@@ -1,0 +1,618 @@
+// Stage 3 (26.09.2026). Section 4942(a)(2) (relief for an incorrect
+// valuation), (e)(2) (valuation of securities), (g) (qualifying distributions:
+// paragraph (1) per payment, (2) set-asides, (3) redistributing recipients,
+// (4) supporting-organization limits), (h) (order in which a qualifying
+// distribution is treated as made, and the (h)(2) election), (i) (adjustment of
+// the distributable amount) and (j)(2) (the allowable distribution period).
+//
+// Design. Per-payment facts derive `qualifying_distribution_payment`; the year
+// total `qualifying_distributions_made` of module 09 stays a case input (an
+// aggregate over a derived relation is the section 111 runtime subset limit,
+// TECH-GAPS G5904). The (a)(2) relief, the (i) adjustment and the (h) ordering
+// are wired into modules 09 and (for the tax base) InitialTaxOnUndistributedIncome
+// through `unless` guards.
+//
+// JUDGMENT CALLS. (h)(1) is applied to the year total (the time order among
+// several distributions of the same year changes nothing once totals are
+// used). (g)(2)(B)(ii)(III) is the weighted sum 80/60/40/20 of the four
+// preceding distributable amounts, given as inputs. "Adjustment period" (at most
+// 5 preceding years) sums are inputs. The Secretary's discretionary extensions
+// ((g)(2) last sentence, (j)(2)(B)) are powers/judgments, not computed. Status:
+// implemented_unverified; scenarios not executed; no legal review.
+
+// --- (j)(2): allowable distribution period; (a)(2): incorrect valuation relief ---
+
+use self::{
+    ExciseAct,
+    ExciseActKind,
+    IRC_S4942_A,
+    IRC_S4942_E,
+    IRC_S4942_G,
+    IRC_S4942_I,
+    Person,
+    TaxableYear,
+    computed_adjustment_period_excess_cash_distributions,
+    deficiency_assessment_barred_until,
+    distributable_amount,
+    excise_act_kind,
+    functionally_integrated_type_iii_4966,
+    initial_tax,
+    operating_foundation_4942j3,
+    secretary_determines_distribution_inappropriate,
+    transition_grant_treated_as_to_operating_foundation,
+    type_i_or_ii_supporting_organization_4966,
+    type_iii_supporting_organization_not_functionally_integrated,
+    undistributed_income,
+    undistributed_income_foundation,
+};
+
+pub relation incorrect_valuation_year(a: ExciseAct, y: TaxableYear) kind empirical {
+    label en unofficial "section 4942(j)(2): the taxable year in which the incorrect valuation described in subsection (a)(2) occurred";
+}
+pub relation year_begins_on(y: TaxableYear, on: Date) kind empirical {
+    label en unofficial "the first day of the taxable year";
+}
+pub relation notice_of_deficiency_4942a_mailed_on(a: ExciseAct, on: Date) kind empirical {
+    label en unofficial "section 4942(j)(2): the date of mailing of a notice of deficiency, under section 6212, with respect to the tax imposed by subsection (a)";
+}
+// `deficiency_assessment_barred_until(a, on)` is declared in module 13 (section 4961); reused here for section 4942(j)(2)(A).
+pub relation allowable_distribution_period_ends(a: ExciseAct, on: Date) kind institutional {
+    label en official "section 4942(j)(2): 90 days after the mailing of the notice of deficiency, extended by any period in which a deficiency cannot be assessed under section 6213(a), read as the later of the 90th day and the end of the assessment bar (the Secretary's (B) extension is not computed)";
+}
+rule AllowableDistributionPeriodEndsNinetiethDay(a: ExciseAct, mailed: Date) defeasible {
+    label en official "section 4942(j)(2): notice date + 90 days when the assessment bar does not run beyond it";
+    when notice_of_deficiency_4942a_mailed_on(a, mailed);
+    unless deficiency_assessment_barred_until(a, _) and notice_of_deficiency_4942a_mailed_on(a, mailed);
+    then allowable_distribution_period_ends(a, add_calendar_period(mailed, 90 calendar_day));
+}
+rule AllowableDistributionPeriodEndsBarBeyondNinetiethDay(a: ExciseAct, mailed: Date, bar: Date) defeasible {
+    label en official "section 4942(j)(2)(A): the assessment bar runs beyond the 90th day, so the period is extended to its end";
+    when notice_of_deficiency_4942a_mailed_on(a, mailed);
+    when deficiency_assessment_barred_until(a, bar);
+    when bar > add_calendar_period(mailed, 90 calendar_day);
+    then allowable_distribution_period_ends(a, bar);
+}
+rule AllowableDistributionPeriodEndsBarWithinNinetiethDay(a: ExciseAct, mailed: Date, bar: Date) defeasible {
+    label en official "section 4942(j)(2): the assessment bar ends within the 90 days, so no extension";
+    when notice_of_deficiency_4942a_mailed_on(a, mailed);
+    when deficiency_assessment_barred_until(a, bar);
+    when bar <= add_calendar_period(mailed, 90 calendar_day);
+    then allowable_distribution_period_ends(a, add_calendar_period(mailed, 90 calendar_day));
+}
+pub relation allowable_distribution_period_starts(a: ExciseAct, on: Date) kind institutional {
+    label en official "section 4942(j)(2): the first day of the first taxable year following the taxable year in which the incorrect valuation occurred";
+}
+pub relation year_after(y: TaxableYear, next: TaxableYear) kind empirical {
+    label en unofficial "next is the taxable year following y";
+}
+rule AllowableDistributionPeriodStarts(a: ExciseAct, y: TaxableYear, next: TaxableYear, on: Date) defeasible {
+    label en official "section 4942(j)(2): the period begins with the first day of the taxable year after the year of the incorrect valuation";
+    when incorrect_valuation_year(a, y);
+    when year_after(y, next);
+    when year_begins_on(next, on);
+    then allowable_distribution_period_starts(a, on);
+}
+
+@source(IRC_S4942_A, coverage = partial, quote = "to the extent that the foundation failed to distribute any amount solely because of an incorrect valuation of assets under subsection (e)")
+pub relation undistributed_amount_from_incorrect_valuation(a: ExciseAct, amount: Money) kind empirical {
+    label en unofficial "section 4942(a)(2): the amount the foundation failed to distribute solely because of an incorrect valuation of assets under subsection (e)";
+}
+@source(IRC_S4942_A, coverage = partial, quote = "the failure to value the assets properly was not willful and was due to reasonable cause")
+external judgment relation valuation_failure_not_willful_and_reasonable_cause(a: ExciseAct) {
+    authority TaxCourt;
+    label en official "section 4942(a)(2)(A): the failure to value the assets properly was not willful and was due to reasonable cause";
+}
+pub relation valuation_shortfall_distributed_on(a: ExciseAct, on: Date) kind empirical {
+    label en unofficial "section 4942(a)(2)(B): the date the amount was distributed as qualifying distributions";
+}
+pub relation foundation_notified_secretary_of_valuation_correction(a: ExciseAct) kind empirical {
+    label en unofficial "section 4942(a)(2)(C): the foundation notified the Secretary that the amount has been distributed to correct the failure";
+}
+pub relation valuation_shortfall_treated_out_of_undistributed_income_h2(a: ExciseAct) kind empirical {
+    label en unofficial "section 4942(a)(2)(D): the distribution is treated under subsection (h)(2) as made out of the undistributed income of the year for which tax would otherwise be imposed";
+}
+pub relation valuation_error_relief_applies(a: ExciseAct) kind institutional {
+    label en official "section 4942(a)(2): conditions (A)-(D) all hold, so the tax under subsection (a) is not imposed to the extent of the valuation-error amount";
+}
+rule ValuationErrorReliefApplies(a: ExciseAct, dist_on: Date, ends: Date, start: Date) defeasible {
+    label en official "section 4942(a)(2)(A)-(D): not willful and reasonable cause, distributed in the allowable distribution period, Secretary notified, treated under (h)(2)";
+    when valuation_failure_not_willful_and_reasonable_cause(a);
+    when valuation_shortfall_distributed_on(a, dist_on);
+    when allowable_distribution_period_starts(a, start);
+    when allowable_distribution_period_ends(a, ends);
+    when dist_on >= start;
+    when dist_on <= ends;
+    when foundation_notified_secretary_of_valuation_correction(a);
+    when valuation_shortfall_treated_out_of_undistributed_income_h2(a);
+    then valuation_error_relief_applies(a);
+}
+pub relation undistributed_income_taxed_base_after_valuation_relief(a: ExciseAct, amount: Money) kind institutional {
+    label en official "section 4942(a): the undistributed income less the amount relieved by (a)(2), when positive";
+}
+rule TaxBaseAfterValuationRelief(a: ExciseAct, base: Money, relieved: Money) defeasible {
+    label en official "section 4942(a)(2): the taxed base is reduced by the valuation-error amount";
+    when valuation_error_relief_applies(a);
+    when undistributed_income(a, base);
+    when undistributed_amount_from_incorrect_valuation(a, relieved);
+    when base > relieved;
+    then undistributed_income_taxed_base_after_valuation_relief(a, base - relieved);
+}
+rule InitialTaxOnUndistributedIncomeAfterValuationRelief(a: ExciseAct, f: Person, base: Money) defeasible {
+    label en official "section 4942(a)(1)-(2): 30 percent of the undistributed income less the valuation-error amount";
+    when excise_act_kind(a, UndistributedIncomeYear);
+    when undistributed_income_foundation(a, f);
+    when undistributed_income_taxed_base_after_valuation_relief(a, base);
+    then initial_tax(a, f, base * UndistributedIncomeInitialTaxRate);
+}
+
+// --- (e)(2): valuation of securities ---
+
+@source(IRC_S4942_E, coverage = partial, quote = "the fair market value of securities for which market quotations are readily available shall be determined on a monthly basis")
+pub relation readily_marketable_securities_valued_monthly(f: Person, y: TaxableYear) kind empirical {
+    label en unofficial "section 4942(e)(2)(A): the fair market value of securities with readily available market quotations was determined on a monthly basis";
+}
+@source(IRC_S4942_E, coverage = partial, quote = "the fair market value of securities for which market quotations are readily available shall be determined on a monthly basis")
+rule S4942ValueSecuritiesMonthlyDutyRule(f: Person, y: TaxableYear, v: Money) defeasible {
+    label en official "section 4942(e)(2)(A): the foundation shall determine the fair market value of securities with readily available market quotations on a monthly basis (the rule for all other assets is left to regulations, not modelled)";
+    when securities_fair_market_value_without_reduction(f, y, v);
+    then duty S4942ValueSecuritiesMonthly {
+        bearer f;
+        goal maintenance {
+            condition readily_marketable_securities_valued_monthly(f, y);
+            window [-infinity, infinity];
+        }
+    };
+}
+@source(IRC_S4942_E, coverage = partial, quote = "the securities could not be liquidated within a reasonable period of time except at a price less than such fair market value")
+pub relation securities_block_or_closely_held_or_forced_sale_cause(f: Person, y: TaxableYear) kind empirical {
+    label en unofficial "section 4942(e)(2)(B)(i)-(iii): as a result of the size of the block, the closely held nature of the corporation or a forced or distress sale";
+}
+external judgment relation securities_cannot_be_liquidated_reasonably_except_below_fmv(f: Person, y: TaxableYear) {
+    authority Secretary;
+    label en official "section 4942(e)(2)(B): the foundation establishes that the securities could not be liquidated within a reasonable period of time except at a price less than fair market value";
+}
+pub relation securities_fair_market_value_without_reduction(f: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "section 4942(e)(2)(B): the fair market value of the securities determined without regard to any reduction in value";
+}
+pub relation securities_value_reduction_claimed(f: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "section 4942(e)(2)(B): the reduction in value the foundation claims";
+}
+pub relation securities_value_reduction_allowed_4942e2(f: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 4942(e)(2)(B): the allowable reduction, established as required and not more than 10 percent of fair market value";
+}
+rule SecuritiesReductionAllowedUpToTenPercent(f: Person, y: TaxableYear, fmv: Money, claimed: Money) defeasible {
+    label en official "section 4942(e)(2)(B): a claimed reduction of at most 10 percent of fair market value is allowed when the liquidity condition is established";
+    when securities_fair_market_value_without_reduction(f, y, fmv);
+    when securities_value_reduction_claimed(f, y, claimed);
+    when securities_block_or_closely_held_or_forced_sale_cause(f, y);
+    when securities_cannot_be_liquidated_reasonably_except_below_fmv(f, y);
+    when claimed <= fmv * 0.10;
+    then securities_value_reduction_allowed_4942e2(f, y, claimed);
+}
+rule SecuritiesReductionCappedAtTenPercent(f: Person, y: TaxableYear, fmv: Money, claimed: Money) defeasible {
+    label en official "section 4942(e)(2)(B): a larger claimed reduction is capped at 10 percent of fair market value";
+    when securities_fair_market_value_without_reduction(f, y, fmv);
+    when securities_value_reduction_claimed(f, y, claimed);
+    when securities_block_or_closely_held_or_forced_sale_cause(f, y);
+    when securities_cannot_be_liquidated_reasonably_except_below_fmv(f, y);
+    when claimed > fmv * 0.10;
+    then securities_value_reduction_allowed_4942e2(f, y, fmv * 0.10);
+}
+pub relation securities_value_for_4942e(f: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 4942(e)(2)(B): the value of the securities for the minimum investment return: fair market value less the allowed reduction (no reduction unless established); feeds undistributed_income_non_exempt_use_asset_value as a component";
+}
+rule SecuritiesValueWithAllowedReduction(f: Person, y: TaxableYear, fmv: Money, reduction: Money) defeasible {
+    label en official "section 4942(e)(2)(B): value net of the allowed reduction";
+    when securities_fair_market_value_without_reduction(f, y, fmv);
+    when securities_value_reduction_allowed_4942e2(f, y, reduction);
+    then securities_value_for_4942e(f, y, fmv - reduction);
+}
+rule SecuritiesValueWithoutReduction(f: Person, y: TaxableYear, fmv: Money) defeasible {
+    label en official "section 4942(e)(2)(B): the fair market value shall not be reduced unless the conditions are established";
+    when securities_fair_market_value_without_reduction(f, y, fmv);
+    unless securities_value_reduction_allowed_4942e2(f, y, _) and securities_fair_market_value_without_reduction(f, y, fmv);
+    then securities_value_for_4942e(f, y, fmv);
+}
+
+// --- (g)(1), (3), (4): qualifying distribution per payment ---
+
+entity DistributionPayment { label en unofficial "a payment of a private foundation tested as a qualifying distribution (section 4942(g))"; }
+
+pub relation payment_by_foundation(p: DistributionPayment, f: Person, y: TaxableYear) kind empirical {
+    label en unofficial "the payment was made by the private foundation in the taxable year";
+}
+pub relation payment_amount(p: DistributionPayment, amount: Money) kind empirical {
+    label en unofficial "the amount of the payment";
+}
+pub relation payment_recipient(p: DistributionPayment, o: Person) kind empirical {
+    label en unofficial "the recipient of the payment";
+}
+@source(IRC_S4942_G, coverage = partial, quote = "any amount (including that portion of reasonable and necessary administrative expenses) paid to accomplish one or more purposes described in section 170(c)(2)(B)")
+pub relation payment_to_accomplish_170c2B_purpose(p: DistributionPayment) kind empirical {
+    label en unofficial "section 4942(g)(1)(A): the amount (including reasonable and necessary administrative expenses) is paid to accomplish one or more purposes described in section 170(c)(2)(B)";
+}
+@source(IRC_S4942_G, coverage = partial, quote = "any amount paid to acquire an asset used (or held for use) directly in carrying out one or more purposes described in section 170(c)(2)(B)")
+pub relation payment_to_acquire_asset_used_directly_for_170c2B(p: DistributionPayment) kind empirical {
+    label en unofficial "section 4942(g)(1)(B): the amount is paid to acquire an asset used (or held for use) directly in carrying out one or more section 170(c)(2)(B) purposes";
+}
+@source(IRC_S4942_G, coverage = partial, quote = "an organization controlled (directly or indirectly) by the foundation or one or more disqualified persons")
+pub relation payment_to_controlled_organization(p: DistributionPayment) kind empirical {
+    label en unofficial "section 4942(g)(1)(A)(i): the recipient is an organization controlled (directly or indirectly) by the foundation or one or more disqualified persons";
+}
+@source(IRC_S4942_G, coverage = partial, quote = "a private foundation which is not an operating foundation")
+pub relation payment_to_nonoperating_private_foundation(p: DistributionPayment) kind empirical {
+    label en unofficial "section 4942(g)(1)(A)(ii): the recipient is a private foundation which is not an operating foundation";
+}
+@source(IRC_S4942_G, coverage = partial, quote = "not later than the close of the first taxable year after its taxable year in which such contribution is received")
+pub relation recipient_redistributed_within_next_year_out_of_corpus(p: DistributionPayment) kind empirical {
+    label en unofficial "section 4942(g)(3)(A): not later than the close of the first taxable year after the year of receipt, the recipient makes a distribution equal to the contribution that is a qualifying distribution treated as out of corpus";
+}
+@source(IRC_S4942_G, coverage = partial, quote = "obtains adequate records or other sufficient evidence from such organization")
+pub relation payer_obtained_adequate_records_of_redistribution(p: DistributionPayment) kind empirical {
+    label en unofficial "section 4942(g)(3)(B): the paying foundation obtained adequate records or other sufficient evidence that the recipient's qualifying distribution was made";
+}
+pub relation payment_covered_by_g3_redistribution(p: DistributionPayment) kind institutional {
+    label en official "section 4942(g)(3): a contribution to a section 501(c)(3) organization described in (g)(1)(A)(i) or (ii) that is passed on and documented is a qualifying distribution";
+}
+rule PaymentCoveredByG3(p: DistributionPayment) defeasible {
+    label en official "section 4942(g)(3)(A)-(B)";
+    when recipient_redistributed_within_next_year_out_of_corpus(p);
+    when payer_obtained_adequate_records_of_redistribution(p);
+    then payment_covered_by_g3_redistribution(p);
+}
+pub relation payment_by_nonoperating_foundation(p: DistributionPayment) kind institutional {
+    label en official "section 4942(g)(4)(A): the payer is a private foundation which is not an operating foundation";
+}
+rule PaymentByNonoperatingFoundation(p: DistributionPayment, f: Person, y: TaxableYear) defeasible {
+    label en official "section 4942(g)(4)(A): a payer that is not an operating foundation (section 4942(j)(3), input of module 26)";
+    when payment_by_foundation(p, f, y);
+    unless operating_foundation_4942j3(f, y) and payment_by_foundation(p, f, y);
+    then payment_by_nonoperating_foundation(p);
+}
+@source(IRC_S4942_G, coverage = partial, quote = "a disqualified person of the private foundation directly or indirectly controls such organization or a supported organization")
+pub relation disqualified_person_controls_recipient_or_supported_org(p: DistributionPayment) kind empirical {
+    label en unofficial "section 4942(g)(4)(A)(ii)(I): a disqualified person of the foundation directly or indirectly controls the recipient or a supported organization of the recipient";
+}
+pub relation payment_excluded_by_g4(p: DistributionPayment) kind institutional {
+    label en official "section 4942(g)(4): the amount paid by a non-operating foundation to a non-integrated type III supporting organization, or to a type I, type II or functionally integrated type III supporting organization under disqualified-person control or a Secretary determination, is not a qualifying distribution";
+}
+rule PaymentExcludedByG4TypeIII(p: DistributionPayment, o: Person) defeasible {
+    label en official "section 4942(g)(4)(A)(i): a type III supporting organization which is not functionally integrated";
+    when payment_by_nonoperating_foundation(p);
+    when payment_recipient(p, o);
+    when type_iii_supporting_organization_not_functionally_integrated(o);
+    then payment_excluded_by_g4(p);
+}
+rule PaymentExcludedByG4TypeIOrIIControlled(p: DistributionPayment, o: Person) defeasible {
+    label en official "section 4942(g)(4)(A)(ii), (B): a type I or II supporting organization under disqualified-person control";
+    when payment_by_nonoperating_foundation(p);
+    when payment_recipient(p, o);
+    when type_i_or_ii_supporting_organization_4966(o);
+    when disqualified_person_controls_recipient_or_supported_org(p);
+    then payment_excluded_by_g4(p);
+}
+rule PaymentExcludedByG4IntegratedControlled(p: DistributionPayment, o: Person) defeasible {
+    label en official "section 4942(g)(4)(A)(ii), (C): a functionally integrated type III supporting organization under disqualified-person control";
+    when payment_by_nonoperating_foundation(p);
+    when payment_recipient(p, o);
+    when functionally_integrated_type_iii_4966(o);
+    when disqualified_person_controls_recipient_or_supported_org(p);
+    then payment_excluded_by_g4(p);
+}
+rule PaymentExcludedByG4SecretaryDetermination(p: DistributionPayment, o: Person) defeasible {
+    label en official "section 4942(g)(4)(A)(ii)(II): the Secretary determines by regulations that a distribution to the organization is otherwise inappropriate";
+    when payment_by_nonoperating_foundation(p);
+    when payment_recipient(p, o);
+    when type_i_or_ii_supporting_organization_4966(o);
+    when secretary_determines_distribution_inappropriate(o);
+    then payment_excluded_by_g4(p);
+}
+pub relation payment_excluded_from_g1A(p: DistributionPayment) kind institutional {
+    label en official "section 4942(g)(1)(A)(i)-(ii): a contribution to a controlled organization or to a private foundation which is not an operating foundation is not within (g)(1)(A), except as (g)(3) provides";
+}
+rule PaymentExcludedFromG1AControlled(p: DistributionPayment) defeasible {
+    label en official "section 4942(g)(1)(A)(i): a contribution to an organization controlled by the foundation or disqualified persons, unless the (g)(3) test is met";
+    when payment_to_controlled_organization(p);
+    unless payment_covered_by_g3_redistribution(p);
+    then payment_excluded_from_g1A(p);
+}
+rule PaymentExcludedFromG1ANonoperating(p: DistributionPayment) defeasible {
+    label en official "section 4942(g)(1)(A)(ii): a contribution to a non-operating private foundation, unless the (g)(3) test is met";
+    when payment_to_nonoperating_private_foundation(p);
+    unless payment_covered_by_g3_redistribution(p);
+    unless transition_grant_treated_as_to_operating_foundation(p);  // Stage 3: note 7(3)(C) (37-*.law)
+    then payment_excluded_from_g1A(p);
+}
+pub relation qualifying_distribution_payment(p: DistributionPayment, amount: Money) kind institutional {
+    label en official "section 4942(g)(1): the payment is a qualifying distribution of that amount";
+}
+rule QualifyingDistributionPurposePayment(p: DistributionPayment, amount: Money) defeasible {
+    label en official "section 4942(g)(1)(A), (3): an amount paid to accomplish a section 170(c)(2)(B) purpose, other than a contribution excluded by (A)(i)-(ii) (unless saved by (g)(3)), and not excluded by (g)(4)";
+    when payment_amount(p, amount);
+    when payment_to_accomplish_170c2B_purpose(p);
+    unless payment_excluded_from_g1A(p) and payment_amount(p, amount) and payment_to_accomplish_170c2B_purpose(p);
+    unless payment_excluded_by_g4(p) and payment_amount(p, amount) and payment_to_accomplish_170c2B_purpose(p);
+    then qualifying_distribution_payment(p, amount);
+}
+rule QualifyingDistributionAssetAcquisition(p: DistributionPayment, amount: Money) defeasible {
+    label en official "section 4942(g)(1)(B): an amount paid to acquire an asset used or held for use directly in carrying out a section 170(c)(2)(B) purpose";
+    when payment_amount(p, amount);
+    when payment_to_acquire_asset_used_directly_for_170c2B(p);
+    then qualifying_distribution_payment(p, amount);
+}
+
+// --- (g)(2): set-asides ---
+
+entity SetAside { label en unofficial "an amount set aside for a specific project (section 4942(g)(2))"; }
+
+pub relation set_aside_by_foundation(s: SetAside, f: Person, y: TaxableYear) kind empirical {
+    label en unofficial "the set-aside was made by the private foundation in the taxable year";
+}
+pub relation set_aside_amount(s: SetAside, amount: Money) kind empirical {
+    label en unofficial "the amount set aside";
+}
+@source(IRC_S4942_G, coverage = partial, quote = "an amount set aside for a specific project which comes within one or more purposes described in section 170(c)(2)(B)")
+pub relation set_aside_for_specific_170c2B_project(s: SetAside) kind empirical {
+    label en unofficial "section 4942(g)(2)(A): the amount is set aside for a specific project which comes within one or more section 170(c)(2)(B) purposes";
+}
+@source(IRC_S4942_G, coverage = partial, quote = "the amount will be paid for the specific project within 5 years")
+external judgment relation set_aside_will_be_paid_within_5_years_established(s: SetAside) {
+    authority Secretary;
+    label en official "section 4942(g)(2)(B): at the time of the set-aside the foundation establishes to the satisfaction of the Secretary that the amount will be paid for the specific project within 5 years";
+}
+@source(IRC_S4942_G, coverage = partial, quote = "the project is one which can better be accomplished by such set-aside than by immediate payment of funds")
+external judgment relation project_better_accomplished_by_set_aside_established(s: SetAside) {
+    authority Secretary;
+    label en official "section 4942(g)(2)(B)(i): at the time of the set-aside the foundation establishes to the satisfaction of the Secretary that the project can better be accomplished by the set-aside than by immediate payment";
+}
+@source(IRC_S4942_G, coverage = partial, quote = "the project will not be completed before the end of the taxable year of the foundation in which the set-aside is made")
+pub relation project_not_completed_before_end_of_set_aside_year(s: SetAside) kind empirical {
+    label en unofficial "section 4942(g)(2)(B)(ii)(I): the project will not be completed before the end of the taxable year in which the set-aside is made";
+}
+pub relation year_cash_distributions(f: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "section 4942(g)(2)(B)(ii)(II): the amounts distributed in cash or its equivalent in the year for section 170(c)(2)(B) purposes (including payments on earlier set-asides)";
+}
+pub relation year_distributable_amount_without_i(f: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "section 4942(g)(2)(B)(ii)(II): the distributable amount under subsection (d) for the year without regard to subsection (i)";
+}
+pub relation adjustment_period_excess_cash_distributions(f: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "section 4942(g)(2)(D)-(E): the excess of cash distributions over the (B)(ii)(II) requirement in the taxable years (not exceeding 5) of the adjustment period immediately preceding the year";
+}
+pub relation required_cash_distribution_4942g2B(f: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 4942(g)(2)(D): the (B)(ii)(II) requirement reduced by the excess distributed in the adjustment period";
+}
+rule RequiredCashDistributionReduced(f: Person, y: TaxableYear, dist: Money, excess: Money) defeasible {
+    label en official "section 4942(g)(2)(D): requirement minus the adjustment-period excess, when positive";
+    when year_distributable_amount_without_i(f, y, dist);
+    when adjustment_period_excess_cash_distributions(f, y, excess);
+    when dist > excess;
+    then required_cash_distribution_4942g2B(f, y, dist - excess);
+}
+rule RequiredCashDistributionFullyOffset(f: Person, y: TaxableYear, dist: Money, excess: Money) defeasible {
+    label en official "section 4942(g)(2)(D): the excess covers the requirement";
+    when year_distributable_amount_without_i(f, y, dist);
+    when adjustment_period_excess_cash_distributions(f, y, excess);
+    when dist <= excess;
+    then required_cash_distribution_4942g2B(f, y, 0.00 USD);
+}
+rule RequiredCashDistributionNoExcess(f: Person, y: TaxableYear, dist: Money) defeasible {
+    label en official "section 4942(g)(2)(B)(ii)(II): no adjustment-period excess is asserted";
+    when year_distributable_amount_without_i(f, y, dist);
+    unless adjustment_period_excess_cash_distributions(f, y, _) and year_distributable_amount_without_i(f, y, dist);
+    unless computed_adjustment_period_excess_cash_distributions(f, y, _) and year_distributable_amount_without_i(f, y, dist);
+    then required_cash_distribution_4942g2B(f, y, dist);
+}
+@source(IRC_S4942_G, coverage = partial, quote = "the failure to distribute such amounts was not willful and was due to reasonable cause")
+external judgment relation cash_shortfall_not_willful_and_reasonable_cause(f: Person, y: TaxableYear) {
+    authority TaxCourt;
+    label en official "section 4942(g)(2)(C)(i): the failure to distribute the (B)(ii)(II) amounts was not willful and was due to reasonable cause";
+}
+@source(IRC_S4942_G, coverage = partial, quote = "within the correction period (as defined in section 4963(e))")
+pub relation cash_shortfall_cure_distributed_within_correction_period(f: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "section 4942(g)(2)(C)(ii): the cash or equivalent distributed within the correction period (section 4963(e)) to make up the shortfall";
+}
+pub relation cash_distribution_requirement_met_4942g2B(f: Person, y: TaxableYear) kind institutional {
+    label en official "section 4942(g)(2)(B)(ii)(II), (C): the year's cash distributions are at least the requirement, or the shortfall was cured within the correction period after a not-willful reasonable-cause failure";
+}
+rule CashDistributionRequirementMetDirectly(f: Person, y: TaxableYear, cash: Money, required: Money) defeasible {
+    label en official "section 4942(g)(2)(B)(ii)(II): cash distributions at least equal the requirement";
+    when year_cash_distributions(f, y, cash);
+    when required_cash_distribution_4942g2B(f, y, required);
+    when cash >= required;
+    then cash_distribution_requirement_met_4942g2B(f, y);
+}
+rule CashDistributionRequirementMetByCure(f: Person, y: TaxableYear, cash: Money, required: Money, cure: Money) defeasible {
+    label en official "section 4942(g)(2)(C): a not-willful reasonable-cause shortfall cured within the correction period is treated as distributed during the year";
+    when year_cash_distributions(f, y, cash);
+    when required_cash_distribution_4942g2B(f, y, required);
+    when cash < required;
+    when cash_shortfall_not_willful_and_reasonable_cause(f, y);
+    when cash_shortfall_cure_distributed_within_correction_period(f, y, cure);
+    when cash + cure >= required;
+    then cash_distribution_requirement_met_4942g2B(f, y);
+}
+pub relation set_aside_prior_four_years_distributable(f: Person, y: TaxableYear, first: Money, second: Money, third: Money, fourth: Money) kind empirical {
+    label en unofficial "section 4942(g)(2)(B)(ii)(III): the distributable amounts of the first, second, third and fourth preceding taxable years";
+}
+pub relation set_aside_prior_four_years_cash_distributed(f: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "section 4942(g)(2)(B)(ii)(III): the aggregate cash or equivalent distributed during the four preceding taxable years (including payments on earlier set-asides)";
+}
+pub relation four_year_distribution_test_met_4942g2B(f: Person, y: TaxableYear) kind institutional {
+    label en official "section 4942(g)(2)(B)(ii)(III): aggregate distributions of at least 80 percent of the first, 60 percent of the second, 40 percent of the third and 20 percent of the fourth preceding year's distributable amount";
+}
+rule FourYearDistributionTestMet(f: Person, y: TaxableYear, d1: Money, d2: Money, d3: Money, d4: Money, x: Money) defeasible {
+    label en official "section 4942(g)(2)(B)(ii)(III): 0.80*d1 + 0.60*d2 + 0.40*d3 + 0.20*d4 <= distributions";
+    when set_aside_prior_four_years_distributable(f, y, d1, d2, d3, d4);
+    when set_aside_prior_four_years_cash_distributed(f, y, x);
+    when x >= d1 * 0.80 + d2 * 0.60 + d3 * 0.40 + d4 * 0.20;
+    then four_year_distribution_test_met_4942g2B(f, y);
+}
+pub relation set_aside_treated_as_qualifying_distribution(s: SetAside) kind institutional {
+    label en official "section 4942(g)(2): the set-aside may be treated as a qualifying distribution when the (B) requirements are met (the Secretary's further terms and conditions are not computed)";
+}
+rule SetAsideQualifiesBetterAccomplishedBySetAside(s: SetAside) defeasible {
+    label en official "section 4942(g)(2)(A), (B)(i): a project better accomplished by a set-aside, paid within 5 years";
+    when set_aside_for_specific_170c2B_project(s);
+    when set_aside_will_be_paid_within_5_years_established(s);
+    when project_better_accomplished_by_set_aside_established(s);
+    then set_aside_treated_as_qualifying_distribution(s);
+}
+rule SetAsideQualifiesByDistributionTests(s: SetAside, f: Person, y: TaxableYear) defeasible {
+    label en official "section 4942(g)(2)(A), (B)(ii): the project outlasts the year, the cash distribution requirement is met and the four-year test is met";
+    when set_aside_for_specific_170c2B_project(s);
+    when set_aside_will_be_paid_within_5_years_established(s);
+    when project_not_completed_before_end_of_set_aside_year(s);
+    when set_aside_by_foundation(s, f, y);
+    when cash_distribution_requirement_met_4942g2B(f, y);
+    when four_year_distribution_test_met_4942g2B(f, y);
+    then set_aside_treated_as_qualifying_distribution(s);
+}
+pub relation set_aside_payment_period_extended(s: SetAside) kind empirical {
+    label en unofficial "section 4942(g)(2) last sentence: for good cause shown the Secretary extended the period for paying a set-aside that satisfies (B)(i) (a discretionary act, input)";
+}
+
+// --- (h): treatment of qualifying distributions ---
+
+pub relation qualifying_distributions_for_year(f: Person, y: TaxableYear, total: Money) kind empirical {
+    label en unofficial "section 4942(h)(1): the qualifying distributions made during the taxable year";
+}
+pub relation undistributed_income_of_preceding_year(f: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "section 4942(h)(1)(A): the undistributed income of the immediately preceding taxable year";
+}
+pub relation subject_to_4942_tax_for_preceding_year(f: Person, y: TaxableYear) kind empirical {
+    label en unofficial "section 4942(h)(1)(A): the foundation was subject to the section 4942 tax for the preceding taxable year";
+}
+pub relation undistributed_income_of_year_before_distributions(f: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "section 4942(h)(1)(B): the undistributed income for the taxable year";
+}
+pub relation effective_preceding_year_income_for_h1(f: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 4942(h)(1)(A): the preceding year's undistributed income counts only if the foundation was subject to the tax for that year";
+}
+rule EffectivePrecedingYearIncomeSubject(f: Person, y: TaxableYear, prior: Money) defeasible {
+    label en official "section 4942(h)(1)(A)";
+    when undistributed_income_of_preceding_year(f, y, prior);
+    when subject_to_4942_tax_for_preceding_year(f, y);
+    then effective_preceding_year_income_for_h1(f, y, prior);
+}
+rule EffectivePrecedingYearIncomeNotSubject(f: Person, y: TaxableYear, prior: Money) defeasible {
+    label en official "section 4942(h)(1)(A): not subject to the tax for the preceding year, so no preceding-year income is available";
+    when undistributed_income_of_preceding_year(f, y, prior);
+    unless subject_to_4942_tax_for_preceding_year(f, y) and undistributed_income_of_preceding_year(f, y, prior);
+    then effective_preceding_year_income_for_h1(f, y, 0.00 USD);
+}
+pub relation distribution_treatment_h1(f: Person, y: TaxableYear, from_prior: Money, from_current: Money, from_corpus: Money) kind institutional {
+    label en official "section 4942(h)(1): first out of the preceding year's undistributed income, second out of the year's undistributed income, then out of corpus";
+}
+rule DistributionTreatmentWithinPrior(f: Person, y: TaxableYear, total: Money, prior: Money) defeasible {
+    label en official "section 4942(h)(1)(A): the distributions do not exceed the preceding year's undistributed income";
+    when qualifying_distributions_for_year(f, y, total);
+    when effective_preceding_year_income_for_h1(f, y, prior);
+    when total <= prior;
+    then distribution_treatment_h1(f, y, total, 0.00 USD, 0.00 USD);
+}
+rule DistributionTreatmentWithinCurrent(f: Person, y: TaxableYear, total: Money, prior: Money, current: Money) defeasible {
+    label en official "section 4942(h)(1)(A)-(B): the preceding year's income is exhausted and the rest fits within the year's undistributed income";
+    when qualifying_distributions_for_year(f, y, total);
+    when effective_preceding_year_income_for_h1(f, y, prior);
+    when undistributed_income_of_year_before_distributions(f, y, current);
+    when total > prior;
+    when total - prior <= current;
+    then distribution_treatment_h1(f, y, prior, total - prior, 0.00 USD);
+}
+rule DistributionTreatmentIntoCorpus(f: Person, y: TaxableYear, total: Money, prior: Money, current: Money) defeasible {
+    label en official "section 4942(h)(1)(C): the remainder is out of corpus";
+    when qualifying_distributions_for_year(f, y, total);
+    when effective_preceding_year_income_for_h1(f, y, prior);
+    when undistributed_income_of_year_before_distributions(f, y, current);
+    when total > prior;
+    when total - prior > current;
+    then distribution_treatment_h1(f, y, prior, current, total - prior - current);
+}
+pub relation h2_election_available(f: Person, y: TaxableYear) kind institutional {
+    label en official "section 4942(h)(2): part of the year's qualifying distributions is not treated under (h)(1) as made out of the preceding year's undistributed income";
+}
+rule H2ElectionAvailable(f: Person, y: TaxableYear, prior: Money, current: Money, corpus: Money) defeasible {
+    label en official "section 4942(h)(2): a portion of the distribution is treated (h)(1) as out of the year's income or corpus";
+    when distribution_treatment_h1(f, y, prior, current, corpus);
+    when current + corpus > 0.00 USD;
+    then h2_election_available(f, y);
+}
+pub relation h2_election_made_on(f: Person, y: TaxableYear, on: Date) kind empirical {
+    label en unofficial "section 4942(h)(2): the date the foundation made the election (at the time and in the manner the Secretary prescribes by regulations)";
+}
+pub relation h2_designation_effective(f: Person, y: TaxableYear) kind institutional {
+    label en official "section 4942(h)(2): the election is effective: the portion is treated as made out of a designated prior year's undistributed income or corpus";
+}
+rule H2ElectionPowerRule(f: Person, y: TaxableYear, on: Date) defeasible {
+    label en official "section 4942(h)(2): the foundation may elect to treat any portion of a qualifying distribution not treated under (h)(1) as made out of the preceding year as made out of the undistributed income of a designated prior year or out of corpus";
+    when h2_election_made_on(f, y, on);
+    then power S4942H2Election {
+        holder f;
+        over f;
+        exercise h2_election_made_on(f, y, on);
+        valid_when h2_election_available(f, y);
+        effect create(h2_designation_effective(f, y));
+        window [-infinity, infinity];
+    };
+}
+
+// --- (i): adjustment of the distributable amount ---
+
+pub relation undistributed_income_year(a: ExciseAct, y: TaxableYear) kind empirical {
+    label en unofficial "the taxable year whose undistributed income the act instance concerns (bridges the act to the year-keyed adjustment)";
+}
+pub relation adjustment_period_years(f: Person, y: TaxableYear, n: Integer) kind empirical {
+    label en unofficial "section 4942(i)(2): the number of taxable years in the adjustment period (not exceeding 5) immediately preceding the year, for which the organization is a private foundation";
+}
+pub relation adjustment_period_qualifying_distributions(f: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "section 4942(i)(1)(A): the aggregate qualifying distributions treated under (h) as made out of the year's undistributed income or out of corpus in those years (except as (g)(3) or section 170(b)(1)(F)(ii) applies)";
+}
+pub relation adjustment_period_distributable_amounts(f: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "section 4942(i)(1)(B): the distributable amounts for those years, determined without regard to subsection (i)";
+}
+pub relation distributable_amount_reduction_4942i(f: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 4942(i)(1): the excess of the adjustment-period distributions over the adjustment-period distributable amounts";
+}
+rule DistributableAmountReduction4942i(f: Person, y: TaxableYear, n: Integer, dist: Money, amounts: Money) defeasible {
+    label en official "section 4942(i)(1)-(2): distributions over distributable amounts, in an adjustment period of at most 5 years";
+    when adjustment_period_years(f, y, n);
+    when n <= 5;
+    when adjustment_period_qualifying_distributions(f, y, dist);
+    when adjustment_period_distributable_amounts(f, y, amounts);
+    when dist > amounts;
+    then distributable_amount_reduction_4942i(f, y, dist - amounts);
+}
+pub relation distributable_amount_reduction_for_act(a: ExciseAct, amount: Money) kind institutional {
+    label en official "section 4942(i): the reduction that applies to the act's distributable amount";
+}
+rule DistributableAmountReductionForAct(a: ExciseAct, f: Person, y: TaxableYear, r: Money) defeasible {
+    label en official "section 4942(i): the year-keyed reduction, read for the act's foundation and year";
+    when undistributed_income_foundation(a, f);
+    when undistributed_income_year(a, y);
+    when distributable_amount_reduction_4942i(f, y, r);
+    then distributable_amount_reduction_for_act(a, r);
+}
+@source(IRC_S4942_I, coverage = partial, quote = "the distributable amount for the taxable year shall be reduced by an amount equal to such excess")
+pub relation distributable_amount_after_4942i(a: ExciseAct, amount: Money) kind institutional {
+    label en official "section 4942(i): the distributable amount after the adjustment (for purposes of this section other than subsection (h))";
+}
+rule DistributableAmountUnadjusted(a: ExciseAct, d: Money) defeasible {
+    label en official "section 4942(d): no (i) reduction applies";
+    when distributable_amount(a, d);
+    unless distributable_amount_reduction_for_act(a, _) and distributable_amount(a, d);
+    then distributable_amount_after_4942i(a, d);
+}
+rule DistributableAmountReducedByAdjustment(a: ExciseAct, d: Money, r: Money) defeasible {
+    label en official "section 4942(i)(1): the distributable amount reduced by the excess, when positive";
+    when distributable_amount(a, d);
+    when distributable_amount_reduction_for_act(a, r);
+    when d > r;
+    then distributable_amount_after_4942i(a, d - r);
+}
+rule DistributableAmountFullyReducedByAdjustment(a: ExciseAct, d: Money, r: Money) defeasible {
+    label en official "section 4942(i)(1): the reduction consumes the whole distributable amount";
+    when distributable_amount(a, d);
+    when distributable_amount_reduction_for_act(a, r);
+    when d <= r;
+    then distributable_amount_after_4942i(a, 0.00 USD);
+}

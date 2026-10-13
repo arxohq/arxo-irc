@@ -1,0 +1,182 @@
+// Stage 2b (IRC-07, A05). Section 1301: farm income averaging. The 3-year
+// elected-farm-income computation with intermediate values; the section 1
+// tax-on-a-hypothetical-taxable-income dependency (owned by
+// income_individual) is a pending, case-asserted contract, not re-derived
+// here (this package does not own the rate schedule).
+
+// =============================================================================
+// (b): definitions
+// =============================================================================
+
+use self::{
+    Estate,
+    IRC_S1301_A,
+    IRC_S1301_B,
+    Person,
+    TaxableYear,
+    Transaction,
+    Trust,
+};
+
+pub relation is_trust_or_estate_1301(p: Person) kind institutional {
+    label en unofficial "guard: the person is a trust or estate (section 1301(b)(2) excludes them from 'individual')";
+}
+rule IsTrustFor1301Rule(p: Trust) strict {
+    when trust_entity_1301(p);
+    then is_trust_or_estate_1301(p);
+}
+relation trust_entity_1301(p: Trust) kind empirical {
+    label en unofficial "guard: the person entity is a Trust (case-asserted)";
+}
+rule IsEstateFor1301Rule(p: Estate) strict {
+    when estate_entity_1301(p);
+    then is_trust_or_estate_1301(p);
+}
+relation estate_entity_1301(p: Estate) kind empirical {
+    label en unofficial "guard: the person entity is an Estate (case-asserted)";
+}
+
+pub relation engaged_in_farming_or_fishing_business(p: Person, y: TaxableYear) kind empirical {
+    label en official "section 1301(a): the individual is engaged in a farming business (section 263A(e)(4)) or fishing business (as defined by the Magnuson-Stevens Act)";
+}
+pub relation elected_farm_income(p: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "section 1301(b)(1)(A): so much of taxable income attributable to the farming/fishing business as is specified in the election";
+}
+pub relation gain_from_farm_property_disposition(p: Person, y: TaxableYear, t: Transaction, amount: Money) kind empirical {
+    label en official "section 1301(b)(1)(B): gain from the sale or other disposition of property (other than land) regularly used in the farming/fishing business for a substantial period, treated as attributable to the business";
+}
+pub relation gain_treated_as_elected_farm_income_eligible(p: Person, y: TaxableYear, t: Transaction) kind institutional {
+    label en official "section 1301(b)(1)(B): the disposition gain is eligible to be specified as elected farm income";
+}
+@source(IRC_S1301_B, quote = "gain from the sale or other disposition of property (other than land) regularly used by the taxpayer in such a farming business or fishing business for a substantial period shall be treated as attributable to such a farming business or fishing business.")
+rule GainTreatedAsFarmIncomeEligibleRule(p: Person, y: TaxableYear, t: Transaction, amount: Money) strict {
+    label en official "section 1301(b)(1)(B): qualifying disposition gain is treated as farm/fishing-business income for elected-farm-income purposes";
+    when gain_from_farm_property_disposition(p, y, t, amount);
+    then gain_treated_as_elected_farm_income_eligible(p, y, t);
+}
+
+// =============================================================================
+// (a): the election and the 3-year averaging computation
+// =============================================================================
+
+pub relation elects_farm_income_averaging(p: Person, y: TaxableYear) kind empirical {
+    label en official "section 1301(a): the individual elects farm income averaging for the taxable year";
+}
+pub relation section_1301_election_in_effect(p: Person, y: TaxableYear) kind institutional {
+    label en official "section 1301(a): the farm income averaging election is in effect for the year";
+}
+@source(IRC_S1301_A, quote = "At the election of an individual engaged in a farming business or fishing business, the tax imposed by section 1 for such taxable year shall be equal to the sum of—")
+rule Section1301ElectionPower(p: Person, y: TaxableYear) strict {
+    label en official "section 1301(a): an individual engaged in a farming/fishing business, not a trust or estate, may elect farm income averaging";
+    when elects_farm_income_averaging(p, y);
+    then power Section1301FarmIncomeAveragingElection {
+        holder p;
+        over y;
+        exercise elects_farm_income_averaging(p, y);
+        valid_when section_1301_election_valid(p, y);
+        effect create(section_1301_election_in_effect(p, y));
+        window [@1997-08-06, infinity);
+    };
+}
+relation section_1301_election_valid(p: Person, y: TaxableYear) kind institutional {
+    label en unofficial "section 1301(a),(b)(2): engaged in farming/fishing business and not a trust or estate — single-atom helper for valid_when";
+}
+rule Section1301ElectionValidRule(p: Person, y: TaxableYear) defeasible {
+    when engaged_in_farming_or_fishing_business(p, y);
+    when not_known(is_trust_or_estate_1301(p));
+    then section_1301_election_valid(p, y);
+}
+
+// Intermediate value 1: taxable income reduced by elected farm income
+// (paragraph (1)).
+pub relation taxable_income_for_1301(p: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the taxpayer's taxable income for the year, before any section 1301 adjustment — pending contract to gross-income/income-individual's own taxable_income relation (WIRE-1 naming-canonicalization queue), case-asserted this stage";
+}
+pub relation taxable_income_reduced_by_farm_income(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 1301(a)(1): taxable income reduced by elected farm income";
+}
+@source(IRC_S1301_A, relation = formalizes, coverage = partial, quote = "taxable income reduced by elected farm income")
+rule TaxableIncomeReducedByFarmIncomeRule(p: Person, y: TaxableYear, ti: Money, efi: Money) defeasible {
+    label en official "section 1301(a)(1): taxable income minus elected farm income";
+    when taxable_income_for_1301(p, y, ti);
+    when elected_farm_income(p, y, efi);
+    then taxable_income_reduced_by_farm_income(p, y, ti - efi);
+}
+pub relation tax_under_section_1_on(p: Person, y: TaxableYear, hypothetical_taxable_income: Money, amount: Money) kind institutional {
+    label en unofficial "the tax that section 1 (income_individual's own rate schedule) would impose for the year on the given (possibly hypothetical) taxable income figure — EXTERNAL_DEPENDENCY: owned by income_individual, and even that package's own rules compute tax only on a taxpayer's ACTUAL filed taxable income, not an arbitrary hypothetical one, so this is not a simple cross-package lookup; WIRE-9: income_individual now publishes the parameterized function (`hypothetical_income_request_1` / `hypothetical_tax_1`, module 69), wired in 53-wire9-owner-contracts.law (requests for the reduced-income and the increased prior-year incomes; the answer derives this relation); a case may still assert it directly";
+}
+pub relation tax_on_reduced_income(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 1301(a)(1): the tax computed under section 1 on taxable income reduced by elected farm income";
+}
+@source(IRC_S1301_A, relation = formalizes, coverage = partial, quote = "a tax computed under such section on taxable income reduced by elected farm income, plus")
+rule TaxOnReducedIncomeRule(p: Person, y: TaxableYear, reduced: Money, tax: Money) defeasible {
+    label en official "section 1301(a)(1): reads the section 1 tax on the reduced taxable income";
+    when taxable_income_reduced_by_farm_income(p, y, reduced);
+    when tax_under_section_1_on(p, y, reduced, tax);
+    then tax_on_reduced_income(p, y, tax);
+}
+
+// Intermediate value 2: one-third of elected farm income, added to each of
+// the 3 prior years' taxable income, and the resulting increase in tax for
+// each of those years (paragraph (2)). Prior years are a case-asserted
+// linkage (`prior_taxable_year`), the same successor/predecessor-year
+// pattern this package's other modules leave case-asserted (TECH-GAPS.md
+// G10 class) rather than derived from a generic "N years before" construct.
+pub relation prior_taxable_year(y: TaxableYear, years_before: Integer, prior_y: TaxableYear) kind empirical {
+    label en unofficial "the taxable year that is `years_before` years before `y` (case-asserted linkage, not derived)";
+}
+pub relation elected_farm_income_third(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 1301(a)(2): one-third of the elected farm income";
+}
+rule ElectedFarmIncomeThirdRule(p: Person, y: TaxableYear, efi: Money) defeasible {
+    label en official "section 1301(a)(2): one-third of elected farm income";
+    when elected_farm_income(p, y, efi);
+    then elected_farm_income_third(p, y, div_round(efi, 3.0, 2, "HALF_UP"));
+}
+pub relation actual_tax_for_prior_year(p: Person, prior_y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the tax actually imposed on the taxpayer for the prior taxable year, before this section's adjustment (section 1301(a)'s own last sentence: 'any adjustment under this section for any taxable year shall be taken into account... for any subsequent taxable year' — that chaining is TECH_GAP, same multi-year-ledger class as TECH-GAPS.md G1/G24/G25; this stage reads the prior year's tax as a case-supplied snapshot)";
+}
+pub relation prior_year_taxable_income_increased_by_third(p: Person, prior_y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 1301(a)(2): the prior taxable year's taxable income, increased by one-third of the elected farm income";
+}
+rule PriorYearTaxableIncomeIncreasedRule(p: Person, y: TaxableYear, years_before: Integer, prior_y: TaxableYear, ti: Money, third: Money) defeasible {
+    label en official "section 1301(a)(2): prior year's taxable income increased by one-third of elected farm income";
+    when prior_taxable_year(y, years_before, prior_y);
+    when taxable_income_for_1301(p, prior_y, ti);
+    when elected_farm_income_third(p, y, third);
+    then prior_year_taxable_income_increased_by_third(p, prior_y, ti + third);
+}
+pub relation increase_in_tax_for_prior_year(p: Person, y: TaxableYear, prior_y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 1301(a)(2): the increase in tax for the prior year that results from the one-third-elected-farm-income addition";
+}
+rule IncreaseInTaxForPriorYearRule(p: Person, y: TaxableYear, years_before: Integer, prior_y: TaxableYear, increased_ti: Money, hypothetical_tax: Money, actual_tax: Money) defeasible {
+    label en official "section 1301(a)(2): the hypothetical tax on the increased prior-year taxable income, less the tax actually imposed for that year";
+    when prior_taxable_year(y, years_before, prior_y);
+    when prior_year_taxable_income_increased_by_third(p, prior_y, increased_ti);
+    when tax_under_section_1_on(p, prior_y, increased_ti, hypothetical_tax);
+    when actual_tax_for_prior_year(p, prior_y, actual_tax);
+    when hypothetical_tax > actual_tax;
+    then increase_in_tax_for_prior_year(p, y, prior_y, hypothetical_tax - actual_tax);
+}
+
+pub relation section_1301_averaging_tax(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 1301(a): the tax imposed by section 1, as adjusted by farm income averaging — the sum of the tax on reduced taxable income and the increases in tax for each of the 3 prior years";
+}
+@source(IRC_S1301_A, quote = "a tax computed under such section on taxable income reduced by elected farm income, plus")
+rule Section1301AveragingTaxRule(p: Person, y: TaxableYear, tax_reduced: Money, y1: TaxableYear, inc1: Money, y2: TaxableYear, inc2: Money, y3: TaxableYear, inc3: Money) defeasible {
+    label en official "section 1301(a): total averaged tax is the reduced-income tax plus all 3 prior years' tax increases (exactly 3 fixed years, not a variable-length aggregate)";
+    when section_1301_election_in_effect(p, y);
+    when tax_on_reduced_income(p, y, tax_reduced);
+    when prior_taxable_year(y, 1, y1);
+    when increase_in_tax_for_prior_year(p, y, y1, inc1);
+    when prior_taxable_year(y, 2, y2);
+    when increase_in_tax_for_prior_year(p, y, y2, inc2);
+    when prior_taxable_year(y, 3, y3);
+    when increase_in_tax_for_prior_year(p, y, y3, inc3);
+    then section_1301_averaging_tax(p, y, tax_reduced + inc1 + inc2 + inc3);
+}
+// The (a) last sentence's cross-year chaining ("any adjustment under this
+// section for any taxable year shall be taken into account... for any
+// subsequent taxable year") and (c)'s ordering/short-year regulations are
+// TECH_GAP — the same multi-year-ledger class as TECH-GAPS.md G1/G24/G25,
+// not attempted here.

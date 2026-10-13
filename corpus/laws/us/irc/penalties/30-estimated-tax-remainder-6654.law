@@ -1,0 +1,308 @@
+language "law.core" version "0.2";
+package us.irc.penalties version "0.1.1";
+namespace "urn:us:irc:penalties:clir";
+
+use self::{
+    EstimatedTaxInstallment,
+    IRC_S6654_B,
+    IRC_S6654_D,
+    IRC_S6654_G,
+    IRC_S6654_L,
+    Person,
+    TaxableYear,
+    files_separately,
+    preceding_year_agi_exceeds_150000,
+    required_installment_due_date,
+    underpayment_cured_on,
+};
+
+// 26 U.S.C. §6654(b)(2), (d)(1)(C)(ii)-(iii), (g), (l)(2)-(3) (IRC-16 stage 2, DECISION-0379).
+// Edits in module 08: `preceding_year_agi_exceeds_150000` and `underpayment_cured_on` become
+// derived relations (scenarios that assert them directly still apply); the underpayment
+// rule gains the section 31 withholding case; the addition rule gains the (l) inapplicability.
+//
+// JUDGMENT CALLS AND GAPS (the rest of §6654 is the stage-2 register: TECH-GAPS G3117-G3123):
+//  - (g)(1): "an equal part ... on each due date" is one quarter (25 percent) for a calendar-year
+//    individual with four installments; the alternative (dates of withholding actually
+//    established) is a case amount per installment. (g)(2) is applied per category.
+//  - (b)(2): the period of the underpayment runs to the earlier of the 15th day of the 4th month
+//    and the payment date; the two candidates are case facts (no date-part term, G9-class).
+//  - (d)(1)(C)(iii): the estate or trust adjusted gross income under section 67(e) is a case fact
+//    (owner: income-individual), used in place of the ordinary preceding-year AGI.
+
+// --- (d)(1)(C): high-income threshold with separate returns and estates/trusts ------------------------
+relation preceding_year_adjusted_gross_income(p: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the adjusted gross income shown on the return of the individual for the preceding taxable year (case fact)";
+}
+relation agi_of_estate_or_trust_under_67e_for_preceding_year(p: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the adjusted gross income of the estate or trust determined as provided in section 67(e) (case fact; owner income-individual)";
+}
+relation estate_or_trust_taxpayer(p: Person) kind empirical {
+    label en official "the taxpayer is an estate or trust";
+}
+relation preceding_year_agi_for_threshold(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "the adjusted gross income to compare with the threshold: the ordinary preceding-year AGI, or for an estate or trust the section 67(e) AGI";
+}
+@source(IRC_S6654_D, relation = formalizes, coverage = exact, quote = "If the adjusted gross income shown on the return of the individual for the preceding taxable year beginning in any calendar year exceeds $150,000")
+rule S6654d1CiiiOrdinaryAgi strict {
+    for p: Person;
+    for y: TaxableYear;
+    for a: Money;
+    when preceding_year_adjusted_gross_income(p, y, a)
+        and not_known(estate_or_trust_taxpayer(p));
+    then preceding_year_agi_for_threshold(p, y, a);
+}
+@source(IRC_S6654_D, relation = formalizes, coverage = exact, quote = "In the case of an estate or trust, adjusted gross income shall be determined as provided in section 67(e)")
+rule S6654d1CiiiTrustAgi strict {
+    for p: Person;
+    for y: TaxableYear;
+    for a: Money;
+    when estate_or_trust_taxpayer(p)
+        and agi_of_estate_or_trust_under_67e_for_preceding_year(p, y, a);
+    then preceding_year_agi_for_threshold(p, y, a);
+}
+@source(IRC_S6654_D, relation = formalizes, coverage = exact, quote = "If the adjusted gross income shown on the return of the individual for the preceding taxable year beginning in any calendar year exceeds $150,000, clause (ii) of subparagraph (B) shall be applied by substituting \"110 percent\" for \"100 percent\"")
+rule S6654d1CiHighIncome strict {
+    for p: Person;
+    for y: TaxableYear;
+    for a: Money;
+    when preceding_year_agi_for_threshold(p, y, a)
+        and not_known(files_separately(p, y))
+        and a > round(EstimatedTaxHighIncomeThreshold, 2, "HALF_UP");
+    then preceding_year_agi_exceeds_150000(p, y);
+}
+@source(IRC_S6654_D, relation = formalizes, coverage = exact, quote = "clause (i) shall be applied by substituting \"$75,000\" for \"$150,000\"")
+rule S6654d1CiiSeparateReturnThreshold strict {
+    for p: Person;
+    for y: TaxableYear;
+    for a: Money;
+    when preceding_year_agi_for_threshold(p, y, a)
+        and files_separately(p, y)
+        and a > round(EstimatedTaxHighIncomeSeparateReturnThreshold, 2, "HALF_UP");
+    then preceding_year_agi_exceeds_150000(p, y);
+}
+
+// --- (g): tax withheld on wages -----------------------------------------------------------------------------
+pub enum WithholdingCategory6654 {
+    WageWithholding;
+    OtherWithholding;
+    label en unofficial "the two categories to which section 6654(g)(1) may be applied separately under (g)(2)";
+}
+relation section31_credit_by_category(p: Person, y: TaxableYear, cat: WithholdingCategory6654, amount: Money) kind empirical {
+    label en official "the amount of the credit allowed under section 31 for the taxable year in the category (case fact)";
+}
+relation actual_withholding_dates_established(p: Person, y: TaxableYear, cat: WithholdingCategory6654) kind empirical {
+    label en official "the taxpayer establishes the dates on which all amounts in the category were actually withheld";
+}
+relation actual_withholding_deemed_on_installment(p: Person, y: TaxableYear, installment: EstimatedTaxInstallment, cat: WithholdingCategory6654, amount: Money) kind empirical {
+    label en official "the amount actually withheld and deemed paid on the due date of the installment (case fact)";
+}
+relation deemed_withholding_by_category_6654g(p: Person, y: TaxableYear, installment: EstimatedTaxInstallment, cat: WithholdingCategory6654, amount: Money) kind institutional {
+    label en unofficial "the withholding of the category deemed a payment of estimated tax on the due date of the installment: an equal part, or the amounts actually withheld when the dates are established";
+}
+@source(IRC_S6654_G, relation = formalizes, coverage = exact, quote = "and an equal part of such amount shall be deemed paid on each due date for such taxable year")
+rule S6654g1EqualPart strict {
+    for p: Person;
+    for y: TaxableYear;
+    for installment: EstimatedTaxInstallment;
+    for cat: WithholdingCategory6654;
+    for c: Money;
+    for due: Date;
+    when section31_credit_by_category(p, y, cat, c)
+        and required_installment_due_date(y, installment, due)
+        and not_known(actual_withholding_dates_established(p, y, cat));
+    then deemed_withholding_by_category_6654g(p, y, installment, cat, round(c * RequiredInstallmentPercent, 2, "HALF_UP"));
+}
+@source(IRC_S6654_G, relation = formalizes, coverage = exact, quote = "unless the taxpayer establishes the dates on which all amounts were actually withheld, in which case the amounts so withheld shall be deemed payments of estimated tax on the dates on which such amounts were actually withheld")
+rule S6654g1ActualDates strict {
+    for p: Person;
+    for y: TaxableYear;
+    for installment: EstimatedTaxInstallment;
+    for cat: WithholdingCategory6654;
+    for a: Money;
+    when actual_withholding_dates_established(p, y, cat)
+        and actual_withholding_deemed_on_installment(p, y, installment, cat, a);
+    then deemed_withholding_by_category_6654g(p, y, installment, cat, a);
+}
+relation has_deemed_withholding_category_6654g(p: Person, y: TaxableYear, installment: EstimatedTaxInstallment, cat: WithholdingCategory6654) kind institutional {
+    label en unofficial "a deemed withholding payment exists for the category and installment";
+}
+@source(IRC_S6654_G, relation = formalizes, coverage = exact, quote = "The taxpayer may apply paragraph (1) separately with respect to—")
+rule S6654g2HasCategory strict {
+    for p: Person;
+    for y: TaxableYear;
+    for installment: EstimatedTaxInstallment;
+    for cat: WithholdingCategory6654;
+    for a: Money;
+    when deemed_withholding_by_category_6654g(p, y, installment, cat, a);
+    then has_deemed_withholding_category_6654g(p, y, installment, cat);
+}
+pub relation deemed_withholding_payment_total_6654g(p: Person, y: TaxableYear, installment: EstimatedTaxInstallment, amount: Money) kind institutional {
+    label en unofficial "the total of the deemed withholding payments for the installment";
+}
+@source(IRC_S6654_G, relation = formalizes, coverage = exact, quote = "(A) wage withholding, and")
+rule S6654g2TotalBoth strict {
+    for p: Person;
+    for y: TaxableYear;
+    for installment: EstimatedTaxInstallment;
+    for a: Money;
+    for b: Money;
+    when deemed_withholding_by_category_6654g(p, y, installment, WageWithholding, a)
+        and deemed_withholding_by_category_6654g(p, y, installment, OtherWithholding, b);
+    then deemed_withholding_payment_total_6654g(p, y, installment, a + b);
+}
+@source(IRC_S6654_G, relation = formalizes, coverage = exact, quote = "(A) wage withholding, and")
+rule S6654g2TotalWageOnly strict {
+    for p: Person;
+    for y: TaxableYear;
+    for installment: EstimatedTaxInstallment;
+    for a: Money;
+    when deemed_withholding_by_category_6654g(p, y, installment, WageWithholding, a)
+        and not_known(has_deemed_withholding_category_6654g(p, y, installment, OtherWithholding));
+    then deemed_withholding_payment_total_6654g(p, y, installment, a);
+}
+@source(IRC_S6654_G, relation = formalizes, coverage = exact, quote = "(B) all other amounts withheld for which credit is allowed under section 31")
+rule S6654g2TotalOtherOnly strict {
+    for p: Person;
+    for y: TaxableYear;
+    for installment: EstimatedTaxInstallment;
+    for b: Money;
+    when deemed_withholding_by_category_6654g(p, y, installment, OtherWithholding, b)
+        and not_known(has_deemed_withholding_category_6654g(p, y, installment, WageWithholding));
+    then deemed_withholding_payment_total_6654g(p, y, installment, b);
+}
+relation withholding_deemed_paid_present_6654g(p: Person, y: TaxableYear, installment: EstimatedTaxInstallment) kind institutional {
+    label en unofficial "a deemed withholding payment exists for the installment";
+}
+@source(IRC_S6654_G, relation = formalizes, coverage = exact, quote = "shall be deemed a payment of estimated tax")
+rule S6654gPresent strict {
+    for p: Person;
+    for y: TaxableYear;
+    for installment: EstimatedTaxInstallment;
+    for t: Money;
+    when deemed_withholding_payment_total_6654g(p, y, installment, t);
+    then withholding_deemed_paid_present_6654g(p, y, installment);
+}
+
+// --- (b)(2): period of the underpayment --------------------------------------------------------------------
+relation fifteenth_day_of_fourth_month_after_close_of_taxable_year(p: Person, y: TaxableYear, installment: EstimatedTaxInstallment, d: Date) kind empirical {
+    label en official "the 15th day of the 4th month following the close of the taxable year (case fact: no date-part term)";
+}
+relation underpayment_portion_paid_on(p: Person, y: TaxableYear, installment: EstimatedTaxInstallment, d: Date) kind institutional {
+    label en official "the date on which the portion of the underpayment is paid";
+}
+relation underpayment_period_end_candidate(p: Person, y: TaxableYear, installment: EstimatedTaxInstallment, d: Date) kind institutional {
+    label en unofficial "a candidate end of the period of the underpayment: the 15th day of the 4th month, or the payment date";
+}
+@source(IRC_S6654_B, relation = formalizes, coverage = exact, quote = "the 15th day of the 4th month following the close of the taxable year, or")
+rule S6654b2ACandidate strict {
+    for p: Person;
+    for y: TaxableYear;
+    for installment: EstimatedTaxInstallment;
+    for d: Date;
+    when fifteenth_day_of_fourth_month_after_close_of_taxable_year(p, y, installment, d);
+    then underpayment_period_end_candidate(p, y, installment, d);
+}
+@source(IRC_S6654_B, relation = formalizes, coverage = exact, quote = "with respect to any portion of the underpayment, the date on which such portion is paid")
+rule S6654b2BCandidate strict {
+    for p: Person;
+    for y: TaxableYear;
+    for installment: EstimatedTaxInstallment;
+    for d: Date;
+    when underpayment_portion_paid_on(p, y, installment, d);
+    then underpayment_period_end_candidate(p, y, installment, d);
+}
+relation earlier_underpayment_period_end_candidate_exists(p: Person, y: TaxableYear, installment: EstimatedTaxInstallment, d: Date) kind institutional {
+    label en unofficial "a strictly earlier candidate exists";
+}
+@source(IRC_S6654_B, relation = formalizes, coverage = exact, quote = "whichever of the following dates is the earlier—")
+rule S6654b2Earlier strict {
+    for p: Person;
+    for y: TaxableYear;
+    for installment: EstimatedTaxInstallment;
+    for d: Date;
+    for e: Date;
+    when underpayment_period_end_candidate(p, y, installment, d)
+        and underpayment_period_end_candidate(p, y, installment, e)
+        and e < d;
+    then earlier_underpayment_period_end_candidate_exists(p, y, installment, d);
+}
+@source(IRC_S6654_B, relation = formalizes, coverage = exact, quote = "The period of the underpayment shall run from the due date for the installment to whichever of the following dates is the earlier—")
+rule S6654b2PeriodEnd strict {
+    for p: Person;
+    for y: TaxableYear;
+    for installment: EstimatedTaxInstallment;
+    for d: Date;
+    when underpayment_period_end_candidate(p, y, installment, d)
+        and not_known(earlier_underpayment_period_end_candidate_exists(p, y, installment, d));
+    then underpayment_cured_on(p, y, installment, d);
+}
+
+// --- (l)(2), (l)(3): estates and trusts ---------------------------------------------------------------------
+relation decedent_died_on(p: Person, d: Date) kind empirical {
+    label en unofficial "the date of the decedent's death";
+}
+relation taxable_year_ends_on_for_estate_or_trust(p: Person, y: TaxableYear, d: Date) kind empirical {
+    label en unofficial "the last day of the taxable year";
+}
+relation estate_of_decedent(p: Person) kind empirical {
+    label en official "the taxpayer is the estate of the decedent";
+}
+relation trust_wholly_treated_as_owned_by_decedent_subpart_E(p: Person) kind empirical {
+    label en official "all of the trust was treated (under subpart E of part I of subchapter J of chapter 1) as owned by the decedent";
+}
+relation residue_of_estate_passes_to_trust_or_trust_pays_estate_debts(p: Person) kind empirical {
+    label en official "the residue of the decedent's estate will pass to the trust under his will (or, if no will is admitted to probate, the trust is primarily responsible for paying debts, taxes, and expenses of administration)";
+}
+relation trust_subject_to_section_511_tax(p: Person) kind empirical {
+    label en official "the trust is subject to the tax imposed by section 511";
+}
+relation trust_is_private_foundation(p: Person) kind empirical {
+    label en official "the trust is a private foundation";
+}
+pub relation estimated_tax_inapplicable_to_estate_or_trust_6654l(p: Person, y: TaxableYear) kind institutional {
+    label en unofficial "section 6654 does not apply to the estate or trust for the taxable year";
+}
+@source(IRC_S6654_L, relation = formalizes, coverage = exact, quote = "the estate of such decedent, or")
+rule S6654l2AEstate strict {
+    for p: Person;
+    for y: TaxableYear;
+    for dd: Date;
+    for e: Date;
+    when estate_of_decedent(p)
+        and decedent_died_on(p, dd)
+        and taxable_year_ends_on_for_estate_or_trust(p, y, e)
+        and e < add_calendar_period(dd, 24 calendar_month);
+    then estimated_tax_inapplicable_to_estate_or_trust_6654l(p, y);
+}
+@source(IRC_S6654_L, relation = formalizes, coverage = exact, quote = "all of which was treated (under subpart E of part I of subchapter J of chapter 1) as owned by the decedent, and")
+rule S6654l2BTrust strict {
+    for p: Person;
+    for y: TaxableYear;
+    for dd: Date;
+    for e: Date;
+    when trust_wholly_treated_as_owned_by_decedent_subpart_E(p)
+        and residue_of_estate_passes_to_trust_or_trust_pays_estate_debts(p)
+        and decedent_died_on(p, dd)
+        and taxable_year_ends_on_for_estate_or_trust(p, y, e)
+        and e < add_calendar_period(dd, 24 calendar_month);
+    then estimated_tax_inapplicable_to_estate_or_trust_6654l(p, y);
+}
+@source(IRC_S6654_L, relation = formalizes, coverage = exact, quote = "This section shall not apply to any trust which is subject to the tax imposed by section 511 or which is a private foundation")
+rule S6654l3Section511 strict {
+    for p: Person;
+    for y: TaxableYear;
+    for e: Date;
+    when trust_subject_to_section_511_tax(p)
+        and taxable_year_ends_on_for_estate_or_trust(p, y, e);
+    then estimated_tax_inapplicable_to_estate_or_trust_6654l(p, y);
+}
+@source(IRC_S6654_L, relation = formalizes, coverage = exact, quote = "This section shall not apply to any trust which is subject to the tax imposed by section 511 or which is a private foundation")
+rule S6654l3PrivateFoundation strict {
+    for p: Person;
+    for y: TaxableYear;
+    for e: Date;
+    when trust_is_private_foundation(p)
+        and taxable_year_ends_on_for_estate_or_trust(p, y, e);
+    then estimated_tax_inapplicable_to_estate_or_trust_6654l(p, y);
+}

@@ -1,0 +1,756 @@
+// Partnership audit (subchapter C of chapter 63): the rows that stages 2b-3 left as
+// TECH_GAP — §6221(b)(2), §6222(c), §6225(b)(2) and (b)(4), §6231(a) and (b)(1),
+// §6232(a), (b) and (f)(2)(B), §6235(a)-(c), §6241(5)-(8), (11), (12)
+// (stage 4, 26.09.2026, DECISION-0379, implemented_unverified). §6225(c) is module 19.
+//
+// METHOD.
+//  - Edits to module 07 made in the same change: `S6221ElectionOutConditionsMet` reads
+//    `election_out_total_statements` (the count of (b)(1)(B) plus the statements the
+//    S corporation partners furnish, (b)(2)(A)(ii)) and refuses an S corporation partner
+//    without the (b)(2)(A)(i) disclosure; `S6225NetPositiveAdjustments` counts positive
+//    category nets, decreases the Secretary permits under the last clause of (b)(4), and
+//    the increases of reallocation adjustments ((b)(2): the decreasing part is disregarded);
+//    `S6222InconsistentUnderpaymentAssessedAsMathError` is defeated by (c)(2).
+//  - The period of §6235 is "the later of" several dates: every candidate produces its own
+//    `bba_adjustment_period_ends` tuple and a reader accepts an action that is on or before
+//    SOME tuple (the union reading; module 04 header). The candidates of (a)(1) use the
+//    G136 pattern (a candidate for which no strictly later candidate exists).
+//  - (a)(2)/(a)(3): "plus the number of days of any extension consented to" is a variable
+//    number of days, so an extended date is validated in comparison form (G243 idiom):
+//    the case proposes the date, the module checks it by `days_between`.
+//
+// JUDGMENT CALLS.
+//  - §6231(b)(1): the prohibition is triggered only when the notice is mailed after every
+//    known §6235 tuple (the later-tuple guard).
+//  - §6241(11)(A): the regulation is a power of the Secretary whose `valid_when` is the
+//    existence of a special enforcement matter ((B)(i)-(vi)); its effect is the disapplication
+//    of the subchapter to the item.
+//  - §6241(12): "except as otherwise provided by the Secretary" is `not_known` of the case
+//    fact that the Secretary provided otherwise.
+
+language "law.core" version "0.2";
+package us.irc.assessment version "0.1.1";
+namespace "urn:us:irc:assessment:clir";
+
+use self::{
+    AarRoute,
+    AttributableItemKind,
+    IRC_S6221_B,
+    IRC_S6222_C,
+    IRC_S6225_B,
+    IRC_S6231_A,
+    IRC_S6231_B,
+    IRC_S6232_A,
+    IRC_S6232_F,
+    IRC_S6235_A,
+    IRC_S6235_C,
+    IRC_S6241,
+    Partnership,
+    PartnershipAdjustmentCategory,
+    Person,
+    Return,
+    Secretary,
+    TaxKind,
+    TaxableYear,
+    aar_route_available,
+    administrative_adjustment_request_filed,
+    assessment_period_ends_for_attributable_item,
+    bba_adjustment_period_ends,
+    bba_adjustment_period_unlimited,
+    election_out_partner_count,
+    exists_partnership_adjustment_for_year,
+    foreign_information_failure_due_to_reasonable_cause,
+    foreign_information_furnished_on,
+    foreign_information_required_under_6038_family,
+    imputed_underpayment_assessable_for_adjustment_year,
+    imputed_underpayment_paid_on,
+    notice_of_final_partnership_adjustment_mailed,
+    notice_of_proposed_partnership_adjustment_mailed,
+    partner_assessment_amount,
+    partner_notified_secretary_of_inconsistency,
+    partner_treatment_inconsistent,
+    partnership_return_due_date,
+    partnership_return_filed_on,
+    secretary_assesses_partner_share,
+    specified_similar_amount,
+};
+
+// ============================================================================
+// §6221(b)(2) — special rules for S corporation and foreign partners
+// ============================================================================
+
+pub relation s_corporation_partner_of(scorp: Person, pship: Partnership, y: TaxableYear) kind empirical {
+    label en official "a partner of the partnership that is an S corporation";
+}
+pub relation s_corporation_shareholder_disclosure_included(pship: Partnership, y: TaxableYear, scorp: Person) kind empirical {
+    label en official "the partnership includes, in the manner prescribed by the Secretary, a disclosure of the name and taxpayer identification number of each person to whom the S corporation is required to furnish a statement under section 6037(b) for its taxable year ending with or within the partnership taxable year";
+}
+pub relation s_corporation_statements_furnished(scorp: Person, pship: Partnership, y: TaxableYear, statements: Integer) kind empirical {
+    label en official "the number of statements the S corporation is required to furnish under section 6037(b) for its taxable year ending with or within the partnership taxable year";
+}
+pub relation unqualified_s_corporation_partner_exists(pship: Partnership, y: TaxableYear) kind institutional {
+    label en unofficial "an S corporation partner whose shareholders are not disclosed: the partnership is not treated as meeting section 6221(b)(1)(C) for it";
+}
+@source(IRC_S6221_B, relation = formalizes, coverage = exact, quote = "the partnership shall only be treated as meeting the requirements of paragraph (1)(C) with respect to such partner if such partnership includes (in the manner prescribed by the Secretary) a disclosure of the name and taxpayer identification number of each person with respect to whom such S corporation is required to furnish a statement under section 6037(b)")
+rule S6221b2AiSCorporationPartnerNeedsShareholderDisclosure strict {
+    label en official "an S corporation partner counts as an eligible partner only if its shareholders are disclosed";
+    for scorp: Person;
+    for pship: Partnership;
+    for y: TaxableYear;
+    when s_corporation_partner_of(scorp, pship, y) and not_known(s_corporation_shareholder_disclosure_included(pship, y, scorp));
+    then unqualified_s_corporation_partner_exists(pship, y);
+}
+pub relation election_out_total_statements(pship: Partnership, y: TaxableYear, total: Integer) kind institutional {
+    label en official "the statements counted for section 6221(b)(1)(B): those the partnership furnishes under section 6031(b) plus the statements each S corporation partner is required to furnish under section 6037(b) (treated as furnished by the partnership)";
+}
+@source(IRC_S6221_B, relation = formalizes, coverage = exact, quote = "the statements such S corporation is required to so furnish shall be treated as statements furnished by the partnership for purposes of paragraph (1)(B).")
+rule S6221b2AiiSCorporationStatementsCountTowardTheLimit strict {
+    label en official "the statements an S corporation partner must furnish are counted as the partnership's for the 100-statement limit";
+    for pship: Partnership;
+    for y: TaxableYear;
+    for own: Integer;
+    when election_out_partner_count(pship, y, own);
+    then election_out_total_statements(pship, y,
+        own + (sum all n: Integer for scorp: Person
+            where s_corporation_partner_of(scorp, pship, y) and s_corporation_statements_furnished(scorp, pship, y, n)));
+}
+pub relation partnership_has_foreign_partner(pship: Partnership, y: TaxableYear) kind empirical {
+    label en official "a partner of the partnership is a foreign partner (section 6221(b)(1)(D)(ii))";
+}
+pub relation alternative_foreign_partner_identification_permitted(pship: Partnership, y: TaxableYear) kind institutional {
+    label en unofficial "the Secretary has provided for alternative identification of the foreign partners of the partnership";
+}
+pub relation secretary_provides_alternative_foreign_partner_identification(pship: Partnership, y: TaxableYear) kind empirical {
+    label en official "the Secretary provides for alternative identification of any foreign partners";
+}
+@source(IRC_S6221_B, relation = formalizes, coverage = exact, quote = "For purposes of paragraph (1)(D)(ii), the Secretary may provide for alternative identification of any foreign partners.")
+rule S6221b2BAlternativeIdentificationOfForeignPartners defeasible {
+    label en official "the Secretary may provide for alternative identification of foreign partners for the election-out disclosure";
+    for pship: Partnership;
+    for y: TaxableYear;
+    when secretary_provides_alternative_foreign_partner_identification(pship, y);
+    then power S6221b2BAlternativeIdentificationPower {
+        holder Secretary;
+        over pship;
+        exercise secretary_provides_alternative_foreign_partner_identification(pship, y);
+        valid_when partnership_has_foreign_partner(pship, y);
+        effect create(alternative_foreign_partner_identification_permitted(pship, y));
+    };
+}
+pub relation secretary_prescribes_similar_rules_for_other_partners(pship: Partnership, y: TaxableYear) kind empirical {
+    label en official "the Secretary by regulation or other guidance prescribes rules similar to those for S corporation partners with respect to partners not described in subparagraph (A) or paragraph (1)(C)";
+}
+pub relation partnership_has_partner_outside_s_corporation_and_listed_types(pship: Partnership, y: TaxableYear) kind empirical {
+    label en official "a partner of the partnership is neither an S corporation nor of a type described in paragraph (1)(C)";
+}
+pub relation similar_rules_for_other_partners_prescribed(pship: Partnership, y: TaxableYear) kind institutional {
+    label en unofficial "rules similar to section 6221(b)(2)(A) have been prescribed for the partnership's other partners";
+}
+@source(IRC_S6221_B, relation = formalizes, coverage = exact, quote = "The Secretary may by regulation or other guidance prescribe rules similar to the rules of subparagraph (A) with respect to any partners not described in such subparagraph or paragraph (1)(C).")
+rule S6221b2CSimilarRulesForOtherPartners defeasible {
+    label en official "the Secretary may prescribe rules similar to (b)(2)(A) for partners not described in that subparagraph or paragraph (1)(C)";
+    for pship: Partnership;
+    for y: TaxableYear;
+    when secretary_prescribes_similar_rules_for_other_partners(pship, y);
+    then power S6221b2CSimilarRulesPower {
+        holder Secretary;
+        over pship;
+        exercise secretary_prescribes_similar_rules_for_other_partners(pship, y);
+        valid_when partnership_has_partner_outside_s_corporation_and_listed_types(pship, y);
+        effect create(similar_rules_for_other_partners_prescribed(pship, y));
+    };
+}
+
+// ============================================================================
+// §6222(c) — notification of inconsistent treatment
+// ============================================================================
+
+pub relation partnership_return_not_filed_for_year(pship: Partnership, y: TaxableYear) kind empirical {
+    label en official "the partnership has not filed a return for the taxable year";
+}
+pub relation inconsistency_exception_applies(partner: Person, pship: Partnership, y: TaxableYear, item: Money) kind institutional {
+    label en official "subsections (a) and (b) of section 6222 do not apply to the item: the partner filed a statement identifying the inconsistency and either the partnership filed a return with which the partner's treatment is or may be inconsistent, or the partnership has not filed a return";
+}
+pub relation exists_partnership_return_filed_for_year(pship: Partnership, y: TaxableYear) kind institutional {
+    label en unofficial "existential wrapper over `partnership_return_filed_on`, to test a return that was never filed";
+}
+rule S6222cExistsPartnershipReturnFiled defeasible {
+    for pship: Partnership;
+    for y: TaxableYear;
+    for d: Date;
+    when partnership_return_filed_on(pship, y, d);
+    then exists_partnership_return_filed_for_year(pship, y);
+}
+@source(IRC_S6222_C, relation = formalizes, coverage = exact, quote = "(A)(i) the partnership has filed a return but the partner's treatment on the partner's return is (or may be) inconsistent with the treatment of the item on the partnership return, or")
+rule S6222cA1ReturnFiledInconsistentAndStatementFiled defeasible {
+    label en official "the exception applies when the partnership filed a return, the partner's treatment is or may be inconsistent, and the partner filed the statement";
+    for partner: Person;
+    for pship: Partnership;
+    for y: TaxableYear;
+    for item: Money;
+    when exists_partnership_return_filed_for_year(pship, y)
+        and partner_treatment_inconsistent(partner, pship, y, item)
+        and partner_notified_secretary_of_inconsistency(partner, pship, y, item);
+    then inconsistency_exception_applies(partner, pship, y, item);
+}
+@source(IRC_S6222_C, relation = formalizes, coverage = exact, quote = "(ii) the partnership has not filed a return, and")
+rule S6222cA2NoPartnershipReturnAndStatementFiled defeasible {
+    label en official "the exception applies when the partnership has not filed a return and the partner filed the statement";
+    for partner: Person;
+    for pship: Partnership;
+    for y: TaxableYear;
+    for item: Money;
+    when partnership_return_not_filed_for_year(pship, y)
+        and partner_notified_secretary_of_inconsistency(partner, pship, y, item);
+    then inconsistency_exception_applies(partner, pship, y, item);
+}
+external judgment relation partner_demonstrates_consistency_with_partnership_statement(partner: Person, pship: Partnership, y: TaxableYear, item: Money) {
+    authority Secretary;
+    label en official "the partner demonstrates to the satisfaction of the Secretary that the treatment of the item on the partner's return is consistent with the treatment of the item on the statement furnished to the partner by the partnership";
+}
+pub relation partner_elects_incorrect_information_rule(partner: Person, pship: Partnership, y: TaxableYear, item: Money) kind empirical {
+    label en official "the partner elects to have paragraph (2) apply with respect to the item";
+}
+pub relation partner_treated_as_notifying_under_6222c2(partner: Person, pship: Partnership, y: TaxableYear, item: Money) kind institutional {
+    label en official "the partner is treated as having complied with subparagraph (B) of paragraph (1) with respect to the item";
+}
+@source(IRC_S6222_C, relation = formalizes, coverage = exact, quote = "A partner shall be treated as having complied with subparagraph (B) of paragraph (1) with respect to an item if the partner—")
+rule S6222c2PartnerReceivingIncorrectInformationTreatedAsNotifying defeasible {
+    label en official "a partner whose return matches the incorrect partnership statement and who elects is treated as having filed the statement";
+    for partner: Person;
+    for pship: Partnership;
+    for y: TaxableYear;
+    for item: Money;
+    when partner_demonstrates_consistency_with_partnership_statement(partner, pship, y, item)
+        and partner_elects_incorrect_information_rule(partner, pship, y, item);
+    then partner_treated_as_notifying_under_6222c2(partner, pship, y, item);
+}
+
+// ============================================================================
+// §6225(b)(2), (b)(4) — reallocations and the Secretary's override
+// ============================================================================
+
+pub relation reallocation_adjustment_effect(pship: Partnership, reviewedYear: TaxableYear, category: PartnershipAdjustmentCategory, amount: Money) kind empirical {
+    label en unofficial "the effect on the imputed underpayment of an adjustment that reallocates the distributive share of an item from one partner to another (a positive amount increases, a negative amount decreases it); the decreasing part is disregarded under section 6225(b)(2)";
+}
+@source(IRC_S6225_B, relation = formalizes, coverage = exact, quote = "such adjustment shall be taken into account by disregarding so much of such adjustment as results in a decrease in the amount of the imputed underpayment.")
+rule S6225ExistsReallocationAdjustment strict {
+    label en unofficial "a reallocation adjustment exists for the reviewed year";
+    for pship: Partnership;
+    for reviewedYear: TaxableYear;
+    for category: PartnershipAdjustmentCategory;
+    for amount: Money;
+    when reallocation_adjustment_effect(pship, reviewedYear, category, amount);
+    then exists_partnership_adjustment_for_year(pship, reviewedYear);
+}
+pub relation secretary_permits_decrease_to_be_taken_into_account(pship: Partnership, reviewedYear: TaxableYear, category: PartnershipAdjustmentCategory) kind empirical {
+    label en official "the Secretary otherwise provides that a decrease subject to an additional limitation (or not allowed against ordinary income) is taken into account under paragraph (1)(A)";
+}
+
+// ============================================================================
+// §6231(a), (b)(1)
+// ============================================================================
+
+pub relation fpa_mailed_to_last_known_address(pship: Partnership, y: TaxableYear, mailedOn: Date) kind empirical {
+    label en official "the notice of a final partnership adjustment is mailed to the last known address of the partnership representative or the partnership";
+}
+pub relation partnership_has_terminated_existence(pship: Partnership) kind empirical {
+    label en official "the partnership has terminated its existence";
+}
+pub relation fpa_notice_sufficient(pship: Partnership, y: TaxableYear, mailedOn: Date) kind institutional {
+    label en official "the notice of a final partnership adjustment is sufficient";
+}
+@source(IRC_S6231_A, relation = formalizes, coverage = exact, quote = "Any notice of a final partnership adjustment shall be sufficient if mailed to the last known address of the partnership representative or the partnership (even if the partnership has terminated its existence).")
+rule S6231aFpaSufficientWhenMailedToLastKnownAddress defeasible {
+    label en official "an FPA mailed to the last known address of the representative or the partnership is sufficient, even if the partnership has terminated";
+    for pship: Partnership;
+    for y: TaxableYear;
+    for mailedOn: Date;
+    when notice_of_final_partnership_adjustment_mailed(pship, y, mailedOn)
+        and fpa_mailed_to_last_known_address(pship, y, mailedOn);
+    then fpa_notice_sufficient(pship, y, mailedOn);
+}
+pub relation bba_later_period_end_exists(pship: Partnership, y: TaxableYear, d: Date) kind institutional {
+    label en unofficial "G136 pattern: a `bba_adjustment_period_ends` tuple strictly later than the given date exists";
+}
+rule S6231bLaterPeriodEndExists defeasible {
+    for pship: Partnership;
+    for y: TaxableYear;
+    for d: Date;
+    for later: Date;
+    when bba_adjustment_period_ends(pship, y, d)
+        and bba_adjustment_period_ends(pship, y, later)
+        and later > d;
+    then bba_later_period_end_exists(pship, y, d);
+}
+@source(IRC_S6231_B, relation = formalizes, coverage = exact, quote = "Any notice of a proposed partnership adjustment shall not be mailed later than the date determined under section 6235 (determined without regard to paragraphs (2) and (3) of subsection (a) thereof).")
+rule S6231b1NoppaNotMailedAfterSection6235Date defeasible {
+    label en official "a notice of proposed partnership adjustment shall not be mailed later than the section 6235 date";
+    for pship: Partnership;
+    for y: TaxableYear;
+    for periodEnd: Date;
+    for mailedOn: Date;
+    when bba_adjustment_period_ends(pship, y, periodEnd)
+        and notice_of_proposed_partnership_adjustment_mailed(pship, y, mailedOn)
+        and mailedOn > periodEnd
+        and not_known(bba_later_period_end_exists(pship, y, periodEnd))
+        and not_known(bba_adjustment_period_unlimited(pship, y));
+    then prohibition S6231b1NoppaMailedAfterPeriodProhibition {
+        bearer Secretary;
+        action notice_of_proposed_partnership_adjustment_mailed(pship, y, mailedOn);
+        window [add_calendar_period(periodEnd, 1 calendar_day), infinity);
+    };
+}
+
+// ============================================================================
+// §6232(a), (b), (f)(2)(B)
+// ============================================================================
+
+pub relation deficiency_procedures_disapplied_for_imputed_underpayment(pship: Partnership, adjustmentYear: TaxableYear) kind institutional {
+    label en official "subchapter B of chapter 63 (deficiency procedures) shall not apply to the imputed underpayment (a scope exclusion: no consumer inside this package reads it)";
+}
+@source(IRC_S6232_A, relation = formalizes, coverage = exact, quote = "(1) subchapter B of chapter 63 shall not apply, and")
+rule S6232a1SubchapterBDoesNotApply defeasible {
+    label en official "an imputed underpayment is assessed and collected outside the deficiency procedures of subchapter B";
+    for pship: Partnership;
+    for adjustmentYear: TaxableYear;
+    for amount: Money;
+    when imputed_underpayment_assessable_for_adjustment_year(pship, adjustmentYear, amount);
+    then deficiency_procedures_disapplied_for_imputed_underpayment(pship, adjustmentYear);
+}
+@source(IRC_S6232_A, relation = formalizes, coverage = exact, quote = "(2) in the case of an administrative adjustment request to which section 6227(b)(1) applies, the underpayment shall be paid and may be assessed when the request is filed.")
+rule S6232a2PaymentDueWhenAarFiled defeasible {
+    label en official "for an AAR to which section 6227(b)(1) applies the imputed underpayment is paid when the request is filed";
+    for pship: Partnership;
+    for reviewedYear: TaxableYear;
+    for filedOn: Date;
+    when administrative_adjustment_request_filed(pship, reviewedYear, filedOn)
+        and aar_route_available(pship, reviewedYear, PartnershipPaysImputedUnderpayment);
+    then duty S6232a2PayImputedUnderpaymentWithAarDuty {
+        bearer pship;
+        beneficiary Secretary;
+        goal achievement {
+            condition imputed_underpayment_paid_on(pship, reviewedYear, filedOn);
+            window [filedOn, filedOn];
+        }
+    };
+}
+pub relation secretary_assesses_imputed_underpayment_on_aar_filing(pship: Partnership, reviewedYear: TaxableYear, assessedOn: Date) kind empirical {
+    label en official "the Secretary assesses the imputed underpayment on the day the administrative adjustment request is filed";
+}
+pub relation imputed_underpayment_assessed_at_aar_filing(pship: Partnership, reviewedYear: TaxableYear) kind institutional {
+    label en unofficial "the imputed underpayment of an AAR to which section 6227(b)(1) applies was assessed when the request was filed";
+}
+pub relation aar_underpayment_assessable_on_filing(pship: Partnership, reviewedYear: TaxableYear, filedOn: Date) kind institutional {
+    label en unofficial "single-atom valid_when helper: an AAR to which section 6227(b)(1) applies was filed on this date";
+}
+rule S6232a2AarAssessableOnFiling defeasible {
+    for pship: Partnership;
+    for reviewedYear: TaxableYear;
+    for filedOn: Date;
+    when administrative_adjustment_request_filed(pship, reviewedYear, filedOn)
+        and aar_route_available(pship, reviewedYear, PartnershipPaysImputedUnderpayment);
+    then aar_underpayment_assessable_on_filing(pship, reviewedYear, filedOn);
+}
+rule S6232a2SecretaryAssessesWhenAarFiled defeasible {
+    for pship: Partnership;
+    for reviewedYear: TaxableYear;
+    for filedOn: Date;
+    for assessedOn: Date;
+    when secretary_assesses_imputed_underpayment_on_aar_filing(pship, reviewedYear, assessedOn)
+        and aar_underpayment_assessable_on_filing(pship, reviewedYear, filedOn);
+    then power S6232a2AssessOnAarFilingPower {
+        holder Secretary;
+        over pship;
+        exercise secretary_assesses_imputed_underpayment_on_aar_filing(pship, reviewedYear, assessedOn);
+        valid_when aar_underpayment_assessable_on_filing(pship, reviewedYear, filedOn);
+        effect create(imputed_underpayment_assessed_at_aar_filing(pship, reviewedYear));
+    };
+}
+pub relation partner_assessed_amount_is_specified_similar_amount(partnerPship: Partnership, pship: Partnership, y: TaxableYear, amount: Money) kind institutional {
+    label en official "an amount assessed under paragraph (1)(B) upon a partner which is a partnership is itself a specified similar amount (one hop: the next tier's own notice and demand is a case fact)";
+}
+@source(IRC_S6232_F, relation = formalizes, coverage = exact, quote = "(B) any amount assessed under paragraph (1)(B) upon a partner which is a partnership.")
+rule S6232f2BAmountAssessedOnPartnerPartnershipIsSpecifiedSimilarAmount defeasible {
+    label en official "an amount assessed under (f)(1)(B) upon a partner that is a partnership is a specified similar amount of that partner";
+    for partnerPship: Partnership;
+    for pship: Partnership;
+    for y: TaxableYear;
+    for assessedOn: Date;
+    for amount: Money;
+    when secretary_assesses_partner_share(partnerPship, pship, y, assessedOn)
+        and partner_assessment_amount(partnerPship, pship, y, amount);
+    then specified_similar_amount(partnerPship, y, amount);
+    then partner_assessed_amount_is_specified_similar_amount(partnerPship, pship, y, amount);
+}
+
+// ============================================================================
+// §6235(a)-(c) — the candidates and alternatives of the adjustment period
+// ============================================================================
+
+pub relation bba_candidate_date(pship: Partnership, y: TaxableYear, d: Date) kind institutional {
+    label en unofficial "one of the dates of section 6235(a)(1): the partnership return was filed (A), the return due date (B), the administrative adjustment request was filed (C)";
+}
+@source(IRC_S6235_A, relation = formalizes, coverage = exact, quote = "(A) the date on which the partnership return for such taxable year was filed,")
+rule S6235a1ACandidateReturnFiled defeasible {
+    for pship: Partnership;
+    for y: TaxableYear;
+    for d: Date;
+    when partnership_return_filed_on(pship, y, d);
+    then bba_candidate_date(pship, y, d);
+}
+@source(IRC_S6235_A, relation = formalizes, coverage = exact, quote = "(B) the return due date for the taxable year, or")
+rule S6235a1BCandidateReturnDueDate defeasible {
+    label en official "the return due date for the taxable year is a candidate for the latest of the section 6235(a)(1) dates";
+    for pship: Partnership;
+    for y: TaxableYear;
+    for d: Date;
+    when partnership_return_due_date(pship, y, d);
+    then bba_candidate_date(pship, y, d);
+}
+@source(IRC_S6235_A, relation = formalizes, coverage = exact, quote = "(C) the date on which the partnership filed an administrative adjustment request with respect to such year under section 6227, or")
+rule S6235a1CCandidateAarFiled defeasible {
+    label en official "the date the partnership filed an administrative adjustment request is a candidate for the latest of the section 6235(a)(1) dates";
+    for pship: Partnership;
+    for y: TaxableYear;
+    for d: Date;
+    when administrative_adjustment_request_filed(pship, y, d);
+    then bba_candidate_date(pship, y, d);
+}
+pub relation bba_later_candidate_exists(pship: Partnership, y: TaxableYear, d: Date) kind institutional {
+    label en unofficial "G136 pattern: a section 6235(a)(1) candidate date strictly later than the given one exists";
+}
+rule S6235a1LaterCandidateExists defeasible {
+    for pship: Partnership;
+    for y: TaxableYear;
+    for d: Date;
+    for later: Date;
+    when bba_candidate_date(pship, y, d) and bba_candidate_date(pship, y, later) and later > d;
+    then bba_later_candidate_exists(pship, y, d);
+}
+@source(IRC_S6235_A, relation = formalizes, coverage = exact, quote = "(1) the date which is 3 years after the latest of—")
+rule S6235a1ThreeYearsAfterTheLatestCandidate defeasible {
+    label en official "no adjustment may be made after 3 years from the latest of the return filing date, the return due date and the AAR filing date";
+    for pship: Partnership;
+    for y: TaxableYear;
+    for d: Date;
+    when bba_candidate_date(pship, y, d) and not_known(bba_later_candidate_exists(pship, y, d));
+    then bba_adjustment_period_ends(pship, y, add_calendar_period(d, 3 calendar_year));
+}
+pub relation bba_modification_submission_complete_on(pship: Partnership, y: TaxableYear, submittedOn: Date) kind empirical {
+    label en official "the date on which everything required to be submitted to the Secretary under section 6225(c) is submitted";
+}
+pub relation bba_modification_submission_extension_consented_until(pship: Partnership, y: TaxableYear, until: Date) kind empirical {
+    label en official "the Secretary consents under section 6225(c)(7) to extend the 270-day submission period until this date";
+}
+pub relation bba_modification_extension_consented(pship: Partnership, y: TaxableYear) kind institutional {
+    label en unofficial "existential wrapper over the section 6225(c)(7) consent";
+}
+rule S6235a2ExtensionConsentedExists defeasible {
+    for pship: Partnership;
+    for y: TaxableYear;
+    for until: Date;
+    when bba_modification_submission_extension_consented_until(pship, y, until);
+    then bba_modification_extension_consented(pship, y);
+}
+@source(IRC_S6235_A, relation = formalizes, coverage = exact, quote = "(2) in the case of any modification of an imputed underpayment under section 6225(c), the date that is 270 days")
+rule S6235a2Modification270DaysAfterSubmission defeasible {
+    label en official "in the case of a section 6225(c) modification the adjustment period runs to 270 days after everything required is submitted";
+    for pship: Partnership;
+    for y: TaxableYear;
+    for submittedOn: Date;
+    when bba_modification_submission_complete_on(pship, y, submittedOn)
+        and not_known(bba_modification_extension_consented(pship, y));
+    then bba_adjustment_period_ends(pship, y, add_calendar_period(submittedOn, 270 calendar_day));
+}
+pub relation candidate_bba_period_end(pship: Partnership, y: TaxableYear, candidate: Date) kind empirical {
+    label en unofficial "a candidate end date of the section 6235(a)(2)/(3) period, extended by the days of the consented extension (comparison form: the case proposes, the module validates by exact day arithmetic)";
+}
+@source(IRC_S6235_A, relation = formalizes, coverage = exact, quote = "(plus the number of days of any extension consented to by the Secretary under paragraph (7) thereof)")
+rule S6235a2ModificationExtendedByConsentedDays defeasible {
+    label en official "the 270-day period is extended by the days of the extension the Secretary consented to under section 6225(c)(7)";
+    for pship: Partnership;
+    for y: TaxableYear;
+    for submittedOn: Date;
+    for noppaOn: Date;
+    for until: Date;
+    for candidate: Date;
+    when bba_modification_submission_complete_on(pship, y, submittedOn)
+        and notice_of_proposed_partnership_adjustment_mailed(pship, y, noppaOn)
+        and bba_modification_submission_extension_consented_until(pship, y, until)
+        and candidate_bba_period_end(pship, y, candidate)
+        and days_between(submittedOn, candidate) == 270 + days_between(add_calendar_period(noppaOn, 270 calendar_day), until);
+    then bba_adjustment_period_ends(pship, y, candidate);
+}
+@source(IRC_S6235_A, relation = formalizes, coverage = exact, quote = "(3) in the case of any notice of a proposed partnership adjustment under section 6231(a)(2), the date that is 330 days")
+rule S6235a3Noppa330Days defeasible {
+    label en official "in the case of a notice of proposed partnership adjustment the adjustment period runs to 330 days after the notice";
+    for pship: Partnership;
+    for y: TaxableYear;
+    for noppaOn: Date;
+    when notice_of_proposed_partnership_adjustment_mailed(pship, y, noppaOn)
+        and not_known(bba_modification_extension_consented(pship, y));
+    then bba_adjustment_period_ends(pship, y, add_calendar_period(noppaOn, 330 calendar_day));
+}
+@source(IRC_S6235_A, relation = formalizes, coverage = exact, quote = "(plus the number of days of any extension consented to by the Secretary under section 6225(c)(7)) after the date of such notice.")
+rule S6235a3NoppaExtendedByConsentedDays defeasible {
+    label en official "the 330-day period is extended by the days of the extension the Secretary consented to under section 6225(c)(7)";
+    for pship: Partnership;
+    for y: TaxableYear;
+    for noppaOn: Date;
+    for until: Date;
+    for candidate: Date;
+    when notice_of_proposed_partnership_adjustment_mailed(pship, y, noppaOn)
+        and bba_modification_submission_extension_consented_until(pship, y, until)
+        and candidate_bba_period_end(pship, y, candidate)
+        and days_between(noppaOn, candidate) == 330 + days_between(add_calendar_period(noppaOn, 270 calendar_day), until);
+    then bba_adjustment_period_ends(pship, y, candidate);
+}
+pub relation partnership_return_executed_by_secretary_6020b(pship: Partnership, y: TaxableYear) kind empirical {
+    label en official "a return executed by the Secretary under section 6020(b) on behalf of the partnership";
+}
+pub relation partnership_executed_return_is_not_a_return(pship: Partnership, y: TaxableYear) kind institutional {
+    label en official "a return executed by the Secretary under section 6020(b) is not treated as a return of the partnership";
+}
+@source(IRC_S6235_C, relation = formalizes, coverage = exact, quote = "a return executed by the Secretary under subsection (b) of section 6020 on behalf of the partnership shall not be treated as a return of the partnership.")
+rule S6235c4ExecutedReturnIsNotAPartnershipReturn defeasible {
+    label en official "a section 6020(b) return does not start the period, so the failure-to-file rule of (c)(3) applies";
+    for pship: Partnership;
+    for y: TaxableYear;
+    when partnership_return_executed_by_secretary_6020b(pship, y) and not_known(exists_partnership_return_filed_for_year(pship, y));
+    then partnership_executed_return_is_not_a_return(pship, y);
+    then bba_adjustment_period_unlimited(pship, y);
+}
+@source(IRC_S6235_C, relation = formalizes, coverage = exact, quote = "the time for making any adjustment under this subchapter with respect to any tax return, event, or period to which such information relates shall not expire before the date that is determined under section 6501(c)(8).")
+rule S6235c5ForeignInformationExtendsAdjustmentPeriod defeasible {
+    label en official "for a partnership required to report section 6501(c)(8) information the adjustment period does not expire before the (c)(8) date";
+    for r: Return;
+    for pship: Partnership;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for furnishedOn: Date;
+    when foreign_information_required_under_6038_family(r, pship, y, k)
+        and foreign_information_furnished_on(r, furnishedOn)
+        and not_known(foreign_information_failure_due_to_reasonable_cause(r));
+    then bba_adjustment_period_ends(pship, y, add_calendar_period(furnishedOn, 3 calendar_year));
+}
+@source(IRC_S6235_C, relation = formalizes, coverage = exact, quote = "the time for making any adjustment under this subchapter with respect to such transaction shall not expire before the date that is determined under section 6501(c)(10).")
+rule S6235c6ListedTransactionExtendsAdjustmentPeriod defeasible {
+    label en official "for a partnership that omits listed transaction information the adjustment period does not expire before the (c)(10) date";
+    for pship: Partnership;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for d: Date;
+    when assessment_period_ends_for_attributable_item(pship, y, k, ListedTransaction, d);
+    then bba_adjustment_period_ends(pship, y, d);
+}
+
+// ============================================================================
+// §6241(5)-(8), (11), (12)
+// ============================================================================
+
+pub relation principal_place_of_business_outside_united_states(pship: Partnership) kind empirical {
+    label en official "the partnership's principal place of business is located outside the United States";
+}
+pub relation principal_place_of_business_treated_as_district_of_columbia(pship: Partnership) kind institutional {
+    label en official "for purposes of section 6234 a principal place of business outside the United States is treated as located in the District of Columbia";
+}
+@source(IRC_S6241, relation = formalizes, coverage = exact, quote = "For purposes of section 6234, a principal place of business located outside the United States shall be treated as located in the District of Columbia.")
+rule S6241p5PrincipalPlaceAbroadIsDistrictOfColumbia defeasible {
+    label en official "a principal place of business abroad is treated as located in the District of Columbia for section 6234";
+    for pship: Partnership;
+    when principal_place_of_business_outside_united_states(pship);
+    then principal_place_of_business_treated_as_district_of_columbia(pship);
+}
+pub relation partnership_prohibited_by_title_11_from_petitioning(pship: Partnership, start: Date, end: Date) kind empirical {
+    label en official "the partnership is prohibited by reason of a title 11 case from filing a petition under section 6234";
+}
+pub relation section_6234_petition_period_suspended(pship: Partnership, start: Date, end: Date) kind institutional {
+    label en official "the running of the section 6234 period is suspended during the title 11 prohibition and for 60 days thereafter (the resulting deadline moves by a variable number of days, so no date is computed here)";
+}
+@source(IRC_S6241, relation = formalizes, coverage = exact, quote = "The running of the period specified in section 6234 shall, in a case under title 11 of the United States Code, be suspended during the period during which the partnership is prohibited by reason of such case from filing a petition under section 6234 and for 60 days thereafter.")
+rule S6241p6BPetitionPeriodSuspendedInTitle11Case defeasible {
+    label en official "the section 6234 petition period is suspended during the title 11 prohibition and for 60 days thereafter";
+    for pship: Partnership;
+    for start: Date;
+    for end: Date;
+    when partnership_prohibited_by_title_11_from_petitioning(pship, start, end);
+    then section_6234_petition_period_suspended(pship, start, add_calendar_period(end, 60 calendar_day));
+}
+pub relation partnership_ceased_to_exist_before_adjustment_takes_effect(pship: Partnership, y: TaxableYear) kind empirical {
+    label en official "the partnership ceases to exist before a partnership adjustment under this subchapter takes effect";
+}
+pub relation former_partner_of(partner: Person, pship: Partnership, y: TaxableYear) kind empirical {
+    label en official "a former partner of the partnership (a partner as determined for purposes of section 6241(7))";
+}
+pub relation former_partner_took_adjustment_into_account(partner: Person, pship: Partnership, y: TaxableYear) kind empirical {
+    label en official "the former partner takes the partnership adjustment into account under the Secretary's regulations";
+}
+@source(IRC_S6241, relation = formalizes, coverage = exact, quote = "such adjustment shall be taken into account by the former partners of such partnership under regulations prescribed by the Secretary.")
+rule S6241p7FormerPartnersTakeAdjustmentIntoAccount defeasible {
+    label en official "when the partnership ceases to exist its adjustment is taken into account by the former partners";
+    for partner: Person;
+    for pship: Partnership;
+    for y: TaxableYear;
+    when partnership_ceased_to_exist_before_adjustment_takes_effect(pship, y) and former_partner_of(partner, pship, y);
+    then duty S6241p7FormerPartnerTakesAdjustmentIntoAccountDuty {
+        bearer partner;
+        beneficiary Secretary;
+        goal achievement {
+            condition former_partner_took_adjustment_into_account(partner, pship, y);
+            window [-infinity, infinity];
+        }
+    };
+}
+pub relation partnership_return_filed_by_entity_not_a_partnership(misclassified: Person, y: TaxableYear) kind empirical {
+    label en official "a partnership return is filed by an entity for the taxable year but it is determined that the entity is not a partnership (or that there is no entity) for the year";
+}
+pub relation regulations_extend_subchapter_to_entity(misclassified: Person, y: TaxableYear) kind empirical {
+    label en official "the regulations provide that the subchapter is extended to the entity for the year";
+}
+pub relation subchapter_c_extended_to_entity(misclassified: Person, y: TaxableYear) kind institutional {
+    label en official "to the extent provided in regulations, the provisions of this subchapter are extended in respect of the year to the entity and its items and to persons holding an interest in the entity";
+}
+@source(IRC_S6241, relation = formalizes, coverage = exact, quote = "then, to the extent provided in regulations, the provisions of this subchapter are hereby extended in respect of such year to such entity and its items and to persons holding an interest in such entity.")
+rule S6241p8SubchapterExtendedToMisclassifiedEntity defeasible {
+    label en official "the subchapter is extended to an entity that filed a partnership return but is not a partnership, as the regulations provide";
+    for misclassified: Person;
+    for y: TaxableYear;
+    when partnership_return_filed_by_entity_not_a_partnership(misclassified, y) and regulations_extend_subchapter_to_entity(misclassified, y);
+    then subchapter_c_extended_to_entity(misclassified, y);
+}
+pub enum SpecialEnforcementMatter {
+    FailureToComplyWith6226b4Aii;    // (B)(i)
+    TerminationOrJeopardyAssessment; // (B)(ii) sections 6851, 6861
+    CriminalInvestigation;           // (B)(iii)
+    IndirectMethodOfProof;           // (B)(iv)
+    ForeignPartnerOrPartnership;     // (B)(v)
+    OtherDeterminedByRegulation;     // (B)(vi)
+    label en unofficial "the special enforcement matters of section 6241(11)(B)";
+}
+pub relation partnership_related_item_involves_matter(pship: Partnership, y: TaxableYear, matter: SpecialEnforcementMatter) kind empirical {
+    label en official "the partnership-related items involve the special enforcement matter";
+}
+pub relation is_special_enforcement_matter_item(pship: Partnership, y: TaxableYear) kind institutional {
+    label en official "the partnership-related items involve special enforcement matters (section 6241(11)(B)(i)-(vi))";
+}
+@source(IRC_S6241, relation = formalizes, coverage = exact, quote = "For purposes of subparagraph (A), the term \"special enforcement matters\" means—")
+rule S6241p11BSpecialEnforcementMatter defeasible {
+    label en official "items involving one of the listed matters are special enforcement matters";
+    for pship: Partnership;
+    for y: TaxableYear;
+    for matter: SpecialEnforcementMatter;
+    when partnership_related_item_involves_matter(pship, y, matter);
+    then is_special_enforcement_matter_item(pship, y);
+}
+pub relation secretary_prescribes_special_enforcement_regulation(pship: Partnership, y: TaxableYear) kind empirical {
+    label en official "the Secretary prescribes a regulation under which the subchapter (or a portion of it) does not apply to the items and special rules apply instead";
+}
+pub relation subchapter_c_disapplied_to_special_enforcement_items(pship: Partnership, y: TaxableYear) kind institutional {
+    label en official "this subchapter (or any portion thereof) does not apply to the special enforcement items; the special rules of the regulation apply";
+}
+@source(IRC_S6241, relation = formalizes, coverage = exact, quote = "In the case of partnership-related items which involve special enforcement matters, the Secretary may prescribe regulations pursuant to which—")
+rule S6241p11ASecretaryMayDisapplySubchapterForSpecialEnforcementMatters defeasible {
+    label en official "the Secretary may prescribe regulations disapplying the subchapter to items involving special enforcement matters";
+    for pship: Partnership;
+    for y: TaxableYear;
+    when secretary_prescribes_special_enforcement_regulation(pship, y);
+    then power S6241p11ASpecialEnforcementRegulationPower {
+        holder Secretary;
+        over pship;
+        exercise secretary_prescribes_special_enforcement_regulation(pship, y);
+        valid_when is_special_enforcement_matter_item(pship, y);
+        effect create(subchapter_c_disapplied_to_special_enforcement_items(pship, y));
+    };
+}
+pub relation controlled_foreign_corporation_partner(cfc: Person, pship: Partnership) kind empirical {
+    label en official "a controlled foreign corporation (as defined in section 957 or 953(c)(1)) which is a partner of the partnership";
+}
+pub relation united_states_shareholder_of(usShareholder: Person, cfc: Person) kind empirical {
+    label en official "a United States shareholder (as defined in section 951(b) or 953(c)(1)) with respect to the controlled foreign corporation";
+}
+pub relation pro_rata_share_of_cfc(usShareholder: Person, cfc: Person, share: Decimal) kind empirical {
+    label en official "the United States shareholder's pro rata share with respect to the controlled foreign corporation (determined under rules similar to section 951(a)(2))";
+}
+pub relation secretary_provides_otherwise_for_cfc_partner(usShareholder: Person, pship: Partnership) kind empirical {
+    label en official "the Secretary otherwise provides (section 6241(12)(A) 'except as otherwise provided by the Secretary')";
+}
+pub relation treated_as_partner_for_subchapter_c(person: Person, pship: Partnership) kind institutional {
+    label en official "the person is treated for purposes of this subchapter as a partner of the partnership";
+}
+pub relation treated_partner_distributive_share(person: Person, pship: Partnership, share: Decimal) kind institutional {
+    label en official "the distributive share of a person treated as a partner under section 6241(12) is the person's pro rata share with respect to the controlled foreign corporation (or passive foreign investment company)";
+}
+@source(IRC_S6241, relation = formalizes, coverage = exact, quote = "each United States shareholder (as defined in section 951(b) or 953(c)(1)) with respect to such controlled foreign corporation shall be treated for purposes of this subchapter as a partner of such partnership.")
+rule S6241p12AUnitedStatesShareholderIsPartner defeasible {
+    label en official "a United States shareholder of a controlled foreign corporation partner is treated as a partner of the partnership";
+    for usShareholder: Person;
+    for cfc: Person;
+    for pship: Partnership;
+    when controlled_foreign_corporation_partner(cfc, pship)
+        and united_states_shareholder_of(usShareholder, cfc)
+        and not_known(secretary_provides_otherwise_for_cfc_partner(usShareholder, pship));
+    then treated_as_partner_for_subchapter_c(usShareholder, pship);
+}
+@source(IRC_S6241, relation = formalizes, coverage = exact, quote = "any distributive share of any such United States shareholder with respect to such partnership shall, except as otherwise provided by the Secretary, be equal to such United States shareholder's pro rata share with respect to such controlled foreign corporation")
+rule S6241p12ADistributiveShareIsProRataShare defeasible {
+    label en official "the distributive share of the treated partner equals its pro rata share of the controlled foreign corporation";
+    for usShareholder: Person;
+    for cfc: Person;
+    for pship: Partnership;
+    for share: Decimal;
+    when controlled_foreign_corporation_partner(cfc, pship)
+        and united_states_shareholder_of(usShareholder, cfc)
+        and pro_rata_share_of_cfc(usShareholder, cfc, share)
+        and not_known(secretary_provides_otherwise_for_cfc_partner(usShareholder, pship));
+    then treated_partner_distributive_share(usShareholder, pship, share);
+}
+pub relation passive_foreign_investment_company_partner(pfic: Person, pship: Partnership) kind empirical {
+    label en official "a passive foreign investment company (as defined in section 1297) which is a partner of the partnership";
+}
+pub relation taxpayer_elected_section_1295_for(taxpayer: Person, pfic: Person) kind empirical {
+    label en official "the taxpayer makes an election under section 1295 with respect to the passive foreign investment company";
+}
+pub relation pro_rata_share_of_pfic(taxpayer: Person, pfic: Person, share: Decimal) kind empirical {
+    label en official "the taxpayer's pro rata share with respect to the passive foreign investment company (determined under rules similar to section 1293(b))";
+}
+@source(IRC_S6241, relation = formalizes, coverage = exact, quote = "each taxpayer that makes an election under section 1295 with respect to such company shall be treated in the same manner as United States shareholders under subparagraph (A)")
+rule S6241p12BPficElectingTaxpayerIsPartner defeasible {
+    label en official "a taxpayer that made a section 1295 election for a PFIC partner is treated as a partner of the partnership";
+    for taxpayer: Person;
+    for pfic: Person;
+    for pship: Partnership;
+    when passive_foreign_investment_company_partner(pfic, pship)
+        and taxpayer_elected_section_1295_for(taxpayer, pfic)
+        and not_known(secretary_provides_otherwise_for_cfc_partner(taxpayer, pship));
+    then treated_as_partner_for_subchapter_c(taxpayer, pship);
+}
+@source(IRC_S6241, relation = formalizes, coverage = exact, quote = "except that such taxpayer's pro rata share with respect to the passive foreign investment company shall be determined under rules similar to the rules of section 1293(b).")
+rule S6241p12BPficDistributiveShareIsProRata defeasible {
+    for taxpayer: Person;
+    for pfic: Person;
+    for pship: Partnership;
+    for share: Decimal;
+    when passive_foreign_investment_company_partner(pfic, pship)
+        and taxpayer_elected_section_1295_for(taxpayer, pfic)
+        and pro_rata_share_of_pfic(taxpayer, pfic, share)
+        and not_known(secretary_provides_otherwise_for_cfc_partner(taxpayer, pship));
+    then treated_partner_distributive_share(taxpayer, pship, share);
+}
+pub relation secretary_issued_guidance_for_6241p12(pship: Partnership) kind empirical {
+    label en official "the Secretary has issued regulations or other guidance necessary or appropriate to carry out paragraph (12), including rules for similar circumstances or similarly situated persons";
+}
+@source(IRC_S6241, relation = formalizes, coverage = exact, quote = "The Secretary shall issue such regulations or other guidance as is necessary or appropriate to carry out the purposes of this paragraph")
+rule S6241p12CSecretaryMustIssueGuidance defeasible {
+    label en official "the Secretary shall issue regulations or other guidance to carry out paragraph (12)";
+    for pship: Partnership;
+    for cfc: Person;
+    when controlled_foreign_corporation_partner(cfc, pship);
+    then duty S6241p12CIssueGuidanceDuty {
+        bearer Secretary;
+        goal achievement {
+            condition secretary_issued_guidance_for_6241p12(pship);
+            window [-infinity, infinity];
+        }
+    };
+}

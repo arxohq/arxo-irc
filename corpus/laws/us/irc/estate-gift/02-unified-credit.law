@@ -1,0 +1,223 @@
+// 26 U.S.C. §2010 — unified credit against estate tax: the applicable credit
+// amount (basic exclusion amount + deceased spousal unused exclusion) and
+// the portability election.
+//
+// COMPILER NOTE: computed amounts are written directly inside the producing
+// `then` head, not through an intermediate `when amount == expr;` step (see
+// 01-estate-imposition.law's header note; `when x == expr` does not bind a
+// fresh variable for range-restriction purposes, §190).
+//
+// JUDGMENT CALLS:
+//  - The PL 119-21 §70106 boundary raising the basic exclusion amount to
+//    $15,000,000 for decedents dying after 2025 is modelled entirely through
+//    `basic-exclusion-amount.lawparam.json`'s two anchored value rows (2011:
+//    $5,000,000; 2026: $15,000,000, each `@source`-anchored to the enacting
+//    text) rather than a `revision` (§32) declaration: a `revision` with an
+//    `op` requires a `next` edition (`LDC-E1305`), and this package does not
+//    build a full post-amendment EDITION of the pinned section text (out of
+//    scope — the coordinator's own `us.irc.temporal` package only pins the
+//    Public Law's own text, not a merged consolidated edition). The
+//    parameter dataset already gives evaluation the correct value on each
+//    side of the January 1, 2026 boundary; a `revision` node would document
+//    the SAME fact a second way without changing what evaluates. Recorded as
+//    a judgment call rather than silently dropped: TECH-GAPS.md G84.
+//  - §2010(b) (pre-1977 specific-exemption offset) is not modelled: narrow,
+//    decedent must have made gifts before September 9, 1976 under a
+//    since-repealed section; TECH_GAP if a scenario ever needs it.
+//  - §2010(c)(5)(B) (post-limitations examination of the FIRST spouse's
+//    return to verify DSUE) is NON_NORMATIVE for this package's purposes: it
+//    is an administrative examination POWER of the Secretary over a return
+//    this package does not separately model as an audit workflow (owned by
+//    `assessment`).
+//  - The "last such deceased spouse" test in §2010(c)(4)(B)(i) is modelled
+//    by requiring the case to assert `last_deceased_spouse_of` directly
+//    rather than deriving "most recent" from a full marriage history —
+//    TECH_GAP for the general "most recent by date" derivation (would need
+//    an aggregate/max over an empirical relation, the same §111 runtime-
+//    subset class flagged elsewhere in this package).
+//  - §2010(c)(4)(B)(i) reads "the applicable exclusion amount of the last
+//    such deceased spouse" — which, read literally, would itself already
+//    include THAT spouse's own DSUE from a still-earlier spouse. Computing
+//    `deceased_spousal_unused_exclusion_amount` from the deceased spouse's
+//    OWN `applicable_exclusion_amount` would make `applicable_exclusion_
+//    amount` and `deceased_spousal_unused_exclusion_amount` mutually
+//    recursive through a `defeasible` edge, which `LDC-E4102` rejects as
+//    unstratifiable (§110/§191: cycles need monotone supported(P) edges).
+//    This stage instead reads the deceased spouse's `BasicExclusionAmount`
+//    (the parameter, not the full applicable-exclusion computation) —
+//    correct for a deceased spouse who was not themselves a surviving
+//    spouse claiming DSUE, and a documented simplification (TECH_GAP,
+//    TECH-GAPS.md G85) for a CHAIN of more than one predeceased spouse.
+
+language "law.core" version "0.2";
+package us.irc.estate_gift version "0.1.1";
+namespace "urn:us:irc:estate_gift:clir";
+
+use self::{
+    Estate,
+    IRC_S2010_A,
+    IRC_S2010_C,
+    IRC_S2010_D,
+    Individual,
+    Person,
+    applicable_credit_amount_before_offset,
+    bracket_2001c,
+    decedent_individual,
+    estate_tax_before_credits,
+    estate_tax_imposed,
+    executor_of,
+    tentative_tax_base,
+};
+
+// --- §2010(a): general rule --------------------------------------------------
+
+@source(IRC_S2010_A, relation = formalizes, coverage = exact, quote = "A credit of the applicable credit amount shall be allowed to the estate of every decedent against the tax imposed by section 2001.")
+pub relation applicable_credit_amount(e: Estate, amount: Money) kind institutional {
+    label en official "the applicable credit amount (section 2010(c))";
+}
+
+// --- §2010(c)(3): basic exclusion amount ------------------------------------
+// `BasicExclusionAmount` is the A3 parameter (basic-exclusion-amount.lawparam.json)
+// carrying the two statutorily EXACT dollar figures this stage can pin
+// (2011: $5,000,000; 2026, per Pub. L. 119-21 §70106: $15,000,000). Every
+// other year is MISSING_PARAMETER_VALUE (TECH-GAPS.md G81) because the
+// actually-published section 1(f)(3)-indexed figure needs a Revenue
+// Procedure this task's SOURCE-MANIFEST.json does not pin.
+
+@source(IRC_S2010_C, relation = formalizes, coverage = exact, quote = "in the case of a surviving spouse, the deceased spousal unused exclusion amount")
+pub relation applicable_exclusion_amount(e: Estate, amount: Money) kind institutional {
+    label en official "the applicable exclusion amount: the basic exclusion amount plus, for a surviving spouse, the deceased spousal unused exclusion amount (section 2010(c)(2))";
+}
+rule ApplicableExclusionAmountWithDsueRule(e: Estate, dsue: Money) defeasible {
+    when deceased_spousal_unused_exclusion_amount(e, dsue);
+    then applicable_exclusion_amount(e, BasicExclusionAmount + dsue);
+}
+relation has_dsue_amount(e: Estate) kind institutional {
+    label en unofficial "a deceased-spousal-unused-exclusion amount has been computed for this estate (closed-world helper, LDC-E0207)";
+}
+rule HasDsueAmountRule(e: Estate) defeasible {
+    when deceased_spousal_unused_exclusion_amount(e, _);
+    then has_dsue_amount(e);
+}
+rule ApplicableExclusionAmountNoDsueRule(e: Estate) defeasible {
+    when estate_tax_imposed(e);
+    when not_known(has_dsue_amount(e));
+    then applicable_exclusion_amount(e, BasicExclusionAmount);
+}
+
+// --- §2010(c)(1): applicable credit amount = tentative tax on the applicable
+// exclusion amount, using the section 2001(c) table (`bracket_2001c` is
+// declared once, in 01-estate-imposition.law) --------------------------------
+
+rule ApplicableCreditAmountRule(e: Estate, excl: Money, lower: Money, base_tax: Money, rate: Decimal) defeasible {
+    when applicable_exclusion_amount(e, excl);
+    when bracket_2001c(excl, lower, base_tax, rate);
+    then applicable_credit_amount_before_offset(e, base_tax + rate * (excl - lower));
+}
+
+// --- §2010(d): limitation based on amount of tax ----------------------------
+
+@source(IRC_S2010_D, relation = formalizes, coverage = exact, quote = "The amount of the credit allowed by subsection (a) shall not exceed the amount of the tax imposed by section 2001.")
+rule EstateTaxWithCreditRule(e: Estate, before_credit: Money, credit: Money) defeasible {
+    label en official "the amount of the credit allowed by subsection (a) shall not exceed the amount of the tax imposed by section 2001";
+    when estate_tax_before_credits(e, before_credit);
+    when applicable_credit_amount(e, credit);
+    then estate_tax_after_unified_credit(e, max(0.00 USD, before_credit - min(credit, before_credit)));
+}
+relation has_applicable_credit_amount(e: Estate) kind institutional {
+    label en unofficial "an applicable credit amount has been computed for this estate (closed-world helper, LDC-E0207)";
+}
+rule HasApplicableCreditAmountRule(e: Estate) defeasible {
+    when applicable_credit_amount(e, _);
+    then has_applicable_credit_amount(e);
+}
+rule EstateTaxNoCreditRule(e: Estate, before_credit: Money) defeasible {
+    when estate_tax_before_credits(e, before_credit);
+    when not_known(has_applicable_credit_amount(e));
+    then estate_tax_after_unified_credit(e, before_credit);
+}
+
+// (`estate_tax_before_credits` is declared once, as `pub relation`, in
+// 01-estate-imposition.law. `estate_tax_after_unified_credit` is the
+// section-2010(d)-limited tax "against which" the remaining chapter-11
+// credits of sections 2012-2016 are applied; STAGE 2 (07-credits-2011-2016.law)
+// layers the section 2013 prior-transfer credit on top of it and produces the
+// FINAL `estate_tax`. Declared `pub` here so 07-credits-2011-2016.law can read
+// it without a forward reference; matches the "estate_tax = ... minus other
+// chapter 11 credits (sections 2011-2016) declared here, computed once the
+// credit exists" interface note in 01-estate-imposition.law.
+//
+// NOT reusing `estate_tax` itself for this intermediate value (and not
+// reading `prior_transfer_credit` etc. from THIS file): both directions
+// would make `estate_tax` a producer AND (transitively, through
+// 07-credits-2011-2016.law reading a transferor estate's OWN
+// pre-section-2013 tax) a consumer of the same head — the self-referential-
+// guard trap documented in this package's own HANDOFF entry (four instances
+// already hit this stage 1 round; LDC-E4102, unstratifiable even absent a
+// real data cycle). `estate_tax_after_unified_credit` breaks that cycle: it
+// is what 07-credits-2011-2016.law both starts FROM (this estate's own
+// chapter-11 credits) and reads OF a transferor estate (section 2013(c)(1)(A)'s
+// own "computed without regard to this section").
+pub relation estate_tax_after_unified_credit(e: Estate, amount: Money) kind institutional {
+    label en unofficial "the tax imposed by section 2001, after the section 2010 unified credit only (section 2010(d)'s own limitation) — before the sections 2012-2016 credits computed in 07-credits-2011-2016.law";
+}
+
+// --- §2010(c)(4)-(5): deceased spousal unused exclusion (DSUE) and the
+// portability election as a power of the FIRST deceased spouse's executor -
+
+pub relation last_deceased_spouse_of(surviving: Individual, deceased: Estate) kind empirical {
+    label en unofficial "deceased is the last deceased spouse of surviving (section 2010(c)(4)(B)(i)); case-asserted, see judgment call above";
+}
+
+@source(IRC_S2010_C, relation = formalizes, coverage = partial, quote = "the lesser of")
+pub relation deceased_spousal_unused_exclusion_amount(surviving_estate: Estate, amount: Money) kind institutional {
+    label en official "the deceased spousal unused exclusion amount (section 2010(c)(4)); see the module header's judgment call on the deceased spouse's own exclusion amount used here";
+}
+rule DeceasedSpousalUnusedExclusionAmountRule(
+    surviving_estate: Estate,
+    surviving: Individual,
+    deceased: Estate,
+    deceased_base: Money,
+) defeasible {
+    when decedent_individual(surviving_estate, surviving);
+    when last_deceased_spouse_of(surviving, deceased);
+    when portability_election_valid(deceased);
+    when tentative_tax_base(deceased, deceased_base);
+    then deceased_spousal_unused_exclusion_amount(surviving_estate, max(0.00 USD, min(BasicExclusionAmount, BasicExclusionAmount - deceased_base)));
+}
+
+// (`tentative_tax_base` is declared once, as `pub relation`, in
+// 01-estate-imposition.law.)
+
+// --- The portability election itself: a power of the FIRST deceased
+// spouse's executor, exercised by timely filing an estate tax return that
+// computes the DSUE amount (section 2010(c)(5)(A)) ---------------------------
+
+pub relation dsue_return_filed(e: Estate) kind empirical {
+    label en unofficial "the executor filed an estate tax return on which the DSUE amount is computed";
+}
+pub relation dsue_return_timely(e: Estate) kind empirical {
+    label en unofficial "the return described above was filed by the time prescribed by law (including extensions) for filing the estate tax return (section 2010(c)(5)(A))";
+}
+pub relation portability_elected(e: Estate) kind empirical {
+    label en unofficial "the executor made the portability election on the return described above";
+}
+
+@source(IRC_S2010_C, relation = formalizes, coverage = exact, quote = "Such election, once made, shall be irrevocable.")
+rule PortabilityElectionPower(e: Estate, x: Person, w: Interval<Instant>) defeasible {
+    label en official "the executor of the estate of the deceased spouse files an estate tax return on which such amount is computed and makes an election on such return that such amount may be so taken into account (section 2010(c)(5)(A))";
+    when executor_of(e, x, w)
+        and dsue_return_filed(e);
+    then power PortabilityElection {
+        holder x;
+        over e;
+        exercise portability_elected(e);
+        valid_when dsue_return_timely(e);
+        effect create(portability_election_valid(e));
+        window w;
+    };
+}
+
+pub relation portability_election_valid(e: Estate) kind institutional {
+    label en unofficial "a valid, irrevocable portability election is in effect for this estate (section 2010(c)(5)(A))";
+}

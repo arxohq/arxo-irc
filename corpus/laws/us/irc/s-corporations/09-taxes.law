@@ -1,0 +1,239 @@
+// Sections 1374-1375 — corporate-level taxes on built-in gains and on
+// excess net passive income.
+//
+// SCOPE 1374: (a) the tax on net recognized built-in gain during the
+// recognition period; (b)(1) rate = highest section 11(b) rate; (b)(2)-(3)
+// C-year NOL/credit carryforwards allowed against the tax (classification,
+// EXTERNAL_DEPENDENCY); (c)(1) the all-years-S-corporation exception;
+// (c)(2)/(d)(1)-(2) the NUBIG cap; (d)(7)(A) the 5-year recognition period.
+// SCOPE 1375: (a) the >25%-passive-income/AE&P gateway and rate; (b)(1)-(2)
+// excess net passive income and net passive income formulas, with the (B)
+// taxable-income ceiling; (d) the Secretary's waiver as a power.
+//
+// The highest section 11(b) rate is read from `us.irc.corporations::
+// maximum_section_11b_rate(y, rate)` (pub, keyed by the taxable year alone;
+// DECISIONS Д-11, WIRE-3 item 4). It concludes for taxable years beginning
+// after December 31, 2017 (Pub. L. 115-97 section 13001); for an earlier
+// year it is silent (the graduated schedule is TECH-GAPS G3300), so the
+// section 1374/1375 tax is then NEITHER, never a guessed rate.
+
+// --- 1374(d): net unrealized built-in gain, net recognized built-in gain --
+
+use self::{
+    Corporation,
+    IRC_S1374_A,
+    IRC_S1374_C,
+    IRC_S1375_A,
+    IRC_S1375_B,
+    SCorpTaxKind,
+    Secretary,
+    TaxableYear,
+    built_in_gain_after_carryforwards,
+    corporation_has_accumulated_e_and_p,
+    net_unrealized_built_in_gain_adjusted,
+    passive_investment_income_1375,
+    s_corp_tax,
+};
+
+pub relation net_unrealized_built_in_gain(c: Corporation, amount: Money) kind empirical {
+    label en official "the excess of the fair market value of the S corporation's assets, as of the start of its first S-corporation taxable year, over their aggregate adjusted bases at that time (section 1374(d)(1)); case-asserted pending a property-transactions-package contract for the asset-by-asset computation";
+}
+pub relation recognized_built_in_gain_for_year(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "gain recognized during the recognition period on disposition of an asset held at the start of the first S-corporation year, up to the built-in amount at that time (section 1374(d)(3)); case-asserted pending a property-transactions-package contract";
+}
+pub relation recognized_built_in_loss_for_year(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "loss recognized during the recognition period on disposition of an asset held at the start of the first S-corporation year, up to the built-in amount at that time (section 1374(d)(4)); case-asserted";
+}
+pub relation taxable_income_if_only_built_in_items(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the S corporation's taxable income for y if only recognized built-in gains and losses were taken into account (section 1374(d)(2)(A)(i)); case-asserted pending a gross-income/deductions-package contract";
+}
+pub relation corporation_taxable_income_1375b1B(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the S corporation's taxable income for y as determined under section 1375(b)(1)(B) (section 1374(d)(2)(A)(ii)); case-asserted, cross-referencing 09-taxes.law's own section 1375(b)(1)(B) relation below";
+}
+pub relation net_recognized_built_in_gain_before_cap(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the lesser of the built-in-items taxable income and the section 1375(b)(1)(B) taxable income, before the (c)(2) NUBIG cap (section 1374(d)(2)(A))";
+}
+rule NetRecognizedBuiltInGainBeforeCapLeftLesser strict {
+    for c: Corporation; for y: TaxableYear; for builtIn: Money; for wholeIncome: Money;
+    when taxable_income_if_only_built_in_items(c, y, builtIn);
+    when corporation_taxable_income_1375b1B(c, y, wholeIncome);
+    when builtIn <= wholeIncome;
+    then net_recognized_built_in_gain_before_cap(c, y, builtIn);
+}
+rule NetRecognizedBuiltInGainBeforeCapRightLesser strict {
+    for c: Corporation; for y: TaxableYear; for builtIn: Money; for wholeIncome: Money;
+    when taxable_income_if_only_built_in_items(c, y, builtIn);
+    when corporation_taxable_income_1375b1B(c, y, wholeIncome);
+    when wholeIncome < builtIn;
+    then net_recognized_built_in_gain_before_cap(c, y, wholeIncome);
+}
+
+pub relation prior_years_net_recognized_built_in_gain(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the sum of net recognized built-in gain for prior taxable years beginning in the recognition period (section 1374(c)(2)(B)); case-asserted running total (TECH-GAPS.md G46: a multi-year running sum, same simplification class as the basis snapshot)";
+}
+pub relation nubig_cap_remaining(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the section 1374(c)(2) ceiling remaining for y: net unrealized built-in gain minus prior years' net recognized built-in gain";
+}
+rule NubigCapRemaining defeasible {
+    for c: Corporation; for y: TaxableYear; for nubig: Money; for prior: Money;
+    when net_unrealized_built_in_gain_adjusted(c, nubig);
+    when prior_years_net_recognized_built_in_gain(c, y, prior);
+    then nubig_cap_remaining(c, y, nubig - prior);
+}
+pub relation net_recognized_built_in_gain(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the net recognized built-in gain for y taken into account under section 1374, after the (c)(2) NUBIG cap";
+}
+@source(IRC_S1374_C, quote = "shall not exceed the excess (if any) of")
+rule NetRecognizedBuiltInGainWithinCap defeasible {
+    label en official "net recognized built-in gain before the cap, when it does not exceed the remaining NUBIG ceiling (section 1374(c)(2))";
+    for c: Corporation; for y: TaxableYear; for beforeCap: Money; for cap: Money;
+    when net_recognized_built_in_gain_before_cap(c, y, beforeCap);
+    when nubig_cap_remaining(c, y, cap);
+    when beforeCap <= cap;
+    then net_recognized_built_in_gain(c, y, beforeCap);
+}
+rule NetRecognizedBuiltInGainAtCap defeasible {
+    label en official "capped at the remaining NUBIG ceiling when the uncapped figure exceeds it (section 1374(c)(2))";
+    for c: Corporation; for y: TaxableYear; for beforeCap: Money; for cap: Money;
+    when net_recognized_built_in_gain_before_cap(c, y, beforeCap);
+    when nubig_cap_remaining(c, y, cap);
+    when beforeCap > cap;
+    then net_recognized_built_in_gain(c, y, cap);
+}
+
+// --- 1374(c)(1): all-years-S-corporation exception ------------------------
+
+pub relation s_corporation_for_all_its_years(c: Corporation) kind empirical {
+    label en official "an election under section 1362(a) has been in effect for the corporation for each of its taxable years (section 1374(c)(1)); case-asserted (a full-history scan is not re-derived from year-by-year s_corporation facts here — TECH-GAPS.md G46)";
+}
+
+// --- 1374(a)-(b): the tax itself -------------------------------------------
+
+pub relation all_years_s_corp_blocks_1374_tax(c: Corporation, y: TaxableYear, gain: Money, rate: Decimal) kind institutional {
+    label en official "the corporation was an S corporation for all its taxable years, so section 1374(c)(1) blocks the tax on this (y, gain, rate) computation";
+}
+rule AllYearsSCorpBlocks1374Tax defeasible {
+    for c: Corporation; for y: TaxableYear; for gain: Money; for rate: Decimal;
+    when built_in_gain_after_carryforwards(c, y, gain);
+    when us.irc.corporations::maximum_section_11b_rate(y, rate);
+    when s_corporation_for_all_its_years(c);
+    then all_years_s_corp_blocks_1374_tax(c, y, gain, rate);
+}
+@source(IRC_S1374_A, quote = "there is hereby imposed a tax (computed under subsection (b)) on the income of such corporation for such taxable year")
+rule S1374BuiltInGainsTax defeasible {
+    label en official "a tax at the highest section 11(b) rate on net recognized built-in gain during the recognition period, unless the corporation was an S corporation for all its taxable years (section 1374(a)-(b)(1), (c)(1))";
+    for c: Corporation; for y: TaxableYear; for gain: Money; for rate: Decimal;
+    when built_in_gain_after_carryforwards(c, y, gain);
+    when gain > 0.00 USD;
+    when us.irc.corporations::maximum_section_11b_rate(y, rate);
+    unless all_years_s_corp_blocks_1374_tax(c, y, gain, rate);
+    then s_corp_tax(c, y, BuiltInGainsTax1374, gain * rate);
+}
+// (b)(2) C-year NOL/capital-loss carryforwards are netted by
+// `built_in_gain_after_carryforwards` (13-taxes-carryovers-and-accounts.law),
+// which the rule above reads; (b)(3) credits are applied to this tax in
+// `built_in_gains_tax_after_credits` there (stage 3, 26.09.2026). The
+// carryforward AMOUNTS remain case-asserted inputs of the deductions and
+// credits owners.
+
+// --- 1375: excess net passive income tax -----------------------------------
+
+pub relation passive_investment_income_total(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the S corporation's passive investment income for y, within the meaning of section 1362(d)(3) as modified by section 1375(b)(3)-(4) (royalties, rents, dividends, interest, annuities, with the exclusions of section 1362(d)(3)(C) and the built-in-gain/loss exclusion of 1375(b)(4)); case-asserted";
+}
+pub relation gross_receipts_total(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the S corporation's gross receipts for y within the meaning of section 1362(d)(3) (section 1375(b)(3)); case-asserted";
+}
+pub relation deductions_directly_connected_with_passive_income(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "deductions allowable under chapter 1 directly connected with the production of the corporation's passive investment income, other than sections 172 and part VIII of subchapter B (section 1375(b)(2)(B)); case-asserted";
+}
+pub relation net_passive_income(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "passive investment income reduced by directly connected deductions (section 1375(b)(2))";
+}
+rule NetPassiveIncome defeasible {
+    for c: Corporation; for y: TaxableYear; for pii: Money; for ded: Money;
+    when passive_investment_income_1375(c, y, pii);
+    when deductions_directly_connected_with_passive_income(c, y, ded);
+    then net_passive_income(c, y, pii - ded);
+}
+pub relation passive_income_excess_over_25_percent(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the amount by which passive investment income for y exceeds 25 percent of gross receipts for y (section 1375(b)(1)(A)(i))";
+}
+rule PassiveIncomeExcessOver25Percent defeasible {
+    for c: Corporation; for y: TaxableYear; for pii: Money; for gr: Money;
+    when passive_investment_income_1375(c, y, pii);
+    when gross_receipts_total(c, y, gr);
+    when pii > gr * 0.25;
+    then passive_income_excess_over_25_percent(c, y, pii - (gr * 0.25));
+}
+pub relation excess_net_passive_income_before_ceiling(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "net passive income times the ratio of the 25-percent excess to total passive investment income, before the (b)(1)(B) taxable-income ceiling (section 1375(b)(1)(A))";
+}
+@source(IRC_S1375_B, quote = "an amount which bears the same ratio to the net passive income for the taxable year as")
+// Stage 3: the ratio is applied in one rounding (money form of AGENT-BRIEF); stage 1
+// multiplied by a 6-decimal share, which gave 1000.012 for 1000/26000 of 26000.
+rule ExcessNetPassiveIncomeBeforeCeiling defeasible {
+    for c: Corporation; for y: TaxableYear; for npi: Money; for excess: Money; for pii: Money;
+    when net_passive_income(c, y, npi);
+    when passive_income_excess_over_25_percent(c, y, excess);
+    when passive_investment_income_1375(c, y, pii);
+    when pii > 0.00 USD;
+    then excess_net_passive_income_before_ceiling(c, y, div_round(npi * (excess / 1.00 USD), pii / 1.00 USD, 2, "HALF_UP"));
+}
+pub relation corporation_taxable_income_63a_modified(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the S corporation's taxable income determined under section 63(a), without regard to the part-VIII-of-subchapter-B deductions (other than section 248) and without regard to the section 172 deduction (section 1375(b)(1)(B)); case-asserted pending a gross-income/deductions-package contract";
+}
+pub relation excess_net_passive_income(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "excess net passive income for y, after the section 1375(b)(1)(B) taxable-income ceiling";
+}
+@source(IRC_S1375_B, quote = "shall not exceed the amount of the corporation's taxable income for such taxable year")
+rule ExcessNetPassiveIncomeWithinCeiling defeasible {
+    label en official "excess net passive income before the ceiling, when it does not exceed the (b)(1)(B) taxable-income ceiling (section 1375(b)(1)(B))";
+    for c: Corporation; for y: TaxableYear; for beforeCeiling: Money; for ceiling: Money;
+    when excess_net_passive_income_before_ceiling(c, y, beforeCeiling);
+    when corporation_taxable_income_63a_modified(c, y, ceiling);
+    when beforeCeiling <= ceiling;
+    then excess_net_passive_income(c, y, beforeCeiling);
+}
+rule ExcessNetPassiveIncomeAtCeiling defeasible {
+    label en official "capped at the (b)(1)(B) taxable-income ceiling when the uncapped figure exceeds it (section 1375(b)(1)(B))";
+    for c: Corporation; for y: TaxableYear; for beforeCeiling: Money; for ceiling: Money;
+    when excess_net_passive_income_before_ceiling(c, y, beforeCeiling);
+    when corporation_taxable_income_63a_modified(c, y, ceiling);
+    when beforeCeiling > ceiling;
+    then excess_net_passive_income(c, y, ceiling);
+}
+
+external judgment relation secretary_waives_1375_tax(c: Corporation, y: TaxableYear) {
+    authority Secretary;
+    label en official "the Secretary is satisfied that the corporation determined in good faith it had no accumulated E&P at the close of y and, within a reasonable time after learning otherwise, distributed that E&P (section 1375(d)(1)-(2))";
+}
+pub relation secretary_grants_1375_waiver(c: Corporation, y: TaxableYear, on: Date) kind empirical {
+    label en official "the Secretary waives the section 1375(a) tax for y";
+}
+@source(IRC_S1375_A, quote = "there is hereby imposed a tax on the income of such corporation for such taxable year")
+rule S1375ExcessNetPassiveIncomeTax defeasible {
+    label en official "with accumulated E&P and passive investment income over 25 percent of gross receipts, a tax at the highest section 11(b) rate on excess net passive income (section 1375(a))";
+    for c: Corporation; for y: TaxableYear; for over25: Money; for excess: Money; for rate: Decimal;
+    when corporation_has_accumulated_e_and_p(c, y);
+    when passive_income_excess_over_25_percent(c, y, over25);
+    when excess_net_passive_income(c, y, excess);
+    when us.irc.corporations::maximum_section_11b_rate(y, rate);
+    then s_corp_tax(c, y, ExcessNetPassiveIncomeTax1375, excess * rate);
+}
+pub relation s_corp_tax_1375_waived(c: Corporation, y: TaxableYear, on: Date) kind institutional {
+    label en official "the section 1375(a) tax for y is waived by the Secretary";
+}
+rule S1375DWaiverPower strict {
+    label en official "the Secretary may waive the section 1375(a) tax on the good-faith/timely-distribution showing of (d)(1)-(2) (section 1375(d))";
+    for c: Corporation; for y: TaxableYear; for on: Date;
+    when secretary_grants_1375_waiver(c, y, on);
+    then power S1375WaiverPower {
+        holder Secretary;
+        over c;
+        exercise secretary_grants_1375_waiver(c, y, on);
+        valid_when secretary_waives_1375_tax(c, y);
+        effect create(s_corp_tax_1375_waived(c, y, on));
+        window [@1958-01-01, infinity);
+    };
+}

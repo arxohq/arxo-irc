@@ -1,0 +1,366 @@
+// 26 U.S.C. chapter 13, §§2601-2602, 2611-2613, 2631-2632, 2641-2642, 2651 —
+// the generation-skipping transfer (GST) tax: imposition and amount,
+// taxable termination/distribution/direct skip, skip/non-skip person,
+// the GST exemption and its allocation (as a power of the transferor or
+// executor), the applicable rate and inclusion ratio, and generation
+// assignment.
+//
+// JUDGMENT CALLS:
+//  - §2611(b) (the educational/medical and prior-tax exclusions from the
+//    definition of a generation-skipping transfer) is NOT modelled: TECH_GAP.
+//  - §2612(a)(2) (a "specified portion" taxable termination on the death of
+//    a lineal descendant) and §2612(c)(2) (the section 2651(f)(2) override
+//    for direct-skip classification) are NOT modelled: TECH_GAP.
+//  - §2613(a)(2) (a TRUST as a skip person) is modelled only for the "all
+//    interests held by skip persons" branch (a)(2)(A); the "no person holds
+//    an interest, and no future distribution to a nonskip person is
+//    possible" branch (a)(2)(B) is NOT modelled: TECH_GAP.
+//  - §2632(a): the basic timely-allocation power is modelled; §2632(b)-(e)
+//    (automatic allocation to direct/indirect skips, the GST trust test, the
+//    predeceased-parent retroactive allocation, and the deemed allocation of
+//    unused exemption at death) are NOT modelled this stage — 53
+//    disposition rows, own multi-step machinery; TECH_GAP, reported as not
+//    done.
+//  - §2642: only the general inclusion-ratio formula (a)(1)-(2) is modelled.
+//    Qualified severances (a)(3), the timing/valuation rules (b), the
+//    nontaxable-gift zero-inclusion-ratio rule (c), the recomputation on
+//    additional transfers (d), the charitable-lead-annuity-trust special
+//    rule (e) and the estate-tax-inclusion-period rule (f) are NOT modelled:
+//    TECH_GAP, 97 disposition rows under this section alone.
+//  - §2651: only (a)-(c) (the lineal-descendant/spouse generation tests) and
+//    (d)(1)-(2) (the two BOUNDED age bands of the fallback birth-date test)
+//    are modelled. (d)(3) ("similar rules for a new generation every 25
+//    years") is an UNBOUNDED repeating step function; modelling it exactly
+//    would need a generalized "which 25-year band does this birth date fall
+//    in" arithmetic rule this stage does not build (self-referential/
+//    unbounded generation count, the same class as the day-by-day-ledger
+//    LDC-E4102 limitation flagged elsewhere in this corpus) — TECH_GAP,
+//    recorded as TECH-GAPS.md G83; (e) (the predeceased-parent rule) and (f)
+//    (the multiple-generation/entity-attribution rules) are NOT modelled:
+//    TECH_GAP.
+
+language "law.core" version "0.2";
+package us.irc.estate_gift version "0.1.1";
+namespace "urn:us:irc:estate_gift:clir";
+
+use self::{
+    IRC_S2601,
+    IRC_S2602,
+    IRC_S2612_A,
+    IRC_S2612_B,
+    IRC_S2612_C,
+    IRC_S2631_A,
+    IRC_S2631_C,
+    IRC_S2641_A,
+    IRC_S2642_A,
+    IRC_S2651_B,
+    IRC_S2651_C,
+    IRC_S2651_D,
+    Individual,
+    Person,
+    TaxableYear,
+    Trust,
+    generation_assignment,
+    gst_excluded_amount_2611b2,
+    gst_exemption_allocation_total,
+    gst_transfer_excluded_2611b,
+    skip_person_natural,
+    spouse_of,
+};
+
+// --- §2601-2602: imposition and amount ---------------------------------------
+
+pub entity GstTransfer { label en unofficial "a generation-skipping transfer: a taxable distribution, taxable termination, or direct skip"; }
+
+pub enum GstTransferKind {
+    TaxableDistribution;
+    TaxableTermination;
+    DirectSkip;
+}
+
+pub relation gst_transfer_kind(t: GstTransfer, kind: GstTransferKind) kind institutional {
+    label en unofficial "the kind of generation-skipping transfer (section 2611(a))";
+}
+pub relation transferor_of(t: GstTransfer, transferor: Person) kind empirical {
+    label en unofficial "the transferor with respect to this generation-skipping transfer";
+}
+pub relation transferee_of(t: GstTransfer, transferee: Person) kind empirical {
+    label en unofficial "the transferee of this generation-skipping transfer";
+}
+
+@source(IRC_S2601, relation = formalizes, coverage = exact, quote = "A tax is hereby imposed on every generation-skipping transfer (within the meaning of subchapter B).")
+pub relation gst_tax_imposed(t: GstTransfer) kind institutional {
+    label en official "a tax is imposed on every generation-skipping transfer (section 2601)";
+}
+rule GstTaxImposedRule(t: GstTransfer) defeasible {
+    when gst_transfer_kind(t, _);
+    when not_known(gst_transfer_excluded_2611b(t));
+    then gst_tax_imposed(t);
+}
+
+pub relation gst_taxable_amount(t: GstTransfer, amount: Money) kind institutional {
+    label en unofficial "the taxable amount, determined under subchapter C (section 2602(1))";
+}
+
+@source(IRC_S2602, relation = formalizes, coverage = exact, quote = "The amount of the tax imposed by section 2601 is")
+pub relation gst_tax(t: GstTransfer, amount: Money) kind institutional {
+    label en official "the amount of the generation-skipping transfer tax (section 2602)";
+}
+rule GstTaxRule(t: GstTransfer, taxable_amount: Money, rate: Decimal) defeasible {
+    when gst_taxable_amount(t, taxable_amount);
+    when gst_applicable_rate(t, rate);
+    then gst_tax(t, max(0.00 USD, taxable_amount - sum(collect all x: Money where gst_excluded_amount_2611b2(t, x), empty: 0.00 USD)) * rate);
+}
+
+// --- §2612: taxable termination, taxable distribution, direct skip ---------
+
+pub relation trust_interest_terminated(t: GstTransfer, trust: Trust) kind empirical {
+    label en unofficial "the termination (by death, lapse of time, release of power, or otherwise) of an interest in property held in this trust (section 2612(a)(1))";
+}
+pub relation non_skip_person_has_interest_after_termination(t: GstTransfer, trust: Trust, holder: Person) kind empirical {
+    label en unofficial "immediately after the termination, a non-skip person has an interest in the trust property (section 2612(a)(1)(A))";
+}
+pub relation distribution_to_skip_person_possible_after_termination(t: GstTransfer, trust: Trust) kind empirical {
+    label en unofficial "at some time after the termination, a distribution (including on termination) may be made from the trust to a skip person (section 2612(a)(1)(B), negated)";
+}
+
+@source(IRC_S2612_A, relation = formalizes, coverage = partial, quote = "the term \"taxable termination\" means the termination")
+rule TaxableTerminationRule(t: GstTransfer, trust: Trust) strict {
+    label en official "section 2612(a)(1): a trust-interest termination is a taxable termination unless a non-skip person immediately holds an interest, or no future distribution to a skip person is possible";
+    when trust_interest_terminated(t, trust)
+        and not_known(has_non_skip_holder_after_termination(t, trust))
+        and not_known(no_future_skip_distribution_possible(t, trust));
+    then gst_transfer_kind(t, TaxableTermination);
+}
+relation has_non_skip_holder_after_termination(t: GstTransfer, trust: Trust) kind institutional {
+    label en unofficial "closed-world helper (LDC-E0207): a non-skip-person holder after termination has been asserted";
+}
+rule HasNonSkipHolderAfterTerminationRule(t: GstTransfer, trust: Trust, holder: Person) strict {
+    when non_skip_person_has_interest_after_termination(t, trust, holder);
+    then has_non_skip_holder_after_termination(t, trust);
+}
+relation no_future_skip_distribution_possible(t: GstTransfer, trust: Trust) kind institutional {
+    label en unofficial "closed-world helper: the case affirmatively asserts no distribution to a skip person is possible (the negative fact of section 2612(a)(1)(B) is itself established, not merely unasserted)";
+}
+rule NoFutureSkipDistributionPossibleRule(t: GstTransfer, trust: Trust) strict {
+    when not_known(distribution_to_skip_person_possible_after_termination(t, trust))
+        and trust_interest_terminated(t, trust)
+        and trust_all_future_distributees_are_non_skip(trust);
+    then no_future_skip_distribution_possible(t, trust);
+}
+pub relation trust_all_future_distributees_are_non_skip(trust: Trust) kind empirical {
+    label en unofficial "the case affirmatively asserts that every possible future distributee of the trust is a non-skip person";
+}
+
+@source(IRC_S2612_B, relation = formalizes, coverage = exact, quote = "the term \"taxable distribution\" means any distribution from a trust to a skip person")
+// JUDGMENT CALL: section 2612(b)'s parenthetical ("other than a taxable
+// termination or a direct skip") is a case-input discipline, not a derived
+// guard here: deriving it from `gst_transfer_kind` itself (the SAME relation
+// this rule also produces) makes the predicate mutually recursive through a
+// `defeasible`/`strict` edge, which `LDC-E4102` rejects as unstratifiable
+// (§110/§191). A scenario simply does not assert BOTH `trust_distribution_to`
+// (this rule's trigger) and `trust_interest_terminated`/a direct-skip trigger
+// for the SAME `GstTransfer` instance.
+rule TaxableDistributionRule(t: GstTransfer, trust: Trust, skip: Individual, transferor: Person) defeasible {
+    label en official "any distribution from a trust to a skip person, other than a taxable termination or direct skip (section 2612(b))";
+    when trust_distribution_to(t, trust, skip)
+        and transferor_of_trust(trust, transferor)
+        and skip_person_natural(skip, transferor);
+    then gst_transfer_kind(t, TaxableDistribution);
+}
+pub relation trust_distribution_to(t: GstTransfer, trust: Trust, distributee: Person) kind empirical {
+    label en unofficial "a distribution from the trust to the distributee (section 2612(b))";
+}
+pub relation transferor_of_trust(trust: Trust, transferor: Person) kind empirical {
+    label en unofficial "the transferor with respect to the trust, for generation-assignment purposes";
+}
+
+@source(IRC_S2612_C, relation = formalizes, coverage = exact, quote = "means a transfer subject to a tax imposed by chapter 11 or 12 of an interest in property to a skip person.")
+rule DirectSkipRule(t: GstTransfer, transferor: Person, skip: Individual) defeasible {
+    label en official "a transfer subject to chapter 11 or 12 tax of an interest in property to a skip person is a direct skip (section 2612(c)(1))";
+    when transferor_of(t, transferor)
+        and transferee_of(t, skip)
+        and subject_to_chapter_11_or_12_tax(t)
+        and skip_person_natural(skip, transferor);
+    then gst_transfer_kind(t, DirectSkip);
+}
+pub relation subject_to_chapter_11_or_12_tax(t: GstTransfer) kind empirical {
+    label en unofficial "the transfer is subject to a tax imposed by chapter 11 or 12 (section 2612(c)(1))";
+}
+
+// --- §2631-2632: GST exemption and its allocation (as a power) -------------
+
+@source(IRC_S2631_C, relation = formalizes, coverage = exact, quote = "the GST exemption amount for any calendar year shall be equal to the basic exclusion amount under section 2010(c) for such calendar year")
+pub relation gst_exemption_amount(y: TaxableYear, amount: Money) kind institutional {
+    label en official "the GST exemption amount for the calendar year equals the section 2010(c) basic exclusion amount (section 2631(c))";
+}
+rule GstExemptionAmountRule(y: TaxableYear, n: Integer) defeasible {
+    when us.irc.core::calendar_year_of(y, n);
+    then gst_exemption_amount(y, BasicExclusionAmount);
+}
+
+pub relation gst_exemption_allocated(transferor: Person, trust_or_property: Trust, amount: Money) kind empirical {
+    label en unofficial "the amount of GST exemption the transferor (or executor) has allocated to this trust or property (section 2631(a))";
+}
+pub relation gst_allocation_by_due_date(transferor: Person, y: TaxableYear) kind institutional {
+    label en unofficial "the allocation was made on or before the date prescribed for filing the transferor's estate tax return, determined with regard to extensions, regardless of whether such a return is required (section 2632(a)(1))";
+}
+
+@source(IRC_S2631_A, relation = formalizes, coverage = exact, quote = "every individual shall be allowed a GST exemption amount which may be allocated by such individual (or his executor) to any property with respect to which such individual is the transferor")
+// JUDGMENT CALL: section 2631(a) also lets the TRANSFEROR's executor make
+// this allocation (after the transferor's death). That branch is not
+// modelled this stage: it needs the same `executor_of`-style local relation
+// 01-estate-imposition.law introduces, keyed to the transferor's OWN estate,
+// which this module does not otherwise establish a link to — TECH_GAP,
+// TECH-GAPS.md G86. Only the living transferor's own allocation is modelled.
+rule GstExemptionAllocationPower(transferor: Individual, trust_or_property: Trust, y: TaxableYear, amount: Money) strict {
+    label en official "the transferor (or the executor) may allocate the GST exemption to any property of which the transferor is the transferor (section 2631(a), section 2632(a)(1))";
+    when gst_exemption_allocated(transferor, trust_or_property, amount)
+        and us.irc.core::year_of(transferor, y);
+    then power GstExemptionAllocation {
+        holder transferor;
+        over trust_or_property;
+        exercise gst_exemption_allocated(transferor, trust_or_property, amount);
+        valid_when gst_allocation_by_due_date(transferor, y);
+        effect create(gst_exemption_allocation_valid(transferor, trust_or_property));
+        window [@1986-01-01, infinity);
+    };
+}
+pub relation gst_exemption_allocation_valid(transferor: Person, trust_or_property: Trust) kind institutional {
+    label en unofficial "a valid, irrevocable GST exemption allocation is in effect for this transferor and property (section 2631(b))";
+}
+
+// --- §2641-2642: applicable rate and inclusion ratio ------------------------
+
+pub relation max_federal_estate_tax_rate(t: GstTransfer, rate: Decimal) kind institutional {
+    label en unofficial "the maximum rate imposed by section 2001 on the estates of decedents dying at the time of the generation-skipping transfer (section 2641(b))";
+}
+rule MaxFederalEstateTaxRateRule(t: GstTransfer) defeasible {
+    when gst_tax_imposed(t);
+    then max_federal_estate_tax_rate(t, 0.40);
+}
+
+@source(IRC_S2641_A, relation = formalizes, coverage = exact, quote = "means, with respect to any generation-skipping transfer, the product of")
+pub relation gst_applicable_rate(t: GstTransfer, rate: Decimal) kind institutional {
+    label en official "the applicable rate: the maximum Federal estate tax rate multiplied by the inclusion ratio (section 2641(a))";
+}
+rule GstApplicableRateRule(t: GstTransfer, max_rate: Decimal, ratio: Decimal) defeasible {
+    when max_federal_estate_tax_rate(t, max_rate);
+    when gst_inclusion_ratio(t, ratio);
+    then gst_applicable_rate(t, max_rate * ratio);
+}
+
+pub relation gst_transfer_trust(t: GstTransfer, trust: Trust) kind empirical {
+    label en unofficial "the trust from which this generation-skipping transfer is made (section 2642(a)(1)(A)); for a direct skip not from a trust, the applicable fraction is determined for the skip itself (section 2642(a)(1)(B), not modelled separately this stage)";
+}
+pub relation gst_property_value_transferred(t: GstTransfer, amount: Money) kind empirical {
+    label en unofficial "the value of the property transferred to the trust (or involved in the direct skip), for the applicable-fraction denominator (section 2642(a)(2)(B)(i))";
+}
+pub relation gst_recovered_taxes_and_charitable_deduction(t: GstTransfer, amount: Money) kind empirical {
+    label en unofficial "Federal estate/State death tax recovered from the trust plus any section 2055/2522 charitable deduction attributable to the property (section 2642(a)(2)(B)(ii))";
+}
+
+@source(IRC_S2642_A, relation = formalizes, coverage = exact, quote = "the applicable fraction is a fraction")
+pub relation gst_applicable_fraction(t: GstTransfer, fraction: Decimal) kind institutional {
+    label en official "the applicable fraction for computing the inclusion ratio (section 2642(a)(2))";
+}
+rule GstApplicableFractionRule(t: GstTransfer, trust: Trust, transferor: Person, allocated: Money, value: Money, reductions: Money) defeasible {
+    when gst_transfer_trust(t, trust);
+    when transferor_of_trust(trust, transferor);
+    when gst_exemption_allocation_total(transferor, trust, allocated);
+    when not_known(gst_direct_skip_kind_asserted(t));
+    when gst_property_value_transferred(t, value);
+    when gst_recovered_taxes_and_charitable_deduction(t, reductions);
+    then gst_applicable_fraction(t, allocated / (value - reductions));
+}
+rule GstApplicableFractionNoReductionsRule(t: GstTransfer, trust: Trust, transferor: Person, allocated: Money, value: Money) defeasible {
+    when gst_transfer_trust(t, trust);
+    when transferor_of_trust(trust, transferor);
+    when gst_exemption_allocation_total(transferor, trust, allocated);
+    when not_known(gst_direct_skip_kind_asserted(t));
+    when gst_property_value_transferred(t, value);
+    when not_known(has_recovered_taxes_and_charitable_deduction(t));
+    then gst_applicable_fraction(t, allocated / value);
+}
+relation gst_direct_skip_kind_asserted(t: GstTransfer) kind institutional {
+    label en unofficial "the transfer is a direct skip: its applicable fraction is determined for the skip itself, not for the trust (section 2642(a)(1)(B))";
+}
+rule GstDirectSkipKindAssertedRule(t: GstTransfer) defeasible {
+    when gst_transfer_kind(t, DirectSkip);
+    then gst_direct_skip_kind_asserted(t);
+}
+relation has_recovered_taxes_and_charitable_deduction(t: GstTransfer) kind institutional {
+    label en unofficial "closed-world helper (LDC-E0207)";
+}
+rule HasRecoveredTaxesAndCharitableDeductionRule(t: GstTransfer, amount: Money) strict {
+    when gst_recovered_taxes_and_charitable_deduction(t, amount);
+    then has_recovered_taxes_and_charitable_deduction(t);
+}
+
+@source(IRC_S2642_A, relation = formalizes, coverage = exact, quote = "the inclusion ratio with respect to any property transferred in a generation-skipping transfer shall be the excess (if any) of 1 over")
+pub relation gst_inclusion_ratio(t: GstTransfer, ratio: Decimal) kind institutional {
+    label en official "the inclusion ratio: 1 minus the applicable fraction (section 2642(a)(1))";
+}
+rule GstInclusionRatioRule(t: GstTransfer, fraction: Decimal) defeasible {
+    when gst_applicable_fraction(t, fraction);
+    then gst_inclusion_ratio(t, max(0.0, 1.0 - fraction));
+}
+
+// --- §2651: generation assignment --------------------------------------------
+
+pub relation grandparent_of(descendant: Person, ancestor: Person) kind empirical {
+    label en unofficial "ancestor is a grandparent of descendant, for the section 2651(b)(1) lineal-descendant test; the case asserts the generation GAP directly via `generations_from_grandparent` rather than a full family tree";
+}
+pub relation generations_from_grandparent(p: Person, ancestor_grandparent: Person, count: Integer) kind empirical {
+    label en unofficial "the number of generations between the named grandparent and p (section 2651(b)(1))";
+}
+pub relation transferor_generations_from_same_grandparent(transferor: Person, ancestor_grandparent: Person, count: Integer) kind empirical {
+    label en unofficial "the number of generations between the named grandparent and the transferor (section 2651(b)(1))";
+}
+
+@source(IRC_S2651_B, relation = formalizes, coverage = exact, quote = "An individual who is a lineal descendant of a grandparent of the transferor shall be assigned to that generation which results from comparing the number of generations between the grandparent and such individual with the number of generations between the grandparent and the transferor.")
+rule GenerationAssignmentLinealDescendantRule(p: Person, transferor: Person, ancestor: Person, p_count: Integer, transferor_count: Integer) strict {
+    label en official "section 2651(b)(1): generation assignment by comparing generation-counts from a common grandparent";
+    when generations_from_grandparent(p, ancestor, p_count)
+        and transferor_generations_from_same_grandparent(transferor, ancestor, transferor_count);
+    then generation_assignment(p, transferor, p_count - transferor_count);
+}
+
+@source(IRC_S2651_C, relation = formalizes, coverage = exact, quote = "An individual who has been married at any time to the transferor shall be assigned to the transferor's generation.")
+rule GenerationAssignmentSpouseOfTransferorRule(p: Person, transferor: Person) strict {
+    label en official "an individual married at any time to the transferor is assigned to the transferor's generation (section 2651(c)(1))";
+    when spouse_of(p, transferor);
+    then generation_assignment(p, transferor, 0);
+}
+
+pub relation birth_year_gap_from_transferor(p: Person, transferor: Person, years: Decimal) kind empirical {
+    label en unofficial "the number of years between the transferor's birth and p's birth, for the section 2651(d) fallback test (used only when p is not otherwise assigned a generation by (b)/(c))";
+}
+
+// JUDGMENT CALL: (b)/(c) and the (d) birth-date fallback are meant to be
+// mutually exclusive (the fallback applies only "if not assigned a
+// generation by the foregoing"), but deriving that exclusion from
+// `generation_assignment` itself (the SAME relation these rules also
+// produce) is the same unstratifiable self-reference `LDC-E4102` rejects
+// for the gst_transfer_kind case above. A scenario for the (d) fallback
+// therefore asserts `birth_year_gap_from_transferor` only for a person NOT
+// otherwise covered by (b)/(c) (no common grandparent asserted, no spousal
+// relationship asserted) — a case-input discipline, not a derived guard.
+@source(IRC_S2651_D, relation = formalizes, coverage = partial, quote = "an individual born not more than 12½ years after the date of the birth of the transferor assigned to the transferor's generation")
+rule GenerationAssignmentBirthDateSameGenerationRule(p: Person, transferor: Person, years: Decimal) strict {
+    label en official "section 2651(d)(1): born not more than 12.5 years after the transferor is assigned to the transferor's generation";
+    when birth_year_gap_from_transferor(p, transferor, years)
+        and years <= 12.5;
+    then generation_assignment(p, transferor, 0);
+}
+@source(IRC_S2651_D, relation = formalizes, coverage = partial, quote = "an individual born more than 12½ years but not more than 37½ years after the date of the birth of the transferor assigned to the first generation younger than the transferor")
+rule GenerationAssignmentBirthDateOneGenerationDownRule(p: Person, transferor: Person, years: Decimal) strict {
+    label en official "section 2651(d)(2): born more than 12.5 but not more than 37.5 years after the transferor is assigned one generation below the transferor";
+    when birth_year_gap_from_transferor(p, transferor, years)
+        and years > 12.5
+        and years <= 37.5;
+    then generation_assignment(p, transferor, 1);
+}
+// Section 2651(d)(3) ("similar rules for a new generation every 25 years",
+// i.e. more than 37.5 years) is NOT modelled: see the module header's
+// judgment call (TECH-GAPS.md G83).

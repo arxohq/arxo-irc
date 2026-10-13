@@ -1,0 +1,373 @@
+// §6041 (payments of $600/$2,000 or more), §6041A (service remuneration/
+// direct sales), §6042 (dividends $10), §6043 (corporate liquidations —
+// brief), §6044 (patronage dividends $10), package
+// `us.irc.information_reporting`, module 02. §6041 STAGE 1 FULL; §6041A,
+// §6042, §6044 STAGE 1 PARTIAL (threshold + duty only); §6043 lighter still
+// (duty only, no penalty/consequence detail).
+//
+// JUDGMENT CALLS
+//  - §6041(a)'s edition split follows PL 119-21 §70433: the base 2024
+//    text's $600 threshold and "taxable year" aggregation window govern
+//    payments made before calendar year 2026; §70433(a)/(c)/(e) raise the
+//    threshold to $2,000 and (e)(2) re-keys the aggregation window to
+//    "calendar year" for payments made after December 31, 2025 (§70433(f)).
+//    The (h) inflation adjustment for calendar years after 2026 is a
+//    MISSING_PARAMETER_VALUE (no Rev. Proc. pinned) — `information_return_
+//    threshold_6041` for calendar years after 2026 is not computed by this
+//    package; only the flat $2,000 (2026 only) and pre-2026 $600 eras are
+//    rules here. The exclusions listed in (a)'s parenthetical (payments
+//    under §§6042(a)(1), 6044(a)(1), 6047(e), 6049(a), 6050N(a), or a
+//    §6042(a)(2)/6044(a)(2)/6045-statement payment) are modeled as an
+//    `unless` defeater keyed to the SAME `InformationReturnKind` enum this
+//    package already gives those other sections, rather than duplicating
+//    each section's own threshold test.
+//  - §6041A(a)'s $600 threshold is modeled as tracking §6041(a)'s own
+//    threshold-by-edition relation (both amended together by PL 119-21
+//    §70433(c): "equals or exceeds the dollar amount in effect for such
+//    calendar year under section 6041(a)"), not as an independent literal.
+//  - §6041(b) (foreign-item collection), (c) (recipient must furnish name/
+//    address on demand — a `duty` of the RECIPIENT, not the payer), (e)
+//    (tips carve-out, cross-referencing §6053(a)), (f) (health-arrangement
+//    carve-out), (g) (nonqualified deferred compensation) and §6041A(b)
+//    (direct sales of $5,000 or more) get the same executable treatment as
+//    (a) where the text gives a clean threshold/test; (g) reads a pending
+//    `us.irc.core::TaxKind`-style §409A classification test as an
+//    EXTERNAL_DEPENDENCY (owner: `deferred-compensation`).
+//  - §6042(a)(2)/§6044(a)(2) ("returns required by the Secretary" below the
+//    $10 floor) are modeled as a defeasible duty conditioned on an
+//    empirical "Secretary requires" fact — the statute itself sets no
+//    threshold there, only a delegation, so no literal is invented.
+//  - §6043's 30-day liquidation-resolution return and its
+//    Secretary-required distribution return are two separate duties;
+//    (b)-(c) (information at source for exempt-organization/political-
+//    organization liquidations, and the penalty cross-reference) stay
+//    `unreviewed`, stage 2 (not named among the owner's priority items).
+
+language "law.core" version "0.2";
+package us.irc.information_reporting version "0.1.1";
+namespace "urn:us:irc:information_reporting:clir";
+
+use self::{
+    Corporation,
+    IRC_S6041A_A,
+    IRC_S6041A_B,
+    IRC_S6041_A,
+    IRC_S6041_C,
+    IRC_S6041_D,
+    IRC_S6042_A,
+    IRC_S6043_A,
+    IRC_S6044_A,
+    InformationReturnKind,
+    Person,
+    Secretary,
+    TaxableYear,
+    amount_described_in_6044b,
+    dividend_excluded_6042,
+    dividend_for_6042,
+    excluded_from_6041,
+    filed_information_return,
+    furnished_payee_statement,
+    information_return_required,
+    payee_statement_due,
+    payee_statement_required,
+    statement_required_under_6051_6052_6053,
+};
+
+// ============================================================================
+// §6041 — Certain payments (of $600 or more / $2,000 or more) at source
+// ============================================================================
+
+pub relation information_return_threshold_6041(y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "the §6041(a) aggregate-payment threshold in effect for the calendar year identified with this taxable year";
+}
+relation threshold_6041_lookup_year(y: TaxableYear) kind empirical {
+    label en unofficial "positive anchor (§190): the case asserts this is the calendar year whose §6041(a) threshold is at issue";
+}
+@source(IRC_S6041_A, relation = formalizes, coverage = partial, quote = "of $600 or more in any taxable year")
+rule S6041ThresholdBefore2026 strict {
+    for y: TaxableYear;
+    effective (-infinity, @2026-01-01);
+    when threshold_6041_lookup_year(y);
+    then information_return_threshold_6041(y, 600 USD);
+}
+@source(us.irc.temporal::PL119_21_S70433, relation = formalizes, coverage = exact, quote = "Section 6041(a) is amended by striking “$600” and inserting “$2,000”.")
+rule S6041ThresholdFrom2026 strict {
+    for y: TaxableYear;
+    effective [@2026-01-01, @2027-01-01);
+    when threshold_6041_lookup_year(y);
+    then information_return_threshold_6041(y, 2000 USD);
+}
+// §70433(h) inflation adjustment for calendar years after 2026: no Rev.
+// Proc. is pinned by this stage — MISSING_PARAMETER_VALUE, see report;
+// no rule concludes `information_return_threshold_6041` for `effective
+// [@2027-01-01, infinity)`.
+
+relation payment_at_source(payer: Person, payee: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the payer, engaged in a trade or business, pays the payee rent, salaries, wages, premiums, annuities, compensation, remuneration, emoluments, or other fixed or determinable gains, profits, and income, aggregating this amount during the year";
+}
+relation excluded_from_6041_by_other_section(payer: Person, payee: Person, y: TaxableYear) kind institutional {
+    label en unofficial "the payment is one to which §6042(a)(1), §6044(a)(1), §6047(e), §6049(a), or §6050N(a) applies, or with respect to which a statement is required under §6042(a)(2), §6044(a)(2), or §6045 — §6041(a)'s own parenthetical exclusion";
+}
+@source(IRC_S6041_A, relation = formalizes, coverage = partial, quote = "shall render a true and accurate return to the Secretary, under such regulations and in such form and manner and to such extent as may be prescribed by the Secretary, setting forth the amount of such gains, profits, and income, and the name and address of the recipient of such payment.")
+rule S6041PaymentReturnDuty defeasible {
+    for payer: Person;
+    for payee: Person;
+    for y: TaxableYear;
+    for amount: Money;
+    for threshold: Money;
+    when payment_at_source(payer, payee, y, amount) and information_return_threshold_6041(y, threshold) and amount >= threshold;
+    then duty MakePaymentAtSourceReturn {
+        bearer payer;
+        beneficiary Secretary;
+        goal achievement {
+            condition filed_information_return(payer, payee, y, PaymentsAtSource6041);
+            window [-infinity, infinity];
+        }
+    };
+    then information_return_required(payer, payee, y, PaymentsAtSource6041);
+    unless excluded_from_6041(payer, payee, y);
+}
+
+@source(IRC_S6041_D, relation = formalizes, coverage = exact, quote = "The written statement required under the preceding sentence shall be furnished to the person on or before January 31 of the year following the calendar year for which the return under subsection (a) was required to be made.")
+rule S6041StatementToPayeeDuty defeasible {
+    for payer: Person;
+    for payee: Person;
+    for y: TaxableYear;
+    when information_return_required(payer, payee, y, PaymentsAtSource6041);
+    then duty FurnishPaymentAtSourceStatement {
+        bearer payer;
+        beneficiary payee;
+        goal achievement {
+            condition furnished_payee_statement(payer, payee, y, PaymentsAtSource6041);
+            window [-infinity, infinity];
+        }
+    };
+    then payee_statement_required(payer, payee, y, PaymentsAtSource6041);
+}
+@source(IRC_S6041_D, relation = formalizes, coverage = exact, quote = "The written statement required under the preceding sentence shall be furnished to the person on or before January 31 of the year following the calendar year for which the return under subsection (a) was required to be made.")
+rule S6041StatementDueJanuary31 defeasible {
+    for payer: Person;
+    for payee: Person;
+    for y: TaxableYear;
+    for end_date: Date;
+    when payee_statement_required(payer, payee, y, PaymentsAtSource6041);
+    when us.irc.core::ends(y, end_date);
+    then payee_statement_due(payer, y, PaymentsAtSource6041, add_calendar_period(add_calendar_period(end_date, 1 calendar_day), 30 calendar_day));
+}
+
+relation recipient_furnishes_name_and_address_on_demand(payee: Person, payer: Person) kind empirical;
+@source(IRC_S6041_C, relation = formalizes, coverage = exact, quote = "When necessary to make effective the provisions of this section, the name and address of the recipient of income shall be furnished upon demand of the person paying the income.")
+rule S6041RecipientMustFurnishNameAndAddress defeasible {
+    for payee: Person;
+    for payer: Person;
+    for y: TaxableYear;
+    for amount: Money;
+    when payment_at_source(payer, payee, y, amount);
+    then duty FurnishNameAndAddressOnDemand {
+        bearer payee;
+        beneficiary payer;
+        goal achievement {
+            condition recipient_furnishes_name_and_address_on_demand(payee, payer);
+            window [-infinity, infinity];
+        }
+    };
+}
+
+// §6041(e)/(f)/(g): carve-outs and inclusions, modeled as facts a §6041(a)
+// consumer reads before applying the payment threshold (not this package's
+// own duty — the general rule's `unless` already covers the (e)/(f)
+// exclusion path via `excluded_from_6041_by_other_section` for (e); (f) and
+// (g) are recorded in the coverage rows as EXTERNAL_DEPENDENCY on
+// `employment`/`deferred-compensation` for the underlying classification
+// tests §106/§213(d)/§409A require, not invented here.
+
+// ============================================================================
+// §6041A — Returns regarding payments of remuneration for services and
+// direct sales
+// ============================================================================
+
+relation service_remuneration_payment(recipient_of_service: Person, payee: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the service-recipient pays the payee remuneration for services performed, aggregating this amount during the calendar year (§6041A(a))";
+}
+@source(IRC_S6041A_A, relation = formalizes, coverage = exact, quote = "the aggregate of such remuneration paid to such person during such calendar year is $600 or more,")
+rule S6041AServiceRemunerationReturnDuty defeasible {
+    for recipient_of_service: Person;
+    for payee: Person;
+    for y: TaxableYear;
+    for amount: Money;
+    for threshold: Money;
+    when service_remuneration_payment(recipient_of_service, payee, y, amount) and information_return_threshold_6041(y, threshold) and amount >= threshold;
+    then duty MakeServiceRemunerationReturn {
+        bearer recipient_of_service;
+        beneficiary Secretary;
+        goal achievement {
+            condition filed_information_return(recipient_of_service, payee, y, ServiceRemunerationOrDirectSales6041A);
+            window [-infinity, infinity];
+        }
+    };
+    then information_return_required(recipient_of_service, payee, y, ServiceRemunerationOrDirectSales6041A);
+    unless statement_required_under_6051_6052_6053(recipient_of_service, payee, y);
+}
+
+relation direct_sale_of_consumer_products(seller: Person, buyer: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the seller sells consumer products to the buyer on a buy-sell, deposit-commission, or similar basis for resale other than in a permanent retail establishment, aggregating this amount during the calendar year (§6041A(b))";
+}
+@source(IRC_S6041A_B, relation = formalizes, coverage = exact, quote = "the aggregate amount of the sales to such buyer during such calendar year is $5,000 or more,")
+rule S6041ADirectSalesReturnDuty defeasible {
+    for seller: Person;
+    for buyer: Person;
+    for y: TaxableYear;
+    for amount: Money;
+    when direct_sale_of_consumer_products(seller, buyer, y, amount) and amount >= 5000 USD;
+    then duty MakeDirectSalesReturn {
+        bearer seller;
+        beneficiary Secretary;
+        goal achievement {
+            condition filed_information_return(seller, buyer, y, ServiceRemunerationOrDirectSales6041A);
+            window [-infinity, infinity];
+        }
+    };
+    then information_return_required(seller, buyer, y, ServiceRemunerationOrDirectSales6041A);
+    unless statement_required_under_6051_6052_6053(seller, buyer, y);
+}
+
+// ============================================================================
+// §6042 — Returns regarding payments of dividends and corporate earnings
+// and profits
+// ============================================================================
+
+relation dividend_payment(payer: Person, payee: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the payer pays the payee dividends aggregating this amount during the calendar year (§6042(a)(1))";
+}
+@source(IRC_S6042_A, relation = formalizes, coverage = partial, quote = "who makes payments of dividends aggregating $10 or more to any other person during any calendar year, or")
+rule S6042DividendReturnDuty defeasible {
+    for payer: Person;
+    for payee: Person;
+    for y: TaxableYear;
+    for amount: Money;
+    when dividend_for_6042(payer, payee, y, amount) and amount >= 10 USD;
+    then duty MakeDividendReturn {
+        bearer payer;
+        beneficiary Secretary;
+        goal achievement {
+            condition filed_information_return(payer, payee, y, Dividends6042);
+            window [-infinity, infinity];
+        }
+    };
+    then information_return_required(payer, payee, y, Dividends6042);
+    unless dividend_excluded_6042(payer, payee, y);
+}
+relation secretary_requires_below_threshold_dividend_return(payer: Person, payee: Person, y: TaxableYear) kind empirical {
+    label en unofficial "the Secretary requires a return of dividend payments aggregating less than $10 for the year (§6042(a)(2))";
+}
+@source(IRC_S6042_A, relation = formalizes, coverage = exact, quote = "Every person who makes payments of dividends aggregating less than $10 to any other person during any calendar year shall, when required by the Secretary, make a return setting forth the aggregate amount of such payments, and the name and address of the person to whom paid.")
+rule S6042BelowThresholdDividendReturnBySecretaryRequirement strict {
+    for payer: Person;
+    for payee: Person;
+    for y: TaxableYear;
+    for amount: Money;
+    when dividend_payment(payer, payee, y, amount);
+    when amount < 10 USD;
+    when secretary_requires_below_threshold_dividend_return(payer, payee, y);
+    then duty MakeDividendReturnBelowThreshold {
+        bearer payer;
+        beneficiary Secretary;
+        goal achievement {
+            condition filed_information_return(payer, payee, y, Dividends6042);
+            window [-infinity, infinity];
+        }
+    };
+    then information_return_required(payer, payee, y, Dividends6042);
+}
+
+// ============================================================================
+// §6043 — Corporate liquidating, etc., transactions
+// ============================================================================
+
+relation adopted_liquidation_or_dissolution_resolution(c: Corporation, adopted_on: Date) kind empirical {
+    label en unofficial "the corporation adopts a resolution or plan for dissolution, or for liquidation of the whole or part of its capital stock, on this date (§6043(a)(1))";
+}
+relation filed_liquidation_resolution_return(c: Corporation, adopted_on: Date) kind empirical;
+@source(IRC_S6043_A, relation = formalizes, coverage = exact, quote = "Within 30 days after the adoption by the corporation of a resolution or plan for the dissolution of the corporation or for the liquidation of the whole or any part of its capital stock, make a return setting forth the terms of such resolution or plan and such other information as the Secretary shall by forms or regulations prescribe; and")
+rule S6043LiquidationResolutionReturnDuty strict {
+    for c: Corporation;
+    for adopted_on: Date;
+    when adopted_liquidation_or_dissolution_resolution(c, adopted_on);
+    then duty MakeLiquidationResolutionReturn {
+        bearer c;
+        beneficiary Secretary;
+        goal achievement {
+            condition filed_liquidation_resolution_return(c, adopted_on);
+            window [adopted_on, add_calendar_period(adopted_on, 30 calendar_day)];
+        }
+    };
+}
+relation secretary_requires_liquidation_distribution_return(c: Corporation, y: TaxableYear) kind empirical;
+relation filed_liquidation_distribution_return(c: Corporation, y: TaxableYear) kind empirical;
+@source(IRC_S6043_A, relation = formalizes, coverage = exact, quote = "When required by the Secretary, make a return regarding its distributions in liquidation, stating the name and address of, the number and class of shares owned by, and the amount paid to, each shareholder, or, if the distribution is in property other than money, the fair market value (as of the date the distribution is made) of the property distributed to each shareholder.")
+rule S6043LiquidationDistributionReturnDuty strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    when secretary_requires_liquidation_distribution_return(c, y);
+    then duty MakeLiquidationDistributionReturn {
+        bearer c;
+        beneficiary Secretary;
+        goal achievement {
+            condition filed_liquidation_distribution_return(c, y);
+            window [-infinity, infinity];
+        }
+    };
+}
+
+// ============================================================================
+// §6044 — Returns regarding payments of patronage dividends
+// ============================================================================
+
+relation is_subchapter_t_cooperative(coop: Person) kind institutional {
+    label en unofficial "the person is a cooperative to which part I of subchapter T of chapter 1 applies (section 1381(a)); derived from `us.irc.exempt_organizations::subchapter_t_part_i_applies_1381a` in 21-wire9-owner-contracts.law, a case may still assert it directly";
+}
+relation patronage_dividend_payment(coop: Person, payee: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the cooperative pays the person amounts described in §6044(b), aggregating this amount during the calendar year";
+}
+relation patronage_dividend_excepted(coop: Person, payee: Person, y: TaxableYear) kind institutional {
+    label en unofficial "§6044(a)(1)'s own exception ('except as otherwise provided in this section') applies (pending: §6044(c)-(f), stage 2, not this stage's norm)";
+}
+@source(IRC_S6044_A, relation = formalizes, coverage = partial, quote = "which makes payments of amounts described in subsection (b) aggregating $10 or more to any person during any calendar year, shall make a return")
+rule S6044PatronageDividendReturnDuty defeasible {
+    for coop: Person;
+    for payee: Person;
+    for y: TaxableYear;
+    for amount: Money;
+    when is_subchapter_t_cooperative(coop) and amount_described_in_6044b(coop, payee, y, amount) and amount >= 10 USD;
+    then duty MakePatronageDividendReturn {
+        bearer coop;
+        beneficiary Secretary;
+        goal achievement {
+            condition filed_information_return(coop, payee, y, PatronageDividends6044);
+            window [-infinity, infinity];
+        }
+    };
+    then information_return_required(coop, payee, y, PatronageDividends6044);
+    unless patronage_dividend_excepted(coop, payee, y);
+}
+relation secretary_requires_below_threshold_patronage_return(coop: Person, payee: Person, y: TaxableYear) kind empirical;
+@source(IRC_S6044_A, relation = formalizes, coverage = exact, quote = "Every such cooperative which makes payments of amounts described in subsection (b) aggregating less than $10 to any person during any calendar year shall, when required by the Secretary, make a return setting forth the aggregate amount of such payments and the name and address of the person to whom paid.")
+rule S6044BelowThresholdPatronageReturnBySecretaryRequirement strict {
+    for coop: Person;
+    for payee: Person;
+    for y: TaxableYear;
+    for amount: Money;
+    when is_subchapter_t_cooperative(coop);
+    when patronage_dividend_payment(coop, payee, y, amount);
+    when amount < 10 USD;
+    when secretary_requires_below_threshold_patronage_return(coop, payee, y);
+    then duty MakePatronageDividendReturnBelowThreshold {
+        bearer coop;
+        beneficiary Secretary;
+        goal achievement {
+            condition filed_information_return(coop, payee, y, PatronageDividends6044);
+            window [-infinity, infinity];
+        }
+    };
+    then information_return_required(coop, payee, y, PatronageDividends6044);
+}

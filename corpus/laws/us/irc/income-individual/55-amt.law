@@ -1,0 +1,434 @@
+// Section 55: the alternative minimum tax (stage 2). Modelled here: (a) the
+// tax as the excess of the tentative minimum tax over the regular tax,
+// (b)(1) the tentative minimum tax of a noncorporate taxpayer (26 / 28
+// percent of the "taxable excess"), (b)(1)(B) taxable excess, (b)(1)(C) the
+// married-filing-separately half-breakpoint, (b)(1)(D) alternative minimum
+// taxable income (taxable income + section 56/58 adjustments + section 57
+// preferences), (c) regular tax, (d)(1)-(2) the exemption amount and its
+// phase-out, (d)(4) the 2018-and-later substitutions. The maximum rate on
+// net capital gain, (b)(3), lives in `55-amt-capital-gains.law`; the
+// corporate alternative minimum tax ((b)(2)) in `55-camt.law`.
+//
+// AMOUNTS AND INDEXING. Every dollar amount is an A3 parameter dataset
+// beside this file (`55-*.lawparam.json`, one parameter per file), keyed on
+// `legal_time`: the statutory base-year figure (2012, before the section
+// 55(d)(3) indexing) and the section 55(d)(4) substitutions (2018), and the
+// indexed figures only for the years whose Revenue Procedure is pinned in
+// `us.irc.inflation_adjustments` (2025 Rev. Proc. 2024-40, 2026 Rev. Proc.
+// 2025-32). Any other year is MISSING_PARAMETER_VALUE, never an invented
+// indexed figure. The section 55(d)(3)/(4)(B) indexing mechanism itself
+// (cost-of-living adjustment of section 1(f)(3), rounding to $100) is not an
+// executable rule here: it needs the chained-CPI inputs, which are not
+// pinned (TECH_GAP, see the coverage rows of 26/55/d/3 and 26/55/d/4/b).
+//
+// TEMPORAL STRUCTURE. Pub. L. 119-21 section 70107 (4 July 2025) strikes
+// ", and before January 1, 2026" from section 55(d)(4)(A) (the TCJA
+// substitutions become permanent), resets the indexing base of the
+// $1,000,000 phase-out threshold to 2025, and by (c) adds a substitution of
+// "50 percent" for "25 percent" in section 55(d)(4)(A)(ii), for taxable years
+// beginning after December 31, 2025. The 2024-Edition text is the base: its
+// 25 percent phase-out rate and every dollar amount are rows of the A3
+// parameter datasets (`AmtPhaseoutRate` 25 percent for [2012-01-01,
+// 2026-01-01), 50 percent from 2026-01-01), so the amendment is a dated
+// parameter row with the Public Law named in its label, not a second copy of
+// the rule. Rows read `legal_time`, i.e. the calendar year of the taxable
+// year for a calendar-year taxpayer; a fiscal year beginning in 2025 but
+// ending in 2026 is NOT distinguished (noted in the coverage row). No
+// `revision` construct is used because no other us.irc owner uses one yet.
+
+// --- Who is a noncorporate taxpayer -----------------------------------------
+
+use self::{
+    AmtAdjustmentKind,
+    AmtPreferenceKind,
+    FilingStatus,
+    IRC_S55_A,
+    IRC_S55_B,
+    IRC_S55_C,
+    IRC_S55_D,
+    Person,
+    TaxableYear,
+    amt_adjustment,
+    amt_capital_gain_limit,
+    amt_exemption_final,
+    amt_preference,
+    applicable_corporation,
+    filing_status,
+    taxable_income,
+};
+
+pub relation noncorporate_taxpayer_for_year(p: Person, y: TaxableYear) kind institutional {
+    label en unofficial "a taxpayer other than a corporation, identified by having a section 1 filing status for the year (every individual, estate and trust has one under section 1(a)-(e))";
+}
+rule NoncorporateTaxpayerHasFilingStatus(p: Person, y: TaxableYear) strict {
+    label en unofficial "section 55(b)(1): a taxpayer other than a corporation";
+    when filing_status(p, y, _);
+    then noncorporate_taxpayer_for_year(p, y);
+}
+
+// --- Alternative minimum taxable income, section 55(b)(1)(D) -----------------
+
+pub relation alternative_minimum_taxable_income(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the term \"alternative minimum taxable income\" means the taxable income of the taxpayer for the taxable year determined with the adjustments provided in section 56 and section 58, and increased by the amount of the items of tax preference described in section 57";
+}
+pub relation regular_tax_uses_alternative_base(p: Person, y: TaxableYear) kind empirical {
+    label en unofficial "the regular tax is determined by reference to an amount other than taxable income";
+}
+pub relation regular_tax_alternative_base(p: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the amount other than taxable income by reference to which the regular tax is determined";
+}
+relation amt_starting_income(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "the amount from which alternative minimum taxable income is built: taxable income, or the amount by reference to which the regular tax is determined";
+}
+
+@source(IRC_S55_B, relation = formalizes, coverage = partial, quote = "The term \"alternative minimum taxable income\" means the taxable income of the taxpayer for the taxable year")
+rule AmtStartsFromTaxableIncome(p: Person, y: TaxableYear, ti: Money) strict {
+    label en official "alternative minimum taxable income starts from the taxable income of the taxpayer";
+    when noncorporate_taxpayer_for_year(p, y);
+    when taxable_income(p, y, ti);
+    when not_known(regular_tax_uses_alternative_base(p, y));
+    then amt_starting_income(p, y, ti);
+}
+
+@source(IRC_S55_B, relation = formalizes, coverage = exact, quote = "if the regular tax is determined by reference to an amount other than taxable income, such amount shall be treated as the taxable income of such taxpayer for purposes of the preceding sentence")
+rule AmtStartsFromAlternativeRegularTaxBase(p: Person, y: TaxableYear, base: Money) strict {
+    label en official "if the regular tax is determined by reference to an amount other than taxable income, such amount is treated as the taxable income for this purpose";
+    when noncorporate_taxpayer_for_year(p, y);
+    when regular_tax_uses_alternative_base(p, y);
+    when regular_tax_alternative_base(p, y, base);
+    then amt_starting_income(p, y, base);
+}
+
+relation has_amt_adjustment(p: Person, y: TaxableYear) kind institutional {
+    label en unofficial "at least one section 56 or section 58 adjustment applies for the year";
+}
+rule HasAmtAdjustment(p: Person, y: TaxableYear) strict {
+    when amt_adjustment(p, y, _, _);
+    then has_amt_adjustment(p, y);
+}
+relation has_amt_preference(p: Person, y: TaxableYear) kind institutional {
+    label en unofficial "at least one section 57 item of tax preference applies for the year";
+}
+rule HasAmtPreference(p: Person, y: TaxableYear) strict {
+    when amt_preference(p, y, _, _);
+    then has_amt_preference(p, y);
+}
+
+relation amt_adjustments_total(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "the net of the section 56 and section 58 adjustments (each may increase or decrease income)";
+}
+rule AmtAdjustmentsTotalSum(p: Person, y: TaxableYear) strict {
+    when has_amt_adjustment(p, y);
+    then amt_adjustments_total(p, y, sum all amount: Money for k: AmtAdjustmentKind where amt_adjustment(p, y, k, amount));
+}
+rule AmtAdjustmentsTotalNone(p: Person, y: TaxableYear) strict {
+    when noncorporate_taxpayer_for_year(p, y);
+    when not_known(has_amt_adjustment(p, y));
+    then amt_adjustments_total(p, y, 0 USD);
+}
+relation amt_preferences_total(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "the sum of the items of tax preference described in section 57";
+}
+rule AmtPreferencesTotalSum(p: Person, y: TaxableYear) strict {
+    when has_amt_preference(p, y);
+    then amt_preferences_total(p, y, sum all amount: Money for k: AmtPreferenceKind where amt_preference(p, y, k, amount));
+}
+rule AmtPreferencesTotalNone(p: Person, y: TaxableYear) strict {
+    when noncorporate_taxpayer_for_year(p, y);
+    when not_known(has_amt_preference(p, y));
+    then amt_preferences_total(p, y, 0 USD);
+}
+
+@source(IRC_S55_B, relation = formalizes, coverage = exact, quote = "determined with the adjustments provided in section 56 and section 58, and")
+rule AlternativeMinimumTaxableIncomeRule(p: Person, y: TaxableYear, start: Money, adjustments: Money, preferences: Money) strict {
+    label en official "alternative minimum taxable income = taxable income with the section 56 and 58 adjustments, increased by the section 57 preferences";
+    when amt_starting_income(p, y, start);
+    when amt_adjustments_total(p, y, adjustments);
+    when amt_preferences_total(p, y, preferences);
+    then alternative_minimum_taxable_income(p, y, start + adjustments + preferences);
+}
+
+// --- Section 55(d)(1): the exemption amount before the phase-out -------------
+
+pub relation amt_exemption_before_phaseout(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the exemption amount of a taxpayer other than a corporation, before the section 55(d)(2) reduction";
+}
+
+@source(IRC_S55_D, relation = formalizes, coverage = partial, quote = "(A) $78,750 in the case of—")
+rule AmtExemptionJointOrSurvivingSpouse(p: Person, y: TaxableYear) strict {
+    label en official "section 55(d)(1)(A): the exemption amount for a joint return or a surviving spouse (the section 1 joint status covers both)";
+    when filing_status(p, y, Joint);
+    then amt_exemption_before_phaseout(p, y, AmtExemptionJoint);
+}
+
+@source(IRC_S55_D, relation = formalizes, coverage = partial, quote = "(B) $50,600 in the case of an individual who—")
+rule AmtExemptionUnmarriedIndividual(p: Person, y: TaxableYear) strict {
+    label en official "section 55(d)(1)(B): the exemption amount for an individual who is not a married individual and not a surviving spouse (unmarried and head-of-household statuses)";
+    when filing_status(p, y, Unmarried);
+    then amt_exemption_before_phaseout(p, y, AmtExemptionUnmarried);
+}
+
+@source(IRC_S55_D, relation = formalizes, coverage = partial, quote = "(B) $50,600 in the case of an individual who—")
+rule AmtExemptionHeadOfHousehold(p: Person, y: TaxableYear) strict {
+    label en official "section 55(d)(1)(B): a head of household is not a married individual and not a surviving spouse";
+    when filing_status(p, y, HeadOfHousehold);
+    then amt_exemption_before_phaseout(p, y, AmtExemptionUnmarried);
+}
+
+@source(IRC_S55_D, relation = formalizes, coverage = partial, quote = "(C) 50 percent of the dollar amount applicable under subparagraph (A) in the case of a married individual who files a separate return, and")
+rule AmtExemptionMarriedSeparate(p: Person, y: TaxableYear) strict {
+    label en official "section 55(d)(1)(C): 50 percent of the subparagraph (A) amount for a married individual who files a separate return";
+    when filing_status(p, y, MarriedSeparate);
+    then amt_exemption_before_phaseout(p, y, AmtExemptionJoint * 0.5);
+}
+
+@source(IRC_S55_D, relation = formalizes, coverage = partial, quote = "(D) $22,500 in the case of an estate or trust.")
+rule AmtExemptionEstateOrTrust(p: Person, y: TaxableYear) strict {
+    label en official "section 55(d)(1)(D): the exemption amount for an estate or trust";
+    when filing_status(p, y, EstateOrTrust);
+    then amt_exemption_before_phaseout(p, y, AmtExemptionEstateTrust);
+}
+
+// --- Section 55(d)(2): the phase-out threshold and rate ----------------------
+
+pub relation amt_phaseout_threshold(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the amount by which alternative minimum taxable income must exceed in order to reduce the exemption amount";
+}
+
+@source(IRC_S55_D, relation = formalizes, coverage = partial, quote = "(A) $150,000 in the case of a taxpayer described in paragraph (1)(A),")
+rule AmtPhaseoutThresholdJointRule(p: Person, y: TaxableYear) strict {
+    label en official "section 55(d)(2)(A) (and (4)(A)(ii)(I)): threshold for a joint return or surviving spouse";
+    when filing_status(p, y, Joint);
+    then amt_phaseout_threshold(p, y, AmtPhaseoutThresholdJoint);
+}
+
+@source(IRC_S55_D, relation = formalizes, coverage = partial, quote = "(B) $112,500 in the case of a taxpayer described in paragraph (1)(B), and")
+rule AmtPhaseoutThresholdUnmarriedRule(p: Person, y: TaxableYear) strict {
+    label en official "section 55(d)(2)(B) (and (4)(A)(ii)(II)): threshold for an unmarried individual";
+    when filing_status(p, y, Unmarried);
+    then amt_phaseout_threshold(p, y, AmtPhaseoutThresholdUnmarried);
+}
+
+@source(IRC_S55_D, relation = formalizes, coverage = partial, quote = "(B) $112,500 in the case of a taxpayer described in paragraph (1)(B), and")
+rule AmtPhaseoutThresholdHeadOfHouseholdRule(p: Person, y: TaxableYear) strict {
+    label en official "section 55(d)(2)(B): threshold for a head of household (a taxpayer described in paragraph (1)(B))";
+    when filing_status(p, y, HeadOfHousehold);
+    then amt_phaseout_threshold(p, y, AmtPhaseoutThresholdUnmarried);
+}
+
+@source(IRC_S55_D, relation = formalizes, coverage = partial, quote = "(C) 50 percent of the dollar amount applicable under subparagraph (A) in the case of a taxpayer described in subparagraph (C) or (D) of paragraph (1).")
+rule AmtPhaseoutThresholdMarriedSeparateRule(p: Person, y: TaxableYear) strict {
+    label en official "section 55(d)(2)(C): 50 percent of the subparagraph (A) amount for a married individual filing separately";
+    when filing_status(p, y, MarriedSeparate);
+    then amt_phaseout_threshold(p, y, AmtPhaseoutThresholdJoint * 0.5);
+}
+
+@source(IRC_S55_D, relation = formalizes, coverage = partial, quote = "(C) 50 percent of the dollar amount applicable under subparagraph (A) in the case of a taxpayer described in subparagraph (C) or (D) of paragraph (1).")
+rule AmtPhaseoutThresholdEstateOrTrustRule(p: Person, y: TaxableYear) strict {
+    label en official "section 55(d)(2)(C) with (4)(A)(ii)(III): the estate or trust threshold, computed without regard to the (4)(A)(ii)(I) substitution";
+    when filing_status(p, y, EstateOrTrust);
+    then amt_phaseout_threshold(p, y, AmtPhaseoutThresholdEstateTrust);
+}
+
+pub relation amt_exemption_after_phaseout(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the exemption amount of the taxpayer after the section 55(d)(2) reduction (but not below zero)";
+}
+
+@source(IRC_S55_D, relation = formalizes, coverage = exact, quote = "shall be reduced (but not below zero) by an amount equal to 25 percent of the amount by which the alternative minimum taxable income of the taxpayer exceeds")
+rule AmtExemptionAfterPhaseoutRule(p: Person, y: TaxableYear, before: Money, threshold: Money, amti: Money) strict {
+    label en official "section 55(d)(2): exemption = max(0, exemption - rate x max(0, alternative minimum taxable income - threshold))";
+    when amt_exemption_before_phaseout(p, y, before);
+    when amt_phaseout_threshold(p, y, threshold);
+    when alternative_minimum_taxable_income(p, y, amti);
+    then amt_exemption_after_phaseout(p, y, max(0.00 USD, before - (max(0.00 USD, amti - threshold) * AmtPhaseoutRate)));
+}
+
+// --- Section 55(d)(2), last sentence: separate-return income increase --------
+
+pub relation amt_income_for_taxable_excess(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "alternative minimum taxable income as used for the taxable excess: for a married individual filing separately, increased by the lesser of 25 percent of the excess over the income at which the exemption is zero, or the exemption amount";
+}
+
+@source(IRC_S55_D, relation = formalizes, coverage = exact, quote = "In the case of a taxpayer described in paragraph (1)(C), alternative minimum taxable income shall be increased by the lesser of (i) 25 percent of the excess of alternative minimum taxable income (determined without regard to this sentence) over the minimum amount of such income (as so determined) for which the exemption amount under paragraph (1)(C) is zero, or (ii) such exemption amount (determined without regard to this paragraph).")
+rule AmtIncomeIncreaseMarriedSeparate(p: Person, y: TaxableYear, amti: Money, exemption: Money, threshold: Money) strict {
+    label en official "section 55(d)(2), last sentence: married filing separately — income increased by min(25 percent x (income - the smallest income at which the exemption is zero), the exemption before the reduction); that smallest income is threshold + exemption / rate";
+    when filing_status(p, y, MarriedSeparate);
+    when alternative_minimum_taxable_income(p, y, amti);
+    when amt_exemption_before_phaseout(p, y, exemption);
+    when amt_phaseout_threshold(p, y, threshold);
+    then amt_income_for_taxable_excess(p, y, amti + min(exemption, max(0.00 USD, (amti - (threshold + (exemption / AmtPhaseoutRate))) * AmtPhaseoutRate)));
+}
+
+@source(IRC_S55_B, relation = formalizes, coverage = partial, quote = "For purposes of this subsection, the term \"taxable excess\" means so much of the alternative minimum taxable income for the taxable year as exceeds the exemption amount.")
+rule AmtIncomeForTaxableExcessOtherThanSeparate(p: Person, y: TaxableYear, amti: Money) strict {
+    label en official "outside the married-filing-separately increase, the income used for the taxable excess is alternative minimum taxable income itself";
+    when alternative_minimum_taxable_income(p, y, amti);
+    when not_known(filing_status(p, y, MarriedSeparate));
+    then amt_income_for_taxable_excess(p, y, amti);
+}
+
+// --- Section 55(b)(1)(B): taxable excess -------------------------------------
+
+pub relation amt_taxable_excess(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "so much of the alternative minimum taxable income for the taxable year as exceeds the exemption amount";
+}
+
+@source(IRC_S55_B, relation = formalizes, coverage = exact, quote = "the term \"taxable excess\" means so much of the alternative minimum taxable income for the taxable year as exceeds the exemption amount")
+rule AmtTaxableExcessRule(p: Person, y: TaxableYear, income: Money, exemption: Money) strict {
+    label en official "taxable excess = max(0, alternative minimum taxable income - exemption amount)";
+    when amt_income_for_taxable_excess(p, y, income);
+    when amt_exemption_final(p, y, exemption);
+    then amt_taxable_excess(p, y, max(0.00 USD, income - exemption));
+}
+
+// --- Section 55(b)(1)(A), (C): the two rates and the breakpoint --------------
+
+pub relation amt_rate_breakpoint(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the taxable excess above which the 28 percent rate applies";
+}
+
+@source(IRC_S55_B, relation = formalizes, coverage = partial, quote = "(i) 26 percent of so much of the taxable excess as does not exceed $175,000, plus")
+rule AmtBreakpointOtherThanSeparate(p: Person, y: TaxableYear) strict {
+    label en official "section 55(b)(1)(A): the 28 percent rate applies above the dollar amount (for every noncorporate taxpayer other than a married individual filing separately)";
+    when noncorporate_taxpayer_for_year(p, y);
+    when not_known(filing_status(p, y, MarriedSeparate));
+    then amt_rate_breakpoint(p, y, AmtRateBreakpoint);
+}
+
+@source(IRC_S55_B, relation = formalizes, coverage = exact, quote = "In the case of a married individual filing a separate return, subparagraph (A) shall be applied by substituting 50 percent of the dollar amount otherwise applicable under clause (i) and clause (ii) thereof.")
+rule AmtBreakpointMarriedSeparate(p: Person, y: TaxableYear) strict {
+    label en official "section 55(b)(1)(C): a married individual filing separately uses 50 percent of the dollar amount";
+    when filing_status(p, y, MarriedSeparate);
+    then amt_rate_breakpoint(p, y, AmtRateBreakpoint * 0.5);
+}
+
+pub relation amt_rates_amount(p: Person, y: TaxableYear, taxable_excess: Money, amount: Money) kind institutional {
+    label en official "the sum of 26 percent of so much of the given amount as does not exceed the breakpoint plus 28 percent of so much as exceeds it";
+}
+
+@source(IRC_S55_B, relation = formalizes, coverage = exact, quote = "(ii) 28 percent of so much of the taxable excess as exceeds $175,000.")
+rule AmtRatesAmountRule(p: Person, y: TaxableYear, base: Money, breakpoint: Money) strict {
+    label en official "section 55(b)(1)(A)(i)-(ii): 26 percent up to the breakpoint, 28 percent above";
+    when amt_taxable_excess(p, y, base);
+    when amt_rate_breakpoint(p, y, breakpoint);
+    then amt_rates_amount(p, y, base, (min(base, breakpoint) * 0.26) + (max(0.00 USD, base - breakpoint) * 0.28));
+}
+
+// --- Section 55(b)(1)(A) second sentence: alternative minimum tax foreign tax credit
+
+pub relation amt_foreign_tax_credit(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the alternative minimum tax foreign tax credit for the taxable year (section 59(a); its computation is a dependency on the section 901-909 owner)";
+}
+
+relation has_amt_foreign_tax_credit(p: Person, y: TaxableYear) kind institutional {
+    label en unofficial "an alternative minimum tax foreign tax credit is asserted for the year";
+}
+rule HasAmtForeignTaxCredit(p: Person, y: TaxableYear) strict {
+    when amt_foreign_tax_credit(p, y, _);
+    then has_amt_foreign_tax_credit(p, y);
+}
+relation has_amt_capital_gain_limit(p: Person, y: TaxableYear) kind institutional {
+    label en unofficial "the section 55(b)(3) net-capital-gain ceiling is computable for the year";
+}
+rule HasAmtCapitalGainLimit(p: Person, y: TaxableYear) strict {
+    when amt_capital_gain_limit(p, y, _);
+    then has_amt_capital_gain_limit(p, y);
+}
+
+pub relation tentative_minimum_tax(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the tentative minimum tax for the taxable year";
+}
+
+// Without the section 55(b)(3) capital-gain data, the first-sentence amount
+// is the amount at the two rates on the whole taxable excess.
+relation tmt_first_sentence_amount(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the amount determined under the first sentence of paragraph (1)(A), after the section 55(b)(3) limit where it applies";
+}
+
+@source(IRC_S55_B, relation = formalizes, coverage = partial, quote = "The tentative minimum tax for the taxable year is the sum of—")
+rule TmtFirstSentenceWithoutCapitalGainLimit(p: Person, y: TaxableYear, base: Money, amount: Money) strict {
+    label en official "no section 55(b)(3) net-capital-gain data: the first-sentence amount is the two-rate amount on the taxable excess";
+    when amt_taxable_excess(p, y, base);
+    when amt_rates_amount(p, y, base, amount);
+    when not_known(has_amt_capital_gain_limit(p, y));
+    then tmt_first_sentence_amount(p, y, amount);
+}
+
+@source(IRC_S55_B, relation = formalizes, coverage = exact, quote = "The amount determined under the first sentence of paragraph (1)(A) shall not exceed the sum of—")
+rule TmtFirstSentenceWithCapitalGainLimit(p: Person, y: TaxableYear, base: Money, amount: Money, limit: Money) strict {
+    label en official "section 55(b)(3): the first-sentence amount is capped by the maximum-rate computation on net capital gain";
+    when amt_taxable_excess(p, y, base);
+    when amt_rates_amount(p, y, base, amount);
+    when amt_capital_gain_limit(p, y, limit);
+    then tmt_first_sentence_amount(p, y, min(amount, limit));
+}
+
+@source(IRC_S55_B, relation = formalizes, coverage = exact, quote = "The amount determined under the preceding sentence shall be reduced by the alternative minimum tax foreign tax credit for the taxable year.")
+rule TentativeMinimumTaxReducedByForeignTaxCredit(p: Person, y: TaxableYear, first: Money, credit: Money) strict {
+    label en official "section 55(b)(1)(A): the first-sentence amount reduced by the alternative minimum tax foreign tax credit";
+    when noncorporate_taxpayer_for_year(p, y);
+    when tmt_first_sentence_amount(p, y, first);
+    when amt_foreign_tax_credit(p, y, credit);
+    then tentative_minimum_tax(p, y, first - credit);
+}
+
+@source(IRC_S55_B, relation = formalizes, coverage = partial, quote = "The amount determined under the preceding sentence shall be reduced by the alternative minimum tax foreign tax credit for the taxable year.")
+rule TentativeMinimumTaxNoForeignTaxCredit(p: Person, y: TaxableYear, first: Money) strict {
+    label en official "no alternative minimum tax foreign tax credit is asserted: the first-sentence amount stands";
+    when noncorporate_taxpayer_for_year(p, y);
+    when tmt_first_sentence_amount(p, y, first);
+    when not_known(has_amt_foreign_tax_credit(p, y));
+    then tentative_minimum_tax(p, y, first);
+}
+
+// --- Section 55(c): the regular tax ------------------------------------------
+
+pub relation regular_tax_liability_without_farm_averaging(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the regular tax liability for the taxable year (as defined in section 26(b)), computed as if section 1301 (averaging of farm and fishing income) did not apply (section 55(c)(2)); the producer is the section 26/1301 owner — dependency contract";
+}
+pub relation foreign_tax_credit_allowable_27a(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the foreign tax credit allowable under section 27(a) — dependency contract";
+}
+pub relation excluded_recapture_increases_in_tax(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "any increase in tax under section 45(e)(11)(C), 49(b) or 50(a) or subsection (j) or (k) of section 42 — dependency contract";
+}
+pub relation regular_tax_for_amt(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the term \"regular tax\" for purposes of section 55";
+}
+
+@source(IRC_S55_C, relation = formalizes, coverage = exact, quote = "For purposes of this section, the term \"regular tax\" means the regular tax liability for the taxable year (as defined in section 26(b)) reduced by the foreign tax credit allowable under section 27(a).")
+rule RegularTaxForAmtRule(p: Person, y: TaxableYear, liability: Money, credit: Money, recapture: Money) strict {
+    label en official "regular tax = regular tax liability (without section 1301 averaging, (c)(2)) reduced by the section 27(a) credit and without the listed recapture increases";
+    when regular_tax_liability_without_farm_averaging(p, y, liability);
+    when foreign_tax_credit_allowable_27a(p, y, credit);
+    when excluded_recapture_increases_in_tax(p, y, recapture);
+    then regular_tax_for_amt(p, y, (liability - credit) - recapture);
+}
+
+// --- Section 55(a): the tax imposed ------------------------------------------
+
+pub relation section_59a_tax(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the tax imposed by section 59A (base erosion and anti-abuse tax); the owner is `us.irc.international` — dependency contract";
+}
+pub relation alternative_minimum_tax(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the tax imposed by section 55(a): the excess (if any) of the tentative minimum tax over the regular tax (plus, for an applicable corporation, the section 59A tax)";
+}
+
+@source(IRC_S55_A, relation = formalizes, coverage = exact, quote = "There is hereby imposed (in addition to any other tax imposed by this subtitle) a tax equal to the excess (if any) of—")
+rule AlternativeMinimumTaxImposed(p: Person, y: TaxableYear, tentative: Money, regular: Money) strict {
+    label en official "section 55(a): tax = max(0, tentative minimum tax - regular tax) for a taxpayer that is not an applicable corporation";
+    when tentative_minimum_tax(p, y, tentative);
+    when regular_tax_for_amt(p, y, regular);
+    when not_known(applicable_corporation(p, y));
+    then alternative_minimum_tax(p, y, max(0.00 USD, tentative - regular));
+}
+
+@source(IRC_S55_A, relation = formalizes, coverage = exact, quote = "the regular tax for the taxable year plus, in the case of an applicable corporation, the tax imposed by section 59A.")
+rule AlternativeMinimumTaxImposedApplicableCorporation(p: Person, y: TaxableYear, tentative: Money, regular: Money, beat: Money) strict {
+    label en official "section 55(a)(2): for an applicable corporation the regular tax is increased by the section 59A tax before the excess is taken";
+    when tentative_minimum_tax(p, y, tentative);
+    when regular_tax_for_amt(p, y, regular);
+    when applicable_corporation(p, y);
+    when section_59a_tax(p, y, beat);
+    then alternative_minimum_tax(p, y, max(0.00 USD, tentative - (regular + beat)));
+}

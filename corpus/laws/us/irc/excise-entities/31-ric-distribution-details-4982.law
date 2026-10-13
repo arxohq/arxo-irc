@@ -1,0 +1,295 @@
+// Stage 3 (26.09.2026). Section 4982(c)(4)(B) (qualified estimated tax payments)
+// and (e)(2)(B)-(C), (e)(4)-(7): capital gain net income reduced by the net
+// ordinary loss, the election to use the taxable year, the timing of specified
+// gains and losses after the cut-off, the mark to market provisions and the
+// elective deferral of ordinary losses. Module 19 reads the two year aggregates
+// (`distribution_ordinary_income`, `distribution_capital_gain_net_income`) and
+// the estimated tax payments as case inputs; this module derives the capital
+// gain net income of (e)(2), derives per-item the date on which a specified gain
+// or loss arises and per-payment whether an estimated tax payment is qualified.
+//
+// JUDGMENT CALLS. Aggregates over derived items are the section 111 runtime
+// subset limit (TECH-GAPS G5910): the year totals stay case inputs; each item is
+// derived on its own. The calendar dates (October 31 of a calendar year, January 1
+// of the following year) are facts of the case (`ric_cutoff_october_31`,
+// `january_1_after`). Status: implemented_unverified; scenarios not executed; no
+// legal review.
+
+// --- (e)(2): capital gain net income ---
+
+use self::{
+    Person,
+    distribution_capital_gain_net_income,
+};
+
+pub relation ric_capital_gain_net_income_before_loss(t: Person, cy: Integer, amount: Money) kind empirical {
+    label en unofficial "section 4982(e)(2)(A): the capital gain net income (section 1222(9)) determined by treating the 1-year period ending on October 31 (or the taxable year, under the (e)(4) election) as the taxable year";
+}
+pub relation ric_net_capital_gain(t: Person, cy: Integer, amount: Money) kind empirical {
+    label en unofficial "section 4982(e)(2)(C)(i): the net capital gain (section 1222(11)) determined on the same basis";
+}
+pub relation ric_net_ordinary_loss_before_deferral(t: Person, cy: Integer, amount: Money) kind empirical {
+    label en unofficial "section 4982(e)(2)(C)(ii): the amount that would be the company's net operating loss for the calendar year if determined in the manner of ordinary income under paragraph (1)";
+}
+pub relation ric_net_ordinary_loss_after_year_start(t: Person, cy: Integer, amount: Money) kind empirical {
+    label en unofficial "section 4982(e)(7)(A): the portion of the net ordinary loss (without regard to specified gains and losses of paragraph (5)) attributable to the part of the calendar year after the beginning of the taxable year that begins in the calendar year";
+}
+pub relation ric_elects_deferral_of_ordinary_loss(t: Person, cy: Integer) kind empirical {
+    label en unofficial "section 4982(e)(7)(A): a regulated investment company with a taxable year other than the calendar year elects to disregard that portion of the net ordinary loss";
+}
+pub relation ric_has_noncalendar_taxable_year(t: Person, cy: Integer) kind empirical {
+    label en unofficial "the company's taxable year is other than the calendar year";
+}
+pub relation ric_net_ordinary_loss_for_calendar_year(t: Person, cy: Integer, amount: Money) kind institutional {
+    label en official "section 4982(e)(2)(C)(ii), (7)(A): the net ordinary loss for the calendar year, without the portion whose deferral was elected";
+}
+rule NetOrdinaryLossWithDeferralElection(t: Person, cy: Integer, nol: Money, deferred: Money) defeasible {
+    label en official "section 4982(e)(7)(A): the elected portion is disregarded";
+    when ric_net_ordinary_loss_before_deferral(t, cy, nol);
+    when ric_has_noncalendar_taxable_year(t, cy);
+    when ric_elects_deferral_of_ordinary_loss(t, cy);
+    when ric_net_ordinary_loss_after_year_start(t, cy, deferred);
+    when nol >= deferred;
+    then ric_net_ordinary_loss_for_calendar_year(t, cy, nol - deferred);
+}
+rule NetOrdinaryLossNoElection(t: Person, cy: Integer, nol: Money) defeasible {
+    label en official "section 4982(e)(2)(C)(ii): no deferral election";
+    when ric_net_ordinary_loss_before_deferral(t, cy, nol);
+    unless ric_elects_deferral_of_ordinary_loss(t, cy) and ric_net_ordinary_loss_before_deferral(t, cy, nol) and ric_has_noncalendar_taxable_year(t, cy);
+    then ric_net_ordinary_loss_for_calendar_year(t, cy, nol);
+}
+pub relation ric_deferred_ordinary_loss_arising_next_year(t: Person, cy: Integer, amount: Money) kind institutional {
+    label en official "section 4982(e)(7)(B): the amount not taken into account is treated as arising on the first day of the following calendar year";
+}
+rule DeferredOrdinaryLossArisesNextYear(t: Person, cy: Integer, deferred: Money) defeasible {
+    label en official "section 4982(e)(7)(B)";
+    when ric_has_noncalendar_taxable_year(t, cy);
+    when ric_elects_deferral_of_ordinary_loss(t, cy);
+    when ric_net_ordinary_loss_after_year_start(t, cy, deferred);
+    then ric_deferred_ordinary_loss_arising_next_year(t, cy, deferred);
+}
+pub relation ric_capital_gain_net_income_4982e2(t: Person, cy: Integer, amount: Money) kind institutional {
+    label en official "section 4982(e)(2)(B): the capital gain net income reduced by the net ordinary loss, but not below the net capital gain";
+}
+rule CapitalGainNetIncomeReducedByLoss(t: Person, cy: Integer, cg: Money, ncg: Money, nol: Money) defeasible {
+    label en official "section 4982(e)(2)(B): cg - nol when that is at least the net capital gain";
+    when ric_capital_gain_net_income_before_loss(t, cy, cg);
+    when ric_net_capital_gain(t, cy, ncg);
+    when ric_net_ordinary_loss_for_calendar_year(t, cy, nol);
+    when cg - nol >= ncg;
+    then ric_capital_gain_net_income_4982e2(t, cy, cg - nol);
+}
+rule CapitalGainNetIncomeFlooredAtNetCapitalGain(t: Person, cy: Integer, cg: Money, ncg: Money, nol: Money) defeasible {
+    label en official "section 4982(e)(2)(B): the reduction stops at the net capital gain";
+    when ric_capital_gain_net_income_before_loss(t, cy, cg);
+    when ric_net_capital_gain(t, cy, ncg);
+    when ric_net_ordinary_loss_for_calendar_year(t, cy, nol);
+    when cg - nol < ncg;
+    then ric_capital_gain_net_income_4982e2(t, cy, ncg);
+}
+pub relation ric_capital_gain_net_income_used(t: Person, cy: Integer, amount: Money) kind institutional {
+    label en official "the capital gain net income used by RicRequiredDistribution: the derived amount of (e)(2)(B), or the asserted aggregate of module 19";
+}
+rule CapitalGainNetIncomeUsedDerived(t: Person, cy: Integer, cg: Money) defeasible {
+    label en official "section 4982(e)(2)";
+    when ric_capital_gain_net_income_4982e2(t, cy, cg);
+    then ric_capital_gain_net_income_used(t, cy, cg);
+}
+rule CapitalGainNetIncomeUsedAsserted(t: Person, cy: Integer, cg: Money) defeasible {
+    label en official "module 19 input";
+    when distribution_capital_gain_net_income(t, cy, cg);
+    unless ric_capital_gain_net_income_before_loss(t, cy, _) and distribution_capital_gain_net_income(t, cy, cg);
+    then ric_capital_gain_net_income_used(t, cy, cg);
+}
+
+// --- (e)(4): election to use the taxable year ---
+
+pub relation ric_taxable_year_ends_in_november_or_december(t: Person, cy: Integer) kind empirical {
+    label en unofficial "section 4982(e)(4)(A)(i): the taxable year of the company ends with the month of November or December";
+}
+pub relation ric_makes_taxable_year_election_4982e4(t: Person, cy: Integer) kind empirical {
+    label en unofficial "section 4982(e)(4)(A)(ii): the company makes an election under paragraph (4)";
+}
+pub relation ric_election_revocation_consented_by_secretary(t: Person, cy: Integer) kind empirical {
+    label en unofficial "section 4982(e)(4)(B): the Secretary consented to the revocation of the election";
+}
+pub relation ric_taxable_year_election_in_effect(t: Person, cy: Integer) kind institutional {
+    label en official "section 4982(e)(4): the election applies (a November or December taxable year end and an election not revoked with the Secretary's consent)";
+}
+rule RicTaxableYearElectionInEffect(t: Person, cy: Integer) defeasible {
+    label en official "section 4982(e)(4)(A)-(B)";
+    when ric_taxable_year_ends_in_november_or_december(t, cy);
+    when ric_makes_taxable_year_election_4982e4(t, cy);
+    unless ric_election_revocation_consented_by_secretary(t, cy) and ric_taxable_year_ends_in_november_or_december(t, cy) and ric_makes_taxable_year_election_4982e4(t, cy);
+    then ric_taxable_year_election_in_effect(t, cy);
+}
+pub relation ric_cutoff_october_31(t: Person, cy: Integer, on: Date) kind empirical {
+    label en unofficial "October 31 of the calendar year";
+}
+pub relation ric_taxable_year_last_day(t: Person, cy: Integer, on: Date) kind empirical {
+    label en unofficial "the last day of the company's taxable year that ends in the calendar year";
+}
+pub relation ric_cutoff_date(t: Person, cy: Integer, on: Date) kind institutional {
+    label en official "section 4982(e)(5)-(6): the cut-off for specified items: October 31, or the last day of the taxable year under the (e)(4) election";
+}
+rule RicCutoffOctober31(t: Person, cy: Integer, on: Date) defeasible {
+    label en official "section 4982(e)(5)(A), (6)(A)";
+    when ric_cutoff_october_31(t, cy, on);
+    unless ric_taxable_year_election_in_effect(t, cy) and ric_cutoff_october_31(t, cy, on);
+    then ric_cutoff_date(t, cy, on);
+}
+rule RicCutoffTaxableYearEnd(t: Person, cy: Integer, on: Date) defeasible {
+    label en official "section 4982(e)(5)(C), (6)(A): the last day of the taxable year replaces October 31";
+    when ric_taxable_year_election_in_effect(t, cy);
+    when ric_taxable_year_last_day(t, cy, on);
+    then ric_cutoff_date(t, cy, on);
+}
+
+// --- (e)(5): specified gains and losses ---
+
+entity RicSpecifiedItem { label en unofficial "an ordinary gain or loss item of a regulated investment company (section 4982(e)(5))"; }
+pub relation ric_item_of(item: RicSpecifiedItem, t: Person, cy: Integer) kind empirical {
+    label en unofficial "the item belongs to the company's calendar year";
+}
+pub relation ric_item_is_ordinary_gain_from_disposition(item: RicSpecifiedItem) kind empirical {
+    label en unofficial "section 4982(e)(5)(B)(i): ordinary gain from the sale, exchange or other disposition of property (including termination of a position)";
+}
+pub relation ric_item_is_section_988_gain_or_1296a1_inclusion(item: RicSpecifiedItem) kind empirical {
+    label en unofficial "section 4982(e)(5)(B)(i): foreign currency gain attributable to a section 988 transaction or an amount includible under section 1296(a)(1)";
+}
+pub relation ric_item_is_ordinary_loss_from_disposition(item: RicSpecifiedItem) kind empirical {
+    label en unofficial "section 4982(e)(5)(B)(ii): ordinary loss from the sale, exchange or other disposition of property (including termination of a position)";
+}
+pub relation ric_item_is_section_988_loss_or_1296a2_deduction(item: RicSpecifiedItem) kind empirical {
+    label en unofficial "section 4982(e)(5)(B)(ii): foreign currency loss attributable to a section 988 transaction or an amount allowable under section 1296(a)(2)";
+}
+pub relation ric_specified_gain(item: RicSpecifiedItem) kind institutional {
+    label en official "section 4982(e)(5)(B)(i): a specified gain";
+}
+rule RicSpecifiedGainDisposition(item: RicSpecifiedItem) defeasible {
+    label en official "section 4982(e)(5)(B)(i)";
+    when ric_item_is_ordinary_gain_from_disposition(item);
+    then ric_specified_gain(item);
+}
+rule RicSpecifiedGain988(item: RicSpecifiedItem) defeasible {
+    label en official "section 4982(e)(5)(B)(i), second sentence";
+    when ric_item_is_section_988_gain_or_1296a1_inclusion(item);
+    then ric_specified_gain(item);
+}
+pub relation ric_specified_loss(item: RicSpecifiedItem) kind institutional {
+    label en official "section 4982(e)(5)(B)(ii): a specified loss";
+}
+rule RicSpecifiedLossDisposition(item: RicSpecifiedItem) defeasible {
+    label en official "section 4982(e)(5)(B)(ii)";
+    when ric_item_is_ordinary_loss_from_disposition(item);
+    then ric_specified_loss(item);
+}
+rule RicSpecifiedLoss988(item: RicSpecifiedItem) defeasible {
+    label en official "section 4982(e)(5)(B)(ii), second sentence";
+    when ric_item_is_section_988_loss_or_1296a2_deduction(item);
+    then ric_specified_loss(item);
+}
+pub relation ric_item_properly_taken_into_account_on(item: RicSpecifiedItem, on: Date) kind empirical {
+    label en unofficial "the date on which the item would properly be taken into account but for paragraph (5)";
+}
+pub relation january_1_after(cy: Integer, on: Date) kind empirical {
+    label en unofficial "January 1 of the calendar year following cy";
+}
+pub relation ric_specified_item_arises_on(item: RicSpecifiedItem, on: Date) kind institutional {
+    label en official "section 4982(e)(5)(A), (C): a specified gain or loss that would be taken into account after the cut-off arises on January 1 of the following calendar year; other items arise when properly taken into account";
+}
+rule SpecifiedItemAfterCutoffArisesJanuary1(item: RicSpecifiedItem, t: Person, cy: Integer, d: Date, cut: Date, jan1: Date) defeasible {
+    label en official "section 4982(e)(5)(A), (C)";
+    when ric_item_of(item, t, cy);
+    when ric_item_properly_taken_into_account_on(item, d);
+    when ric_cutoff_date(t, cy, cut);
+    when d > cut;
+    when january_1_after(cy, jan1);
+    when ric_specified_gain(item);
+    then ric_specified_item_arises_on(item, jan1);
+}
+rule SpecifiedLossAfterCutoffArisesJanuary1(item: RicSpecifiedItem, t: Person, cy: Integer, d: Date, cut: Date, jan1: Date) defeasible {
+    label en official "section 4982(e)(5)(A), (C) for a specified loss";
+    when ric_item_of(item, t, cy);
+    when ric_item_properly_taken_into_account_on(item, d);
+    when ric_cutoff_date(t, cy, cut);
+    when d > cut;
+    when january_1_after(cy, jan1);
+    when ric_specified_loss(item);
+    then ric_specified_item_arises_on(item, jan1);
+}
+rule SpecifiedItemNotAfterCutoffKeepsDate(item: RicSpecifiedItem, t: Person, cy: Integer, d: Date, cut: Date) defeasible {
+    label en official "section 4982(e)(5)(A): an item on or before the cut-off is taken into account when properly taken into account";
+    when ric_item_of(item, t, cy);
+    when ric_item_properly_taken_into_account_on(item, d);
+    when ric_cutoff_date(t, cy, cut);
+    when d <= cut;
+    then ric_specified_item_arises_on(item, d);
+}
+
+// --- (e)(6): mark to market provisions ---
+
+entity RicMarkToMarketProvision { label en unofficial "a provision that treats property as disposed of at the end of the taxable year or measures income by year-end value (section 4982(e)(6))"; }
+pub relation mtm_provision_is_section_1256_or_1296(p: RicMarkToMarketProvision) kind empirical {
+    label en unofficial "section 4982(e)(6)(B): the provision is section 1256 or 1296";
+}
+pub relation mtm_provision_treats_property_as_disposed_last_day(p: RicMarkToMarketProvision) kind empirical {
+    label en unofficial "section 4982(e)(6)(B): another provision of the title (or regulations) that treats property as disposed of on the last day of the taxable year";
+}
+pub relation mtm_provision_determines_income_by_last_day_value(p: RicMarkToMarketProvision) kind empirical {
+    label en unofficial "section 4982(e)(6)(B): a provision that determines income by reference to the value of an item on the last day of the taxable year";
+}
+pub relation specified_mark_to_market_provision(p: RicMarkToMarketProvision) kind institutional {
+    label en official "section 4982(e)(6)(B): a specified mark to market provision";
+}
+rule SpecifiedMtm1256Or1296(p: RicMarkToMarketProvision) defeasible {
+    label en official "section 4982(e)(6)(B)";
+    when mtm_provision_is_section_1256_or_1296(p);
+    then specified_mark_to_market_provision(p);
+}
+rule SpecifiedMtmDisposedLastDay(p: RicMarkToMarketProvision) defeasible {
+    label en official "section 4982(e)(6)(B)";
+    when mtm_provision_treats_property_as_disposed_last_day(p);
+    then specified_mark_to_market_provision(p);
+}
+rule SpecifiedMtmLastDayValue(p: RicMarkToMarketProvision) defeasible {
+    label en official "section 4982(e)(6)(B)";
+    when mtm_provision_determines_income_by_last_day_value(p);
+    then specified_mark_to_market_provision(p);
+}
+pub relation mtm_provision_of(p: RicMarkToMarketProvision, t: Person, cy: Integer) kind empirical {
+    label en unofficial "the provision is applied in determining the company's ordinary income for the calendar year";
+}
+pub relation mtm_provision_measured_as_of(p: RicMarkToMarketProvision, on: Date) kind institutional {
+    label en official "section 4982(e)(6)(A): notwithstanding (1)(C), each specified mark to market provision is applied as if the company's taxable year ended on October 31 (or on the last day of the taxable year under the (e)(4) election)";
+}
+rule MtmProvisionMeasuredAsOfCutoff(p: RicMarkToMarketProvision, t: Person, cy: Integer, cut: Date) defeasible {
+    label en official "section 4982(e)(6)(A)";
+    when specified_mark_to_market_provision(p);
+    when mtm_provision_of(p, t, cy);
+    when ric_cutoff_date(t, cy, cut);
+    then mtm_provision_measured_as_of(p, cut);
+}
+
+// --- (c)(4)(B): qualified estimated tax payments ---
+
+entity RicEstimatedTaxPayment { label en unofficial "a payment of estimated tax of a tax described in section 4982(c)(1)(B)"; }
+pub relation estimated_payment_of_described_tax(pay: RicEstimatedTaxPayment) kind empirical {
+    label en unofficial "section 4982(c)(4)(B): the payment is of estimated tax of a tax described in paragraph (1)(B)";
+}
+pub relation estimated_payment_year_begins_in(pay: RicEstimatedTaxPayment, cy: Integer) kind empirical {
+    label en unofficial "section 4982(c)(4)(B): the taxable year for which the payment is made begins in the calendar year";
+}
+pub relation estimated_payment_year_ends_in(pay: RicEstimatedTaxPayment, cy: Integer) kind empirical {
+    label en unofficial "the taxable year for which the payment is made also ends in the calendar year";
+}
+pub relation qualified_estimated_tax_payment(pay: RicEstimatedTaxPayment, cy: Integer) kind institutional {
+    label en official "section 4982(c)(4)(B): a payment of estimated tax for a taxable year which begins (but does not end) in the calendar year";
+}
+rule QualifiedEstimatedTaxPayment(pay: RicEstimatedTaxPayment, cy: Integer) defeasible {
+    label en official "section 4982(c)(4)(B)";
+    when estimated_payment_of_described_tax(pay);
+    when estimated_payment_year_begins_in(pay, cy);
+    unless estimated_payment_year_ends_in(pay, cy) and estimated_payment_of_described_tax(pay) and estimated_payment_year_begins_in(pay, cy);
+    then qualified_estimated_tax_payment(pay, cy);
+}

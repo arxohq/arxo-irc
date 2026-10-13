@@ -1,0 +1,107 @@
+// Stage 3 (TECH_GAP reduction), part C: chapter 53 firearms occupational tax gross receipts (section 5801(b)(2)-(3)), chapter 54
+// greenmail (section 5881(b) last sentence) and chapter 55 structured settlement factoring (section 5891(c)(3)(B)).
+//
+// JUDGMENT CALLS: as in module 12, every aggregate runs over EMPIRICAL relations (a section 111 limit applies to derived ones), the
+// short-year annualization is applied to the aggregate, and cents are HALF_UP where the text names no rounding.
+
+// =====================================================================
+// Section 5801(b)(2)-(3): the small-proprietor gross receipts test
+// =====================================================================
+
+use self::{
+    FirearmTradeRole,
+    GreenmailReceiptEvent,
+    IRC_S5801_B,
+    IRC_S5881_B,
+    IRC_S5891_C,
+    Person,
+    StructuredSettlementFactoringEvent,
+    firearm_occupational_taxpayer,
+    greenmail_receipt,
+};
+
+pub relation firearm_controlled_group_member(p: Person, q: Person) kind empirical {
+    label en unofficial "section 5801(b)(2): q is treated as one taxpayer with p under section 5061(e)(3) (EXTERNAL_DEPENDENCY on the section 5061(e)(3) controlled-group determination, carried as a fact)";
+}
+pub relation firearm_receipts_returns_and_allowances(p: Person, amount: Money) kind empirical {
+    label en unofficial "section 5801(b)(3) with section 448(c)(3)(C): returns and allowances made during the test year, which reduce the gross receipts (one item per return or allowance)";
+}
+pub relation firearm_receipts_short_period_months(p: Person, months: Integer) kind empirical {
+    label en unofficial "section 5801(b)(3) with section 448(c)(3)(B): the test year is a taxable year of less than 12 months, of this many months";
+}
+relation firearm_short_period_recorded(p: Person) kind institutional {
+    label en unofficial "helper: a short test year was recorded for this taxpayer";
+}
+rule FirearmShortPeriodRecorded(p: Person, m: Integer) strict {
+    when firearm_receipts_short_period_months(p, m);
+    then firearm_short_period_recorded(p);
+}
+pub relation firearm_net_group_receipts(p: Person, amount: Money) kind institutional {
+    label en official "section 5801(b)(2)-(3): the gross receipts of the taxpayer and of all persons treated as one taxpayer, reduced by returns and allowances";
+}
+@source(IRC_S5801_B, relation = formalizes, coverage = exact, quote = "All persons treated as 1 taxpayer under section 5061(e)(3) shall be treated as 1 taxpayer for purposes of paragraph (1).")
+rule FirearmNetGroupReceipts(p: Person, own: Money) strict {
+    when firearm_occupational_taxpayer(p, _, own);
+    then firearm_net_group_receipts(p, own
+        + sum(collect all g: Money, q: Person, k: FirearmTradeRole where firearm_controlled_group_member(p, q) and firearm_occupational_taxpayer(q, k, g), empty: 0.00 USD)
+        - sum(collect all r: Money where firearm_receipts_returns_and_allowances(p, r), empty: 0.00 USD)
+        - sum(collect all r2: Money, q2: Person where firearm_controlled_group_member(p, q2) and firearm_receipts_returns_and_allowances(q2, r2), empty: 0.00 USD));
+}
+pub relation firearm_receipts_test_amount(p: Person, amount: Money) kind institutional {
+    label en official "section 5801(b): the gross receipts compared with the small-proprietor threshold, after aggregation, returns and allowances and annualization of a short year";
+}
+@source(IRC_S5801_B, relation = formalizes, coverage = exact, quote = "For purposes of paragraph (1), rules similar to the rules of subparagraphs (B) and (C) of section 448(c)(3) shall apply.")
+rule FirearmReceiptsTestAmountFullYear(p: Person, net: Money) strict {
+    when firearm_net_group_receipts(p, net) and not_known(firearm_short_period_recorded(p));
+    then firearm_receipts_test_amount(p, net);
+}
+@source(IRC_S5801_B, relation = formalizes, coverage = exact, quote = "For purposes of paragraph (1), rules similar to the rules of subparagraphs (B) and (C) of section 448(c)(3) shall apply.")
+rule FirearmReceiptsTestAmountShortYear(p: Person, net: Money, m: Integer) strict {
+    when firearm_net_group_receipts(p, net) and firearm_receipts_short_period_months(p, m) and m > 0 and m < 12;
+    then firearm_receipts_test_amount(p, div_round(net * 12, m * 1.0, 2, "HALF_UP"));
+}
+@source(IRC_S5801_B, relation = formalizes, coverage = exact, quote = "For purposes of paragraph (1), rules similar to the rules of subparagraphs (B) and (C) of section 448(c)(3) shall apply.")
+rule FirearmReceiptsTestAmountTwelveMonths(p: Person, net: Money, m: Integer) strict {
+    when firearm_net_group_receipts(p, net) and firearm_receipts_short_period_months(p, m) and m >= 12;
+    then firearm_receipts_test_amount(p, net);
+}
+
+// =====================================================================
+// Section 5881(b) last sentence: related payments are treated as paid in the acquisition
+// =====================================================================
+
+pub relation greenmail_related_transaction_income(e: GreenmailReceiptEvent, amount: Money) kind empirical {
+    label en unofficial "section 5881(b) last sentence: the gain or other income by reason of a payment made in connection with, or in a transaction related to, the acquisition (one item per payment); such a payment is treated as paid in the acquisition";
+}
+pub relation greenmail_total_income(e: GreenmailReceiptEvent, amount: Money) kind institutional {
+    label en official "sections 5881(a), (b): the gain or other income by reason of the receipt, including that by reason of related payments treated as paid in the acquisition";
+}
+@source(IRC_S5881_B, relation = formalizes, coverage = exact, quote = "For purposes of the preceding sentence, payments made in connection with, or in transactions related to, an acquisition shall be treated as paid in such acquisition.")
+rule GreenmailTotalIncome(e: GreenmailReceiptEvent, recipient: Person, gain: Money) strict {
+    when greenmail_receipt(e, recipient, gain);
+    then greenmail_total_income(e, gain + sum(collect all a: Money where greenmail_related_transaction_income(e, a), empty: 0.00 USD));
+}
+
+// =====================================================================
+// Section 5891(c)(3)(B): transfers that are not structured settlement factoring transactions
+// =====================================================================
+
+pub relation structured_settlement_blanket_security_interest_without_redirection(e: StructuredSettlementFactoringEvent) kind empirical {
+    label en unofficial "section 5891(c)(3)(B)(i): the transfer is the creation or perfection of a security interest under a blanket security agreement with an insured depository institution, with no action to redirect the payments or otherwise to enforce the interest against the payment rights";
+}
+pub relation structured_settlement_subsequent_transfer_of_acquired_rights(e: StructuredSettlementFactoringEvent) kind empirical {
+    label en unofficial "section 5891(c)(3)(B)(ii): the transfer is a subsequent transfer of structured settlement payment rights acquired in a structured settlement factoring transaction";
+}
+pub relation structured_settlement_excluded_from_factoring(e: StructuredSettlementFactoringEvent) kind institutional {
+    label en official "section 5891(c)(3)(B): the transfer is excluded from the term structured settlement factoring transaction";
+}
+@source(IRC_S5891_C, relation = formalizes, coverage = exact, quote = "the creation or perfection of a security interest in structured settlement payment rights under a blanket security agreement entered into with an insured depository institution in the absence of any action to redirect the structured settlement payments to such institution")
+rule StructuredSettlementBlanketSecurityExcluded(e: StructuredSettlementFactoringEvent) strict {
+    when structured_settlement_blanket_security_interest_without_redirection(e);
+    then structured_settlement_excluded_from_factoring(e);
+}
+@source(IRC_S5891_C, relation = formalizes, coverage = exact, quote = "a subsequent transfer of structured settlement payment rights acquired in a structured settlement factoring transaction.")
+rule StructuredSettlementSubsequentTransferExcluded(e: StructuredSettlementFactoringEvent) strict {
+    when structured_settlement_subsequent_transfer_of_acquired_rights(e);
+    then structured_settlement_excluded_from_factoring(e);
+}

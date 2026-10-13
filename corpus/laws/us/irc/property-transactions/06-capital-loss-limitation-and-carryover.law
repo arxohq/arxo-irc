@@ -1,0 +1,224 @@
+// Section 1211 (limitation on capital losses) and section 1212
+// (capital loss carrybacks and carryovers).
+//
+// SIMPLIFICATION: section 1212(a) (corporate 3-year carryback / 5-year
+// carryover, foreign-expropriation-loss and RIC exceptions) and section
+// 1212(c) (section 1256 contracts loss carryback, 60/40 character) are
+// EXTERNAL_DEPENDENCY-flavoured classification, not fully executable this
+// stage — the priority instruction calls out "individuals unlimited
+// carryforward with the character rules" as the section 1212 item to do
+// fully; that is modelled below in full. The corporate and section 1256
+// branches are declared (shapes only) and flagged TECH_GAP in the coverage
+// notes.
+
+// --- Section 1211: limitation on capital losses -----------------------------
+
+use self::{
+    FederalRateClass,
+    IRC_S1211_A,
+    IRC_S1211_B,
+    IRC_S1212_B,
+    Person,
+    TaxableYear,
+    long_term_capital_gain,
+    long_term_capital_loss,
+    net_long_term_capital_gain,
+    net_long_term_capital_loss,
+    net_short_term_capital_gain,
+    net_short_term_capital_loss,
+    short_term_capital_gain,
+    short_term_capital_loss,
+};
+
+pub relation corporation_taxpayer(p: Person) kind institutional {
+    label en unofficial "the taxpayer is a corporation, for purposes of the section 1211(a)/(b) distinction (owner: definitions/us.irc.core subtype test; asserted here directly pending that typed dependency)";
+}
+pub relation capital_losses_for_year(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "the sum of section 1222 short-term and long-term capital losses for the taxable year (before the section 1211 limitation)";
+}
+rule CapitalLossesForYearRule(p: Person, y: TaxableYear, st_loss: Money, lt_loss: Money) defeasible {
+    label en unofficial "aggregates the year's short-term and long-term capital losses";
+    when short_term_capital_loss(p, y, st_loss);
+    when long_term_capital_loss(p, y, lt_loss);
+    then capital_losses_for_year(p, y, st_loss + lt_loss);
+}
+pub relation capital_gains_for_year(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "the sum of section 1222 short-term and long-term capital gains for the taxable year";
+}
+rule CapitalGainsForYearRule(p: Person, y: TaxableYear, st_gain: Money, lt_gain: Money) defeasible {
+    label en unofficial "aggregates the year's short-term and long-term capital gains";
+    when short_term_capital_gain(p, y, st_gain);
+    when long_term_capital_gain(p, y, lt_gain);
+    then capital_gains_for_year(p, y, st_gain + lt_gain);
+}
+
+pub relation capital_loss_allowed(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 1211: the amount of capital losses allowed for the taxable year";
+}
+@source(IRC_S1211_A, quote = "In the case of a corporation, losses from sales or exchanges of capital assets shall be allowed only to the extent of gains from such sales or exchanges.")
+rule CorporateCapitalLossLimitationRule(p: Person, y: TaxableYear, losses: Money, gains: Money) defeasible {
+    label en official "section 1211(a): a corporation's capital losses are allowed only to the extent of capital gains";
+    when corporation_taxpayer(p);
+    when capital_losses_for_year(p, y, losses);
+    when capital_gains_for_year(p, y, gains);
+    when losses <= gains;
+    then capital_loss_allowed(p, y, losses);
+}
+rule CorporateCapitalLossLimitationExcessDisallowedRule(p: Person, y: TaxableYear, losses: Money, gains: Money) defeasible {
+    label en official "section 1211(a): a corporation's capital losses in excess of gains are disallowed for the year (carried under section 1212(a) instead)";
+    when corporation_taxpayer(p);
+    when capital_losses_for_year(p, y, losses);
+    when capital_gains_for_year(p, y, gains);
+    when losses > gains;
+    then capital_loss_allowed(p, y, gains);
+}
+
+pub const IndividualCapitalLossFloor: Money = 3000.00 USD {
+    label en official "$3,000 (section 1211(b)(1))";
+};
+pub const MarriedFilingSeparateCapitalLossFloor: Money = 1500.00 USD {
+    label en official "$1,500 in the case of a married individual filing a separate return (section 1211(b)(1))";
+};
+pub relation married_filing_separately(p: Person, y: TaxableYear) kind institutional {
+    label en unofficial "the individual is a married individual filing a separate return for the year; derived from `us.irc.income_individual::filing_status` (MarriedSeparate) in 53-wire9-owner-contracts.law, a case may still assert it directly";
+}
+
+@source(IRC_S1211_B, quote = "In the case of a taxpayer other than a corporation, losses from sales or exchanges of capital assets shall be allowed only to the extent of the gains from such sales or exchanges, plus (if such losses exceed such gains) the lower of—")
+rule IndividualCapitalLossLimitationWithinGainsRule(p: Person, y: TaxableYear, losses: Money, gains: Money) defeasible {
+    label en official "section 1211(b): an individual's capital losses not exceeding capital gains are fully allowed (the ordinary ceiling)";
+    when not_known(corporation_taxpayer(p));
+    when capital_losses_for_year(p, y, losses);
+    when capital_gains_for_year(p, y, gains);
+    when losses <= gains;
+    then capital_loss_allowed(p, y, losses);
+}
+rule IndividualCapitalLossLimitationExcessUpToFloorRule(p: Person, y: TaxableYear, losses: Money, gains: Money) defeasible {
+    label en official "section 1211(b)(1)-(2): an individual's excess capital losses over gains are additionally allowed up to the lower of the $3,000/$1,500 floor or the excess itself";
+    when not_known(corporation_taxpayer(p));
+    when capital_losses_for_year(p, y, losses);
+    when capital_gains_for_year(p, y, gains);
+    when losses > gains;
+    when not_known(married_filing_separately(p, y));
+    then capital_loss_allowed(p, y, gains + min(IndividualCapitalLossFloor, losses - gains));
+}
+rule IndividualCapitalLossLimitationExcessUpToFloorMfsRule(p: Person, y: TaxableYear, losses: Money, gains: Money) defeasible {
+    label en official "section 1211(b)(1): the floor is $1,500, not $3,000, for a married individual filing separately";
+    when not_known(corporation_taxpayer(p));
+    when capital_losses_for_year(p, y, losses);
+    when capital_gains_for_year(p, y, gains);
+    when losses > gains;
+    when married_filing_separately(p, y);
+    then capital_loss_allowed(p, y, gains + min(MarriedFilingSeparateCapitalLossFloor, losses - gains));
+}
+
+// --- Section 1212(a): corporate carryback/carryover (shape only) -----------
+// TECH_GAP / not fully modelled this stage: the 3-year carryback / 5-year
+// (or 10-year, foreign-expropriation) carryover ordering, the RIC/REIT
+// carryback exception, and the "earliest year first" absorption ordering
+// are declared as shapes on `us.irc.core::Carryover` but not computed here.
+pub relation corporate_net_capital_loss(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "section 1212(a): a corporation's net capital loss for the loss year — TECH_GAP: the carryback/carryover schedule itself (3 years back, 5 forward, 10 for foreign-expropriation losses, RIC/REIT carryback exception, earliest-year-first absorption) is not computed this stage";
+}
+
+// --- Section 1212(b): individual carryover (fully modelled) -----------------
+
+// The taxpayer/scenario asserts a `us.irc.core::Carryover` entity `c` linking
+// the loss year to the next taxable year (`carryover_from_year`/
+// `carryover_to_year`), which these rules read to place the carried loss in
+// the RIGHT year without hard-coding "add one year" (a taxable year is not
+// a fixed-length calendar unit — see `us.irc.core`). Every variable below is
+// bound by an ordinary positive `when` clause (never left unbound inside a
+// `not_known`, per the LDC-E4101 range-restriction rule): the "no
+// offsetting gain" rules use a dedicated guard relation instead of an
+// unbound placeholder argument.
+relation has_net_long_term_capital_gain(p: Person, y: TaxableYear) kind institutional {
+    label en unofficial "guard: a net long-term capital gain exists for the year";
+}
+rule HasNetLongTermCapitalGainRule(p: Person, y: TaxableYear, amount: Money) defeasible {
+    label en unofficial "derives the guard from the asserted/derived amount";
+    when net_long_term_capital_gain(p, y, amount);
+    then has_net_long_term_capital_gain(p, y);
+}
+relation has_net_short_term_capital_gain(p: Person, y: TaxableYear) kind institutional {
+    label en unofficial "guard: a net short-term capital gain exists for the year";
+}
+rule HasNetShortTermCapitalGainRule(p: Person, y: TaxableYear, amount: Money) defeasible {
+    label en unofficial "derives the guard from the asserted/derived amount";
+    when net_short_term_capital_gain(p, y, amount);
+    then has_net_short_term_capital_gain(p, y);
+}
+
+// NOTE ON DESIGN: the carryover conclusion below is `pub relation
+// capital_loss_carryover(...)`, a DEDICATED relation — NOT a further
+// `short_term_capital_loss`/`long_term_capital_loss` fact for the next
+// year. Concluding next year's `short_term_capital_loss` directly (so that
+// a SECOND carryover computation could chain from it into a third year)
+// would make `short_term_capital_loss` depend on itself by predicate name
+// across years, the same LDC-E4102 class of self-loop flagged for
+// `acquired_on` in module 05 (the engine's dependency graph is predicate-
+// level, not keyed by the taxable-year argument, so it cannot see that the
+// year-to-year chain is acyclic in fact). `capital_loss_carryover` is a
+// terminal, one-hop-safe fact: PLAN §7's probe scenario (basis → gain/loss
+// → carryover to the NEXT year, asserted as a relation between the two
+// years) is exactly this shape. Chaining a carryover THROUGH a second
+// carryover (three or more consecutive loss years) is TECH_GAP, same
+// class as the acquired_on tacking chain.
+pub enum CapitalLossCharacter {
+    ShortTerm;
+    LongTerm;
+    label en unofficial "whether a carried-over capital loss retains short-term or long-term character (section 1212(b)(1))";
+}
+pub relation capital_loss_carryover(p: Person, from_year: TaxableYear, to_year: TaxableYear, character: CapitalLossCharacter, amount: Money) kind institutional {
+    label en official "section 1212(b): the amount and character of a capital loss carried over from one taxable year to the next (individuals: unlimited carryforward)";
+}
+
+@source(IRC_S1212_B, quote = "the excess of the net short-term capital loss over the net long-term capital gain for such year shall be a short-term capital loss in the succeeding taxable year")
+rule ShortTermLossCarryoverToNextYearRule(p: Person, y: TaxableYear, next_y: TaxableYear, c: us.irc.core::Carryover, st_loss: Money, lt_gain: Money) defeasible {
+    label en official "section 1212(b)(1)(A): the excess of net short-term capital loss over net long-term capital gain is a short-term capital loss in the succeeding taxable year";
+    when not_known(corporation_taxpayer(p));
+    when net_short_term_capital_loss(p, y, st_loss);
+    when net_long_term_capital_gain(p, y, lt_gain);
+    when st_loss > lt_gain;
+    when us.irc.core::carryover_from_year(c, y);
+    when us.irc.core::carryover_to_year(c, next_y);
+    then capital_loss_carryover(p, y, next_y, ShortTerm, st_loss - lt_gain);
+}
+rule ShortTermLossCarryoverNoOffsettingGainRule(p: Person, y: TaxableYear, next_y: TaxableYear, c: us.irc.core::Carryover, st_loss: Money) defeasible {
+    label en official "section 1212(b)(1)(A): with no offsetting net long-term capital gain, the entire net short-term capital loss carries over as a short-term capital loss";
+    when not_known(corporation_taxpayer(p));
+    when net_short_term_capital_loss(p, y, st_loss);
+    when not_known(has_net_long_term_capital_gain(p, y));
+    when us.irc.core::carryover_from_year(c, y);
+    when us.irc.core::carryover_to_year(c, next_y);
+    then capital_loss_carryover(p, y, next_y, ShortTerm, st_loss);
+}
+@source(IRC_S1212_B, quote = "the excess of the net long-term capital loss over the net short-term capital gain for such year shall be a long-term capital loss in the succeeding taxable year")
+rule LongTermLossCarryoverToNextYearRule(p: Person, y: TaxableYear, next_y: TaxableYear, c: us.irc.core::Carryover, lt_loss: Money, st_gain: Money) defeasible {
+    label en official "section 1212(b)(1)(B): the excess of net long-term capital loss over net short-term capital gain is a long-term capital loss in the succeeding taxable year";
+    when not_known(corporation_taxpayer(p));
+    when net_long_term_capital_loss(p, y, lt_loss);
+    when net_short_term_capital_gain(p, y, st_gain);
+    when lt_loss > st_gain;
+    when us.irc.core::carryover_from_year(c, y);
+    when us.irc.core::carryover_to_year(c, next_y);
+    then capital_loss_carryover(p, y, next_y, LongTerm, lt_loss - st_gain);
+}
+rule LongTermLossCarryoverNoOffsettingGainRule(p: Person, y: TaxableYear, next_y: TaxableYear, c: us.irc.core::Carryover, lt_loss: Money) defeasible {
+    label en official "section 1212(b)(1)(B): with no offsetting net short-term capital gain, the entire net long-term capital loss carries over as a long-term capital loss";
+    when not_known(corporation_taxpayer(p));
+    when net_long_term_capital_loss(p, y, lt_loss);
+    when not_known(has_net_short_term_capital_gain(p, y));
+    when us.irc.core::carryover_from_year(c, y);
+    when us.irc.core::carryover_to_year(c, next_y);
+    then capital_loss_carryover(p, y, next_y, LongTerm, lt_loss);
+}
+
+// section 1212(b)(1)'s carried loss is, in the succeeding year, "a
+// short-term [or long-term] capital loss" — i.e., it feeds section 1222's
+// aggregates for that year. This module exposes it as a SEPARATE relation
+// (above) rather than re-deriving `short_term_capital_loss`/
+// `long_term_capital_loss` for the reason given in the design note; a
+// scenario computing the SUCCEEDING year's total allowable loss combines
+// `short_term_capital_loss`/`long_term_capital_loss` (module 05, that
+// year's own transactions) with `capital_loss_carryover` (this relation)
+// directly in its `expect` — the two are not silently pre-merged.

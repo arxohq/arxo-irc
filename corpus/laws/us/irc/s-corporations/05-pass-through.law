@@ -1,0 +1,170 @@
+// Section 1366 — Pass-thru of items to shareholders; section 1377(a) — the
+// per-share-per-day pro rata share formula.
+//
+// SCOPE: (a)(1)-(2) separately stated items and nonseparately computed
+// income/loss, passed through per shareholder's pro rata share; (b)
+// character pass-through (classification only); (c) gross income
+// inclusion; (d)(1)-(2) loss/deduction limited to stock+debt basis with
+// carryover; (d)(3) post-termination transition period loss allowance;
+// (e) family-services adjustment as the Secretary's institutional
+// adjustment; (f)(1)-(3) special rules (fuel credit exclusion, §1374/§1375
+// tax treated as a loss/passive-income reduction).
+//
+// SIMPLIFICATION (recorded once): the true section 1366(a)(1)(A) list is
+// MANY separately stated items, each keeping its own character under (b).
+// This stage buckets them into ONE `pro_rata_share_separately_stated`
+// amount per shareholder per year (a net figure), rather than one relation
+// per item type — TECH-GAPS.md G46: per-item character preservation across
+// an open-ended item list is not modeled. Ownership is also taken as
+// CONSTANT for the whole taxable year (shares/total shares as of the year's
+// first day), not the true section 1377(a)(1) day-by-day allocation over a
+// year with transfers — TECH-GAPS.md G46, same class as G1's day-by-day
+// ledger gap. A scenario with a mid-year transfer is TECH_GAP, not modeled.
+
+// --- (a)(2): nonseparately computed income or loss ------------------------
+
+use self::{
+    Corporation,
+    IRC_S1366_A,
+    IRC_S1366_D,
+    IRC_S1377_A,
+    Person,
+    TaxableYear,
+    loss_limitation_ceiling_effective,
+    next_taxable_year,
+    separately_stated_items_itemized,
+    shareholder_stock_basis,
+    shares_held,
+    shares_outstanding,
+};
+
+pub relation corporation_gross_income(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the S corporation's gross income for y, before excluding section 1366(a)(1)(A) items; case-asserted pending a gross-income-package contract";
+}
+pub relation corporation_deductions_excluding_separately_stated(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the S corporation's deductions allowed under chapter 1 for y, excluding all section 1366(a)(1)(A) items (section 1366(a)(2)); case-asserted pending a deductions-package contract";
+}
+pub relation nonseparately_computed_income_or_loss(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "gross income minus the deductions allowed the corporation, excluding section 1366(a)(1)(A) items (section 1366(a)(2))";
+}
+@source(IRC_S1366_A, quote = "gross income minus the deductions allowed to the corporation under this chapter")
+rule NonseparatelyComputedIncomeOrLoss strict {
+    for c: Corporation; for y: TaxableYear; for gi: Money; for ded: Money;
+    when corporation_gross_income(c, y, gi);
+    when corporation_deductions_excluding_separately_stated(c, y, ded);
+    then nonseparately_computed_income_or_loss(c, y, gi - ded);
+}
+
+// --- (a)(1): pro rata share (§1377(a)(1) formula, year-constant ownership) ---
+
+pub relation corporation_separately_stated_items_net(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the net of the S corporation's section 1366(a)(1)(A) separately stated items (income, loss, deduction, credit whose separate treatment could affect a shareholder's tax) for y; case-asserted, bucketed net (see module note)";
+}
+pub relation shareholder_ownership_fraction(sh: Person, c: Corporation, y: TaxableYear, fraction: Decimal) kind institutional {
+    label en official "sh's shares divided by total shares outstanding, taken at the start of y (section 1377(a)(1), year-constant simplification, see module note)";
+}
+rule ShareholderOwnershipFraction strict {
+    for sh: Person; for c: Corporation; for y: TaxableYear; for d0: Date; for shares: Decimal; for total: Decimal;
+    when us.irc.core::begins(y, d0);
+    when shares_held(sh, c, d0, shares);
+    when shares_outstanding(c, d0, total);
+    when total > 0.00;
+    then shareholder_ownership_fraction(sh, c, y, div_round(shares, total, 6, "HALF_UP"));
+}
+pub relation pro_rata_share_nonseparately(sh: Person, c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "sh's pro rata share of the corporation's nonseparately computed income or loss for y (sections 1366(a)(1)(B), 1377(a)(1))";
+}
+@source(IRC_S1377_A, quote = "each shareholder's pro rata share of any item for any taxable year shall be the sum of the amounts determined with respect to the shareholder")
+rule ProRataShareNonseparately strict {
+    for sh: Person; for c: Corporation; for y: TaxableYear; for total: Money; for fraction: Decimal;
+    when nonseparately_computed_income_or_loss(c, y, total);
+    when shareholder_ownership_fraction(sh, c, y, fraction);
+    then pro_rata_share_nonseparately(sh, c, y, total * fraction);
+}
+pub relation pro_rata_share_separately_stated(sh: Person, c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "sh's pro rata share of the corporation's net separately stated items for y (sections 1366(a)(1)(A), 1377(a)(1))";
+}
+@source(IRC_S1366_A, quote = "there shall be taken into account the shareholder's pro rata share")
+rule ProRataShareSeparatelyStated strict {
+    for sh: Person; for c: Corporation; for y: TaxableYear; for total: Money; for fraction: Decimal;
+    when corporation_separately_stated_items_net(c, y, total);
+    when shareholder_ownership_fraction(sh, c, y, fraction);
+    when not_known(separately_stated_items_itemized(c, y));
+    then pro_rata_share_separately_stated(sh, c, y, total * fraction);
+}
+
+// --- (c): gross income inclusion -------------------------------------------
+
+pub relation shareholder_gross_income_includes_pro_rata_share(sh: Person, c: Corporation, y: TaxableYear) kind institutional {
+    label en official "the shareholder's gross income includes the shareholder's pro rata share of the corporation's gross income, where necessary to determine the shareholder's own gross income (section 1366(c))";
+}
+rule ShareholderGrossIncomeIncludesProRataShare strict {
+    for sh: Person; for c: Corporation; for y: TaxableYear; for fraction: Decimal;
+    when shareholder_ownership_fraction(sh, c, y, fraction);
+    then shareholder_gross_income_includes_pro_rata_share(sh, c, y);
+}
+
+// --- (d)(1)-(2): loss/deduction limited to basis, carryover ---------------
+
+pub relation aggregate_loss_or_deduction_share(sh: Person, c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the aggregate amount of the shareholder's pro rata share of losses and deductions for y under subsection (a), before the section 1366(d)(1) basis limitation; the negative part of the separately-stated and nonseparately-computed shares combined (see module note on bucketing)";
+}
+rule AggregateLossOrDeductionShare strict {
+    for sh: Person; for c: Corporation; for y: TaxableYear; for a1: Money; for a2: Money;
+    when pro_rata_share_separately_stated(sh, c, y, a1);
+    when pro_rata_share_nonseparately(sh, c, y, a2);
+    when a1 + a2 < 0.00 USD;
+    then aggregate_loss_or_deduction_share(sh, c, y, 0.00 USD - (a1 + a2));
+}
+pub relation shareholder_debt_basis(sh: Person, c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the shareholder's adjusted basis of indebtedness of the S corporation to the shareholder, for the section 1366(d)(1)(B) limitation (see 06-basis.law for the general debt-basis-restoration rule of section 1367(b)(2))";
+}
+pub relation loss_limitation_ceiling(sh: Person, c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the sum of the shareholder's stock basis and debt basis for y — the section 1366(d)(1) ceiling on losses and deductions taken into account";
+}
+@source(IRC_S1366_D, quote = "shall not exceed the sum of")
+rule LossLimitationCeiling defeasible {
+    for sh: Person; for c: Corporation; for y: TaxableYear; for stockBasis: Money; for debtBasis: Money;
+    when shareholder_stock_basis(sh, c, y, stockBasis);
+    when shareholder_debt_basis(sh, c, y, debtBasis);
+    then loss_limitation_ceiling(sh, c, y, stockBasis + debtBasis);
+}
+pub relation shareholder_loss_allowed(sh: Person, c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the amount of the aggregate loss/deduction share actually allowed for y, after the section 1366(d)(1) basis ceiling";
+}
+@source(IRC_S1366_D, quote = "The aggregate amount of losses and deductions taken into account by a shareholder under subsection (a) for any taxable year shall not exceed the sum of")
+rule ShareholderLossAllowedWithinCeiling defeasible {
+    label en official "the loss/deduction share is allowed in full when it does not exceed the basis ceiling (section 1366(d)(1))";
+    for sh: Person; for c: Corporation; for y: TaxableYear; for loss: Money; for ceiling: Money;
+    when aggregate_loss_or_deduction_share(sh, c, y, loss);
+    when loss_limitation_ceiling_effective(sh, c, y, ceiling);
+    when loss <= ceiling;
+    then shareholder_loss_allowed(sh, c, y, loss);
+}
+@source(IRC_S1366_D, quote = "any loss or deduction which is disallowed for any taxable year by reason of paragraph (1) shall be treated as incurred by the corporation in the succeeding taxable year with respect to that shareholder")
+rule ShareholderLossAllowedAtCeiling defeasible {
+    label en official "only the ceiling amount is allowed when the loss/deduction share exceeds it; the excess carries to the succeeding year (section 1366(d)(1)-(2)(A))";
+    for sh: Person; for c: Corporation; for y: TaxableYear; for loss: Money; for ceiling: Money;
+    when aggregate_loss_or_deduction_share(sh, c, y, loss);
+    when loss_limitation_ceiling_effective(sh, c, y, ceiling);
+    when loss > ceiling;
+    then shareholder_loss_allowed(sh, c, y, ceiling);
+}
+pub relation shareholder_loss_carryover(sh: Person, c: Corporation, from_year: TaxableYear, to_year: TaxableYear, amount: Money) kind institutional {
+    label en official "the section 1366(d)(1) excess loss/deduction carried, indefinitely, to the succeeding year with respect to that shareholder (section 1366(d)(2)(A))";
+}
+rule ShareholderLossCarryoverToNextYear defeasible {
+    for sh: Person; for c: Corporation; for y: TaxableYear; for nextY: TaxableYear; for loss: Money; for ceiling: Money;
+    when aggregate_loss_or_deduction_share(sh, c, y, loss);
+    when loss_limitation_ceiling_effective(sh, c, y, ceiling);
+    when loss > ceiling;
+    when next_taxable_year(y, nextY);
+    then shareholder_loss_carryover(sh, c, y, nextY, loss - ceiling);
+}
+// (d)(2)(B) (a section 1041(a) transfer redirects the carryover), (d)(3)
+// (the post-termination transition period allowance) and (d)(4) (the
+// charitable-contribution carve-out) are stage 3 (26.09.2026): see
+// `loss_carryover_treated_as_incurred_for`, `loss_treated_as_incurred_in_pttp`
+// and `loss_limitation_ceiling_effective` in
+// 13-taxes-carryovers-and-accounts.law, which the three rules above now read
+// for the (d)(4) ceiling.

@@ -1,0 +1,606 @@
+// 26 U.S.C. §2056(b)(1)-(10), (c), (d) — the rest of the estate-tax marital
+// deduction: the terminable-interest rule with its exceptions ((b)(3)
+// survivorship, (b)(5)/(b)(6) life estate or insurance with a power of
+// appointment, (b)(7) QTIP components and the survivor-annuity deemed
+// election, (b)(8) charitable remainder trust), the value adjustments of
+// (b)(2) and (b)(4), the double-deduction bar (b)(9), the "passing from the
+// decedent" definition (c), and the noncitizen-spouse rule (d).
+// Stage 2 (DECISION-0379 with deontics) of `us.irc.estate_gift` (B01/IRC-11).
+// The qualified domestic trust itself (§2056A) is 18-qdot-2056a.law.
+//
+// DESIGN. Stage 1 (04-deductions.law) computed the deduction from case-asserted
+// `interest_passes_to_surviving_spouse` and gated it by
+// `disqualified_terminable_interest`. This module refines the gate, not the
+// facts: `terminable_interest_effective` (after the (b)(1) bond sentence and the
+// (b)(3) survivorship exception), `other_person_interest_2056b1` (after the (c)
+// definition), and one exception relation `terminable_interest_exception_2056b`
+// collecting every subsection (b) exception. The amount is
+// `marital_deductible_value`, the passing value less the (b)(2) unidentified
+// pool and the (b)(4) tax and encumbrance effects.
+//
+// JUDGMENT CALLS (each is also in the coverage row of the sentence it touches):
+//  - Power-of-appointment tests ((b)(5), (b)(6), (b)(7)(B)(ii)) are stated over
+//    case-asserted booleans about the instrument (who holds which power, alone
+//    and in all events). The construction of the instrument is not derived.
+//  - "Specific portion" ((b)(10)) is a classification of HOW a portion is
+//    described (fraction or percentage). The case asserts the basis; a portion
+//    described on any other basis does not satisfy (b)(5)-(7).
+//  - (b)(4)(A)/(B) amounts (effect of taxes and encumbrances on net value) are
+//    case-asserted amounts, exactly like other appraised values in this package.
+//  - The noncitizen bar reads the citizenship of the surviving spouse from
+//    `us.irc.definitions::citizen_of_united_states` and applies only on an
+//    asserted negation: an unknown citizenship gives the deduction no bar
+//    (unknown is not negative, AGENT-BRIEF).
+
+language "law.core" version "0.2";
+package us.irc.estate_gift version "0.1.1";
+namespace "urn:us:irc:estate_gift:clir";
+
+use self::{
+    Asset,
+    Estate,
+    IRC_S2056_B,
+    IRC_S2056_C,
+    IRC_S2056_D,
+    Individual,
+    Person,
+    Secretary,
+    Trust,
+    alternate_valuation_adjustment_2032b,
+    alternate_valuation_elected,
+    charitable_deduction_item_2055,
+    date_of_death,
+    disqualified_terminable_interest,
+    executor_of,
+    interest_passes_to_surviving_spouse,
+    marital_deduction_item_2056,
+    other_person_may_possess_after_termination,
+    qdot_election_effective,
+    qtip_election_validly_makeable,
+    qtip_saved,
+    surviving_spouse_of,
+    terminable_interest,
+    trust_qualifies_as_qdot_2056a,
+};
+
+// --- Return dates shared by (d) and by 18-qdot-2056a.law -------------------
+
+pub relation estate_return_filed_on(e: Estate, d: Date) kind empirical {
+    label en unofficial "the return of the tax imposed by section 2001 was made (filed) on the stated date";
+}
+pub relation estate_return_due_date_with_extensions(e: Estate, d: Date) kind empirical {
+    label en unofficial "the due date of the return of the tax imposed by section 2001, determined with regard to extensions";
+}
+
+// --- (c): "passing from the decedent" ---------------------------------------
+
+pub enum PassingMode {
+    BequeathedOrDevised;              // (c)(1)
+    Inherited;                        // (c)(2)
+    DowerCurtesyOrStatutoryInLieu;    // (c)(3)
+    TransferredByDecedent;            // (c)(4)
+    JointOwnershipWithSurvivorship;   // (c)(5)
+    PowerOfAppointmentExerciseOrDefault; // (c)(6)
+    LifeInsuranceProceeds;            // (c)(7)
+}
+
+@source(IRC_S2056_C, relation = formalizes, coverage = exact, quote = "an interest in property shall be considered as passing from the decedent to any person if and only if")
+pub relation interest_passes_from_decedent_by_mode(e: Estate, item: Asset, recipient: Person, mode: PassingMode) kind empirical {
+    label en official "the interest in item passes from the decedent to the recipient by the stated one of the seven modes of section 2056(c)(1)-(7)";
+}
+@source(IRC_S2056_C, relation = formalizes, coverage = exact, quote = "an interest in property shall be considered as passing from the decedent to any person if and only if")
+pub relation interest_passes_from_decedent(e: Estate, item: Asset, recipient: Person) kind institutional {
+    label en official "the interest in item passes from the decedent to the recipient: it does so if and only if one of the modes (c)(1)-(7) applies";
+}
+rule InterestPassesFromDecedentRule(e: Estate, item: Asset, recipient: Person, mode: PassingMode) defeasible {
+    label en official "an interest is considered as passing from the decedent to a person if it does so by any of the seven listed modes (section 2056(c))";
+    when interest_passes_from_decedent_by_mode(e, item, recipient, mode);
+    then interest_passes_from_decedent(e, item, recipient);
+}
+
+@source(IRC_S2056_C, relation = formalizes, coverage = exact, quote = "where at the time of the decedent's death it is not possible to ascertain the particular person or persons to whom an interest in property may pass from the decedent")
+pub relation passing_person_unascertainable_at_death(e: Estate, item: Asset) kind empirical {
+    label en official "at the time of the decedent's death it is not possible to ascertain the particular person or persons to whom the interest in item may pass from the decedent (section 2056(c), last sentence)";
+}
+
+// The spouse side of the same definition is the stage-1 fact
+// `interest_passes_to_surviving_spouse(e, item, amount)`. The bridge below
+// makes the (c) test executable for the spouse: the amount is asserted by the
+// case; this rule checks that the interest passes by one of the seven modes.
+pub relation interest_passes_to_surviving_spouse_by_2056c(e: Estate, item: Asset) kind institutional {
+    label en unofficial "the interest in item passes from the decedent to the surviving spouse by one of the section 2056(c) modes";
+}
+rule InterestPassesToSurvivingSpouseBy2056cRule(e: Estate, item: Asset, s: Individual) defeasible {
+    when surviving_spouse_of(e, s);
+    when interest_passes_from_decedent(e, item, s);
+    then interest_passes_to_surviving_spouse_by_2056c(e, item);
+}
+
+// --- (b)(1): the bond sentence, the executor-acquired interest --------------
+
+@source(IRC_S2056_B, relation = formalizes, coverage = exact, quote = "an interest shall not be considered as an interest which will terminate or fail merely because it is the ownership of a bond, note, or similar contractual obligation, the discharge of which would not have the effect of an annuity for life or for a term")
+pub relation interest_is_bond_note_or_similar_obligation(e: Estate, item: Asset) kind empirical {
+    label en official "the interest is the ownership of a bond, note, or similar contractual obligation whose discharge would not have the effect of an annuity for life or for a term (section 2056(b)(1), last sentence)";
+}
+@source(IRC_S2056_B, relation = formalizes, coverage = exact, quote = "if such interest is to be acquired for the surviving spouse, pursuant to directions of the decedent, by his executor or by the trustee of a trust")
+pub relation interest_acquired_on_decedent_directions_by_executor_or_trustee(e: Estate, item: Asset) kind empirical {
+    label en official "the interest is to be acquired for the surviving spouse, pursuant to directions of the decedent, by the executor or by the trustee of a trust (section 2056(b)(1)(C))";
+}
+
+pub relation terminable_interest_effective(e: Estate, item: Asset) kind institutional {
+    label en unofficial "the interest terminates or fails for purposes of section 2056(b)(1): terminable, and neither the bond sentence nor the (b)(3) survivorship exception removes it";
+}
+rule TerminableInterestEffectiveRule(e: Estate, item: Asset) defeasible {
+    when terminable_interest(e, item);
+    when not_known(interest_is_bond_note_or_similar_obligation(e, item));
+    when not_known(survivorship_exception_2056b3(e, item));
+    then terminable_interest_effective(e, item);
+}
+
+pub relation other_person_interest_2056b1(e: Estate, item: Asset) kind institutional {
+    label en unofficial "an interest in the same property passes (or is treated as passing) to a person other than the surviving spouse who may possess or enjoy it after termination (section 2056(b)(1)(A)-(B), read with the last sentence of subsection (c))";
+}
+rule OtherPersonInterestAssertedRule(e: Estate, item: Asset) defeasible {
+    when other_person_may_possess_after_termination(e, item);
+    then other_person_interest_2056b1(e, item);
+}
+rule OtherPersonInterestUnascertainableRule(e: Estate, item: Asset) defeasible {
+    label en official "where the recipient cannot be ascertained at death the interest is considered as passing to a person other than the surviving spouse (section 2056(c), last sentence); paragraphs (5) and (6) are excepted through terminable_interest_exception_2056b";
+    when passing_person_unascertainable_at_death(e, item);
+    then other_person_interest_2056b1(e, item);
+}
+
+@source(IRC_S2056_B, relation = formalizes, coverage = exact, quote = "no deduction shall be allowed with respect to such interest (even if such deduction is not disallowed under subparagraphs (A) and (B))")
+rule DisqualifiedDirectedAcquisitionRule(e: Estate, item: Asset) defeasible {
+    label en official "a terminable interest to be acquired for the spouse on the decedent's directions by the executor or trustee is disqualified even when (A) and (B) are not met (section 2056(b)(1)(C))";
+    when terminable_interest_effective(e, item);
+    when interest_acquired_on_decedent_directions_by_executor_or_trustee(e, item);
+    then disqualified_terminable_interest(e, item);
+}
+
+// --- (b)(3): survival for a limited period ----------------------------------
+
+pub relation survival_condition_period_months(e: Estate, item: Asset, months: Integer) kind empirical {
+    label en unofficial "the surviving spouse's death terminates or fails the interest only if it occurs within the stated number of months after the decedent's death";
+}
+pub relation survival_condition_common_disaster_only(e: Estate, item: Asset) kind empirical {
+    label en unofficial "the surviving spouse's death terminates or fails the interest only if it occurs as a result of a common disaster resulting in the death of the decedent and the surviving spouse";
+}
+pub relation survival_termination_did_not_occur(e: Estate, item: Asset) kind empirical {
+    label en unofficial "the termination or failure of the interest by reason of the spouse's death did not in fact occur (section 2056(b)(3)(B))";
+}
+relation survival_condition_within_limit_2056b3a(e: Estate, item: Asset) kind institutional;
+rule SurvivalConditionWithinSixMonthsRule(e: Estate, item: Asset, months: Integer) defeasible {
+    when survival_condition_period_months(e, item, months) and months <= 6;
+    then survival_condition_within_limit_2056b3a(e, item);
+}
+rule SurvivalConditionCommonDisasterRule(e: Estate, item: Asset) defeasible {
+    when survival_condition_common_disaster_only(e, item);
+    then survival_condition_within_limit_2056b3a(e, item);
+}
+@source(IRC_S2056_B, relation = formalizes, coverage = exact, quote = "an interest passing to the surviving spouse shall not be considered as an interest which will terminate or fail on the death of such spouse if")
+pub relation survivorship_exception_2056b3(e: Estate, item: Asset) kind institutional {
+    label en official "the interest is not treated as terminating on the spouse's death: the death would terminate it only within 6 months or in a common disaster, and the termination did not occur (section 2056(b)(3))";
+}
+rule SurvivorshipException2056b3Rule(e: Estate, item: Asset) defeasible {
+    when survival_condition_within_limit_2056b3a(e, item);
+    when survival_termination_did_not_occur(e, item);
+    then survivorship_exception_2056b3(e, item);
+}
+
+// --- (b)(10) and (b)(7)(B)(iv): specific portion ----------------------------
+
+pub enum PortionBasis {
+    FractionalBasis;
+    PercentageBasis;
+    OtherBasis;
+}
+pub relation specific_portion_of_property(e: Estate, portion: Asset, whole: Asset, basis: PortionBasis) kind empirical {
+    label en unofficial "portion is a portion of whole determined on the stated basis (section 2056(b)(10))";
+}
+@source(IRC_S2056_B, relation = formalizes, coverage = exact, quote = "the term \"specific portion\" only includes a portion determined on a fractional or percentage basis")
+pub relation specific_portion_valid_2056b10(e: Estate, portion: Asset) kind institutional {
+    label en official "the portion is a specific portion: determined on a fractional or percentage basis (section 2056(b)(10))";
+}
+rule SpecificPortionFractionalRule(e: Estate, portion: Asset, whole: Asset) defeasible {
+    when specific_portion_of_property(e, portion, whole, FractionalBasis);
+    then specific_portion_valid_2056b10(e, portion);
+}
+rule SpecificPortionPercentageRule(e: Estate, portion: Asset, whole: Asset) defeasible {
+    when specific_portion_of_property(e, portion, whole, PercentageBasis);
+    then specific_portion_valid_2056b10(e, portion);
+}
+@source(IRC_S2056_B, relation = formalizes, coverage = exact, quote = "A specific portion of property shall be treated as separate property.")
+pub relation separate_property_2056b7(e: Estate, item: Asset) kind institutional {
+    label en official "the specific portion is treated as separate property for the QTIP rules (section 2056(b)(7)(B)(iv)); each such portion is its own Asset in this model";
+}
+rule SeparatePropertyForSpecificPortionRule(e: Estate, portion: Asset) defeasible {
+    when specific_portion_valid_2056b10(e, portion);
+    then separate_property_2056b7(e, portion);
+}
+
+// --- (b)(5): life estate with power of appointment in the spouse ------------
+
+pub relation spouse_entitled_to_all_income_for_life_payable_annually(e: Estate, item: Asset) kind empirical {
+    label en unofficial "the surviving spouse is entitled for life to all the income from the entire interest (or from the specific portion), payable annually or more frequently";
+}
+pub relation spouse_power_to_appoint_in_favor_of_self_or_estate(e: Estate, item: Asset) kind empirical {
+    label en unofficial "the spouse has power to appoint the entire interest (or portion), exercisable in favor of the spouse, of the spouse's estate, or either";
+}
+pub relation spouse_power_exercisable_alone_and_in_all_events(e: Estate, item: Asset) kind empirical {
+    label en unofficial "the spouse's power, by will or during life, is exercisable by the spouse alone and in all events (sections 2056(b)(5), last sentence; (b)(6), last sentence)";
+}
+pub relation other_person_power_to_appoint_to_non_spouse(e: Estate, item: Asset) kind empirical {
+    label en unofficial "some person other than the spouse has a power to appoint any part of the interest to any person other than the spouse";
+}
+pub relation interest_described_as_specific_portion_or_entire(e: Estate, item: Asset) kind empirical {
+    label en unofficial "the interest is the entire interest, or a specific portion of it (whose basis is asserted through specific_portion_of_property)";
+}
+@source(IRC_S2056_B, relation = formalizes, coverage = exact, quote = "if his surviving spouse is entitled for life to all the income from the entire interest, or all the income from a specific portion thereof, payable annually or at more frequent intervals, with power in the surviving spouse to appoint the entire interest, or such specific portion")
+pub relation life_estate_power_of_appointment_2056b5(e: Estate, item: Asset) kind institutional {
+    label en official "paragraph (5) applies: life income to the spouse with a power to appoint alone and in all events, and no power in another person to appoint to a non-spouse";
+}
+rule LifeEstatePowerOfAppointment2056b5EntireRule(e: Estate, item: Asset) defeasible {
+    label en official "paragraph (5) applies to an entire interest";
+    when interest_passes_to_surviving_spouse(e, item, _);
+    when interest_described_as_specific_portion_or_entire(e, item);
+    when spouse_entitled_to_all_income_for_life_payable_annually(e, item);
+    when spouse_power_to_appoint_in_favor_of_self_or_estate(e, item);
+    when spouse_power_exercisable_alone_and_in_all_events(e, item);
+    when not_known(other_person_power_to_appoint_to_non_spouse(e, item));
+    when not_known(portion_not_specific_2056b10(e, item));
+    then life_estate_power_of_appointment_2056b5(e, item);
+}
+relation portion_not_specific_2056b10(e: Estate, item: Asset) kind institutional;
+rule PortionNotSpecificRule(e: Estate, item: Asset, whole: Asset) defeasible {
+    when specific_portion_of_property(e, item, whole, OtherBasis);
+    then portion_not_specific_2056b10(e, item);
+}
+
+// --- (b)(6): insurance or annuity payments with a power ---------------------
+
+pub relation insurance_proceeds_payable_in_installments_or_held_at_interest(e: Estate, item: Asset) kind empirical {
+    label en unofficial "proceeds under a life insurance, endowment or annuity contract are payable in installments or are held by the insurer subject to an agreement to pay interest";
+}
+pub relation insurance_payments_at_least_annual(e: Estate, item: Asset) kind empirical {
+    label en unofficial "the installment or interest payments are payable annually or at more frequent intervals";
+}
+pub relation insurance_first_payment_date(e: Estate, item: Asset, d: Date) kind empirical {
+    label en unofficial "the date on which payments under the contract commence";
+}
+pub relation insurance_amounts_payable_only_to_spouse_during_life(e: Estate, item: Asset) kind empirical {
+    label en unofficial "all amounts (or a specific portion) payable during the life of the surviving spouse are payable only to the spouse";
+}
+relation insurance_payments_commence_within_13_months(e: Estate, item: Asset) kind institutional;
+rule InsurancePaymentsCommenceWithin13MonthsRule(e: Estate, item: Asset, dod: Date, first: Date) defeasible {
+    when date_of_death(e, dod);
+    when insurance_first_payment_date(e, item, first) and first <= add_calendar_period(dod, 13 calendar_month);
+    then insurance_payments_commence_within_13_months(e, item);
+}
+@source(IRC_S2056_B, relation = formalizes, coverage = exact, quote = "commencing not later than 13 months after the decedent's death")
+pub relation insurance_power_of_appointment_2056b6(e: Estate, item: Asset) kind institutional {
+    label en official "paragraph (6) applies: insurance or annuity payments to the spouse with a power of appointment alone and in all events, commencing within 13 months of death";
+}
+rule InsurancePowerOfAppointment2056b6Rule(e: Estate, item: Asset) defeasible {
+    when interest_passes_to_surviving_spouse(e, item, _);
+    when insurance_proceeds_payable_in_installments_or_held_at_interest(e, item);
+    when insurance_payments_at_least_annual(e, item);
+    when insurance_payments_commence_within_13_months(e, item);
+    when insurance_amounts_payable_only_to_spouse_during_life(e, item);
+    when spouse_power_to_appoint_in_favor_of_self_or_estate(e, item);
+    when spouse_power_exercisable_alone_and_in_all_events(e, item);
+    when not_known(other_person_power_to_appoint_to_non_spouse(e, item));
+    then insurance_power_of_appointment_2056b6(e, item);
+}
+
+// --- (b)(7)(B)(ii)-(iii), (C): QTIP components ------------------------------
+
+pub relation spouse_entitled_to_all_income_or_usufruct_for_life(e: Estate, item: Asset) kind empirical {
+    label en unofficial "the surviving spouse is entitled to all the income from the property, payable annually or more frequently, or has a usufruct interest for life (section 2056(b)(7)(B)(ii)(I))";
+}
+pub relation any_person_power_to_appoint_part_to_non_spouse(e: Estate, item: Asset) kind empirical {
+    label en unofficial "some person has a power to appoint any part of the property to a person other than the surviving spouse (section 2056(b)(7)(B)(ii)(II))";
+}
+pub relation appointment_power_exercisable_only_at_or_after_spouse_death(e: Estate, item: Asset) kind empirical {
+    label en unofficial "the power to appoint to a non-spouse is exercisable only at or after the death of the surviving spouse";
+}
+relation disqualifying_power_over_qtip_property(e: Estate, item: Asset) kind institutional;
+rule DisqualifyingPowerOverQtipPropertyRule(e: Estate, item: Asset) defeasible {
+    label en official "subclause (II) does not apply to a power exercisable only at or after the death of the surviving spouse (section 2056(b)(7)(B)(ii), last paragraph)";
+    when any_person_power_to_appoint_part_to_non_spouse(e, item);
+    when not_known(appointment_power_exercisable_only_at_or_after_spouse_death(e, item));
+    then disqualifying_power_over_qtip_property(e, item);
+}
+@source(IRC_S2056_B, relation = formalizes, coverage = exact, quote = "The surviving spouse has a qualifying income interest for life if")
+pub relation qualifying_income_interest_for_life_2056b7(e: Estate, item: Asset) kind institutional {
+    label en official "the spouse has a qualifying income interest for life: all the income (or a usufruct) for life and no disqualifying power to appoint to a non-spouse (section 2056(b)(7)(B)(ii))";
+}
+rule QualifyingIncomeInterestForLife2056b7Rule(e: Estate, item: Asset) defeasible {
+    when spouse_entitled_to_all_income_or_usufruct_for_life(e, item);
+    when not_known(disqualifying_power_over_qtip_property(e, item));
+    then qualifying_income_interest_for_life_2056b7(e, item);
+}
+rule QtipElectionValidlyMakeableFromComponentsRule(e: Estate, item: Asset) defeasible {
+    label en official "qualified terminable interest property: passes from the decedent, the spouse has a qualifying income interest for life (section 2056(b)(7)(B)(i)(I)-(II)); the election itself is the power QtipElection";
+    when interest_passes_to_surviving_spouse_by_2056c(e, item);
+    when qualifying_income_interest_for_life_2056b7(e, item);
+    then qtip_election_validly_makeable(e, item);
+}
+
+// (b)(7)(B)(v): the election is irrevocable. The executor has no power to
+// revoke it: modelled as a prohibition of the act of revoking, with the
+// executor's tenure as the window.
+pub relation executor_revokes_qtip_election(e: Estate, item: Asset, x: Person) kind empirical {
+    label en unofficial "the executor purports to revoke the section 2056(b)(7) election made with respect to item";
+}
+@source(IRC_S2056_B, relation = formalizes, coverage = exact, quote = "Such an election, once made, shall be irrevocable.")
+rule QtipElectionIrrevocableRule(e: Estate, item: Asset, x: Person, w: Interval<Instant>) strict {
+    label en official "a section 2056(b)(7) election, once made, shall be irrevocable: the executor may not revoke it (section 2056(b)(7)(B)(v))";
+    when executor_of(e, x, w);
+    when qtip_saved(e, item);
+    then prohibition QtipElectionRevocationProhibition {
+        bearer x;
+        beneficiary Secretary;
+        action executor_revokes_qtip_election(e, item, x);
+        window w;
+    };
+}
+
+// (b)(7)(C): survivor annuities are treated as qualifying income interests and
+// the executor is deemed to have elected unless he elects otherwise.
+pub relation annuity_included_under_2039_or_community_property_2033(e: Estate, item: Asset) kind empirical {
+    label en unofficial "an annuity included in the gross estate under section 2039 (or, for a community-property annuity interest, under section 2033)";
+}
+pub relation only_surviving_spouse_may_receive_payments_before_spouse_death(e: Estate, item: Asset) kind empirical {
+    label en unofficial "only the surviving spouse has the right to receive payments before the spouse's death";
+}
+pub relation survivor_annuity_election_out_made(e: Estate, item: Asset, x: Person, w: Interval<Instant>) kind empirical {
+    label en unofficial "the executor elects on the return not to have the survivor annuity treated as elected under section 2056(b)(7)(C)(ii)";
+}
+@source(IRC_S2056_B, relation = formalizes, coverage = exact, quote = "the interest of such surviving spouse shall be treated as a qualifying income interest for life")
+pub relation survivor_annuity_2056b7c(e: Estate, item: Asset) kind institutional {
+    label en official "a survivor annuity in the spouse's favor: included under section 2039 (or 2033 community property) and payable only to the spouse before the spouse's death (section 2056(b)(7)(C))";
+}
+rule SurvivorAnnuity2056b7cRule(e: Estate, item: Asset) defeasible {
+    when annuity_included_under_2039_or_community_property_2033(e, item);
+    when only_surviving_spouse_may_receive_payments_before_spouse_death(e, item);
+    then survivor_annuity_2056b7c(e, item);
+}
+rule SurvivorAnnuityQualifyingIncomeInterestRule(e: Estate, item: Asset) defeasible {
+    when survivor_annuity_2056b7c(e, item);
+    then qualifying_income_interest_for_life_2056b7(e, item);
+}
+pub relation survivor_annuity_election_out_effective(e: Estate, item: Asset) kind institutional {
+    label en unofficial "the executor's election out of the deemed section 2056(b)(7)(C)(ii) election is validly exercised (irrevocable once made)";
+}
+@source(IRC_S2056_B, relation = formalizes, coverage = exact, quote = "the executor shall be treated as having made an election under this subsection with respect to such annuity unless the executor otherwise elects on the return of tax imposed by section 2001")
+rule SurvivorAnnuityElectOutPower(e: Estate, item: Asset, x: Person, w: Interval<Instant>) strict {
+    label en official "the executor may otherwise elect on the return, so that no election is deemed made for the survivor annuity (section 2056(b)(7)(C)(ii))";
+    when executor_of(e, x, w);
+    when survivor_annuity_election_out_made(e, item, x, w);
+    then power SurvivorAnnuityElectOut {
+        holder x;
+        over e;
+        exercise survivor_annuity_election_out_made(e, item, x, w);
+        valid_when survivor_annuity_2056b7c(e, item);
+        effect create(survivor_annuity_election_out_effective(e, item));
+        window w;
+    };
+}
+rule SurvivorAnnuityDeemedQtipElectionRule(e: Estate, item: Asset) defeasible {
+    label en official "the executor is treated as having elected QTIP treatment of the survivor annuity unless the executor otherwise elects (section 2056(b)(7)(C)(ii))";
+    when survivor_annuity_2056b7c(e, item);
+    when interest_passes_to_surviving_spouse(e, item, _);
+    when not_known(survivor_annuity_election_out_effective(e, item));
+    then qtip_saved(e, item);
+}
+
+// --- (b)(8): charitable remainder trusts ------------------------------------
+
+pub relation trust_is_charitable_remainder_annuity_or_unitrust(e: Estate, item: Asset) kind empirical {
+    label en unofficial "the trust is a charitable remainder annuity trust or a charitable remainder unitrust described in section 664 (section 2056(b)(8)(B)(iii))";
+}
+pub relation other_noncharitable_non_esop_beneficiary_than_spouse(e: Estate, item: Asset) kind empirical {
+    label en unofficial "the trust has a beneficiary other than the surviving spouse who is neither a charitable beneficiary (an organization described in section 170(c)) nor an ESOP beneficiary (section 2056(b)(8)(B)(i)-(ii))";
+}
+@source(IRC_S2056_B, relation = formalizes, coverage = exact, quote = "If the surviving spouse of the decedent is the only beneficiary of a qualified charitable remainder trust who is not a charitable beneficiary nor an ESOP beneficiary, paragraph (1) shall not apply to any interest in such trust which passes or has passed from the decedent to such surviving spouse.")
+pub relation charitable_remainder_trust_special_rule_2056b8(e: Estate, item: Asset) kind institutional {
+    label en official "paragraph (1) does not apply: the spouse is the only beneficiary of a qualified charitable remainder trust who is not a charitable or ESOP beneficiary (section 2056(b)(8))";
+}
+rule CharitableRemainderTrustSpecialRule2056b8Rule(e: Estate, item: Asset) defeasible {
+    when interest_passes_to_surviving_spouse(e, item, _);
+    when trust_is_charitable_remainder_annuity_or_unitrust(e, item);
+    when not_known(other_noncharitable_non_esop_beneficiary_than_spouse(e, item));
+    then charitable_remainder_trust_special_rule_2056b8(e, item);
+}
+
+// --- Every subsection (b) exception in one relation -------------------------
+
+@source(IRC_S2056_B, relation = formalizes, coverage = partial, quote = "no deduction shall be allowed under this section with respect to such interest")
+pub relation terminable_interest_exception_2056b(e: Estate, item: Asset) kind institutional {
+    label en official "a subsection (b) exception removes the terminable-interest disqualification: QTIP (7), life estate with power (5), insurance with power (6), or charitable remainder trust (8)";
+}
+rule TerminableInterestExceptionQtipRule(e: Estate, item: Asset) defeasible {
+    when qtip_saved(e, item);
+    then terminable_interest_exception_2056b(e, item);
+}
+rule TerminableInterestExceptionLifeEstateRule(e: Estate, item: Asset) defeasible {
+    when life_estate_power_of_appointment_2056b5(e, item);
+    then terminable_interest_exception_2056b(e, item);
+}
+rule TerminableInterestExceptionInsuranceRule(e: Estate, item: Asset) defeasible {
+    when insurance_power_of_appointment_2056b6(e, item);
+    then terminable_interest_exception_2056b(e, item);
+}
+rule TerminableInterestExceptionCrtRule(e: Estate, item: Asset) defeasible {
+    when charitable_remainder_trust_special_rule_2056b8(e, item);
+    then terminable_interest_exception_2056b(e, item);
+}
+
+// --- (b)(2) and (b)(4): value adjustments -----------------------------------
+
+pub relation nondeductible_asset_in_unidentified_pool(e: Estate, item: Asset, pool_asset: Asset, value: Money) kind empirical {
+    label en unofficial "a particular asset out of which (or out of whose proceeds) the interest in item may be satisfied and with respect to which no deduction would be allowed if it passed to the spouse (section 2056(b)(2)), with its value";
+}
+@source(IRC_S2056_B, relation = formalizes, coverage = exact, quote = "the value of such interest passing to such spouse shall, for purposes of subsection (a), be reduced by the aggregate value of such particular assets")
+pub relation unidentified_pool_reduction_2056b2(e: Estate, item: Asset, amount: Money) kind institutional {
+    label en official "the aggregate value of the particular non-deductible assets in the unidentified pool (section 2056(b)(2))";
+}
+rule UnidentifiedPoolReductionRule(e: Estate, item: Asset) defeasible {
+    when nondeductible_asset_in_unidentified_pool(e, item, _, _);
+    then unidentified_pool_reduction_2056b2(e, item, sum(collect all v: Money, a: Asset where nondeductible_asset_in_unidentified_pool(e, item, a, v), empty: 0.00 USD));
+}
+pub relation estate_tax_effect_on_spouse_interest(e: Estate, item: Asset, amount: Money) kind empirical {
+    label en unofficial "the amount by which the tax imposed by section 2001 (or any estate, succession, legacy or inheritance tax), charged against the interest, reduces its net value to the spouse (section 2056(b)(4)(A))";
+}
+pub relation encumbrance_or_obligation_on_spouse_interest(e: Estate, item: Asset, amount: Money) kind empirical {
+    label en unofficial "an encumbrance on the interest, or an obligation imposed by the decedent on the spouse with respect to its passing, taken into account as in the case of a gift (section 2056(b)(4)(B))";
+}
+@source(IRC_S2056_B, relation = formalizes, coverage = exact, quote = "In determining for purposes of subsection (a) the value of any interest in property passing to the surviving spouse for which a deduction is allowed by this section")
+pub relation marital_deductible_value(e: Estate, item: Asset, amount: Money) kind institutional {
+    label en official "the value of the interest passing to the surviving spouse for purposes of the deduction: the passing value less the (b)(2) pool reduction, the (b)(4)(A) tax effect and the (b)(4)(B) encumbrances, never below zero";
+}
+rule MaritalDeductibleValueRule(e: Estate, item: Asset, passing: Money) defeasible {
+    when interest_passes_to_surviving_spouse(e, item, passing);
+    when not_known(alternate_valuation_elected(e));
+    then marital_deductible_value(e, item, max(0.00 USD, passing
+        - sum(collect all v: Money where unidentified_pool_reduction_2056b2(e, item, v), empty: 0.00 USD)
+        - sum(collect all v: Money where estate_tax_effect_on_spouse_interest(e, item, v), empty: 0.00 USD)
+        - sum(collect all v: Money where encumbrance_or_obligation_on_spouse_interest(e, item, v), empty: 0.00 USD)));
+}
+rule MaritalDeductibleValueAlternateValuationRule(e: Estate, item: Asset, passing: Money, inc: Money, dec: Money) defeasible {
+    label en official "under an alternate valuation election the interest is valued at death with adjustment for the difference in value at the alternate date (section 2032(b)(2))";
+    when interest_passes_to_surviving_spouse(e, item, passing);
+    when alternate_valuation_adjustment_2032b(e, item, inc, dec);
+    then marital_deductible_value(e, item, max(0.00 USD, passing + inc - dec
+        - sum(collect all v: Money where unidentified_pool_reduction_2056b2(e, item, v), empty: 0.00 USD)
+        - sum(collect all v: Money where estate_tax_effect_on_spouse_interest(e, item, v), empty: 0.00 USD)
+        - sum(collect all v: Money where encumbrance_or_obligation_on_spouse_interest(e, item, v), empty: 0.00 USD)));
+}
+
+// --- (b)(9): no double deduction --------------------------------------------
+
+@source(IRC_S2056_B, relation = formalizes, coverage = exact, quote = "Nothing in this section or any other provision of this chapter shall allow the value of any interest in property to be deducted under this chapter more than once with respect to the same decedent.")
+pub relation double_deduction_2056b9(e: Estate, item: Asset) kind institutional {
+    label en official "the value of the same interest is claimed under two deduction provisions of this chapter (section 2056(b)(9)); the statute names no order, so both deductions of this item are reported as a conflict and neither is silently preferred";
+}
+rule DoubleDeduction2056b9Rule(e: Estate, item: Asset) defeasible {
+    when marital_deduction_item_2056(e, item, _);
+    when charitable_deduction_item_2055(e, item, _);
+    then double_deduction_2056b9(e, item);
+}
+
+// --- (d): noncitizen surviving spouse ---------------------------------------
+
+pub relation noncitizen_surviving_spouse_2056d(e: Estate) kind institutional {
+    label en official "the surviving spouse of the decedent is not a citizen of the United States (section 2056(d)(1)); derived only from an asserted negation of citizenship";
+}
+rule NoncitizenSurvivingSpouseRule(e: Estate, s: Individual) defeasible {
+    when surviving_spouse_of(e, s);
+    when not us.irc.definitions::citizen_of_united_states(s);
+    then noncitizen_surviving_spouse_2056d(e);
+}
+
+pub relation spouse_became_citizen_before_return_and_resident_since_death(e: Estate) kind empirical {
+    label en unofficial "the surviving spouse becomes a citizen of the United States before the day on which the return is made, and was a resident of the United States at all times after the decedent's death and before becoming a citizen (section 2056(d)(4))";
+}
+pub relation property_transferred_to_trust_before_return(e: Estate, item: Asset, t: Trust) kind empirical {
+    label en unofficial "the property is transferred to the trust before the date on which the return is made (section 2056(d)(2)(B)(i))";
+}
+pub relation property_irrevocably_assigned_to_trust_by_return_date(e: Estate, item: Asset, t: Trust) kind empirical {
+    label en unofficial "the property is irrevocably assigned to the trust under an assignment made on or before the return date, enforceable under local law (section 2056(d)(2)(B)(ii))";
+}
+@source(IRC_S2056_D, relation = formalizes, coverage = exact, quote = "Paragraph (1) shall not apply to any property passing to the surviving spouse in a qualified domestic trust.")
+pub relation property_passes_in_qdot_2056d2(e: Estate, item: Asset) kind institutional {
+    label en official "the property passes to the surviving spouse in a qualified domestic trust (section 2056(d)(2)), including property transferred or irrevocably assigned to it by the return date";
+}
+rule PropertyPassesInQdotByTransferRule(e: Estate, item: Asset, t: Trust) defeasible {
+    when property_transferred_to_trust_before_return(e, item, t);
+    when trust_qualifies_as_qdot_2056a(e, t);
+    then property_passes_in_qdot_2056d2(e, item);
+}
+rule PropertyPassesInQdotByAssignmentRule(e: Estate, item: Asset, t: Trust) defeasible {
+    when property_irrevocably_assigned_to_trust_by_return_date(e, item, t);
+    when trust_qualifies_as_qdot_2056a(e, t);
+    then property_passes_in_qdot_2056d2(e, item);
+}
+
+@source(IRC_S2056_D, relation = formalizes, coverage = exact, quote = "if the surviving spouse of the decedent is not a citizen of the United States")
+pub relation marital_deduction_barred_noncitizen_2056d1(e: Estate, item: Asset) kind institutional {
+    label en official "no deduction is allowed under subsection (a) for property passing to a noncitizen surviving spouse, except in a qualified domestic trust or where the spouse becomes a citizen in time (section 2056(d)(1), (2), (4))";
+}
+rule MaritalDeductionBarredNoncitizenRule(e: Estate, item: Asset) defeasible {
+    when noncitizen_surviving_spouse_2056d(e);
+    when interest_passes_to_surviving_spouse(e, item, _);
+    when not_known(property_passes_in_qdot_2056d2(e, item));
+    when not_known(spouse_became_citizen_before_return_and_resident_since_death(e));
+    then marital_deduction_barred_noncitizen_2056d1(e, item);
+}
+@source(IRC_S2056_D, relation = formalizes, coverage = exact, quote = "section 2040(b) shall not apply")
+pub relation section_2040b_disabled_2056d1(e: Estate) kind institutional {
+    label en official "section 2040(b) (qualified joint interest one-half inclusion) does not apply where the surviving spouse is not a citizen (section 2056(d)(1)(B)), unless the (d)(2) or (d)(4) exceptions of paragraph (1) apply";
+}
+rule Section2040bDisabledRule(e: Estate) defeasible {
+    when noncitizen_surviving_spouse_2056d(e);
+    when not_known(spouse_became_citizen_before_return_and_resident_since_death(e));
+    then section_2040b_disabled_2056d1(e);
+}
+
+// (d)(3): credit under section 2013 for tax paid by the first decedent.
+pub relation property_passes_to_noncitizen_spouse_who_dies_subject_to_tax(first_estate: Estate, second_estate: Estate, item: Asset) kind empirical {
+    label en unofficial "property passes to the surviving spouse of the first decedent, a deduction would be allowable under subsection (a) but for subsection (d), and the spouse dies with an estate subject to the tax imposed by this chapter (section 2056(d)(3)(A)-(C))";
+}
+@source(IRC_S2056_D, relation = formalizes, coverage = partial, quote = "the Federal estate tax paid (or treated as paid under section 2056A(b)(7)) by the first decedent with respect to such property shall be allowed as a credit under section 2013 to the estate of such surviving spouse")
+pub relation section_2013_credit_allowed_by_2056d3(first_estate: Estate, second_estate: Estate) kind institutional {
+    label en official "the first decedent's estate tax on the property is allowed as a section 2013 credit to the spouse's estate, without regard to when the first decedent died (section 2056(d)(3)); the amount is determined by the section 2013 relations (07-credits-2011-2016.law) and the timing-free percentage is TECH-GAPS G3600";
+}
+rule Section2013CreditAllowedBy2056d3Rule(first_estate: Estate, second_estate: Estate, item: Asset) defeasible {
+    when property_passes_to_noncitizen_spouse_who_dies_subject_to_tax(first_estate, second_estate, item);
+    then section_2013_credit_allowed_by_2056d3(first_estate, second_estate);
+}
+
+// (d)(5): reformations. QDOT status is determined as of the return date, or, if
+// a judicial proceeding to reform the trust was commenced by the due date
+// (with extensions), as of the time the changes are made.
+pub relation reformation_proceeding_commenced_on(e: Estate, t: Trust, d: Date) kind empirical {
+    label en unofficial "a judicial proceeding to change the trust into a qualified domestic trust was commenced on the stated date";
+}
+pub relation reformation_changes_made_on(e: Estate, t: Trust, d: Date) kind empirical {
+    label en unofficial "the changes pursuant to the judicial proceeding were made on the stated date";
+}
+relation reformation_proceeding_timely(e: Estate, t: Trust) kind institutional;
+rule ReformationProceedingTimelyRule(e: Estate, t: Trust, started: Date, due: Date) defeasible {
+    when reformation_proceeding_commenced_on(e, t, started);
+    when estate_return_due_date_with_extensions(e, due) and started <= due;
+    then reformation_proceeding_timely(e, t);
+}
+@source(IRC_S2056_D, relation = formalizes, coverage = exact, quote = "the determination of whether a trust is a qualified domestic trust shall be made")
+pub relation qdot_determination_date_2056d5(e: Estate, t: Trust, d: Date) kind institutional {
+    label en official "the date as of which qualified-domestic-trust status is determined: the return date, or the date the reformation changes are made where a timely judicial proceeding was commenced (section 2056(d)(5)(A))";
+}
+rule QdotDeterminationDateByReturnRule(e: Estate, t: Trust, filed: Date) defeasible {
+    label en official "the determination is made as of the date the return is made (section 2056(d)(5)(A)(i))";
+    when qdot_election_effective(e, t);
+    when estate_return_filed_on(e, filed);
+    when not_known(reformation_proceeding_timely(e, t));
+    then qdot_determination_date_2056d5(e, t, filed);
+}
+rule QdotDeterminationDateByReformationRule(e: Estate, t: Trust, changed: Date) defeasible {
+    label en official "if a judicial proceeding to reform the trust was commenced on or before the due date, the determination is made as of the time the changes are made (section 2056(d)(5)(A)(ii))";
+    when qdot_election_effective(e, t);
+    when reformation_proceeding_timely(e, t);
+    when reformation_changes_made_on(e, t, changed);
+    then qdot_determination_date_2056d5(e, t, changed);
+}
+@source(IRC_S2056_D, relation = formalizes, coverage = exact, quote = "the period for assessing any deficiency of tax attributable to any failure of such trust to be a qualified domestic trust shall not expire before the date 1 year after the date on which the Secretary is notified")
+pub relation secretary_notified_of_reformation_on(e: Estate, t: Trust, d: Date) kind empirical {
+    label en official "the Secretary is notified that the trust has been changed pursuant to the judicial proceeding, or that the proceeding has been terminated, on the stated date";
+}
+pub relation deficiency_assessment_period_floor_2056d5b(e: Estate, t: Trust, floor_date: Date) kind institutional {
+    label en official "the period for assessing a deficiency attributable to the trust's failure to be a qualified domestic trust does not expire before this date: 1 year after the Secretary's notice (a lower bound only; the section 6501 period itself is owned by us.irc.assessment)";
+}
+rule DeficiencyAssessmentPeriodFloor2056d5bRule(e: Estate, t: Trust, notified: Date) defeasible {
+    when reformation_proceeding_commenced_on(e, t, _);
+    when secretary_notified_of_reformation_on(e, t, notified);
+    then deficiency_assessment_period_floor_2056d5b(e, t, add_calendar_period(notified, 1 calendar_year));
+}

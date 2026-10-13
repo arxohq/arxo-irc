@@ -1,0 +1,122 @@
+// Chapter 23A (Railroad Unemployment Repayment Tax, RUIA), sections
+// 3321-3323. Stage 2b scope. A flat-rate excise tax on rail wages, mirroring
+// the section 3301/3306 FUTA shape but with its own 4-percent rate and its
+// own termination condition (tied to repayment of pre-1985 Railroad
+// Unemployment Insurance Account loans) rather than a credit mechanism.
+//
+// "Rail employer"/"rail wages"/"employee representative" (section 3322(a)-
+// (c)) are EXTERNAL cross-references to section 1/8(a) of the Railroad
+// Unemployment Insurance Act (45 U.S.C.), a statute this package does not
+// own or formalize; each is modelled as a case fact rather than an
+// invented in-package definition. Section 3322(d)'s "rules similar to
+// section 3307 and 3308" is wired directly by reusing this package's own
+// section 3307/3308 relations (`constructively_paid_to_employee_3123`-style
+// pattern and the instrumentality-not-exempt rule), not duplicated.
+
+// `Person`, `TaxableYear` are package-level symbols already declared in
+// `01-fica-tax.law` (one namespace across this package's files); not
+// redeclared here to avoid a duplicate-symbol error.
+
+// --- Section 3322: definitions ----------------------------------------------
+
+use self::{
+    IRC_S3321_A,
+    IRC_S3321_B,
+    IRC_S3321_C,
+    IRC_S3322_D,
+    Person,
+};
+
+pub relation rail_employer_ruia(p: Person) kind empirical {
+    label en official "this person is an \"employer\" as defined in section 1 of the Railroad Unemployment Insurance Act (45 U.S.C.) — EXTERNAL_DEPENDENCY, case fact";
+}
+pub relation rail_wages_paid_in_month(employer: Person, employee: Person, monthStart: Date, amount: Money) kind empirical {
+    label en official "remuneration paid during this calendar month which is subject to contributions under section 8(a) of the Railroad Unemployment Insurance Act — EXTERNAL_DEPENDENCY, case fact (section 3322(b))";
+}
+pub relation employee_representative_ruia(p: Person, org: Person) kind empirical {
+    label en official "this individual is an \"employee representative\" as defined by section 1 of the Railroad Unemployment Insurance Act — EXTERNAL_DEPENDENCY, case fact (section 3322(c)); a separate case-fact relation from `us.irc.employment::rrta_employee_representative` (section 3231(c)) because the two statutes' definitions are independent cross-references, not textually identical";
+}
+pub relation employee_organization_rail_wages_in_month(org: Person, rep: Person, monthStart: Date, amount: Money) kind empirical {
+    label en official "section 3322(a)(2): the rail wages of an employee representative, determined as if the employee organization employing them were itself a rail employer — case fact (the determination method is EXTERNAL_DEPENDENCY on RUIA, not re-derived)";
+}
+
+// --- Section 3321(c): termination if loans to railroad unemployment fund
+//     repaid ------------------------------------------------------------------
+//
+// A REAL, checkable condition: no balance of pre-October-1985 transfers to
+// the railroad unemployment insurance account, and no unpaid interest on
+// them, as of the first day of the month.
+pub relation railroad_unemployment_account_loan_balance(monthStart: Date, balance: Money, unpaidInterest: Money) kind empirical {
+    label en unofficial "case fact: the outstanding pre-October-1985 transfer balance and unpaid interest on the railroad unemployment insurance account as of this month's first day (section 3321(c))";
+}
+pub relation ruia_tax_terminated_for_month(monthStart: Date) kind institutional {
+    label en official "section 3321(c): the RUIA excise tax does not apply to rail wages paid on or after this month's first day, because both the loan balance and unpaid interest are zero";
+}
+@source(IRC_S3321_C, relation = formalizes, coverage = exact, quote = "The tax imposed by this section shall not apply to rail wages paid on or after the 1st day of any calendar month if, as of such 1st day, there is")
+rule Section3321CTerminationCondition(monthStart: Date, balance: Money, unpaidInterest: Money) strict {
+    when railroad_unemployment_account_loan_balance(monthStart, balance, unpaidInterest) and balance == 0.00 USD and unpaidInterest == 0.00 USD;
+    then ruia_tax_terminated_for_month(monthStart);
+}
+
+// --- Section 3321(a): tax on rail employers ---------------------------------
+
+pub relation ruia_employer_tax(employer: Person, monthStart: Date, amount: Money) kind institutional {
+    label en official "the section 3321(a) 4-percent excise tax on total rail wages a rail employer paid during the calendar month";
+}
+pub relation rail_wages_paid_in_month_total(employer: Person, monthStart: Date, amount: Money) kind institutional {
+    label en unofficial "aggregate rail wages a rail employer paid during the calendar month, summed over case-asserted per-employee payments (section 111 aggregate-over-case-asserted-fact pattern, mirrors `futa_wages_paid_in_year` in `08-futa.law`)";
+}
+rule RailWagesPaidInMonthTotal(employer0: Person, monthStart0: Date, employee0: Person, amount0: Money) strict {
+    when rail_wages_paid_in_month(employer0, employee0, monthStart0, amount0);
+    then rail_wages_paid_in_month_total(employer0, monthStart0,
+        sum all amount: Money for employee: Person where rail_wages_paid_in_month(employer0, employee, monthStart0, amount));
+}
+@source(IRC_S3321_A, relation = formalizes, coverage = exact, quote = "There is hereby imposed on every rail employer for each calendar month an excise tax, with respect to having individuals in his employ, equal to 4 percent of the total rail wages paid by him during such month.")
+rule Section3321EmployerTax(employer: Person, monthStart: Date, totalWages: Money) strict {
+    when rail_employer_ruia(employer) and rail_wages_paid_in_month_total(employer, monthStart, totalWages) and not_known(ruia_tax_terminated_for_month_exists(monthStart));
+    then ruia_employer_tax(employer, monthStart, round(totalWages * 0.04, 2, "HALF_UP"));
+}
+relation ruia_tax_terminated_for_month_exists(monthStart: Date) kind institutional;
+rule RuiaTaxTerminatedForMonthExists(monthStart: Date) strict {
+    when ruia_tax_terminated_for_month(monthStart);
+    then ruia_tax_terminated_for_month_exists(monthStart);
+}
+
+// --- Section 3321(b): tax on employee representatives -----------------------
+
+pub relation ruia_representative_tax(rep: Person, org: Person, monthStart: Date, amount: Money) kind institutional {
+    label en official "the section 3321(b) 4-percent tax on an employee representative's rail wages for the calendar month";
+}
+@source(IRC_S3321_B, relation = formalizes, coverage = exact, quote = "There is hereby imposed on the income of each employee representative a tax equal to 4 percent of the rail wages paid to him during the calendar month.")
+rule Section3321RepresentativeTax(rep: Person, org: Person, monthStart: Date, amount: Money) strict {
+    when employee_representative_ruia(rep, org) and employee_organization_rail_wages_in_month(org, rep, monthStart, amount) and not_known(ruia_tax_terminated_for_month_exists(monthStart));
+    then ruia_representative_tax(rep, org, monthStart, round(amount * 0.04, 2, "HALF_UP"));
+}
+
+// --- Section 3322(d): rules similar to sections 3307 and 3308 --------------
+
+pub relation ruia_deducted_and_remitted(employer: Person, employee: Person, amount: Money, on: Date) kind empirical {
+    label en official "an amount an employer deducted from remuneration subject to this chapter and paid over under a legal requirement or permission other than this chapter (section 3322(d) cross-reference to section 3307, case fact)";
+}
+pub relation ruia_constructively_paid_to_employee(employee: Person, amount: Money, on: Date) kind institutional {
+    label en official "section 3322(d)/3307: an amount deemed paid to the employee, for this chapter's purposes, at the time of the deduction";
+}
+@source(IRC_S3322_D, relation = formalizes, coverage = partial, quote = "rules similar to the rules of section 3307 and 3308 shall apply")
+rule Section3322DConstructivePayment(employer: Person, employee: Person, amount: Money, on: Date) strict {
+    when ruia_deducted_and_remitted(employer, employee, amount, on);
+    then ruia_constructively_paid_to_employee(employee, amount, on);
+}
+pub relation ruia_federal_instrumentality_not_exempt(instrumentality: Person) kind institutional {
+    label en official "section 3322(d)/3308: a federal instrumentality is not exempt from the section 3321 tax unless another provision of law grants a specific exemption by reference to section 3321";
+}
+relation federal_instrumentality_ruia(instrumentality: Person) kind empirical;
+relation specific_exemption_from_3321(instrumentality: Person) kind empirical {
+    label en unofficial "case fact: another provision of law grants this instrumentality a specific exemption from the section 3321 tax by reference to section 3321 (or its prior-law equivalent)";
+}
+rule Section3322DInstrumentalityNotExempt(instrumentality: Person) strict {
+    when federal_instrumentality_ruia(instrumentality) and not specific_exemption_from_3321(instrumentality);
+    then ruia_federal_instrumentality_not_exempt(instrumentality);
+}
+
+// --- Section 3323: REPEALED (superseded by section 3322, Pub. L. 100-647,
+//     1988) — classification = NON_NORMATIVE / repealed_or_reserved.

@@ -1,0 +1,166 @@
+// Chapter 2, section 1401 — tax on self-employment income. Stage IRC-10
+// (A14), DECISION-0379. Reads `self_employment_income` from
+// `03-self-employment-income-and-trade-or-business.law` (section 1402(b)).
+
+
+
+use self::{
+    IRC_S1401_A,
+    IRC_S1401_B,
+    IRC_S1401_C,
+    Individual,
+    Person,
+    TaxableYear,
+    self_employment_income,
+};
+
+type FilingStatus = us.irc.income_individual::FilingStatus;
+
+// Rates are constants, not `.lawparam.json`, because the statute states them
+// as flat percentages with no history of change and no filing-status/time
+// variation (contrast the additional-Medicare THRESHOLDS below, which are
+// dollar amounts and get their own A3 parameter files).
+const OasdiSeRate: Decimal = 0.124;
+const HiSeRate: Decimal = 0.029;
+const AdditionalMedicareSeRate: Decimal = 0.009;
+
+pub relation self_employment_oasdi_tax(p: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the tax imposed by section 1401(a)";
+}
+
+@source(IRC_S1401_A, relation = formalizes, coverage = exact, quote = "there shall be imposed for each taxable year, on the self-employment income of every individual, a tax equal to 12.4 percent of the amount of the self-employment income for such taxable year")
+rule Section1401AOasdiTax(p: Individual, y: TaxableYear, se: Money) defeasible {
+    when self_employment_income(p, y, se);
+    then self_employment_oasdi_tax(p, y, round(se * OasdiSeRate, 2, "HALF_UP"));
+}
+
+pub relation self_employment_hi_tax(p: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the tax imposed by section 1401(b)(1)";
+}
+
+@source(IRC_S1401_B, relation = formalizes, coverage = partial, quote = "there shall be imposed for each taxable year, on the self-employment income of every individual, a tax equal to 2.9 percent of the amount of the self-employment income for such taxable year")
+rule Section1401B1HiTax(p: Individual, y: TaxableYear, se: Money) defeasible {
+    when self_employment_income(p, y, se);
+    then self_employment_hi_tax(p, y, round(se * HiSeRate, 2, "HALF_UP"));
+}
+
+// --- section 1401(b)(2): additional Medicare tax on self-employment income --
+
+pub relation is_corporation_estate_or_trust(p: Person) kind empirical {
+    label en unofficial "the taxpayer is a corporation, estate, or trust — excluded from the section 1401(b)(2) additional tax by its own terms (\"every taxpayer (other than a corporation, estate, or trust)\"); an `Individual` never satisfies this, so the case need only assert it for a non-individual `Person` if one is ever tested here (this package's self-employment income is otherwise Individual-only per section 1402(b))";
+}
+
+// Wages "taken into account in determining the tax imposed under section
+// 3121(b)(2)" reduce the threshold. `us.irc.employment::wages_3121` is a
+// per-`WagePayment` classification; this package needs the ANNUAL total for
+// the individual, which `us.irc.employment` does not itself aggregate
+// (TECH_GAP, see docs/foundations/us-irc/TECH-GAPS.md G110). The case
+// asserts the annual total directly.
+pub relation wages_taken_into_account_3121b2(p: Individual, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the total wages of this individual for this taxable year taken into account in determining the section 3121(b)(2) (HI) tax — section 1401(b)(2)(B) reduction; asserted as an annual total (TECH_GAP G110: no aggregate-of-`us.irc.employment::wages_3121` rule is wired here)";
+}
+
+pub relation additional_medicare_threshold_se(p: Individual, y: TaxableYear, threshold: Money) kind institutional {
+    label en official "the section 1401(b)(2)(A) threshold applicable to this taxpayer's filing status, before the section 1401(b)(2)(B) wage reduction";
+}
+
+@source(IRC_S1401_B, relation = formalizes, coverage = partial, quote = "in the case of a joint return, $250,000")
+rule AdditionalMedicareThresholdSeJointRule(p: Individual, y: TaxableYear) strict {
+    when us.irc.income_individual::filing_status(p, y, us.irc.income_individual::Joint);
+    then additional_medicare_threshold_se(p, y, SeAdditionalMedicareThresholdJoint);
+}
+
+@source(IRC_S1401_B, relation = formalizes, coverage = partial, quote = "in the case of a married taxpayer (as defined in section 7703) filing a separate return, ½ of the dollar amount determined under clause (i)")
+rule AdditionalMedicareThresholdSeMarriedSeparateRule(p: Individual, y: TaxableYear) strict {
+    when us.irc.income_individual::filing_status(p, y, us.irc.income_individual::MarriedSeparate);
+    then additional_medicare_threshold_se(p, y, SeAdditionalMedicareThresholdMarriedSeparate);
+}
+
+@source(IRC_S1401_B, relation = formalizes, coverage = partial, quote = "in any other case, $200,000")
+rule AdditionalMedicareThresholdSeOtherRule(p: Individual, y: TaxableYear, s: us.irc.income_individual::FilingStatus) strict {
+    when us.irc.income_individual::filing_status(p, y, s)
+        and s != us.irc.income_individual::Joint
+        and s != us.irc.income_individual::MarriedSeparate;
+    then additional_medicare_threshold_se(p, y, SeAdditionalMedicareThresholdOther);
+}
+
+pub relation additional_medicare_threshold_reduced(p: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the section 1401(b)(2)(A) threshold reduced (but not below zero) by wages under section 1401(b)(2)(B)";
+}
+
+@source(IRC_S1401_B, relation = formalizes, coverage = exact, quote = "shall be reduced (but not below zero) by the amount of wages taken into account in determining the tax imposed under section 3121(b)(2) with respect to the taxpayer")
+rule AdditionalMedicareThresholdReduced(p: Individual, y: TaxableYear, base: Money, wages: Money) strict {
+    when additional_medicare_threshold_se(p, y, base)
+        and wages_taken_into_account_3121b2(p, y, wages)
+        and base > wages;
+    then additional_medicare_threshold_reduced(p, y, base - wages);
+}
+rule AdditionalMedicareThresholdReducedFloor(p: Individual, y: TaxableYear, base: Money, wages: Money) strict {
+    when additional_medicare_threshold_se(p, y, base)
+        and wages_taken_into_account_3121b2(p, y, wages)
+        and wages >= base;
+    then additional_medicare_threshold_reduced(p, y, 0.00 USD);
+}
+
+pub relation additional_medicare_tax_se(p: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the tax imposed by section 1401(b)(2)(A) on self-employment income in excess of the reduced threshold";
+}
+
+@source(IRC_S1401_B, relation = formalizes, coverage = partial, quote = "a tax equal to 0.9 percent of the self-employment income for such taxable year which is in excess of")
+rule Section1401B2AdditionalMedicareTax(p: Individual, y: TaxableYear, se: Money, threshold: Money) defeasible {
+    when self_employment_income(p, y, se)
+        and additional_medicare_threshold_reduced(p, y, threshold)
+        and not is_corporation_estate_or_trust(p)
+        and se > threshold;
+    then additional_medicare_tax_se(p, y, round((se - threshold) * AdditionalMedicareSeRate, 2, "HALF_UP"));
+}
+rule Section1401B2AdditionalMedicareTaxBelowThreshold(p: Individual, y: TaxableYear, se: Money, threshold: Money) defeasible {
+    when self_employment_income(p, y, se)
+        and additional_medicare_threshold_reduced(p, y, threshold)
+        and not is_corporation_estate_or_trust(p)
+        and se <= threshold;
+    then additional_medicare_tax_se(p, y, 0.00 USD);
+}
+
+// --- total self-employment tax -----------------------------------------------
+
+pub relation self_employment_tax(p: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the total tax imposed by section 1401 (subsections (a), (b)(1) and (b)(2))";
+}
+
+rule SelfEmploymentTaxTotal(p: Individual, y: TaxableYear, oasdi: Money, hi: Money, addl: Money) defeasible {
+    when self_employment_oasdi_tax(p, y, oasdi)
+        and self_employment_hi_tax(p, y, hi)
+        and additional_medicare_tax_se(p, y, addl);
+    then self_employment_tax(p, y, oasdi + hi + addl);
+}
+
+rule SelfEmploymentTaxLiability(p: Individual, y: TaxableYear, amount: Money) defeasible {
+    when self_employment_tax(p, y, amount);
+    then us.irc.core::liability(p, y, us.irc.core::SelfEmploymentCh2, amount);
+}
+
+// --- section 1401(c): totalization agreement exemption -----------------------
+
+pub relation totalization_agreement_covers(p: Individual, y: TaxableYear) kind empirical {
+    label en unofficial "during the taxable year an agreement under section 233 of the Social Security Act with a foreign country is in effect, and this individual's self-employment income is subject exclusively, under that agreement, to that country's social security laws (section 1401(c))";
+}
+
+pub relation self_employment_tax_immunity_totalization(p: Individual, y: TaxableYear) kind institutional {
+    label en official "the self-employment income is exempt from the section 1401 taxes under the totalization-agreement exemption";
+}
+
+@source(IRC_S1401_C, relation = formalizes, coverage = exact, quote = "the self-employment income of an individual shall be exempt from the taxes imposed by this section to the extent that such self-employment income is subject under such agreement exclusively to the laws applicable to the social security system of such foreign country")
+rule TotalizationAgreementImmunity(p: Individual, y: TaxableYear, start: Date, end: Date) strict {
+    when totalization_agreement_covers(p, y)
+        and us.irc.core::begins(y, start)
+        and us.irc.core::ends(y, end);
+    then immunity Section1401CTotalizationImmunity {
+        holder p;
+        protected_effect not_liable_for_section_1401_tax(p, y);
+        window [start, end];
+    };
+    then self_employment_tax_immunity_totalization(p, y);
+}
+
+pub relation not_liable_for_section_1401_tax(p: Individual, y: TaxableYear) kind institutional;

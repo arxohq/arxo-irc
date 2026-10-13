@@ -1,0 +1,920 @@
+// Stage 3 (26.09.2026) — interest: the last date for payment of section
+// 6601(b)(2)-(4) and the credit rule of (f); the overpayment periods of section
+// 6611(b)(1)-(2) and (e)(2)-(3) and the processible-form gate of (g); the
+// applicable date and exceptions of section 6621(c)(2)-(3); section 6622 daily
+// compounding chained over a day count.
+//
+// JUDGMENT CALLS AND GAPS
+//  - 6622: the statute says only "compounded daily". The daily step is the
+//    stage-1 convention (balance x (1 + annual rate / days in the year), rounded
+//    to cents each day); the denominator (365 or 366) is an input of the
+//    request. Chaining is unrolled: a distinct relation per day, 1 to 92 days
+//    for one constant-rate segment (a quarter is at most 92 days) and a second
+//    segment after a rate change; a period over more than two segments is not
+//    derived (recursion over one relation is LDC-E4102, TECH-GAPS G5806).
+//  - 6621(c)(2): the applicable date is the 30th day after the earliest counting
+//    letter or notice; a quarter is treated as "after the applicable date" when
+//    it begins on or after that date (a straddling quarter is not split).
+//  - 6611(g): a return not in processible form is treated as filed on the date
+//    it became processible (asserted); a return with no processible facts keeps
+//    its filing date (the stage-1 behavior).
+
+language "law.core" version "0.2";
+package us.irc.payment_refunds_interest version "0.1.1";
+namespace "urn:us:irc:payment_refunds_interest:clir";
+
+use self::{
+    IRC_S6601_B,
+    IRC_S6601_F,
+    IRC_S6611_B,
+    IRC_S6611_E,
+    IRC_S6611_G,
+    IRC_S6621_C,
+    IRC_S6622_A,
+    Person,
+    Return,
+    TaxKind,
+    TaxableYear,
+    federal_short_term_rate,
+    large_corporate_underpayment_rate_applies,
+    last_date_prescribed_for_payment,
+    notice_and_demand_made_on,
+    overpayment_is_withholding_tax,
+    overpayment_refunded_on,
+    underpayment_amount,
+};
+
+// ============================================================================
+// §6601(b)(2)-(4), (f)
+// ============================================================================
+
+relation jeopardy_notice_and_demand_on(p: Person, y: TaxableYear, kind: TaxKind, d: Date) kind empirical { label en official "a notice and demand for payment issued by reason of jeopardy (chapter 70)"; }
+relation last_date_unaffected_by_jeopardy_demand(p: Person, y: TaxableYear, kind: TaxKind, last: Date) kind institutional { label en official "the last date prescribed for payment is determined without regard to a jeopardy notice and demand issued prior to the last date otherwise prescribed"; }
+@source(IRC_S6601_B, relation = formalizes, coverage = exact, quote = "The last date prescribed for payment shall be determined without regard to any notice and demand for payment issued, by reason of jeopardy (as provided in chapter 70), prior to the last date otherwise prescribed for such payment.")
+rule S6601B2JeopardyDisregarded strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for jd: Date;
+    for last: Date;
+    when jeopardy_notice_and_demand_on(p, y, kind, jd) and last_date_prescribed_for_payment(p, y, kind, last) and jd < last;
+    then last_date_unaffected_by_jeopardy_demand(p, y, kind, last);
+}
+relation accumulated_earnings_tax_531(p: Person, y: TaxableYear, kind: TaxKind) kind empirical { label en official "the tax is the accumulated earnings tax imposed by section 531 for the taxable year"; }
+@source(IRC_S6601_B, relation = formalizes, coverage = exact, quote = "the last date prescribed for payment shall be deemed to be the due date (without regard to extensions) for the return of tax imposed by subtitle A for such taxable year")
+rule S6601B3AccumulatedEarningsLastDate strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for r: Return;
+    for d: Date;
+    when accumulated_earnings_tax_531(p, y, kind) and us.irc.core::return_of(r, p, y, us.irc.core::IncomeCh1) and us.irc.core::due_date(r, d);
+    then last_date_prescribed_for_payment(p, y, kind, d);
+}
+relation last_date_not_otherwise_prescribed(p: Person, y: TaxableYear, kind: TaxKind) kind empirical { label en official "taxes payable by stamp and all other cases in which the last date for payment is not otherwise prescribed"; }
+relation liability_arises_on(p: Person, y: TaxableYear, kind: TaxKind, d: Date) kind empirical { label en official "the date the liability for tax arises"; }
+relation notice_and_demand_stated(p: Person, y: TaxableYear, kind: TaxKind) kind institutional { label en unofficial "helper: a notice and demand date is stated"; }
+rule S6601B4NoticeStated strict { for p: Person; for y: TaxableYear; for kind: TaxKind; for d: Date; when notice_and_demand_made_on(p, y, kind, d); then notice_and_demand_stated(p, y, kind); }
+@source(IRC_S6601_B, relation = formalizes, coverage = partial, quote = "the last date for payment shall be deemed to be the date the liability for tax arises")
+rule S6601B4LastDateLiabilityArises strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for arises: Date;
+    for nd: Date;
+    when last_date_not_otherwise_prescribed(p, y, kind) and liability_arises_on(p, y, kind, arises) and notice_and_demand_made_on(p, y, kind, nd) and arises <= nd;
+    then last_date_prescribed_for_payment(p, y, kind, arises);
+}
+@source(IRC_S6601_B, relation = formalizes, coverage = partial, quote = "(and in no event shall be later than the date notice and demand for the tax is made by the Secretary)")
+rule S6601B4LastDateCappedAtNotice strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for arises: Date;
+    for nd: Date;
+    when last_date_not_otherwise_prescribed(p, y, kind) and liability_arises_on(p, y, kind, arises) and notice_and_demand_made_on(p, y, kind, nd) and arises > nd;
+    then last_date_prescribed_for_payment(p, y, kind, nd);
+}
+rule S6601B4LastDateNoNotice strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for arises: Date;
+    when last_date_not_otherwise_prescribed(p, y, kind) and liability_arises_on(p, y, kind, arises) and not_known(notice_and_demand_stated(p, y, kind));
+    then last_date_prescribed_for_payment(p, y, kind, arises);
+}
+// (f): satisfaction by credits.
+relation portion_satisfied_by_credit(p: Person, y: TaxableYear, kind: TaxKind, amount: Money, credit_date: Date) kind empirical { label en official "a portion of the tax is satisfied by credit of an overpayment on the date"; }
+relation credited_overpayment_date(p: Person, y: TaxableYear, kind: TaxKind, d: Date) kind empirical { label en official "the date of the overpayment credited: interest would have been allowable on it from this date if the credit had not been made"; }
+relation section_6621d_applies_to_credit(p: Person, y: TaxableYear, kind: TaxKind) kind empirical { label en official "section 6621(d) (net rate of zero) applies to the credited portion"; }
+relation credit_interest_free_start(p: Person, y: TaxableYear, kind: TaxKind, from: Date) kind institutional { label en official "the later of the last date prescribed for payment and the date of the credited overpayment"; }
+rule S6601FStartLast strict { for p: Person; for y: TaxableYear; for kind: TaxKind; for last: Date; for od: Date; when last_date_prescribed_for_payment(p, y, kind, last) and credited_overpayment_date(p, y, kind, od) and last >= od; then credit_interest_free_start(p, y, kind, last); }
+rule S6601FStartOverpayment strict { for p: Person; for y: TaxableYear; for kind: TaxKind; for last: Date; for od: Date; when last_date_prescribed_for_payment(p, y, kind, last) and credited_overpayment_date(p, y, kind, od) and od > last; then credit_interest_free_start(p, y, kind, od); }
+relation credited_portion_interest_free(p: Person, y: TaxableYear, kind: TaxKind, amount: Money, from: Date, to: Date) kind institutional { label en official "no interest under section 6601 on the portion satisfied by credit for a period during which interest would have been allowable on the overpayment if the credit had not been made"; }
+@source(IRC_S6601_F, relation = formalizes, coverage = exact, quote = "then no interest shall be imposed under this section on the portion of the tax so satisfied for any period during which, if the credit had not been made, interest would have been allowable with respect to such overpayment")
+rule S6601FCreditedPortionInterestFree strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for amount: Money;
+    for credited: Date;
+    for from: Date;
+    when portion_satisfied_by_credit(p, y, kind, amount, credited) and credit_interest_free_start(p, y, kind, from) and from <= credited and not_known(section_6621d_applies_to_credit(p, y, kind));
+    then credited_portion_interest_free(p, y, kind, amount, from, credited);
+}
+
+// ============================================================================
+// §6611(b)(1)-(2), (e)(2)-(3), (g)
+// ============================================================================
+
+relation overpayment_date_of(p: Person, y: TaxableYear, kind: TaxKind, d: Date) kind empirical { label en official "the date of the overpayment"; }
+relation credit_taken_against_due_date(p: Person, y: TaxableYear, kind: TaxKind, due: Date) kind empirical { label en official "the due date of the amount against which the credit is taken"; }
+relation refund_check_date(p: Person, y: TaxableYear, kind: TaxKind, d: Date) kind empirical { label en official "the date of the refund check"; }
+relation secretary_interest_end_date(p: Person, y: TaxableYear, kind: TaxKind, e: Date) kind empirical { label en official "the date determined by the Secretary to which interest on a refund runs"; }
+relation overpayment_interest_period(p: Person, y: TaxableYear, kind: TaxKind, from: Date, to: Date) kind institutional { label en official "the period for which interest is allowed and paid on the overpayment"; }
+@source(IRC_S6611_B, relation = formalizes, coverage = exact, quote = "In the case of a credit, from the date of the overpayment to the due date of the amount against which the credit is taken.")
+rule S6611B1CreditPeriod strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for od: Date;
+    for due: Date;
+    when overpayment_date_of(p, y, kind, od) and credit_taken_against_due_date(p, y, kind, due);
+    then overpayment_interest_period(p, y, kind, od, due);
+}
+@source(IRC_S6611_B, relation = formalizes, coverage = exact, quote = "from the date of the overpayment to a date (to be determined by the Secretary) preceding the date of the refund check by not more than 30 days")
+rule S6611B2RefundPeriod strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for od: Date;
+    for check: Date;
+    for e: Date;
+    for calendar_before_1: Date;
+    when overpayment_date_of(p, y, kind, od) and refund_check_date(p, y, kind, check) and secretary_interest_end_date(p, y, kind, e) and e <= check and e >= calendar_before_1
+        and us.irc.core::civil_calendar_boundary_before(check, 30, us.irc.core::CalendarDay, calendar_before_1);
+    then overpayment_interest_period(p, y, kind, od, e);
+}
+relation refund_check_acceptance_without_prejudice(p: Person, y: TaxableYear, kind: TaxKind) kind institutional { label en official "the acceptance of a refund check (whether or not accepted after tender) is without prejudice to any right of the taxpayer to claim any additional overpayment and interest thereon"; }
+@source(IRC_S6611_B, relation = formalizes, coverage = exact, quote = "The acceptance of such check shall be without prejudice to any right of the taxpayer to claim any additional overpayment and interest thereon.")
+rule S6611B2WithoutPrejudice strict { for p: Person; for y: TaxableYear; for kind: TaxKind; for check: Date; when refund_check_date(p, y, kind, check); then refund_check_acceptance_without_prejudice(p, y, kind); }
+// (e)(2): a refund after a claim within 45 (180) days.
+relation refund_claim_filed_on(p: Person, y: TaxableYear, kind: TaxKind, claim_date: Date) kind empirical { label en official "the taxpayer files a claim for a credit or refund for the overpayment"; }
+relation no_interest_from_claim_to_refund(p: Person, y: TaxableYear, kind: TaxKind, from: Date, to: Date) kind institutional { label en official "no interest is allowed from the date the claim is filed until the day the refund is made"; }
+@source(IRC_S6611_E, relation = formalizes, coverage = exact, quote = "no interest shall be allowed on such overpayment from the date the claim is filed until the day the refund is made")
+rule S6611E2ClaimRefundedWithin45 strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for claim_date: Date;
+    for refunded: Date;
+    when refund_claim_filed_on(p, y, kind, claim_date) and overpayment_refunded_on(p, y, kind, refunded) and not_known(overpayment_is_withholding_tax(p, y, kind)) and refunded <= add_calendar_period(claim_date, 45 calendar_day);
+    then no_interest_from_claim_to_refund(p, y, kind, claim_date, refunded);
+}
+@source(IRC_S6611_E, relation = formalizes, coverage = partial, quote = "paragraphs (1), (2), and (3) shall be applied by substituting \"180 days\" for \"45 days\" each place it appears")
+rule S6611E2ClaimRefundedWithin180Withholding strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for claim_date: Date;
+    for refunded: Date;
+    when refund_claim_filed_on(p, y, kind, claim_date) and overpayment_refunded_on(p, y, kind, refunded) and overpayment_is_withholding_tax(p, y, kind) and refunded <= add_calendar_period(claim_date, 180 calendar_day);
+    then no_interest_from_claim_to_refund(p, y, kind, claim_date, refunded);
+}
+// (e)(3): an adjustment initiated by the Secretary.
+relation irs_initiated_adjustment(p: Person, y: TaxableYear, kind: TaxKind) kind empirical { label en official "an adjustment initiated by the Secretary results in a refund or credit of an overpayment"; }
+relation interest_days_otherwise_allowed(p: Person, y: TaxableYear, kind: TaxKind, days: Integer) kind empirical { label en official "the number of days interest would otherwise be allowed with respect to the overpayment"; }
+relation interest_days_after_irs_adjustment(p: Person, y: TaxableYear, kind: TaxKind, days: Integer) kind institutional { label en official "interest is computed by subtracting 45 days (180 days for chapter 3 or 4 withholding) from the number of days interest would otherwise be allowed"; }
+@source(IRC_S6611_E, relation = formalizes, coverage = exact, quote = "interest on such overpayment shall be computed by subtracting 45 days from the number of days interest would otherwise be allowed with respect to such overpayment")
+rule S6611E3SubtractFortyFive strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for n: Integer;
+    when irs_initiated_adjustment(p, y, kind) and interest_days_otherwise_allowed(p, y, kind, n) and not_known(overpayment_is_withholding_tax(p, y, kind));
+    then interest_days_after_irs_adjustment(p, y, kind, max(0, n - 45));
+}
+rule S6611E3SubtractOneEighty strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for n: Integer;
+    when irs_initiated_adjustment(p, y, kind) and interest_days_otherwise_allowed(p, y, kind, n) and overpayment_is_withholding_tax(p, y, kind);
+    then interest_days_after_irs_adjustment(p, y, kind, max(0, n - 180));
+}
+// (g): no interest until the return is in processible form.
+relation return_on_permitted_form(r: Return) kind empirical { label en official "the return is filed on a permitted form"; }
+relation return_has_identity_and_signature(r: Return) kind empirical { label en official "the return contains the taxpayer's name, address, and identifying number and the required signature"; }
+relation return_has_information_for_math_verification(r: Return) kind empirical { label en official "the return contains sufficient required information (on the return or on required attachments) to permit the mathematical verification of the tax liability shown on it"; }
+relation return_processible(r: Return) kind institutional { label en official "the return is in processible form"; }
+@source(IRC_S6611_G, relation = formalizes, coverage = exact, quote = "a return is in a processible form if—")
+rule S6611G2Processible strict {
+    for r: Return;
+    when return_on_permitted_form(r) and return_has_identity_and_signature(r) and return_has_information_for_math_verification(r);
+    then return_processible(r);
+}
+relation return_became_processible_on(r: Return, d: Date) kind empirical { label en official "the date the return was first in processible form, when that is after the date it was filed"; }
+relation processible_facts_stated(r: Return) kind institutional { label en unofficial "helper: some processible-form fact is stated for the return"; }
+rule S6611GFactsStated1 strict { for r: Return; when return_on_permitted_form(r); then processible_facts_stated(r); }
+rule S6611GFactsStated2 strict { for r: Return; when return_has_identity_and_signature(r); then processible_facts_stated(r); }
+rule S6611GFactsStated3 strict { for r: Return; when return_has_information_for_math_verification(r); then processible_facts_stated(r); }
+relation treated_as_filed_for_6611(r: Return, d: Date) kind institutional { label en official "the date the return is treated as filed for subsections (b)(3) and (e): the date it is filed in processible form"; }
+@source(IRC_S6611_G, relation = formalizes, coverage = exact, quote = "a return shall not be treated as filed until it is filed in processible form")
+rule S6611G1FiledProcessible strict {
+    for r: Return;
+    for d: Date;
+    when us.irc.core::filed_on(r, d) and return_processible(r);
+    then treated_as_filed_for_6611(r, d);
+}
+rule S6611G1LaterProcessible strict {
+    for r: Return;
+    for d: Date;
+    for filed: Date;
+    when us.irc.core::filed_on(r, filed) and return_became_processible_on(r, d) and not_known(return_processible(r));
+    then treated_as_filed_for_6611(r, d);
+}
+rule S6611G1NoProcessibleFacts strict {
+    for r: Return;
+    for d: Date;
+    when us.irc.core::filed_on(r, d) and not_known(processible_facts_stated(r)) and not_known(return_became_processible_on_stated(r));
+    then treated_as_filed_for_6611(r, d);
+}
+relation return_became_processible_on_stated(r: Return) kind institutional { label en unofficial "helper: a later processible date is stated"; }
+rule S6611GLaterStated strict { for r: Return; for d: Date; when return_became_processible_on(r, d); then return_became_processible_on_stated(r); }
+
+// ============================================================================
+// §6621(c)(2)-(3) applicable date and large corporate underpayment
+// ============================================================================
+
+entity DeficiencyLetter6621 { label en unofficial "a letter or notice that may fix the applicable date of section 6621(c)(2)"; }
+enum DeficiencyLetterKind {
+    ProposedDeficiencyLetterWithAppealsReview;
+    DeficiencyNoticeSection6212;
+    NondeficiencyAssessmentNotice;
+    label en official "§6621(c)(2)(A)(i) the first letter of proposed deficiency allowing administrative review in the Independent Office of Appeals; (ii) the deficiency notice under section 6212; (B)(i) a letter or notice of assessment or proposed assessment where the deficiency procedures do not apply";
+}
+relation letter_of_taxpayer(l: DeficiencyLetter6621, p: Person) kind empirical;
+relation letter_kind(l: DeficiencyLetter6621, k: DeficiencyLetterKind) kind empirical;
+relation letter_sent_on(l: DeficiencyLetter6621, d: Date) kind empirical;
+relation letter_withdrawn_by_secretary(l: DeficiencyLetter6621) kind empirical { label en official "the letter or notice is withdrawn by the Secretary"; }
+relation letter_amount_of_deficiency(l: DeficiencyLetter6621, amount: Money) kind empirical { label en official "the amount of the deficiency or proposed deficiency (or assessment or proposed assessment) set forth, not taking into account interest, penalties or additions to tax"; }
+relation letter_amount_shown_as_due(l: DeficiencyLetter6621, amount: Money) kind empirical { label en official "the amount shown as due in the letter or notice"; }
+relation payment_after_letter(l: DeficiencyLetter6621, amount: Money, paid_on: Date) kind empirical { label en official "a payment made by the taxpayer after the letter or notice"; }
+relation letter_relates_to_deficiency_procedures(l: DeficiencyLetter6621) kind empirical { label en official "the deficiency procedures apply to the underpayment"; }
+relation letter_disregarded_for_payment_in_full(l: DeficiencyLetter6621) kind institutional { label en official "a letter or notice is disregarded if, during the 30-day period beginning on the day it was sent, the taxpayer makes a payment equal to the amount shown as due"; }
+@source(IRC_S6621_C, relation = formalizes, coverage = exact, quote = "a letter or notice shall be disregarded if, during the 30-day period beginning on the day on which it was sent, the taxpayer makes a payment equal to the amount shown as due in such letter or notice, as the case may be")
+rule S6621C2BiiPaidInFull strict {
+    for l: DeficiencyLetter6621;
+    for sent: Date;
+    for due: Money;
+    for paid: Money;
+    for paid_on: Date;
+    when letter_sent_on(l, sent) and letter_amount_shown_as_due(l, due) and payment_after_letter(l, paid, paid_on) and paid >= due and paid_on <= add_calendar_period(sent, 29 calendar_day);
+    then letter_disregarded_for_payment_in_full(l);
+}
+relation letter_disregarded_small_amount(l: DeficiencyLetter6621) kind institutional { label en official "a letter or notice is disregarded if the amount of the deficiency or proposed deficiency set forth in it is not greater than $100,000"; }
+@source(IRC_S6621_C, relation = formalizes, coverage = exact, quote = "is not greater than $100,000 (determined by not taking into account any interest, penalties, or additions to tax)")
+rule S6621C2BiiiSmallAmount strict { for l: DeficiencyLetter6621; for a: Money; when letter_amount_of_deficiency(l, a) and a <= 100000 USD; then letter_disregarded_small_amount(l); }
+relation letter_counts_for_applicable_date(l: DeficiencyLetter6621, p: Person, sent: Date) kind institutional { label en official "a letter or notice that is not withdrawn and not disregarded, and whose kind fits the procedure"; }
+@source(IRC_S6621_C, relation = formalizes, coverage = partial, quote = "The preceding sentence shall be applied without regard to any such letter or notice which is withdrawn by the Secretary.")
+rule S6621C2ACountingProposedLetter strict {
+    for l: DeficiencyLetter6621;
+    for p: Person;
+    for sent: Date;
+    when letter_of_taxpayer(l, p) and letter_kind(l, ProposedDeficiencyLetterWithAppealsReview) and letter_sent_on(l, sent) and not_known(letter_withdrawn_by_secretary(l)) and not_known(letter_disregarded_for_payment_in_full(l)) and not_known(letter_disregarded_small_amount(l));
+    then letter_counts_for_applicable_date(l, p, sent);
+}
+rule S6621C2ACountingDeficiencyNotice strict {
+    for l: DeficiencyLetter6621;
+    for p: Person;
+    for sent: Date;
+    when letter_of_taxpayer(l, p) and letter_kind(l, DeficiencyNoticeSection6212) and letter_sent_on(l, sent) and not_known(letter_withdrawn_by_secretary(l)) and not_known(letter_disregarded_for_payment_in_full(l)) and not_known(letter_disregarded_small_amount(l));
+    then letter_counts_for_applicable_date(l, p, sent);
+}
+@source(IRC_S6621_C, relation = formalizes, coverage = partial, quote = "subparagraph (A) shall be applied by taking into account any letter or notice provided by the Secretary which notifies the taxpayer of the assessment or proposed assessment of the tax")
+rule S6621C2BiNondeficiency strict {
+    for l: DeficiencyLetter6621;
+    for p: Person;
+    for sent: Date;
+    when letter_of_taxpayer(l, p) and letter_kind(l, NondeficiencyAssessmentNotice) and letter_sent_on(l, sent) and not_known(letter_relates_to_deficiency_procedures(l)) and not_known(letter_withdrawn_by_secretary(l)) and not_known(letter_disregarded_for_payment_in_full(l)) and not_known(letter_disregarded_small_amount(l));
+    then letter_counts_for_applicable_date(l, p, sent);
+}
+relation earlier_counting_letter_exists(p: Person, sent: Date) kind institutional { label en unofficial "helper: a strictly earlier counting letter exists (TECH-GAPS G136 idiom)"; }
+rule S6621C2AEarlierExists strict { for p: Person; for l1: DeficiencyLetter6621; for l2: DeficiencyLetter6621; for s1: Date; for s2: Date; when letter_counts_for_applicable_date(l1, p, s1) and letter_counts_for_applicable_date(l2, p, s2) and s2 < s1; then earlier_counting_letter_exists(p, s1); }
+relation applicable_date_6621c2(p: Person, applicable: Date) kind institutional { label en official "the applicable date: the 30th day after the earlier counting letter or notice"; }
+@source(IRC_S6621_C, relation = formalizes, coverage = exact, quote = "The applicable date is the 30th day after the earlier of—")
+rule S6621C2AApplicableDate strict {
+    for p: Person;
+    for l: DeficiencyLetter6621;
+    for sent: Date;
+    when letter_counts_for_applicable_date(l, p, sent) and not_known(earlier_counting_letter_exists(p, sent));
+    then applicable_date_6621c2(p, add_calendar_period(sent, 30 calendar_day));
+}
+relation applicable_date_reached_by_quarter(p: Person, quarter_start: Date) kind institutional { label en official "the quarter begins on or after the applicable date, so the large corporate underpayment rate applies for it"; }
+rule S6621C1QuarterAfterApplicableDate strict {
+    for p: Person;
+    for applicable: Date;
+    for quarter_start: Date;
+    when applicable_date_6621c2(p, applicable) and federal_short_term_rate(quarter_start, _) and quarter_start >= applicable;
+    then applicable_date_reached_by_quarter(p, quarter_start);
+}
+relation is_c_corporation_for_6621(p: Person) kind empirical { label en official "the taxpayer is a C corporation"; }
+relation large_corporate_underpayment_for_period(p: Person, y: TaxableYear, kind: TaxKind) kind institutional { label en official "an underpayment of a tax by a C corporation for a taxable period exceeding $100,000; the taxable period is the taxable year for a subtitle A tax, and otherwise the period to which the underpayment relates"; }
+@source(IRC_S6621_C, relation = formalizes, coverage = exact, quote = "The term \"large corporate underpayment\" means any underpayment of a tax by a C corporation for any taxable period if the amount of such underpayment for such period exceeds $100,000.")
+rule S6621C3LargeCorporateUnderpayment strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for amount: Money;
+    when is_c_corporation_for_6621(p) and underpayment_amount(p, y, kind, amount) and amount > 100000 USD;
+    then large_corporate_underpayment_for_period(p, y, kind);
+}
+relation large_corporate_underpayment_rate_applies_derived(p: Person, y: TaxableYear, kind: TaxKind, quarter_start: Date) kind institutional { label en official "the 5-percentage-point rate applies to a large corporate underpayment for a quarter after the applicable date"; }
+rule S6621C1RateAppliesDerived strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for quarter_start: Date;
+    when large_corporate_underpayment_for_period(p, y, kind) and applicable_date_reached_by_quarter(p, quarter_start);
+    then large_corporate_underpayment_rate_applies_derived(p, y, kind, quarter_start);
+}
+@source(IRC_S6621_C, relation = formalizes, coverage = partial, quote = "on any large corporate underpayment for periods after the applicable date")
+rule S6621C1AppliesFromLetters strict {
+    label en official "the section 6621(c)(1) rate applies from the applicable date derived from the letters and notices; 06-interest.law then substitutes 5 percentage points for 3";
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for quarter_start: Date;
+    when large_corporate_underpayment_rate_applies_derived(p, y, kind, quarter_start);
+    then large_corporate_underpayment_rate_applies(p, quarter_start);
+}
+
+// ============================================================================
+// §6622 daily compounding chained over a day count (families A and B)
+// ============================================================================
+
+relation compounding_over_days(principal: Money, annual_rate_percent: Decimal, days: Integer, denominator: Integer) kind empirical { label en unofficial "a request: compound the principal daily at the annual rate for the given number of days (1 to 92), the denominator being the days in the year (365 or 366)"; }
+relation compounding_two_segments(principal: Money, rate1: Decimal, days1: Integer, rate2: Decimal, days2: Integer, denominator: Integer) kind empirical { label en unofficial "a request: compound over two consecutive segments at different annual rates (a change of the section 6621 rate), the balance at the end of the first segment being the principal of the second"; }
+
+// --- generated by gen20 (26.09.2026): one relation per day, 1..92 ---
+relation compound_a_1(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 1 day(s) of daily compounding, family A"; }
+relation compound_a_2(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 2 day(s) of daily compounding, family A"; }
+relation compound_a_3(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 3 day(s) of daily compounding, family A"; }
+relation compound_a_4(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 4 day(s) of daily compounding, family A"; }
+relation compound_a_5(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 5 day(s) of daily compounding, family A"; }
+relation compound_a_6(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 6 day(s) of daily compounding, family A"; }
+relation compound_a_7(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 7 day(s) of daily compounding, family A"; }
+relation compound_a_8(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 8 day(s) of daily compounding, family A"; }
+relation compound_a_9(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 9 day(s) of daily compounding, family A"; }
+relation compound_a_10(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 10 day(s) of daily compounding, family A"; }
+relation compound_a_11(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 11 day(s) of daily compounding, family A"; }
+relation compound_a_12(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 12 day(s) of daily compounding, family A"; }
+relation compound_a_13(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 13 day(s) of daily compounding, family A"; }
+relation compound_a_14(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 14 day(s) of daily compounding, family A"; }
+relation compound_a_15(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 15 day(s) of daily compounding, family A"; }
+relation compound_a_16(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 16 day(s) of daily compounding, family A"; }
+relation compound_a_17(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 17 day(s) of daily compounding, family A"; }
+relation compound_a_18(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 18 day(s) of daily compounding, family A"; }
+relation compound_a_19(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 19 day(s) of daily compounding, family A"; }
+relation compound_a_20(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 20 day(s) of daily compounding, family A"; }
+relation compound_a_21(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 21 day(s) of daily compounding, family A"; }
+relation compound_a_22(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 22 day(s) of daily compounding, family A"; }
+relation compound_a_23(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 23 day(s) of daily compounding, family A"; }
+relation compound_a_24(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 24 day(s) of daily compounding, family A"; }
+relation compound_a_25(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 25 day(s) of daily compounding, family A"; }
+relation compound_a_26(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 26 day(s) of daily compounding, family A"; }
+relation compound_a_27(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 27 day(s) of daily compounding, family A"; }
+relation compound_a_28(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 28 day(s) of daily compounding, family A"; }
+relation compound_a_29(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 29 day(s) of daily compounding, family A"; }
+relation compound_a_30(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 30 day(s) of daily compounding, family A"; }
+relation compound_a_31(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 31 day(s) of daily compounding, family A"; }
+relation compound_a_32(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 32 day(s) of daily compounding, family A"; }
+relation compound_a_33(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 33 day(s) of daily compounding, family A"; }
+relation compound_a_34(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 34 day(s) of daily compounding, family A"; }
+relation compound_a_35(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 35 day(s) of daily compounding, family A"; }
+relation compound_a_36(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 36 day(s) of daily compounding, family A"; }
+relation compound_a_37(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 37 day(s) of daily compounding, family A"; }
+relation compound_a_38(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 38 day(s) of daily compounding, family A"; }
+relation compound_a_39(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 39 day(s) of daily compounding, family A"; }
+relation compound_a_40(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 40 day(s) of daily compounding, family A"; }
+relation compound_a_41(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 41 day(s) of daily compounding, family A"; }
+relation compound_a_42(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 42 day(s) of daily compounding, family A"; }
+relation compound_a_43(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 43 day(s) of daily compounding, family A"; }
+relation compound_a_44(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 44 day(s) of daily compounding, family A"; }
+relation compound_a_45(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 45 day(s) of daily compounding, family A"; }
+relation compound_a_46(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 46 day(s) of daily compounding, family A"; }
+relation compound_a_47(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 47 day(s) of daily compounding, family A"; }
+relation compound_a_48(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 48 day(s) of daily compounding, family A"; }
+relation compound_a_49(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 49 day(s) of daily compounding, family A"; }
+relation compound_a_50(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 50 day(s) of daily compounding, family A"; }
+relation compound_a_51(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 51 day(s) of daily compounding, family A"; }
+relation compound_a_52(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 52 day(s) of daily compounding, family A"; }
+relation compound_a_53(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 53 day(s) of daily compounding, family A"; }
+relation compound_a_54(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 54 day(s) of daily compounding, family A"; }
+relation compound_a_55(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 55 day(s) of daily compounding, family A"; }
+relation compound_a_56(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 56 day(s) of daily compounding, family A"; }
+relation compound_a_57(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 57 day(s) of daily compounding, family A"; }
+relation compound_a_58(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 58 day(s) of daily compounding, family A"; }
+relation compound_a_59(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 59 day(s) of daily compounding, family A"; }
+relation compound_a_60(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 60 day(s) of daily compounding, family A"; }
+relation compound_a_61(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 61 day(s) of daily compounding, family A"; }
+relation compound_a_62(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 62 day(s) of daily compounding, family A"; }
+relation compound_a_63(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 63 day(s) of daily compounding, family A"; }
+relation compound_a_64(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 64 day(s) of daily compounding, family A"; }
+relation compound_a_65(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 65 day(s) of daily compounding, family A"; }
+relation compound_a_66(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 66 day(s) of daily compounding, family A"; }
+relation compound_a_67(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 67 day(s) of daily compounding, family A"; }
+relation compound_a_68(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 68 day(s) of daily compounding, family A"; }
+relation compound_a_69(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 69 day(s) of daily compounding, family A"; }
+relation compound_a_70(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 70 day(s) of daily compounding, family A"; }
+relation compound_a_71(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 71 day(s) of daily compounding, family A"; }
+relation compound_a_72(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 72 day(s) of daily compounding, family A"; }
+relation compound_a_73(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 73 day(s) of daily compounding, family A"; }
+relation compound_a_74(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 74 day(s) of daily compounding, family A"; }
+relation compound_a_75(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 75 day(s) of daily compounding, family A"; }
+relation compound_a_76(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 76 day(s) of daily compounding, family A"; }
+relation compound_a_77(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 77 day(s) of daily compounding, family A"; }
+relation compound_a_78(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 78 day(s) of daily compounding, family A"; }
+relation compound_a_79(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 79 day(s) of daily compounding, family A"; }
+relation compound_a_80(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 80 day(s) of daily compounding, family A"; }
+relation compound_a_81(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 81 day(s) of daily compounding, family A"; }
+relation compound_a_82(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 82 day(s) of daily compounding, family A"; }
+relation compound_a_83(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 83 day(s) of daily compounding, family A"; }
+relation compound_a_84(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 84 day(s) of daily compounding, family A"; }
+relation compound_a_85(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 85 day(s) of daily compounding, family A"; }
+relation compound_a_86(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 86 day(s) of daily compounding, family A"; }
+relation compound_a_87(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 87 day(s) of daily compounding, family A"; }
+relation compound_a_88(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 88 day(s) of daily compounding, family A"; }
+relation compound_a_89(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 89 day(s) of daily compounding, family A"; }
+relation compound_a_90(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 90 day(s) of daily compounding, family A"; }
+relation compound_a_91(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 91 day(s) of daily compounding, family A"; }
+relation compound_a_92(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 92 day(s) of daily compounding, family A"; }
+rule S6622ADay1 strict { for principal: Money; for rate: Decimal; for n: Integer; when compounding_over_days(principal, rate, _, n) and principal > 0 USD; then compound_a_1(principal, rate, n, round(principal * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay2 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_1(principal, rate, n, prev); then compound_a_2(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay3 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_2(principal, rate, n, prev); then compound_a_3(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay4 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_3(principal, rate, n, prev); then compound_a_4(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay5 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_4(principal, rate, n, prev); then compound_a_5(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay6 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_5(principal, rate, n, prev); then compound_a_6(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay7 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_6(principal, rate, n, prev); then compound_a_7(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay8 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_7(principal, rate, n, prev); then compound_a_8(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay9 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_8(principal, rate, n, prev); then compound_a_9(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay10 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_9(principal, rate, n, prev); then compound_a_10(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay11 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_10(principal, rate, n, prev); then compound_a_11(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay12 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_11(principal, rate, n, prev); then compound_a_12(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay13 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_12(principal, rate, n, prev); then compound_a_13(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay14 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_13(principal, rate, n, prev); then compound_a_14(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay15 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_14(principal, rate, n, prev); then compound_a_15(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay16 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_15(principal, rate, n, prev); then compound_a_16(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay17 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_16(principal, rate, n, prev); then compound_a_17(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay18 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_17(principal, rate, n, prev); then compound_a_18(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay19 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_18(principal, rate, n, prev); then compound_a_19(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay20 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_19(principal, rate, n, prev); then compound_a_20(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay21 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_20(principal, rate, n, prev); then compound_a_21(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay22 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_21(principal, rate, n, prev); then compound_a_22(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay23 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_22(principal, rate, n, prev); then compound_a_23(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay24 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_23(principal, rate, n, prev); then compound_a_24(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay25 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_24(principal, rate, n, prev); then compound_a_25(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay26 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_25(principal, rate, n, prev); then compound_a_26(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay27 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_26(principal, rate, n, prev); then compound_a_27(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay28 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_27(principal, rate, n, prev); then compound_a_28(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay29 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_28(principal, rate, n, prev); then compound_a_29(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay30 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_29(principal, rate, n, prev); then compound_a_30(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay31 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_30(principal, rate, n, prev); then compound_a_31(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay32 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_31(principal, rate, n, prev); then compound_a_32(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay33 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_32(principal, rate, n, prev); then compound_a_33(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay34 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_33(principal, rate, n, prev); then compound_a_34(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay35 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_34(principal, rate, n, prev); then compound_a_35(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay36 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_35(principal, rate, n, prev); then compound_a_36(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay37 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_36(principal, rate, n, prev); then compound_a_37(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay38 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_37(principal, rate, n, prev); then compound_a_38(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay39 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_38(principal, rate, n, prev); then compound_a_39(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay40 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_39(principal, rate, n, prev); then compound_a_40(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay41 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_40(principal, rate, n, prev); then compound_a_41(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay42 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_41(principal, rate, n, prev); then compound_a_42(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay43 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_42(principal, rate, n, prev); then compound_a_43(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay44 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_43(principal, rate, n, prev); then compound_a_44(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay45 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_44(principal, rate, n, prev); then compound_a_45(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay46 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_45(principal, rate, n, prev); then compound_a_46(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay47 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_46(principal, rate, n, prev); then compound_a_47(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay48 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_47(principal, rate, n, prev); then compound_a_48(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay49 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_48(principal, rate, n, prev); then compound_a_49(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay50 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_49(principal, rate, n, prev); then compound_a_50(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay51 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_50(principal, rate, n, prev); then compound_a_51(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay52 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_51(principal, rate, n, prev); then compound_a_52(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay53 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_52(principal, rate, n, prev); then compound_a_53(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay54 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_53(principal, rate, n, prev); then compound_a_54(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay55 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_54(principal, rate, n, prev); then compound_a_55(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay56 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_55(principal, rate, n, prev); then compound_a_56(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay57 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_56(principal, rate, n, prev); then compound_a_57(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay58 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_57(principal, rate, n, prev); then compound_a_58(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay59 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_58(principal, rate, n, prev); then compound_a_59(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay60 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_59(principal, rate, n, prev); then compound_a_60(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay61 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_60(principal, rate, n, prev); then compound_a_61(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay62 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_61(principal, rate, n, prev); then compound_a_62(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay63 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_62(principal, rate, n, prev); then compound_a_63(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay64 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_63(principal, rate, n, prev); then compound_a_64(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay65 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_64(principal, rate, n, prev); then compound_a_65(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay66 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_65(principal, rate, n, prev); then compound_a_66(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay67 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_66(principal, rate, n, prev); then compound_a_67(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay68 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_67(principal, rate, n, prev); then compound_a_68(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay69 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_68(principal, rate, n, prev); then compound_a_69(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay70 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_69(principal, rate, n, prev); then compound_a_70(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay71 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_70(principal, rate, n, prev); then compound_a_71(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay72 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_71(principal, rate, n, prev); then compound_a_72(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay73 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_72(principal, rate, n, prev); then compound_a_73(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay74 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_73(principal, rate, n, prev); then compound_a_74(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay75 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_74(principal, rate, n, prev); then compound_a_75(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay76 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_75(principal, rate, n, prev); then compound_a_76(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay77 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_76(principal, rate, n, prev); then compound_a_77(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay78 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_77(principal, rate, n, prev); then compound_a_78(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay79 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_78(principal, rate, n, prev); then compound_a_79(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay80 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_79(principal, rate, n, prev); then compound_a_80(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay81 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_80(principal, rate, n, prev); then compound_a_81(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay82 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_81(principal, rate, n, prev); then compound_a_82(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay83 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_82(principal, rate, n, prev); then compound_a_83(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay84 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_83(principal, rate, n, prev); then compound_a_84(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay85 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_84(principal, rate, n, prev); then compound_a_85(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay86 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_85(principal, rate, n, prev); then compound_a_86(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay87 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_86(principal, rate, n, prev); then compound_a_87(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay88 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_87(principal, rate, n, prev); then compound_a_88(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay89 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_88(principal, rate, n, prev); then compound_a_89(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay90 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_89(principal, rate, n, prev); then compound_a_90(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay91 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_90(principal, rate, n, prev); then compound_a_91(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622ADay92 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_a_91(principal, rate, n, prev); then compound_a_92(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+relation compounded_balance_a(principal: Money, rate: Decimal, days: Integer, denominator: Integer, balance: Money) kind institutional { label en official "such interest and such amount shall be compounded daily: the balance after the requested number of days (family A)"; }
+rule S6622ASelect1 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 1 and compound_a_1(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect2 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 2 and compound_a_2(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect3 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 3 and compound_a_3(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect4 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 4 and compound_a_4(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect5 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 5 and compound_a_5(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect6 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 6 and compound_a_6(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect7 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 7 and compound_a_7(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect8 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 8 and compound_a_8(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect9 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 9 and compound_a_9(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect10 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 10 and compound_a_10(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect11 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 11 and compound_a_11(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect12 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 12 and compound_a_12(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect13 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 13 and compound_a_13(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect14 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 14 and compound_a_14(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect15 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 15 and compound_a_15(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect16 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 16 and compound_a_16(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect17 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 17 and compound_a_17(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect18 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 18 and compound_a_18(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect19 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 19 and compound_a_19(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect20 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 20 and compound_a_20(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect21 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 21 and compound_a_21(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect22 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 22 and compound_a_22(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect23 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 23 and compound_a_23(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect24 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 24 and compound_a_24(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect25 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 25 and compound_a_25(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect26 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 26 and compound_a_26(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect27 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 27 and compound_a_27(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect28 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 28 and compound_a_28(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect29 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 29 and compound_a_29(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect30 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 30 and compound_a_30(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect31 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 31 and compound_a_31(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect32 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 32 and compound_a_32(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect33 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 33 and compound_a_33(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect34 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 34 and compound_a_34(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect35 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 35 and compound_a_35(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect36 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 36 and compound_a_36(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect37 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 37 and compound_a_37(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect38 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 38 and compound_a_38(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect39 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 39 and compound_a_39(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect40 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 40 and compound_a_40(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect41 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 41 and compound_a_41(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect42 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 42 and compound_a_42(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect43 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 43 and compound_a_43(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect44 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 44 and compound_a_44(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect45 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 45 and compound_a_45(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect46 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 46 and compound_a_46(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect47 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 47 and compound_a_47(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect48 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 48 and compound_a_48(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect49 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 49 and compound_a_49(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect50 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 50 and compound_a_50(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect51 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 51 and compound_a_51(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect52 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 52 and compound_a_52(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect53 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 53 and compound_a_53(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect54 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 54 and compound_a_54(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect55 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 55 and compound_a_55(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect56 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 56 and compound_a_56(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect57 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 57 and compound_a_57(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect58 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 58 and compound_a_58(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect59 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 59 and compound_a_59(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect60 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 60 and compound_a_60(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect61 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 61 and compound_a_61(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect62 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 62 and compound_a_62(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect63 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 63 and compound_a_63(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect64 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 64 and compound_a_64(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect65 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 65 and compound_a_65(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect66 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 66 and compound_a_66(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect67 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 67 and compound_a_67(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect68 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 68 and compound_a_68(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect69 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 69 and compound_a_69(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect70 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 70 and compound_a_70(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect71 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 71 and compound_a_71(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect72 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 72 and compound_a_72(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect73 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 73 and compound_a_73(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect74 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 74 and compound_a_74(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect75 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 75 and compound_a_75(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect76 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 76 and compound_a_76(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect77 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 77 and compound_a_77(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect78 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 78 and compound_a_78(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect79 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 79 and compound_a_79(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect80 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 80 and compound_a_80(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect81 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 81 and compound_a_81(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect82 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 82 and compound_a_82(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect83 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 83 and compound_a_83(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect84 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 84 and compound_a_84(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect85 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 85 and compound_a_85(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect86 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 86 and compound_a_86(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect87 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 87 and compound_a_87(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect88 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 88 and compound_a_88(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect89 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 89 and compound_a_89(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect90 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 90 and compound_a_90(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect91 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 91 and compound_a_91(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+rule S6622ASelect92 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compounding_over_days(principal, rate, days, n) and days == 92 and compound_a_92(principal, rate, n, bal); then compounded_balance_a(principal, rate, days, n, bal); }
+relation compound_b_1(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 1 day(s) of daily compounding, family B"; }
+relation compound_b_2(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 2 day(s) of daily compounding, family B"; }
+relation compound_b_3(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 3 day(s) of daily compounding, family B"; }
+relation compound_b_4(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 4 day(s) of daily compounding, family B"; }
+relation compound_b_5(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 5 day(s) of daily compounding, family B"; }
+relation compound_b_6(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 6 day(s) of daily compounding, family B"; }
+relation compound_b_7(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 7 day(s) of daily compounding, family B"; }
+relation compound_b_8(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 8 day(s) of daily compounding, family B"; }
+relation compound_b_9(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 9 day(s) of daily compounding, family B"; }
+relation compound_b_10(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 10 day(s) of daily compounding, family B"; }
+relation compound_b_11(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 11 day(s) of daily compounding, family B"; }
+relation compound_b_12(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 12 day(s) of daily compounding, family B"; }
+relation compound_b_13(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 13 day(s) of daily compounding, family B"; }
+relation compound_b_14(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 14 day(s) of daily compounding, family B"; }
+relation compound_b_15(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 15 day(s) of daily compounding, family B"; }
+relation compound_b_16(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 16 day(s) of daily compounding, family B"; }
+relation compound_b_17(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 17 day(s) of daily compounding, family B"; }
+relation compound_b_18(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 18 day(s) of daily compounding, family B"; }
+relation compound_b_19(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 19 day(s) of daily compounding, family B"; }
+relation compound_b_20(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 20 day(s) of daily compounding, family B"; }
+relation compound_b_21(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 21 day(s) of daily compounding, family B"; }
+relation compound_b_22(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 22 day(s) of daily compounding, family B"; }
+relation compound_b_23(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 23 day(s) of daily compounding, family B"; }
+relation compound_b_24(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 24 day(s) of daily compounding, family B"; }
+relation compound_b_25(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 25 day(s) of daily compounding, family B"; }
+relation compound_b_26(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 26 day(s) of daily compounding, family B"; }
+relation compound_b_27(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 27 day(s) of daily compounding, family B"; }
+relation compound_b_28(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 28 day(s) of daily compounding, family B"; }
+relation compound_b_29(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 29 day(s) of daily compounding, family B"; }
+relation compound_b_30(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 30 day(s) of daily compounding, family B"; }
+relation compound_b_31(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 31 day(s) of daily compounding, family B"; }
+relation compound_b_32(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 32 day(s) of daily compounding, family B"; }
+relation compound_b_33(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 33 day(s) of daily compounding, family B"; }
+relation compound_b_34(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 34 day(s) of daily compounding, family B"; }
+relation compound_b_35(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 35 day(s) of daily compounding, family B"; }
+relation compound_b_36(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 36 day(s) of daily compounding, family B"; }
+relation compound_b_37(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 37 day(s) of daily compounding, family B"; }
+relation compound_b_38(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 38 day(s) of daily compounding, family B"; }
+relation compound_b_39(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 39 day(s) of daily compounding, family B"; }
+relation compound_b_40(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 40 day(s) of daily compounding, family B"; }
+relation compound_b_41(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 41 day(s) of daily compounding, family B"; }
+relation compound_b_42(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 42 day(s) of daily compounding, family B"; }
+relation compound_b_43(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 43 day(s) of daily compounding, family B"; }
+relation compound_b_44(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 44 day(s) of daily compounding, family B"; }
+relation compound_b_45(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 45 day(s) of daily compounding, family B"; }
+relation compound_b_46(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 46 day(s) of daily compounding, family B"; }
+relation compound_b_47(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 47 day(s) of daily compounding, family B"; }
+relation compound_b_48(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 48 day(s) of daily compounding, family B"; }
+relation compound_b_49(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 49 day(s) of daily compounding, family B"; }
+relation compound_b_50(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 50 day(s) of daily compounding, family B"; }
+relation compound_b_51(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 51 day(s) of daily compounding, family B"; }
+relation compound_b_52(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 52 day(s) of daily compounding, family B"; }
+relation compound_b_53(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 53 day(s) of daily compounding, family B"; }
+relation compound_b_54(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 54 day(s) of daily compounding, family B"; }
+relation compound_b_55(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 55 day(s) of daily compounding, family B"; }
+relation compound_b_56(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 56 day(s) of daily compounding, family B"; }
+relation compound_b_57(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 57 day(s) of daily compounding, family B"; }
+relation compound_b_58(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 58 day(s) of daily compounding, family B"; }
+relation compound_b_59(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 59 day(s) of daily compounding, family B"; }
+relation compound_b_60(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 60 day(s) of daily compounding, family B"; }
+relation compound_b_61(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 61 day(s) of daily compounding, family B"; }
+relation compound_b_62(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 62 day(s) of daily compounding, family B"; }
+relation compound_b_63(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 63 day(s) of daily compounding, family B"; }
+relation compound_b_64(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 64 day(s) of daily compounding, family B"; }
+relation compound_b_65(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 65 day(s) of daily compounding, family B"; }
+relation compound_b_66(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 66 day(s) of daily compounding, family B"; }
+relation compound_b_67(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 67 day(s) of daily compounding, family B"; }
+relation compound_b_68(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 68 day(s) of daily compounding, family B"; }
+relation compound_b_69(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 69 day(s) of daily compounding, family B"; }
+relation compound_b_70(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 70 day(s) of daily compounding, family B"; }
+relation compound_b_71(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 71 day(s) of daily compounding, family B"; }
+relation compound_b_72(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 72 day(s) of daily compounding, family B"; }
+relation compound_b_73(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 73 day(s) of daily compounding, family B"; }
+relation compound_b_74(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 74 day(s) of daily compounding, family B"; }
+relation compound_b_75(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 75 day(s) of daily compounding, family B"; }
+relation compound_b_76(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 76 day(s) of daily compounding, family B"; }
+relation compound_b_77(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 77 day(s) of daily compounding, family B"; }
+relation compound_b_78(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 78 day(s) of daily compounding, family B"; }
+relation compound_b_79(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 79 day(s) of daily compounding, family B"; }
+relation compound_b_80(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 80 day(s) of daily compounding, family B"; }
+relation compound_b_81(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 81 day(s) of daily compounding, family B"; }
+relation compound_b_82(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 82 day(s) of daily compounding, family B"; }
+relation compound_b_83(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 83 day(s) of daily compounding, family B"; }
+relation compound_b_84(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 84 day(s) of daily compounding, family B"; }
+relation compound_b_85(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 85 day(s) of daily compounding, family B"; }
+relation compound_b_86(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 86 day(s) of daily compounding, family B"; }
+relation compound_b_87(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 87 day(s) of daily compounding, family B"; }
+relation compound_b_88(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 88 day(s) of daily compounding, family B"; }
+relation compound_b_89(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 89 day(s) of daily compounding, family B"; }
+relation compound_b_90(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 90 day(s) of daily compounding, family B"; }
+relation compound_b_91(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 91 day(s) of daily compounding, family B"; }
+relation compound_b_92(principal: Money, rate: Decimal, denominator: Integer, balance: Money) kind institutional { label en unofficial "the balance after 92 day(s) of daily compounding, family B"; }
+rule S6622BDay1 strict { for principal: Money; for rate: Decimal; for n: Integer; when compound_b_seed(principal, rate, n) and principal > 0 USD; then compound_b_1(principal, rate, n, round(principal * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay2 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_1(principal, rate, n, prev); then compound_b_2(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay3 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_2(principal, rate, n, prev); then compound_b_3(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay4 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_3(principal, rate, n, prev); then compound_b_4(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay5 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_4(principal, rate, n, prev); then compound_b_5(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay6 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_5(principal, rate, n, prev); then compound_b_6(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay7 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_6(principal, rate, n, prev); then compound_b_7(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay8 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_7(principal, rate, n, prev); then compound_b_8(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay9 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_8(principal, rate, n, prev); then compound_b_9(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay10 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_9(principal, rate, n, prev); then compound_b_10(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay11 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_10(principal, rate, n, prev); then compound_b_11(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay12 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_11(principal, rate, n, prev); then compound_b_12(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay13 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_12(principal, rate, n, prev); then compound_b_13(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay14 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_13(principal, rate, n, prev); then compound_b_14(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay15 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_14(principal, rate, n, prev); then compound_b_15(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay16 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_15(principal, rate, n, prev); then compound_b_16(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay17 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_16(principal, rate, n, prev); then compound_b_17(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay18 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_17(principal, rate, n, prev); then compound_b_18(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay19 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_18(principal, rate, n, prev); then compound_b_19(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay20 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_19(principal, rate, n, prev); then compound_b_20(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay21 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_20(principal, rate, n, prev); then compound_b_21(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay22 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_21(principal, rate, n, prev); then compound_b_22(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay23 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_22(principal, rate, n, prev); then compound_b_23(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay24 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_23(principal, rate, n, prev); then compound_b_24(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay25 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_24(principal, rate, n, prev); then compound_b_25(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay26 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_25(principal, rate, n, prev); then compound_b_26(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay27 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_26(principal, rate, n, prev); then compound_b_27(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay28 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_27(principal, rate, n, prev); then compound_b_28(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay29 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_28(principal, rate, n, prev); then compound_b_29(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay30 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_29(principal, rate, n, prev); then compound_b_30(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay31 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_30(principal, rate, n, prev); then compound_b_31(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay32 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_31(principal, rate, n, prev); then compound_b_32(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay33 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_32(principal, rate, n, prev); then compound_b_33(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay34 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_33(principal, rate, n, prev); then compound_b_34(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay35 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_34(principal, rate, n, prev); then compound_b_35(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay36 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_35(principal, rate, n, prev); then compound_b_36(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay37 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_36(principal, rate, n, prev); then compound_b_37(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay38 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_37(principal, rate, n, prev); then compound_b_38(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay39 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_38(principal, rate, n, prev); then compound_b_39(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay40 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_39(principal, rate, n, prev); then compound_b_40(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay41 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_40(principal, rate, n, prev); then compound_b_41(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay42 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_41(principal, rate, n, prev); then compound_b_42(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay43 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_42(principal, rate, n, prev); then compound_b_43(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay44 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_43(principal, rate, n, prev); then compound_b_44(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay45 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_44(principal, rate, n, prev); then compound_b_45(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay46 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_45(principal, rate, n, prev); then compound_b_46(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay47 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_46(principal, rate, n, prev); then compound_b_47(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay48 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_47(principal, rate, n, prev); then compound_b_48(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay49 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_48(principal, rate, n, prev); then compound_b_49(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay50 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_49(principal, rate, n, prev); then compound_b_50(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay51 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_50(principal, rate, n, prev); then compound_b_51(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay52 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_51(principal, rate, n, prev); then compound_b_52(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay53 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_52(principal, rate, n, prev); then compound_b_53(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay54 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_53(principal, rate, n, prev); then compound_b_54(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay55 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_54(principal, rate, n, prev); then compound_b_55(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay56 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_55(principal, rate, n, prev); then compound_b_56(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay57 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_56(principal, rate, n, prev); then compound_b_57(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay58 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_57(principal, rate, n, prev); then compound_b_58(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay59 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_58(principal, rate, n, prev); then compound_b_59(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay60 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_59(principal, rate, n, prev); then compound_b_60(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay61 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_60(principal, rate, n, prev); then compound_b_61(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay62 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_61(principal, rate, n, prev); then compound_b_62(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay63 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_62(principal, rate, n, prev); then compound_b_63(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay64 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_63(principal, rate, n, prev); then compound_b_64(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay65 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_64(principal, rate, n, prev); then compound_b_65(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay66 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_65(principal, rate, n, prev); then compound_b_66(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay67 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_66(principal, rate, n, prev); then compound_b_67(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay68 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_67(principal, rate, n, prev); then compound_b_68(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay69 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_68(principal, rate, n, prev); then compound_b_69(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay70 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_69(principal, rate, n, prev); then compound_b_70(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay71 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_70(principal, rate, n, prev); then compound_b_71(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay72 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_71(principal, rate, n, prev); then compound_b_72(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay73 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_72(principal, rate, n, prev); then compound_b_73(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay74 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_73(principal, rate, n, prev); then compound_b_74(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay75 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_74(principal, rate, n, prev); then compound_b_75(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay76 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_75(principal, rate, n, prev); then compound_b_76(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay77 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_76(principal, rate, n, prev); then compound_b_77(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay78 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_77(principal, rate, n, prev); then compound_b_78(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay79 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_78(principal, rate, n, prev); then compound_b_79(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay80 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_79(principal, rate, n, prev); then compound_b_80(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay81 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_80(principal, rate, n, prev); then compound_b_81(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay82 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_81(principal, rate, n, prev); then compound_b_82(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay83 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_82(principal, rate, n, prev); then compound_b_83(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay84 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_83(principal, rate, n, prev); then compound_b_84(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay85 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_84(principal, rate, n, prev); then compound_b_85(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay86 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_85(principal, rate, n, prev); then compound_b_86(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay87 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_86(principal, rate, n, prev); then compound_b_87(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay88 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_87(principal, rate, n, prev); then compound_b_88(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay89 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_88(principal, rate, n, prev); then compound_b_89(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay90 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_89(principal, rate, n, prev); then compound_b_90(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay91 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_90(principal, rate, n, prev); then compound_b_91(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+rule S6622BDay92 strict { for principal: Money; for rate: Decimal; for n: Integer; for prev: Money; when compound_b_91(principal, rate, n, prev); then compound_b_92(principal, rate, n, round(prev * (1.0 + (rate / 100.0 / (n * 1.0))), 2, "HALF_UP")); }
+relation compounded_balance_b(principal: Money, rate: Decimal, days: Integer, denominator: Integer, balance: Money) kind institutional { label en official "such interest and such amount shall be compounded daily: the balance after the requested number of days (family B)"; }
+rule S6622BSelect1 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 1 and compound_b_1(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect2 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 2 and compound_b_2(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect3 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 3 and compound_b_3(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect4 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 4 and compound_b_4(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect5 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 5 and compound_b_5(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect6 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 6 and compound_b_6(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect7 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 7 and compound_b_7(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect8 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 8 and compound_b_8(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect9 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 9 and compound_b_9(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect10 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 10 and compound_b_10(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect11 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 11 and compound_b_11(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect12 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 12 and compound_b_12(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect13 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 13 and compound_b_13(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect14 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 14 and compound_b_14(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect15 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 15 and compound_b_15(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect16 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 16 and compound_b_16(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect17 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 17 and compound_b_17(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect18 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 18 and compound_b_18(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect19 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 19 and compound_b_19(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect20 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 20 and compound_b_20(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect21 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 21 and compound_b_21(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect22 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 22 and compound_b_22(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect23 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 23 and compound_b_23(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect24 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 24 and compound_b_24(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect25 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 25 and compound_b_25(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect26 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 26 and compound_b_26(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect27 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 27 and compound_b_27(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect28 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 28 and compound_b_28(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect29 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 29 and compound_b_29(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect30 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 30 and compound_b_30(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect31 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 31 and compound_b_31(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect32 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 32 and compound_b_32(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect33 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 33 and compound_b_33(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect34 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 34 and compound_b_34(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect35 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 35 and compound_b_35(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect36 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 36 and compound_b_36(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect37 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 37 and compound_b_37(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect38 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 38 and compound_b_38(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect39 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 39 and compound_b_39(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect40 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 40 and compound_b_40(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect41 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 41 and compound_b_41(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect42 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 42 and compound_b_42(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect43 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 43 and compound_b_43(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect44 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 44 and compound_b_44(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect45 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 45 and compound_b_45(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect46 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 46 and compound_b_46(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect47 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 47 and compound_b_47(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect48 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 48 and compound_b_48(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect49 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 49 and compound_b_49(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect50 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 50 and compound_b_50(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect51 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 51 and compound_b_51(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect52 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 52 and compound_b_52(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect53 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 53 and compound_b_53(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect54 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 54 and compound_b_54(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect55 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 55 and compound_b_55(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect56 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 56 and compound_b_56(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect57 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 57 and compound_b_57(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect58 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 58 and compound_b_58(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect59 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 59 and compound_b_59(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect60 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 60 and compound_b_60(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect61 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 61 and compound_b_61(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect62 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 62 and compound_b_62(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect63 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 63 and compound_b_63(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect64 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 64 and compound_b_64(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect65 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 65 and compound_b_65(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect66 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 66 and compound_b_66(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect67 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 67 and compound_b_67(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect68 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 68 and compound_b_68(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect69 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 69 and compound_b_69(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect70 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 70 and compound_b_70(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect71 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 71 and compound_b_71(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect72 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 72 and compound_b_72(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect73 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 73 and compound_b_73(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect74 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 74 and compound_b_74(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect75 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 75 and compound_b_75(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect76 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 76 and compound_b_76(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect77 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 77 and compound_b_77(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect78 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 78 and compound_b_78(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect79 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 79 and compound_b_79(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect80 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 80 and compound_b_80(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect81 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 81 and compound_b_81(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect82 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 82 and compound_b_82(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect83 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 83 and compound_b_83(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect84 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 84 and compound_b_84(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect85 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 85 and compound_b_85(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect86 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 86 and compound_b_86(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect87 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 87 and compound_b_87(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect88 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 88 and compound_b_88(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect89 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 89 and compound_b_89(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect90 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 90 and compound_b_90(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect91 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 91 and compound_b_91(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+rule S6622BSelect92 strict { for principal: Money; for rate: Decimal; for days: Integer; for n: Integer; for bal: Money; when compound_b_request(principal, rate, days, n) and days == 92 and compound_b_92(principal, rate, n, bal); then compounded_balance_b(principal, rate, days, n, bal); }
+relation compound_b_seed(principal: Money, rate: Decimal, denominator: Integer) kind institutional { label en unofficial "the second segment starts from the balance at the end of the first"; }
+relation compound_b_request(principal: Money, rate: Decimal, days: Integer, denominator: Integer) kind institutional { label en unofficial "the second segment request"; }
+rule S6622SecondSegmentRequest strict { for p0: Money; for r1: Decimal; for d1: Integer; for r2: Decimal; for d2: Integer; for n: Integer; for mid: Money; when compounding_two_segments(p0, r1, d1, r2, d2, n) and compounded_balance_a(p0, r1, d1, n, mid); then compound_b_request(mid, r2, d2, n); }
+rule S6622SecondSegmentSeed strict { for p0: Money; for r1: Decimal; for d1: Integer; for r2: Decimal; for d2: Integer; for n: Integer; for mid: Money; when compounding_two_segments(p0, r1, d1, r2, d2, n) and compounded_balance_a(p0, r1, d1, n, mid); then compound_b_seed(mid, r2, n); }
+relation compounded_balance_two_segments(principal: Money, rate1: Decimal, days1: Integer, rate2: Decimal, days2: Integer, denominator: Integer, balance: Money) kind institutional { label en official "the balance after compounding daily over two consecutive segments at different rates"; }
+@source(IRC_S6622_A, relation = formalizes, coverage = partial, quote = "such interest and such amount shall be compounded daily")
+rule S6622TwoSegmentsBalance strict { for p0: Money; for r1: Decimal; for d1: Integer; for r2: Decimal; for d2: Integer; for n: Integer; for mid: Money; for fin: Money; when compounding_two_segments(p0, r1, d1, r2, d2, n) and compounded_balance_a(p0, r1, d1, n, mid) and compounded_balance_b(mid, r2, d2, n, fin); then compounded_balance_two_segments(p0, r1, d1, r2, d2, n, fin); }

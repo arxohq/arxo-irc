@@ -1,0 +1,356 @@
+// Sections 316 (dividend defined), 317 (property/redemption definitions),
+// 301 (distributions of property: the shareholder's three-tier treatment),
+// and 311 (corporate gain on distribution). Stage 1 (IRC-08 stage 1, A06),
+// priority sections.
+//
+// METHOD (AGENT-BRIEF "the corporation and the shareholder are two Persons
+// with linked computations"): a distribution scenario asserts the
+// corporation's current and accumulated earnings and profits (E&P), the
+// shareholder's basis in the stock, and the fair market value of the
+// property distributed; this module derives BOTH the shareholder's three
+// tiers (dividend / return of basis / gain, section 301(c)) with
+// intermediate `dividend_amount`/`distribution_return_of_capital`/
+// `distribution_gain` facts, and the corporation's own section 311 gain and
+// basis-of-property-received-by-shareholder fact (section 301(d)).
+//
+// E&P is modelled as an INPUT relation this module reads (`earnings_and_
+// profits_current`/`earnings_and_profits_accumulated`), not computed: the
+// full section 312 adjustment machinery (E&P history as a running relation
+// across taxable years) is a SEPARATE, larger undertaking than this stage
+// reaches — see the "NOT DONE" note at the end of this file and TECH-GAPS.md.
+// Section 316(a)'s "most recently accumulated" ordering and the
+// current-vs-accumulated priority for section 301(c)(1) ARE modelled here
+// as the ordering rule over the two INPUT relations.
+
+
+use self::{
+    Asset,
+    Corporation,
+    IRC_S301_B,
+    IRC_S301_C,
+    IRC_S301_D,
+    IRC_S311_A,
+    IRC_S311_B,
+    IRC_S316_A,
+    IRC_S317_A,
+    IRC_S317_B,
+    Person,
+    TaxableYear,
+};
+
+pub entity DistributionEvent { label en unofficial "a distribution of property by a corporation to a shareholder with respect to its stock"; }
+
+// --- Section 317: "property" and "redeemed" -------------------------------
+
+@source(IRC_S317_A, quote = "For purposes of this part, the term \"property\" means money, securities, and any other property; except that such term does not include stock in the corporation making the distribution (or rights to acquire such stock).")
+pub relation distributed_property(dist: DistributionEvent, a: Asset) kind empirical {
+    label en official "property (money, securities, or any other property, other than stock or rights to acquire stock of the distributing corporation) distributed in a DistributionEvent, for purposes of section 317(a)/part I";
+}
+@source(IRC_S317_B, quote = "For purposes of this part, stock shall be treated as redeemed by a corporation if the corporation acquires its stock from a shareholder in exchange for property, whether or not the stock so acquired is cancelled, retired, or held as treasury stock.")
+pub relation redemption_acquisition(dist: DistributionEvent, corp: Corporation, shareholder: Person) kind empirical {
+    label en official "the corporation acquires its stock from the shareholder in exchange for property — treated as a redemption of stock for purposes of part I (section 317(b))";
+}
+
+// --- Section 316: dividend defined -----------------------------------------
+
+pub relation distribution(dist: DistributionEvent, corp: Corporation, shareholder: Person, on: Date) kind empirical {
+    label en official "a distribution of property made by a corporation to a shareholder with respect to its stock";
+}
+
+// E&P — INPUT facts this stage reads (section 312's own computation is out
+// of scope; see the module header and TECH-GAPS.md).
+pub relation earnings_and_profits_current(corp: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the corporation's earnings and profits of the taxable year, computed as of the close of the taxable year without diminution by reason of any distributions made during the taxable year (section 316(a)(2))";
+}
+pub relation earnings_and_profits_accumulated(corp: Corporation, on: Date, amount: Money) kind empirical {
+    label en official "the corporation's earnings and profits accumulated after February 28, 1913, as of a date (section 316(a)(1))";
+}
+pub relation distribution_in_year(dist: DistributionEvent, y: TaxableYear) kind empirical {
+    label en official "the taxable year of the corporation that a distribution falls within, for purposes of applying section 316(a)";
+}
+
+pub relation earnings_and_profits(corp: Corporation, on: Date, amount: Money) kind institutional {
+    label en official "the corporation's earnings and profits as of a date, for purposes of section 316 (dividend definition)";
+}
+@source(IRC_S316_A, quote = "out of its earnings and profits accumulated after February 28, 1913")
+rule EarningsAndProfitsIsAccumulated(corp: Corporation, on: Date, amount: Money) defeasible {
+    label en official "section 316(a)(1): earnings and profits, absent a more specific current-year fact, are the accumulated earnings and profits as of the date";
+    when earnings_and_profits_accumulated(corp, on, amount);
+    then earnings_and_profits(corp, on, amount);
+}
+
+// Section 316(a): a distribution is a dividend to the extent it is made out
+// of (1) accumulated E&P or (2) current-year E&P, "without regard to the
+// amount of the earnings and profits at the time the distribution was
+// made", "to the extent thereof, and from the most recently accumulated
+// earnings and profits". Modelled as: the dividend ceiling for a given
+// distribution is the SUM of the current-year E&P and the accumulated E&P
+// as of the distribution date — both pools are available without ordering
+// consequence to the ceiling amount itself (the "most recently
+// accumulated" phrase orders which E&P is treated as consumed FIRST when
+// there are several distributions during the year, drawing down the same
+// pool — a multi-distribution running ledger this stage does not model;
+// TECH_GAP, see file header).
+pub relation dividend_ceiling(dist: DistributionEvent, amount: Money) kind institutional {
+    label en official "the amount out of which a distribution can be a dividend under section 316(a): current-year E&P plus E&P accumulated after February 28, 1913, as of the distribution date";
+}
+@source(IRC_S316_A, quote = "every distribution is made out of earnings and profits to the extent thereof, and from the most recently accumulated earnings and profits")
+rule DividendCeilingRule(dist: DistributionEvent, corp: Corporation, shareholder: Person, on: Date, y: TaxableYear, current: Money, accumulated: Money) strict {
+    label en official "section 316(a): the dividend ceiling for a distribution is current-year E&P plus E&P accumulated as of the distribution date";
+    when distribution(dist, corp, shareholder, on);
+    when distribution_in_year(dist, y);
+    when earnings_and_profits_current(corp, y, current);
+    when earnings_and_profits_accumulated(corp, on, accumulated);
+    then dividend_ceiling(dist, current + accumulated);
+}
+
+// --- Section 316(a) stage 2 (G38): pro rata current-E&P allocation and ----
+// --- chronological accumulated-E&P allocation, as far as the language ----
+// --- allows -----------------------------------------------------------
+//
+// `dividend_ceiling` above gives EACH distribution the FULL current-year
+// E&P independently, which over-counts when a corporation makes more than
+// one distribution in the same taxable year (both distributions would be
+// allowed to consume the same current-year pool in full). Treas. Reg.
+// section 1.316-2(b)'s well-settled reading — current E&P is allocated PRO
+// RATA among all distributions of the year by amount, while accumulated
+// E&P is applied in date order (earliest distribution first, decrementing
+// the pool as it is consumed) — is implemented here for the PRO RATA
+// current-E&P half, which is expressible without a running ledger: it is a
+// SUM over the (empirical) distributed amounts of the year, not a value
+// that depends on its own prior output. The chronological accumulated-E&P
+// consumption is NOT implemented: allocating a shared pool in date order
+// across an unbounded number of distributions is a self-referential
+// running-ledger computation (a later distribution's available pool
+// depends on how much earlier distributions in the SAME year already
+// consumed) — the same LDC-E4102 class as G1/G10/G21(b), already filed as
+// TECH-GAPS.md G38. The residual gap after this stage: `dividend_ceiling`
+// (above) remains the ceiling used by `DistributionGain`/`DividendAmount`
+// rules (module unchanged, pub signature stable); the pro rata figure below
+// is an ADDITIVE, more accurate current-E&P component a consumer may use
+// instead of `dividend_ceiling`'s naive full current-E&P term when it knows
+// more than one distribution occurred in the year — accumulated E&P's
+// chronological consumption still has no correct multi-distribution
+// figure at all (G38 stands, residual: the accumulated-E&P half only).
+
+pub relation total_amount_distributed_in_year(corp: Corporation, y: TaxableYear, total: Money) kind institutional {
+    label en unofficial "the sum of section 301(b) amounts distributed by the corporation with respect to its stock during the taxable year, across every DistributionEvent of that year — the denominator for the section 316(a)/Treas. Reg. 1.316-2(b) pro rata current-E&P allocation";
+}
+@source(IRC_S316_A, quote = "every distribution is made out of earnings and profits to the extent thereof, and from the most recently accumulated earnings and profits")
+rule TotalAmountDistributedInYearRule(dist: DistributionEvent, corp: Corporation, shareholder: Person, on: Date, y: TaxableYear) defeasible {
+    label en unofficial "sums every distribution's section 301(b) amount within the same corporation and taxable year, for the pro rata current-E&P allocation";
+    when distribution(dist, corp, shareholder, on);
+    when distribution_in_year(dist, y);
+    then total_amount_distributed_in_year(corp, y, sum all amt: Money for d2: DistributionEvent where distribution(d2, corp, _, _) and distribution_in_year(d2, y) and amount_distributed(d2, amt));
+}
+
+pub relation dividend_ceiling_current_share_pro_rata(dist: DistributionEvent, share: Money) kind institutional {
+    label en official "the pro rata share of the corporation's current-year earnings and profits allocated to this distribution under section 316(a), where more than one distribution was made during the taxable year (Treas. Reg. section 1.316-2(b)): current-year E&P multiplied by this distribution's amount over the total amount distributed during the year";
+}
+@source(IRC_S316_A, quote = "out of its earnings and profits of the taxable year (computed as of the close of the taxable year without diminution by reason of any distributions made during the taxable year)")
+rule DividendCeilingCurrentSharePartRoRataRule(dist: DistributionEvent, corp: Corporation, shareholder: Person, on: Date, y: TaxableYear, current: Money, amt: Money, total: Money) defeasible {
+    label en official "section 316(a)(2) as applied under Treas. Reg. section 1.316-2(b): a distribution's share of current-year E&P is proportional to its amount relative to the total distributed during the year";
+    when distribution(dist, corp, shareholder, on);
+    when distribution_in_year(dist, y);
+    when earnings_and_profits_current(corp, y, current);
+    when amount_distributed(dist, amt);
+    when total_amount_distributed_in_year(corp, y, total);
+    when total > 0.00 USD;
+    // One proportion, one rounding (TECH-GAPS G499, 26.09.2026).
+    then dividend_ceiling_current_share_pro_rata(dist, div_round(current * (amt / 1.00 USD), total / 1.00 USD, 2, "HALF_UP"));
+}
+
+// --- Section 301(b): amount distributed -------------------------------------
+
+pub relation money_received_in_distribution(dist: DistributionEvent, amount: Money) kind empirical {
+    label en official "the amount of money received in a distribution (section 301(b)(1))";
+}
+pub relation fmv_of_property_in_distribution(dist: DistributionEvent, amount: Money) kind empirical {
+    label en official "the fair market value of the other property received in a distribution, determined as of the date of the distribution (section 301(b)(1), (3))";
+}
+pub relation liability_assumed_by_shareholder(dist: DistributionEvent, amount: Money) kind empirical {
+    label en official "the amount of any liability of the corporation assumed by the shareholder in connection with the distribution (section 301(b)(2)(A))";
+}
+pub relation liability_on_property_received(dist: DistributionEvent, amount: Money) kind empirical {
+    label en official "the amount of any liability to which the property received by the shareholder is subject immediately before and immediately after the distribution (section 301(b)(2)(B))";
+}
+
+pub relation amount_distributed_before_liabilities(dist: DistributionEvent, amount: Money) kind institutional {
+    label en official "the amount of money received plus the fair market value of other property received (section 301(b)(1))";
+}
+@source(IRC_S301_B, quote = "For purposes of this section, the amount of any distribution shall be the amount of money received, plus the fair market value of the other property received.")
+rule AmountDistributedBeforeLiabilitiesRule(dist: DistributionEvent, money: Money, fmv: Money) strict {
+    label en official "section 301(b)(1): amount of a distribution before the liability reduction";
+    when money_received_in_distribution(dist, money);
+    when fmv_of_property_in_distribution(dist, fmv);
+    then amount_distributed_before_liabilities(dist, money + fmv);
+}
+
+pub relation amount_distributed(dist: DistributionEvent, amount: Money) kind institutional {
+    label en official "the amount of the distribution under section 301(b), reduced (but not below zero) by liabilities assumed by the shareholder or attaching to the property";
+}
+@source(IRC_S301_B, quote = "The amount of any distribution determined under paragraph (1) shall be reduced (but not below zero) by—")
+rule AmountDistributedWithLiabilitiesRule(dist: DistributionEvent, before: Money, assumed: Money, on_property: Money) defeasible {
+    label en official "section 301(b)(2): reduce the amount distributed by liabilities assumed or attaching to the property, not below zero";
+    when amount_distributed_before_liabilities(dist, before);
+    when liability_assumed_by_shareholder(dist, assumed);
+    when liability_on_property_received(dist, on_property);
+    when before > (assumed + on_property);
+    then amount_distributed(dist, before - (assumed + on_property));
+}
+@source(IRC_S301_B, quote = "reduced (but not below zero)")
+rule AmountDistributedFloorAtZeroRule(dist: DistributionEvent, before: Money, assumed: Money, on_property: Money) defeasible {
+    label en official "section 301(b)(2): the liability reduction does not take the amount distributed below zero";
+    when amount_distributed_before_liabilities(dist, before);
+    when liability_assumed_by_shareholder(dist, assumed);
+    when liability_on_property_received(dist, on_property);
+    when (assumed + on_property) >= before;
+    then amount_distributed(dist, 0.00 USD);
+}
+// A distribution with no liabilities asserted at all: the liability facts
+// are empirical (case-asserted), so a distribution with neither asserted
+// simply never reaches the two rules above; without a floor default the
+// amount stays UNDETERMINED. That is the correct reading here ONLY where
+// the case means "liabilities not addressed"; a case meaning "no
+// liabilities" must assert `liability_assumed_by_shareholder(dist, 0 USD)`
+// and `liability_on_property_received(dist, 0 USD)` explicitly. Recorded as
+// a judgment call in the report, not silently defaulted to zero.
+
+// --- Section 301(c): the shareholder's three tiers --------------------------
+
+pub relation stock_basis(shareholder: Person, corp: Corporation, on: Date, amount: Money) kind empirical {
+    label en unofficial "the shareholder's adjusted basis in the stock with respect to which the distribution is made, as of the distribution date (feeds section 301(c)(2)-(3) via us.irc.core::adjusted_basis in the general case; asserted directly here as a case fact for this stage)";
+}
+
+pub relation dividend_amount(dist: DistributionEvent, amount: Money) kind institutional {
+    label en official "that portion of the distribution which is a dividend as defined in section 316, included in the shareholder's gross income (section 301(c)(1))";
+}
+@source(IRC_S301_C, quote = "That portion of the distribution which is a dividend (as defined in section 316) shall be included in gross income.")
+rule DividendPortionWithinCeilingRule(dist: DistributionEvent, distributed: Money, ceiling: Money) defeasible {
+    label en official "section 301(c)(1): the distribution is a dividend up to the section 316 ceiling";
+    when amount_distributed(dist, distributed);
+    when dividend_ceiling(dist, ceiling);
+    when ceiling >= distributed;
+    then dividend_amount(dist, distributed);
+}
+@source(IRC_S301_C, quote = "That portion of the distribution which is a dividend (as defined in section 316) shall be included in gross income.")
+rule DividendPortionAboveCeilingRule(dist: DistributionEvent, distributed: Money, ceiling: Money) defeasible {
+    label en official "section 301(c)(1): the dividend portion cannot exceed the section 316 ceiling — the excess is not a dividend";
+    when amount_distributed(dist, distributed);
+    when dividend_ceiling(dist, ceiling);
+    when distributed > ceiling;
+    then dividend_amount(dist, ceiling);
+}
+
+pub relation non_dividend_portion(dist: DistributionEvent, amount: Money) kind institutional {
+    label en official "that portion of the distribution which is not a dividend, before comparison to stock basis (section 301(c)(2)-(3))";
+}
+rule NonDividendPortionRule(dist: DistributionEvent, distributed: Money, dividend: Money) defeasible {
+    label en official "the non-dividend portion of a distribution is the amount distributed less the dividend amount";
+    when amount_distributed(dist, distributed);
+    when dividend_amount(dist, dividend);
+    when distributed >= dividend;
+    then non_dividend_portion(dist, distributed - dividend);
+}
+
+pub relation distribution_return_of_capital(dist: DistributionEvent, amount: Money) kind institutional {
+    label en official "that portion of the distribution which is not a dividend, applied against and reducing the adjusted basis of the stock (section 301(c)(2))";
+}
+@source(IRC_S301_C, quote = "That portion of the distribution which is not a dividend shall be applied against and reduce the adjusted basis of the stock.")
+rule ReturnOfCapitalWithinBasisRule(dist: DistributionEvent, corp: Corporation, shareholder: Person, on: Date, non_dividend: Money, basis: Money) defeasible {
+    label en official "section 301(c)(2): the non-dividend portion, up to the stock's adjusted basis, is a return of basis";
+    when distribution(dist, corp, shareholder, on);
+    when non_dividend_portion(dist, non_dividend);
+    when stock_basis(shareholder, corp, on, basis);
+    when basis >= non_dividend;
+    then distribution_return_of_capital(dist, non_dividend);
+}
+@source(IRC_S301_C, quote = "That portion of the distribution which is not a dividend shall be applied against and reduce the adjusted basis of the stock.")
+rule ReturnOfCapitalCappedAtBasisRule(dist: DistributionEvent, corp: Corporation, shareholder: Person, on: Date, non_dividend: Money, basis: Money) defeasible {
+    label en official "section 301(c)(2): the return of basis cannot exceed the stock's adjusted basis";
+    when distribution(dist, corp, shareholder, on);
+    when non_dividend_portion(dist, non_dividend);
+    when stock_basis(shareholder, corp, on, basis);
+    when non_dividend > basis;
+    then distribution_return_of_capital(dist, basis);
+}
+
+pub relation distribution_gain(dist: DistributionEvent, amount: Money) kind institutional {
+    label en official "that portion of the distribution which is not a dividend, to the extent it exceeds the adjusted basis of the stock, treated as gain from the sale or exchange of property (section 301(c)(3)(A))";
+}
+@source(IRC_S301_C, quote = "Except as provided in subparagraph (B), that portion of the distribution which is not a dividend, to the extent that it exceeds the adjusted basis of the stock, shall be treated as gain from the sale or exchange of property.")
+rule DistributionGainRule(dist: DistributionEvent, corp: Corporation, shareholder: Person, on: Date, non_dividend: Money, basis: Money) defeasible {
+    label en official "section 301(c)(3)(A): the non-dividend portion in excess of stock basis is gain from the sale or exchange of property";
+    when distribution(dist, corp, shareholder, on);
+    when non_dividend_portion(dist, non_dividend);
+    when stock_basis(shareholder, corp, on, basis);
+    when non_dividend > basis;
+    then distribution_gain(dist, non_dividend - basis);
+}
+// Section 301(c)(3)(B) (pre-March-1-1913 increase in value: exempt from
+// tax rather than gain) is EVALUATIVE/records a fact this formalization
+// does not model this stage — TECH_GAP: the "out of increase in value
+// accrued before March 1, 1913" apportionment needs a historical
+// value-accretion fact this stage has no case pattern for (in practice
+// dead-letter for any distribution after 1913 basis records exist, but the
+// text is still in force and not modelled — recorded honestly rather than
+// silently folded into `distribution_gain`).
+
+// --- Section 301(d): basis of property received -----------------------------
+
+pub relation basis_of_distributed_property(shareholder: Person, dist: DistributionEvent, amount: Money) kind institutional {
+    label en official "the basis of property received in a section 301(a) distribution: the fair market value of the property (section 301(d))";
+}
+@source(IRC_S301_D, quote = "The basis of property received in a distribution to which subsection (a) applies shall be the fair market value of such property.")
+rule BasisOfDistributedPropertyRule(shareholder: Person, dist: DistributionEvent, corp: Corporation, on: Date, fmv: Money) strict {
+    label en official "section 301(d): basis of distributed property is its fair market value";
+    when distribution(dist, corp, shareholder, on);
+    when fmv_of_property_in_distribution(dist, fmv);
+    then basis_of_distributed_property(shareholder, dist, fmv);
+}
+
+// --- Section 311: taxability of the corporation on distribution -------------
+
+pub relation corp_adjusted_basis_of_distributed_property(dist: DistributionEvent, amount: Money) kind empirical {
+    label en unofficial "the distributing corporation's adjusted basis in the property immediately before the distribution (section 311(b)(1)(B))";
+}
+pub relation distribution_not_in_complete_liquidation(dist: DistributionEvent) kind empirical {
+    label en official "the distribution is not in complete liquidation with respect to the corporation's stock, for purposes of section 311(a)";
+}
+
+pub relation corp_gain_on_distribution(dist: DistributionEvent, amount: Money) kind institutional {
+    label en official "gain recognized to the distributing corporation on a distribution of appreciated property, as if the property were sold to the distributee at fair market value (section 311(b)(1))";
+}
+@source(IRC_S311_B, quote = "then gain shall be recognized to the distributing corporation as if such property were sold to the distributee at its fair market value.")
+rule CorporateGainOnAppreciatedDistributionRule(dist: DistributionEvent, corp: Corporation, shareholder: Person, on: Date, fmv: Money, basis: Money) defeasible {
+    label en official "section 311(b)(1): gain to the distributing corporation when the FMV of distributed property (other than the corporation's own obligation) exceeds its adjusted basis";
+    when distribution(dist, corp, shareholder, on);
+    when distribution_not_in_complete_liquidation(dist);
+    when fmv_of_property_in_distribution(dist, fmv);
+    when corp_adjusted_basis_of_distributed_property(dist, basis);
+    when fmv > basis;
+    then corp_gain_on_distribution(dist, fmv - basis);
+}
+pub relation corp_no_loss_recognized_on_distribution(dist: DistributionEvent) kind institutional {
+    label en official "no loss is recognized to the distributing corporation on the distribution (section 311(a))";
+}
+@source(IRC_S311_A, quote = "Except as provided in subsection (b), no gain or loss shall be recognized to a corporation on the distribution (not in complete liquidation) with respect to its stock of—")
+rule NoCorporateLossOnDistributionRule(dist: DistributionEvent, corp: Corporation, shareholder: Person, on: Date) defeasible {
+    label en official "section 311(a): no LOSS is recognized to the distributing corporation on a distribution not in complete liquidation, even where FMV is below basis";
+    when distribution(dist, corp, shareholder, on);
+    when distribution_not_in_complete_liquidation(dist);
+    then corp_no_loss_recognized_on_distribution(dist);
+}
+
+// NOT DONE this stage (recorded here, not hidden): section 301(e) (20
+// percent corporate shareholder special rule reading section 312 without
+// (k)/(n)) — EXTERNAL_DEPENDENCY on the section 312 owner's full
+// adjustment model, which this stage does not build; section 301(f)
+// (cross-references to sections 302-386) — NON_NORMATIVE pointer, covered
+// by this package's own sections directly; section 316(b) (special rules:
+// insurance company dividends, personal holding company distributions,
+// qualified dividends corporate distributions) — EXTERNAL_DEPENDENCY /
+// TECH_GAP, not reached; section 311(b)(2)-(3) (rules similar to section
+// 336(b); partnership/trust interest loss-computation regulation) —
+// EXTERNAL_DEPENDENCY on section 336 (this package, module 06, not yet
+// written) and a Secretary regulation respectively.

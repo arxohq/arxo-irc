@@ -1,0 +1,397 @@
+// 26 U.S.C. chapter 12, §§2501-2503, 2505, 2512-2513, 2518 — imposition and
+// cumulative computation of the gift tax, taxable gifts (the annual
+// exclusion and the present-interest/minors rules), the unified credit
+// against the gift tax, valuation, gift-splitting between spouses, and
+// qualified disclaimers.
+//
+// JUDGMENT CALLS:
+//  - §2501(a)(2)-(6) (the intangible-property carve-out for nonresident
+//    noncitizens, the covered-expatriate override, political-organization
+//    and certain exempt-organization transfers) are NOT modelled: TECH_GAP/
+//    NON_NORMATIVE — this stage models the citizen/resident donor case
+//    (section 2501(a)(1)) only, consistent with the report's scope.
+//  - §2503(c) (transfers to minors under age 21) and §2503(e) (educational/
+//    medical exclusion), §2503(f)/(g) (survivor-benefit waivers, loans of
+//    art) are NOT modelled this stage: TECH_GAP, narrower than the annual-
+//    exclusion/present-interest core this stage reaches.
+//  - §2512(b) (bargain-sale gift) is modelled directly; §2512(c) (valuation
+//    statement right) is NON_NORMATIVE (a procedural right, cross-referenced
+//    to section 7517).
+//  - §2513(c) (revocation of consent) is NOT modelled: TECH_GAP, narrow.
+//  - §2518(c) (partial disclaimers, disclaiming a power, disclaimer by
+//    transfer) is NOT modelled beyond the plain refusal case in (b): TECH_GAP.
+//  - `adjusted_taxable_gifts` (chapter 11's own interface value) is derived
+//    here from the decedent's OWN chapter-12 history (post-1976 taxable
+//    gifts) LESS gifts already included in the gross estate under section
+//    2035 — the section 2001(b) carve-out ("adjusted taxable gifts ... other
+//    than gifts which are includible in the gross estate") is modelled with
+//    the `transferred_or_power_relinquished_within_3_years`/`would_be_
+//    included_under_2036_2037_2038_2042` facts already asserted for the
+//    section 2035 rule in 03-gross-estate-inclusions.law, read here through
+//    a helper `gift_included_in_gross_estate` the case asserts once per such
+//    gift (rather than re-deriving section 2035's own item-level logic
+//    against a gift-tax-year fact) — a deliberate simplification, noted so
+//    it is not mistaken for full section 2001(b) integration.
+
+language "law.core" version "0.2";
+package us.irc.estate_gift version "0.1.1";
+namespace "urn:us:irc:estate_gift:clir";
+
+use self::{
+    Asset,
+    Estate,
+    IRC_S2001_B,
+    IRC_S2501_A,
+    IRC_S2502_A,
+    IRC_S2502_C,
+    IRC_S2503_A,
+    IRC_S2503_B,
+    IRC_S2505_A,
+    IRC_S2512,
+    IRC_S2513_A,
+    IRC_S2513_D,
+    IRC_S2518_A,
+    IRC_S2518_B,
+    Individual,
+    Person,
+    Secretary,
+    TaxableYear,
+    bracket_2001c,
+    decedent_individual,
+    donee_is_noncitizen_spouse_recipient,
+    foreign_gift_tax_credit_2501a3b,
+    gift_deductions_allowed_2524,
+    gift_increase_for_gst_tax_2515,
+    gift_is_future_interest_effective,
+    gift_splitting_consent_revoked_effective,
+    gift_to_donee_subject_to_tax,
+    noncitizen_spouse_annual_exclusion_2523i2,
+    specific_exemption_offset,
+    spouse_of,
+    taxable_gift_value_for_cumulative_computation,
+};
+
+// --- §2501(a)(1): imposition -------------------------------------------------
+
+@source(IRC_S2501_A, relation = formalizes, coverage = partial, quote = "A tax, computed as provided in section 2502, is hereby imposed for each calendar year on the transfer of property by gift during such calendar year by any individual resident or nonresident.")
+pub relation gift_tax_imposed(donor: Individual, y: TaxableYear) kind institutional {
+    label en official "a tax is imposed for each calendar year on the transfer of property by gift during such year (section 2501(a)(1))";
+}
+rule GiftTaxImposedCitizenOrResidentRule(donor: Individual, y: TaxableYear) defeasible {
+    label en official "section 2501(a)(1), for a citizen or resident donor (the nonresident-noncitizen intangible-property carve-out of (a)(2) is not modelled this stage)";
+    when (us.irc.definitions::citizen_of_united_states(donor) or us.irc.definitions::resident_of_united_states(donor))
+        and total_gifts_during_year(donor, y, _);
+    then gift_tax_imposed(donor, y);
+}
+
+pub relation total_gifts_during_year(donor: Individual, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the total amount of gifts made by the donor during the calendar year, before the section 2503(b) exclusion and subchapter C deductions";
+}
+
+// --- §2503: taxable gifts, per-donee -----------------------------------------
+// Modelled per-donee (the annual exclusion operates per donee, section
+// 2503(b)(1)) and then summed for the year.
+
+pub relation gift_to_donee_during_year(donor: Individual, y: TaxableYear, donee: Person, amount: Money) kind empirical {
+    label en unofficial "the amount of a gift (other than a gift of a future interest) from the donor to this donee during the calendar year";
+}
+pub relation gift_is_future_interest(donor: Individual, y: TaxableYear, donee: Person) kind empirical {
+    label en unofficial "the gift is of a future interest in property, so the annual exclusion does not apply to it (section 2503(b)(1))";
+}
+
+@source(IRC_S2503_B, relation = formalizes, coverage = exact, quote = "the first $10,000 of such gifts to such person shall not, for purposes of subsection (a), be included in the total amount of gifts made during such year")
+pub relation annual_exclusion_applied(donor: Individual, y: TaxableYear, donee: Person, amount: Money) kind institutional {
+    label en official "the annual per-donee exclusion applied against gifts of a present interest to this donee (section 2503(b)); for a noncitizen spouse the substituted amount of section 2523(i)(2)";
+}
+rule AnnualExclusionAppliedRule(donor: Individual, y: TaxableYear, donee: Person, gift: Money) defeasible {
+    when gift_to_donee_subject_to_tax(donor, y, donee, gift)
+        and not_known(gift_is_future_interest_effective(donor, y, donee))
+        and not_known(donee_is_noncitizen_spouse_recipient(donor, y, donee));
+    then annual_exclusion_applied(donor, y, donee, min(gift, AnnualExclusionAmount));
+}
+rule AnnualExclusionAppliedNoncitizenSpouseRule(donor: Individual, y: TaxableYear, donee: Individual, ex: Money) defeasible {
+    label en official "section 2503(b) applied with $100,000 substituted for $10,000 for a gift to a noncitizen spouse (section 2523(i)(2))";
+    when noncitizen_spouse_annual_exclusion_2523i2(donor, y, donee, ex);
+    then annual_exclusion_applied(donor, y, donee, ex);
+}
+
+pub relation taxable_gift_to_donee(donor: Individual, y: TaxableYear, donee: Person, amount: Money) kind institutional {
+    label en unofficial "the taxable portion of gifts to this donee for the year, after the annual exclusion (section 2503(a)-(b)) and increased by the chapter 13 tax on a direct skip (section 2515)";
+}
+rule TaxableGiftToDoneePresentInterestRule(donor: Individual, y: TaxableYear, donee: Person, gift: Money, excl: Money) defeasible {
+    when gift_to_donee_subject_to_tax(donor, y, donee, gift)
+        and annual_exclusion_applied(donor, y, donee, excl);
+    then taxable_gift_to_donee(donor, y, donee, gift - excl + sum(collect all i: Money where gift_increase_for_gst_tax_2515(donor, y, donee, i), empty: 0.00 USD));
+}
+rule TaxableGiftToDoneeFutureInterestRule(donor: Individual, y: TaxableYear, donee: Person, gift: Money) defeasible {
+    when gift_to_donee_subject_to_tax(donor, y, donee, gift)
+        and gift_is_future_interest_effective(donor, y, donee);
+    then taxable_gift_to_donee(donor, y, donee, gift + sum(collect all i: Money where gift_increase_for_gst_tax_2515(donor, y, donee, i), empty: 0.00 USD));
+}
+
+@source(IRC_S2503_A, relation = formalizes, coverage = exact, quote = "means the total amount of gifts made during the calendar year, less the deductions provided in subchapter C")
+pub relation taxable_gifts(donor: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en official "taxable gifts: the total amount of gifts made during the calendar year, less the section 2522-2523 deductions, allowed only to the extent the gifts are included (sections 2503(a), 2524)";
+}
+pub relation taxable_gifts_before_deductions_2503a(donor: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "the sum of the per-donee taxable gifts for the year, before the section 2522 and 2523 deductions";
+}
+rule TaxableGiftsBeforeDeductionsRule(donor: Individual, y: TaxableYear) defeasible {
+    when taxable_gift_to_donee(donor, y, _, _);
+    then taxable_gifts_before_deductions_2503a(donor, y, sum(collect all a: Money, donee: Person where taxable_gift_to_donee(donor, y, donee, a), empty: 0.00 USD));
+}
+rule TaxableGiftsRule(donor: Individual, y: TaxableYear, before: Money, allowed: Money) defeasible {
+    label en official "taxable gifts are the gifts for the year less the deductions of subchapter C, allowed only to the extent of the gifts included (sections 2503(a), 2524)";
+    when taxable_gifts_before_deductions_2503a(donor, y, before);
+    when gift_deductions_allowed_2524(donor, y, allowed);
+    then taxable_gifts(donor, y, max(0.00 USD, before - allowed));
+}
+
+// --- §2502: rate of tax (cumulative computation) ----------------------------
+
+pub relation cumulative_taxable_gifts_through(donor: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "the aggregate sum of taxable gifts for this calendar year and every preceding calendar period (section 2502(a)(1))";
+}
+rule CumulativeTaxableGiftsThroughRule(donor: Individual, y: TaxableYear, n: Integer) defeasible {
+    when taxable_gifts(donor, y, _);
+    when us.irc.core::calendar_year_of(y, n);
+    then cumulative_taxable_gifts_through(donor, y, sum all g: Money for y2: TaxableYear, n2: Integer where taxable_gift_value_for_cumulative_computation(donor, y2, g) and us.irc.core::calendar_year_of(y2, n2) and n2 <= n);
+}
+
+pub relation cumulative_taxable_gifts_before(donor: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "the aggregate sum of taxable gifts for every calendar period preceding this calendar year (section 2502(a)(2))";
+}
+rule CumulativeTaxableGiftsBeforeRule(donor: Individual, y: TaxableYear, n: Integer) defeasible {
+    when taxable_gifts(donor, y, _);
+    when us.irc.core::calendar_year_of(y, n);
+    then cumulative_taxable_gifts_before(donor, y, sum all g: Money for y2: TaxableYear, n2: Integer where taxable_gift_value_for_cumulative_computation(donor, y2, g) and us.irc.core::calendar_year_of(y2, n2) and n2 < n);
+}
+
+// (`bracket_2001c` is declared once, in 01-estate-imposition.law.)
+
+pub relation tentative_gift_tax_through(donor: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "a tentative tax, computed under section 2001(c), on the cumulative sum of taxable gifts through this year (section 2502(a)(1))";
+}
+rule TentativeGiftTaxThroughRule(donor: Individual, y: TaxableYear, base: Money, lower: Money, base_tax: Money, rate: Decimal) defeasible {
+    when cumulative_taxable_gifts_through(donor, y, base);
+    when bracket_2001c(base, lower, base_tax, rate);
+    then tentative_gift_tax_through(donor, y, base_tax + rate * (base - lower));
+}
+
+pub relation tentative_gift_tax_before(donor: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "a tentative tax, computed under section 2001(c), on the cumulative sum of taxable gifts for every preceding calendar period (section 2502(a)(2))";
+}
+rule TentativeGiftTaxBeforeRule(donor: Individual, y: TaxableYear, base: Money, lower: Money, base_tax: Money, rate: Decimal) defeasible {
+    when cumulative_taxable_gifts_before(donor, y, base);
+    when bracket_2001c(base, lower, base_tax, rate);
+    then tentative_gift_tax_before(donor, y, base_tax + rate * (base - lower));
+}
+
+@source(IRC_S2502_A, relation = formalizes, coverage = exact, quote = "The tax imposed by section 2501 for each calendar year shall be an amount equal to the excess of")
+pub relation gift_tax_before_credit(donor: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the tax imposed by section 2501 before the section 2505 unified credit (section 2502(a))";
+}
+rule GiftTaxBeforeCreditRule(donor: Individual, y: TaxableYear, through: Money, before: Money) defeasible {
+    when tentative_gift_tax_through(donor, y, through);
+    when tentative_gift_tax_before(donor, y, before);
+    then gift_tax_before_credit(donor, y, max(0.00 USD, through - before));
+}
+
+// --- §2505: unified credit against gift tax ---------------------------------
+
+pub relation cumulative_gift_tax_credit_allowed_before(donor: Individual, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the sum of the amounts allowable as a section 2505 credit to the donor for all preceding calendar periods (section 2505(a)(2)); case-asserted running total, since re-deriving it from every preceding year's own credit computation is a self-referential recursion this stage does not build (TECH_GAP, same class as the day-by-day ledger limitation flagged elsewhere in this corpus)";
+}
+
+@source(IRC_S2505_A, relation = formalizes, coverage = exact, quote = "there shall be allowed as a credit against the tax imposed by section 2501 for each calendar year an amount equal to")
+pub relation gift_tax_credit(donor: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the section 2505 unified credit against the gift tax for this calendar year";
+}
+rule GiftTaxCreditRule(donor: Individual, y: TaxableYear, hypothetical_estate_credit: Money, prior: Money) defeasible {
+    when applicable_credit_amount_as_of_year_end(donor, y, hypothetical_estate_credit);
+    when cumulative_gift_tax_credit_allowed_before(donor, y, prior);
+    then gift_tax_credit(donor, y, max(0.00 USD, hypothetical_estate_credit - prior - sum(collect all x: Money where specific_exemption_offset(donor, x), empty: 0.00 USD)));
+}
+rule GiftTaxCreditNoPriorRule(donor: Individual, y: TaxableYear, hypothetical_estate_credit: Money) defeasible {
+    when applicable_credit_amount_as_of_year_end(donor, y, hypothetical_estate_credit);
+    when not_known(has_cumulative_gift_tax_credit_allowed_before(donor, y));
+    then gift_tax_credit(donor, y, max(0.00 USD, hypothetical_estate_credit - sum(collect all x: Money where specific_exemption_offset(donor, x), empty: 0.00 USD)));
+}
+relation has_cumulative_gift_tax_credit_allowed_before(donor: Individual, y: TaxableYear) kind institutional {
+    label en unofficial "a prior-periods gift-tax-credit total has been asserted for this donor and year (closed-world helper, LDC-E0207)";
+}
+rule HasCumulativeGiftTaxCreditAllowedBeforeRule(donor: Individual, y: TaxableYear, amount: Money) strict {
+    when cumulative_gift_tax_credit_allowed_before(donor, y, amount);
+    then has_cumulative_gift_tax_credit_allowed_before(donor, y);
+}
+
+pub relation applicable_credit_amount_as_of_year_end(donor: Individual, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the applicable credit amount under section 2010(c) that would apply if the donor died as of the end of this calendar year; case-asserted (a full hypothetical-death projection of section 2010(c) for a living donor is outside this stage's scope, TECH_GAP)";
+}
+
+pub relation gift_tax(donor: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "the net gift tax due for the year, after the section 2505 credit (PLAN §5 interface value)";
+}
+rule GiftTaxRule(donor: Individual, y: TaxableYear, before: Money, credit: Money) defeasible {
+    when gift_tax_before_credit(donor, y, before);
+    when gift_tax_credit(donor, y, credit);
+    then gift_tax(donor, y, max(0.00 USD, before - min(credit, before) - sum(collect all f: Money where foreign_gift_tax_credit_2501a3b(donor, y, f), empty: 0.00 USD)));
+}
+
+@source(IRC_S2502_C, relation = formalizes, coverage = exact, quote = "The tax imposed by section 2501 shall be paid by the donor.")
+rule DonorPaysGiftTax(donor: Individual, y: TaxableYear, w: Interval<Instant>) defeasible {
+    label en official "the tax imposed by section 2501 shall be paid by the donor (section 2502(c))";
+    when gift_tax_imposed(donor, y);
+    then duty DonorGiftTaxPaymentDuty {
+        bearer donor;
+        beneficiary Secretary;
+        achieve gift_tax_paid(donor, y) during [@1976-01-01, infinity);
+    };
+}
+pub relation gift_tax_paid(donor: Individual, y: TaxableYear) kind empirical {
+    label en unofficial "the donor has paid the tax imposed by chapter 12 for this year";
+}
+
+// --- §2512: valuation of gifts -----------------------------------------------
+
+pub relation gift_property_value(donor: Individual, y: TaxableYear, donee: Person, amount: Money) kind empirical {
+    label en unofficial "the value of the property at the date of the gift (section 2512(a)); EVALUATIVE/appraised fact";
+}
+pub relation consideration_received(donor: Individual, y: TaxableYear, donee: Person, amount: Money) kind empirical {
+    label en unofficial "the value of consideration received by the donor for the transfer (section 2512(b))";
+}
+
+@source(IRC_S2512, relation = formalizes, coverage = exact, quote = "If the gift is made in property, the value thereof at the date of the gift shall be considered the amount of the gift.")
+rule GiftAmountFullGiftRule(donor: Individual, y: TaxableYear, donee: Person, amount: Money) defeasible {
+    when gift_property_value(donor, y, donee, amount)
+        and not_known(has_consideration_received(donor, y, donee));
+    then gift_to_donee_during_year(donor, y, donee, amount);
+}
+@source(IRC_S2512, relation = formalizes, coverage = exact, quote = "Where property is transferred for less than an adequate and full consideration in money or money's worth, then the amount by which the value of the property exceeded the value of the consideration shall be deemed a gift")
+rule GiftAmountBargainSaleRule(donor: Individual, y: TaxableYear, donee: Person, value: Money, consideration: Money) defeasible {
+    when gift_property_value(donor, y, donee, value)
+        and consideration_received(donor, y, donee, consideration)
+        and value > consideration;
+    then gift_to_donee_during_year(donor, y, donee, value - consideration);
+}
+relation has_consideration_received(donor: Individual, y: TaxableYear, donee: Person) kind institutional {
+    label en unofficial "a consideration-received amount has been asserted for this gift (closed-world helper, LDC-E0207)";
+}
+rule HasConsiderationReceivedRule(donor: Individual, y: TaxableYear, donee: Person, amount: Money) strict {
+    when consideration_received(donor, y, donee, amount);
+    then has_consideration_received(donor, y, donee);
+}
+
+// --- §2513: gift-splitting between spouses -----------------------------------
+
+pub relation gift_splitting_consent_signified(spouse_of_donor: Individual, y: TaxableYear) kind empirical {
+    label en unofficial "the non-donor spouse signified consent to gift-splitting for all gifts made by either spouse to third parties during the calendar year (section 2513(a)(2), (b))";
+}
+pub relation gift_splitting_consent_timely(spouse_of_donor: Individual, y: TaxableYear) kind institutional {
+    label en unofficial "the consent was signified within the section 2513(b)(2) time limits (not after April 15 following the year unless no return has yet been filed, and not after a notice of deficiency)";
+}
+pub relation gift_creates_general_power_in_spouse(donor: Individual, y: TaxableYear, donee: Person) kind empirical {
+    label en unofficial "the donor's gift creates in the donor's spouse a general power of appointment (as defined in section 2514(c)) over the interest (section 2513(a)(1), second sentence) — gift-splitting does not apply to such a gift";
+}
+
+@source(IRC_S2513_A, relation = formalizes, coverage = exact, quote = "A gift made by one spouse to any person other than his spouse shall, for the purposes of this chapter, be considered as made one-half by him and one-half by his spouse, but only if at the time of the gift each spouse is a citizen or resident of the United States.")
+pub relation gift_splitting_elected(donor: Individual, spouse: Individual, y: TaxableYear) kind institutional {
+    label en official "gift-splitting is elected and valid for this donor, spouse and calendar year (section 2513(a))";
+}
+rule GiftSplittingElectionPower(donor: Individual, spouse: Individual, y: TaxableYear) strict {
+    label en official "a gift made by one spouse to a third party is considered made one-half by each spouse, if both signify consent (section 2513(a))";
+    when spouse_of(donor, spouse)
+        and gift_splitting_consent_signified(spouse, y);
+    then power GiftSplittingElection {
+        holder spouse;
+        over y;
+        exercise gift_splitting_consent_signified(spouse, y);
+        valid_when gift_splitting_consent_timely(spouse, y);
+        effect create(gift_splitting_elected(donor, spouse, y));
+        window [@1976-01-01, infinity);
+    };
+}
+
+@source(IRC_S2513_D, relation = formalizes, coverage = exact, quote = "If the consent required by subsection (a)(2) is signified with respect to a gift made in any calendar year, the liability with respect to the entire tax imposed by this chapter of each spouse for such year shall be joint and several.")
+rule GiftSplittingJointAndSeveralLiability(donor: Individual, spouse: Individual, y: TaxableYear, w: Interval<Instant>) defeasible {
+    label en official "the liability of each spouse for the entire chapter-12 tax for the year is joint and several once gift-splitting is elected (section 2513(d))";
+    when gift_splitting_elected(donor, spouse, y);
+    when not_known(gift_splitting_consent_revoked_effective(spouse, y));
+    then duty SpouseJointAndSeveralGiftTaxDuty {
+        bearer spouse;
+        beneficiary Secretary;
+        achieve gift_tax_paid(donor, y) during [@1976-01-01, infinity);
+    };
+}
+
+// --- §2518: qualified disclaimers --------------------------------------------
+
+pub relation disclaimer_in_writing(p: Person, item: Asset) kind empirical {
+    label en unofficial "the refusal is in writing (section 2518(b)(1))";
+}
+pub relation disclaimer_received_timely(p: Person, item: Asset) kind empirical {
+    label en unofficial "the writing was received by the transferor, the transferor's legal representative, or the holder of legal title not later than 9 months after the later of the transfer creating the interest or the disclaimant's 21st birthday (section 2518(b)(2))";
+}
+pub relation disclaimant_accepted_interest_or_benefits(p: Person, item: Asset) kind empirical {
+    label en unofficial "the person has accepted the interest or any of its benefits (section 2518(b)(3)) — defeats a qualified disclaimer";
+}
+pub relation disclaimed_interest_passes_without_direction(p: Person, item: Asset) kind empirical {
+    label en unofficial "as a result of the refusal, the interest passes without any direction on the part of the disclaimant, to the decedent's spouse or to a person other than the disclaimant (section 2518(b)(4))";
+}
+
+@source(IRC_S2518_B, relation = formalizes, coverage = exact, quote = "an irrevocable and unqualified refusal by a person to accept an interest in property but only if")
+pub relation qualified_disclaimer(p: Person, item: Asset) kind institutional {
+    label en official "a qualified disclaimer under section 2518(b)";
+}
+rule QualifiedDisclaimerRule(p: Person, item: Asset) strict {
+    when disclaimer_in_writing(p, item)
+        and disclaimer_received_timely(p, item)
+        and not_known(disclaimant_accepted_interest_or_benefits(p, item))
+        and disclaimed_interest_passes_without_direction(p, item);
+    then qualified_disclaimer(p, item);
+}
+
+@source(IRC_S2518_A, relation = formalizes, coverage = exact, quote = "if a person makes a qualified disclaimer with respect to any interest in property, this subtitle shall apply with respect to such interest as if the interest had never been transferred to such person")
+rule QualifiedDisclaimerTreatedAsNoTransfer(p: Person, item: Asset) strict {
+    label en official "a qualified disclaimer is treated, for purposes of this subtitle, as if the interest had never been transferred to the disclaimant (section 2518(a))";
+    when qualified_disclaimer(p, item);
+    then power QualifiedDisclaimerPower {
+        holder p;
+        over item;
+        exercise qualified_disclaimer(p, item);
+        valid_when qualified_disclaimer(p, item);
+        effect create(disclaimed_as_never_transferred(p, item));
+        window [@1976-01-01, infinity);
+    };
+}
+pub relation disclaimed_as_never_transferred(p: Person, item: Asset) kind institutional {
+    label en unofficial "the interest is treated as if it had never been transferred to p (section 2518(a))";
+}
+
+// --- Interface for chapter 11: adjusted taxable gifts -----------------------
+// See the judgment call at the top of this module.
+
+pub relation gift_included_in_gross_estate(donor: Individual, y: TaxableYear) kind institutional {
+    label en unofficial "the taxable gifts made in this calendar year are themselves included in the donor's own gross estate (e.g. because the donor later died within the section 2035 3-year window) and so are excluded from adjusted taxable gifts (section 2001(b)(1)(B))";
+}
+
+pub relation adjusted_taxable_gifts(e: Estate, amount: Money) kind institutional {
+    label en unofficial "the total amount of taxable gifts made by the decedent after December 31, 1976, other than gifts includible in the gross estate (section 2001(b)(1)(B))";
+}
+
+@source(IRC_S2001_B, relation = formalizes, coverage = partial, quote = "the term \"adjusted taxable gifts\" means the total amount of the taxable gifts")
+rule AdjustedTaxableGiftsRule(e: Estate, donor: Individual) defeasible {
+    label en official "adjusted taxable gifts: the total post-1976 taxable gifts of the decedent, other than gifts includible in the gross estate (section 2001(b)(1)(B))";
+    when decedent_individual(e, donor);
+    then adjusted_taxable_gifts(e, sum all g: Money for y: TaxableYear, n: Integer where taxable_gifts(donor, y, g) and us.irc.core::calendar_year_of(y, n) and n >= 1977 and not_known(gift_included_in_gross_estate(donor, y)));
+}
+
+pub relation gift_tax_payable_at_current_rates(e: Estate, amount: Money) kind institutional {
+    label en unofficial "the aggregate amount of tax which would have been payable under chapter 12 with respect to post-1976 gifts, using the rates in effect at death (section 2001(b)(2), (g)(1))";
+}
+// `GiftTaxPayableAtCurrentRatesRule` is in 23-gift-deductions-and-coordination.law
+// (section 2001(b)(2), (d), (e), (g)(1): the tentative tax on ALL post-1976 gifts
+// at the rates in effect at death, less the section 2505 credit, never below zero).
+pub relation date_of_death_year(e: Estate, y: TaxableYear) kind empirical {
+    label en unofficial "the taxable year (calendar year) in which the decedent died; case-asserted so the section 2001(b)(2) cumulative-gift-tax computation can be evaluated as of that year without re-deriving section 441's own calendar/fiscal-year machinery for the decedent as donor";
+}

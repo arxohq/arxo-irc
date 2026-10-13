@@ -1,0 +1,757 @@
+// Section 433 — STAGE 2f (IRC-09, DECISION-0379, 25.09.2026): the minimum
+// funding standard of a CSEC plan (a church-sponsored or similar plan of
+// section 414(y), modelled in module 28). The design follows module 31:
+// items recorded by kind and year, totals as sums, the accumulated funding
+// deficiency as an exact difference, level installments as ordinary-annuity
+// payments with the growth written as products of one 5-year factor. Added
+// here: the alternative minimum funding standard account (e), the
+// underpayment interest rate, installments and liquidity shortfall (f), the
+// lien (g), the funded current liability percentage (i) and the funding
+// restoration rules (j).
+//
+// Percentages are fractions. Actuarial values, segment rates and the Federal
+// mid-term rate are case inputs.
+
+use self::{
+    DefinedBenefitPlan,
+    IRC_S433_A,
+    IRC_S433_B,
+    IRC_S433_C,
+    IRC_S433_D,
+    IRC_S433_E,
+    IRC_S433_F,
+    IRC_S433_G,
+    IRC_S433_I,
+    IRC_S433_J,
+    Person,
+    Plan,
+    TaxableYear,
+    csec_plan_414y,
+    db_plan_sponsor_430,
+};
+
+pub enum CsecChargeKind433 {
+    NormalCost;
+    PastServiceInExistenceJanuary1974;
+    PastServiceNewPlanBefore2014;
+    AmendmentIncrease;
+    ExperienceLoss;
+    AssumptionLoss;
+    WaivedDeficiency;
+    CreditBalance5Years;
+    ContributionsButForOldLaw20Years;
+}
+
+pub enum CsecCreditKind433 {
+    EmployerContribution;
+    AmendmentDecrease;
+    ExperienceGain;
+    AssumptionGain;
+    WaivedFundingDeficiency;
+    DebitBalanceAfterAlternativeStandard;
+}
+
+pub relation csec_account_maintained_433(plan: DefinedBenefitPlan) kind empirical {
+    label en unofficial "the CSEC plan has established and maintains a funding standard account, case-asserted (section 433(b)(1))";
+}
+
+pub relation csec_charge_item_433(plan: DefinedBenefitPlan, y: TaxableYear, kind: CsecChargeKind433, amount: Money) kind empirical {
+    label en unofficial "a charge to the funding standard account by kind for the plan year, case-asserted (section 433(b)(2))";
+}
+
+pub relation csec_credit_item_433(plan: DefinedBenefitPlan, y: TaxableYear, kind: CsecCreditKind433, amount: Money) kind empirical {
+    label en unofficial "a credit to the funding standard account by kind for the plan year, case-asserted (section 433(b)(3))";
+}
+
+pub relation csec_charges_for_year_433(plan: DefinedBenefitPlan, y: TaxableYear, total: Money) kind institutional {
+    label en official "section 433(b)(2): the sum of the charges for the plan year";
+}
+
+@source(IRC_S433_B, relation = formalizes, coverage = exact, quote = "For a plan year, the funding standard account shall be charged with the sum of")
+rule CsecChargesForYear433(plan: DefinedBenefitPlan, y: TaxableYear, first: CsecChargeKind433, first_amount: Money) strict {
+    label en official "sum over the recorded items";
+    when csec_charge_item_433(plan, y, first, first_amount);
+    then csec_charges_for_year_433(plan, y,
+        sum all amt: Money for k: CsecChargeKind433 where csec_charge_item_433(plan, y, k, amt));
+}
+
+pub relation csec_credits_for_year_433(plan: DefinedBenefitPlan, y: TaxableYear, total: Money) kind institutional {
+    label en official "section 433(b)(3): the sum of the credits for the plan year";
+}
+
+@source(IRC_S433_B, relation = formalizes, coverage = exact, quote = "For a plan year, the funding standard account shall be credited with the sum of")
+rule CsecCreditsForYear433(plan: DefinedBenefitPlan, y: TaxableYear, first: CsecCreditKind433, first_amount: Money) strict {
+    label en official "sum over the recorded items";
+    when csec_credit_item_433(plan, y, first, first_amount);
+    then csec_credits_for_year_433(plan, y,
+        sum all amt: Money for k: CsecCreditKind433 where csec_credit_item_433(plan, y, k, amt));
+}
+
+pub relation csec_accumulated_funding_deficiency_433a(plan: DefinedBenefitPlan, amount: Money) kind institutional {
+    label en official "section 433(a): the excess of the total charges over the total credits for all plan years";
+}
+
+@source(IRC_S433_A, relation = formalizes, coverage = exact, quote = "the term \"accumulated funding deficiency\" for a CSEC plan means the excess of the total charges to the")
+rule CsecAccumulatedFundingDeficiency433a(plan: DefinedBenefitPlan) strict {
+    label en official "exact difference of the two all-year sums, when positive";
+    when csec_account_maintained_433(plan)
+        and (sum all c: Money for y: TaxableYear where csec_charges_for_year_433(plan, y, c))
+            > (sum all d: Money for y2: TaxableYear where csec_credits_for_year_433(plan, y2, d));
+    then csec_accumulated_funding_deficiency_433a(plan,
+        (sum all c: Money for y: TaxableYear where csec_charges_for_year_433(plan, y, c))
+        - (sum all d: Money for y2: TaxableYear where csec_credits_for_year_433(plan, y2, d)));
+}
+
+@source(IRC_S433_B, relation = formalizes, coverage = exact, quote = "Each plan to which this section applies shall establish and maintain a funding standard account.")
+rule CsecAccountDuty433(plan: DefinedBenefitPlan, sponsor: Person) strict {
+    label en official "the sponsor keeps the account for a CSEC plan (no window)";
+    when csec_plan_414y(plan) and db_plan_sponsor_430(plan, sponsor);
+    then duty MaintainCsecAccountDuty {
+        bearer sponsor;
+        beneficiary sponsor;
+        goal maintenance {
+            condition csec_account_maintained_433(plan);
+            window [-infinity, infinity];
+        }
+    };
+}
+
+// ---------------------------------------------------------------------
+// (b)(2), (b)(5) Amortization periods and installments
+// ---------------------------------------------------------------------
+
+pub relation csec_amortization_base_433(plan: DefinedBenefitPlan, y: TaxableYear, kind: CsecChargeKind433, base: Money) kind empirical {
+    label en unofficial "the amount to be amortized for the kind, case-asserted";
+}
+
+pub relation csec_amortization_years_433(plan: DefinedBenefitPlan, y: TaxableYear, kind: CsecChargeKind433, years: Integer) kind institutional {
+    label en official "section 433(b)(2): the amortization period by kind (40, 30, 15, 5, 10, 5, 5 and 20 plan years)";
+}
+
+@source(IRC_S433_B, relation = formalizes, coverage = exact, quote = "in the case of a plan in existence on January 1, 1974, the unfunded past service liability under the plan on the first day of the first plan year to which section 412 applies, over a period of 40 plan years")
+rule CsecPeriodPast1974(plan: DefinedBenefitPlan, y: TaxableYear, base: Money) strict {
+    label en official "40 plan years";
+    when csec_amortization_base_433(plan, y, PastServiceInExistenceJanuary1974, base);
+    then csec_amortization_years_433(plan, y, PastServiceInExistenceJanuary1974, 40);
+}
+
+@source(IRC_S433_B, relation = formalizes, coverage = exact, quote = "over a period of 30 plan years")
+rule CsecPeriodPastNew(plan: DefinedBenefitPlan, y: TaxableYear, base: Money) strict {
+    label en official "30 plan years";
+    when csec_amortization_base_433(plan, y, PastServiceNewPlanBefore2014, base);
+    then csec_amortization_years_433(plan, y, PastServiceNewPlanBefore2014, 30);
+}
+
+@source(IRC_S433_B, relation = formalizes, coverage = exact, quote = "arising from plan amendments adopted in such year, over a period of 15 plan years")
+rule CsecPeriodAmendment(plan: DefinedBenefitPlan, y: TaxableYear, base: Money) strict {
+    label en official "15 plan years";
+    when csec_amortization_base_433(plan, y, AmendmentIncrease, base);
+    then csec_amortization_years_433(plan, y, AmendmentIncrease, 15);
+}
+
+@source(IRC_S433_B, relation = formalizes, coverage = exact, quote = "the net experience loss (if any) under the plan, over a period of 5 plan years")
+rule CsecPeriodExperience(plan: DefinedBenefitPlan, y: TaxableYear, base: Money) strict {
+    label en official "5 plan years";
+    when csec_amortization_base_433(plan, y, ExperienceLoss, base);
+    then csec_amortization_years_433(plan, y, ExperienceLoss, 5);
+}
+
+@source(IRC_S433_B, relation = formalizes, coverage = exact, quote = "resulting from changes in actuarial assumptions used under the plan, over a period of 10 plan years")
+rule CsecPeriodAssumption(plan: DefinedBenefitPlan, y: TaxableYear, base: Money) strict {
+    label en official "10 plan years";
+    when csec_amortization_base_433(plan, y, AssumptionLoss, base);
+    then csec_amortization_years_433(plan, y, AssumptionLoss, 10);
+}
+
+@source(IRC_S433_B, relation = formalizes, coverage = exact, quote = "in equal annual installments (until fully amortized) over a period of 5 plan years")
+rule CsecPeriodWaived(plan: DefinedBenefitPlan, y: TaxableYear, base: Money) strict {
+    label en official "5 plan years for a waived deficiency";
+    when csec_amortization_base_433(plan, y, WaivedDeficiency, base);
+    then csec_amortization_years_433(plan, y, WaivedDeficiency, 5);
+}
+
+rule CsecPeriodCreditBalance(plan: DefinedBenefitPlan, y: TaxableYear, base: Money) strict {
+    label en official "5 plan years for the (D) credit balance";
+    when csec_amortization_base_433(plan, y, CreditBalance5Years, base);
+    then csec_amortization_years_433(plan, y, CreditBalance5Years, 5);
+}
+
+rule CsecPeriodOldLaw(plan: DefinedBenefitPlan, y: TaxableYear, base: Money) strict {
+    label en official "20 years for the (E) old-law contributions";
+    when csec_amortization_base_433(plan, y, ContributionsButForOldLaw20Years, base);
+    then csec_amortization_years_433(plan, y, ContributionsButForOldLaw20Years, 20);
+}
+
+pub relation csec_interest_rate_433(plan: DefinedBenefitPlan, y: TaxableYear, rate: Decimal) kind empirical {
+    label en unofficial "the interest rate at which the account is charged and credited (section 433(b)(5)(A)), case-asserted";
+}
+
+pub relation csec_growth_5_years_433(plan: DefinedBenefitPlan, y: TaxableYear, factor: Decimal) kind institutional {
+    label en unofficial "(1 + r)^5 for the plan's rate";
+}
+
+rule CsecGrowth5Years433(plan: DefinedBenefitPlan, y: TaxableYear, r: Decimal) strict {
+    label en unofficial "(1+r) five times";
+    when csec_interest_rate_433(plan, y, r);
+    then csec_growth_5_years_433(plan, y, (1.0 + r) * (1.0 + r) * (1.0 + r) * (1.0 + r) * (1.0 + r));
+}
+
+pub relation csec_level_installment_433(plan: DefinedBenefitPlan, y: TaxableYear, kind: CsecChargeKind433, amount: Money) kind institutional {
+    label en official "section 433(b)(2): the equal annual installment amortizing the base over its period";
+}
+
+@source(IRC_S433_B, relation = formalizes, coverage = partial, quote = "the amounts necessary to amortize in equal annual installments (until fully amortized)")
+rule CsecInstallment5(plan: DefinedBenefitPlan, y: TaxableYear, kind: CsecChargeKind433, base: Money, r: Decimal, f5: Decimal) strict {
+    label en official "PARTIAL: 5-year kinds; ordinary-annuity payment base x r x g / (g - 1) with g = (1+r)^5";
+    when csec_amortization_base_433(plan, y, kind, base)
+        and csec_amortization_years_433(plan, y, kind, 5)
+        and csec_interest_rate_433(plan, y, r)
+        and csec_growth_5_years_433(plan, y, f5)
+        and r > 0.0 and base > 0.00 USD;
+    then csec_level_installment_433(plan, y, kind, div_round(base * r * f5, f5 - 1.0, 2, "HALF_UP"));
+}
+
+rule CsecInstallment10(plan: DefinedBenefitPlan, y: TaxableYear, kind: CsecChargeKind433, base: Money, r: Decimal, f5: Decimal) strict {
+    label en official "PARTIAL: 10-year kinds; g = f5^2";
+    when csec_amortization_base_433(plan, y, kind, base)
+        and csec_amortization_years_433(plan, y, kind, 10)
+        and csec_interest_rate_433(plan, y, r)
+        and csec_growth_5_years_433(plan, y, f5)
+        and r > 0.0 and base > 0.00 USD;
+    then csec_level_installment_433(plan, y, kind, div_round(base * r * (f5 * f5), (f5 * f5) - 1.0, 2, "HALF_UP"));
+}
+
+rule CsecInstallment15(plan: DefinedBenefitPlan, y: TaxableYear, kind: CsecChargeKind433, base: Money, r: Decimal, f5: Decimal) strict {
+    label en official "PARTIAL: 15-year kinds; g = f5^3";
+    when csec_amortization_base_433(plan, y, kind, base)
+        and csec_amortization_years_433(plan, y, kind, 15)
+        and csec_interest_rate_433(plan, y, r)
+        and csec_growth_5_years_433(plan, y, f5)
+        and r > 0.0 and base > 0.00 USD;
+    then csec_level_installment_433(plan, y, kind, div_round(base * r * (f5 * f5 * f5), (f5 * f5 * f5) - 1.0, 2, "HALF_UP"));
+}
+
+rule CsecInstallment20(plan: DefinedBenefitPlan, y: TaxableYear, kind: CsecChargeKind433, base: Money, r: Decimal, f5: Decimal) strict {
+    label en official "PARTIAL: 20-year kinds; g = f5^4";
+    when csec_amortization_base_433(plan, y, kind, base)
+        and csec_amortization_years_433(plan, y, kind, 20)
+        and csec_interest_rate_433(plan, y, r)
+        and csec_growth_5_years_433(plan, y, f5)
+        and r > 0.0 and base > 0.00 USD;
+    then csec_level_installment_433(plan, y, kind, div_round(base * r * (f5 * f5 * f5 * f5), (f5 * f5 * f5 * f5) - 1.0, 2, "HALF_UP"));
+}
+
+rule CsecInstallment30(plan: DefinedBenefitPlan, y: TaxableYear, kind: CsecChargeKind433, base: Money, r: Decimal, f5: Decimal) strict {
+    label en official "PARTIAL: 30-year kinds; g = f5^6";
+    when csec_amortization_base_433(plan, y, kind, base)
+        and csec_amortization_years_433(plan, y, kind, 30)
+        and csec_interest_rate_433(plan, y, r)
+        and csec_growth_5_years_433(plan, y, f5)
+        and r > 0.0 and base > 0.00 USD;
+    then csec_level_installment_433(plan, y, kind, div_round(base * r * (f5 * f5 * f5 * f5 * f5 * f5), (f5 * f5 * f5 * f5 * f5 * f5) - 1.0, 2, "HALF_UP"));
+}
+
+rule CsecInstallment40(plan: DefinedBenefitPlan, y: TaxableYear, kind: CsecChargeKind433, base: Money, r: Decimal, f5: Decimal) strict {
+    label en official "PARTIAL: 40-year kinds; g = f5^8";
+    when csec_amortization_base_433(plan, y, kind, base)
+        and csec_amortization_years_433(plan, y, kind, 40)
+        and csec_interest_rate_433(plan, y, r)
+        and csec_growth_5_years_433(plan, y, f5)
+        and r > 0.0 and base > 0.00 USD;
+    then csec_level_installment_433(plan, y, kind, div_round(base * r * (f5 * f5 * f5 * f5 * f5 * f5 * f5 * f5), (f5 * f5 * f5 * f5 * f5 * f5 * f5 * f5) - 1.0, 2, "HALF_UP"));
+}
+
+pub relation federal_mid_term_rate_first_month_433(plan: DefinedBenefitPlan, y: TaxableYear, rate: Decimal) kind empirical {
+    label en unofficial "the Federal mid-term rate under section 1274 for the first month of the plan year, case-asserted";
+}
+
+pub relation waiver_amortization_rate_433b5B(plan: DefinedBenefitPlan, y: TaxableYear, rate: Decimal) kind institutional {
+    label en official "section 433(b)(5)(B): the interest rate for the waived-deficiency amortization is the greater of 150 percent of the Federal mid-term rate and the (A) rate";
+}
+
+@source(IRC_S433_B, relation = formalizes, coverage = exact, quote = "150 percent of the Federal mid-term rate (as in effect under section 1274 for the 1st month of such plan year)")
+rule WaiverAmortizationRate433b5B(plan: DefinedBenefitPlan, y: TaxableYear, mid: Decimal, plan_rate: Decimal) strict {
+    label en official "max(1.50 x mid-term rate, plan rate), exact";
+    when federal_mid_term_rate_first_month_433(plan, y, mid) and csec_interest_rate_433(plan, y, plan_rate);
+    then waiver_amortization_rate_433b5B(plan, y, max(mid * 1.5, plan_rate));
+}
+
+// ---------------------------------------------------------------------
+// (c) Full-funding limitation, valuation date, deemed contributions
+// ---------------------------------------------------------------------
+
+pub relation csec_accrued_liability_433c7(plan: DefinedBenefitPlan, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the accrued liability including normal cost, case-asserted (section 433(c)(7)(A))";
+}
+
+pub relation csec_asset_fmv_433c7(plan: DefinedBenefitPlan, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the fair market value of the plan's assets, case-asserted ((B)(i))";
+}
+
+pub relation csec_asset_actuarial_433c7(plan: DefinedBenefitPlan, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the value of the assets determined under paragraph (2), case-asserted ((B)(ii))";
+}
+
+pub relation csec_current_liability_433c7(plan: DefinedBenefitPlan, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the current liability (without regard to (h)(4)) including expected accruals, case-asserted ((C)(i)(I))";
+}
+
+pub relation csec_full_funding_limitation_433c7(plan: DefinedBenefitPlan, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 433(c)(7): the accrued liability less the lesser asset value, and not less than 90 percent of current liability less the actuarial value of assets";
+}
+
+@source(IRC_S433_C, relation = formalizes, coverage = exact, quote = "the term \"full-funding limitation\" means the excess (if any) of")
+rule CsecFullFundingLimitation433c7(plan: DefinedBenefitPlan, y: TaxableYear, liability: Money, fmv: Money, actuarial: Money, current: Money) strict {
+    label en official "max(liability - min(fmv, actuarial), 0.9 x current - actuarial, 0)";
+    when csec_accrued_liability_433c7(plan, y, liability)
+        and csec_asset_fmv_433c7(plan, y, fmv)
+        and csec_asset_actuarial_433c7(plan, y, actuarial)
+        and csec_current_liability_433c7(plan, y, current);
+    then csec_full_funding_limitation_433c7(plan, y, max(max(liability - min(fmv, actuarial), 0.00 USD), max(current * 0.90 - actuarial, 0.00 USD)));
+}
+
+pub relation csec_deficiency_before_ffl_433c6(plan: DefinedBenefitPlan, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the accumulated funding deficiency without regard to paragraph (6) and the alternative account, case-asserted";
+}
+
+pub relation csec_ffl_credit_433c6(plan: DefinedBenefitPlan, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 433(c)(6)(A): the account is credited with the excess of the deficiency over the full-funding limitation";
+}
+
+@source(IRC_S433_C, relation = formalizes, coverage = partial, quote = "the funding standard account shall be credited with the amount of such excess")
+rule CsecFflCredit433c6(plan: DefinedBenefitPlan, y: TaxableYear, deficiency: Money, limit: Money) strict {
+    label en official "PARTIAL: deficiency - limitation when positive; the reduction of the amortization charges ((B)) is a ledger not derived";
+    when csec_deficiency_before_ffl_433c6(plan, y, deficiency) and csec_full_funding_limitation_433c7(plan, y, limit) and deficiency > limit;
+    then csec_ffl_credit_433c6(plan, y, deficiency - limit);
+}
+
+pub relation csec_valuation_date_433c8(plan: DefinedBenefitPlan, y: TaxableYear, on: Date) kind empirical {
+    label en unofficial "the date as of which the valuation is made, case-asserted";
+}
+
+pub relation csec_year_bounds_433(plan: DefinedBenefitPlan, y: TaxableYear, first_day: Date, last_day: Date) kind empirical {
+    label en unofficial "the first and last day of the plan year, case-asserted";
+}
+
+pub relation csec_valuation_date_permitted_433c8b(plan: DefinedBenefitPlan, y: TaxableYear) kind institutional {
+    label en official "section 433(c)(8)(B)(i): the valuation date is within the plan year or within one month before it";
+}
+
+@source(IRC_S433_C, relation = formalizes, coverage = exact, quote = "Except as provided in clause (ii), the valuation referred to in subparagraph (A) shall be made as of a date within the plan year")
+rule CsecValuationDatePermitted433c8b(plan: DefinedBenefitPlan, y: TaxableYear, v: Date, first_day: Date, last_day: Date, calendar_before_1: Date) strict {
+    label en official "exact boundaries: one calendar month before the first day through the last day";
+    when csec_valuation_date_433c8(plan, y, v)
+        and csec_year_bounds_433(plan, y, first_day, last_day)
+        and v >= calendar_before_1
+        and v <= last_day
+        and us.irc.core::civil_calendar_boundary_before(first_day, 1, us.irc.core::CalendarMonth, calendar_before_1);
+    then csec_valuation_date_permitted_433c8b(plan, y);
+}
+
+pub relation csec_contribution_made_on_433(plan: DefinedBenefitPlan, y: TaxableYear, on: Date) kind empirical {
+    label en unofficial "the date an employer contribution for the plan year is made, case-asserted";
+}
+
+pub relation csec_contribution_deemed_made_433c9(plan: DefinedBenefitPlan, y: TaxableYear) kind institutional {
+    label en official "section 433(c)(9): a contribution made within 8 1/2 months after the close of the plan year is deemed made on the last day";
+}
+
+@source(IRC_S433_C, relation = formalizes, coverage = exact, quote = "ending on the day which is 8½ months after the close of the plan year")
+rule CsecContributionDeemedMade433c9(plan: DefinedBenefitPlan, y: TaxableYear, made: Date, last_day: Date) strict {
+    label en official "INTERPRETATION: 8 1/2 months is read as 8 calendar months and 15 days (the reading used for section 430(j)(1)); the last day is inclusive";
+    when csec_contribution_made_on_433(plan, y, made)
+        and csec_year_bounds_433(plan, y, _, last_day)
+        and made > last_day
+        and made <= add_calendar_period(add_calendar_period(last_day, 8 calendar_month), 15 calendar_day);
+    then csec_contribution_deemed_made_433c9(plan, y);
+}
+
+pub relation csec_assumption_change_facts_433c5(plan: DefinedBenefitPlan, y: TaxableYear, decrease: Money, current_liability_before: Money) kind empirical {
+    label en unofficial "the decrease in the funding shortfall from a change in actuarial assumptions and the current liability before the change, case-asserted (section 433(c)(5)(C)(ii)(III))";
+}
+
+pub relation csec_uvb_threshold_exceeded_433c5(plan: DefinedBenefitPlan, y: TaxableYear) kind empirical {
+    label en unofficial "the aggregate unfunded vested benefits exceed the statutory threshold, case-asserted (SOURCE_GAP: the dollar amount is cut off in the pinned text)";
+}
+
+pub relation csec_assumption_change_needs_approval_433c5(plan: DefinedBenefitPlan, y: TaxableYear) kind institutional {
+    label en official "section 433(c)(5)(C): an assumption may not be changed without the Secretary's approval when (ii)(I)-(III) hold";
+}
+
+@source(IRC_S433_C, relation = formalizes, coverage = partial, quote = "results in a decrease in the funding shortfall of the plan for the current plan year that exceeds $50,000,000")
+rule CsecAssumptionChangeLarge433c5(plan: DefinedBenefitPlan, y: TaxableYear, decrease: Money, current: Money) strict {
+    label en official "PARTIAL: over $50,000,000; the other prongs are case facts";
+    when csec_plan_414y(plan)
+        and csec_uvb_threshold_exceeded_433c5(plan, y)
+        and csec_assumption_change_facts_433c5(plan, y, decrease, current)
+        and decrease > 50000000.00 USD;
+    then csec_assumption_change_needs_approval_433c5(plan, y);
+}
+
+rule CsecAssumptionChangeMedium433c5(plan: DefinedBenefitPlan, y: TaxableYear, decrease: Money, current: Money) strict {
+    label en official "PARTIAL: over $5,000,000 and at least 5 percent of the current liability before the change (cross-multiplication)";
+    when csec_plan_414y(plan)
+        and csec_uvb_threshold_exceeded_433c5(plan, y)
+        and csec_assumption_change_facts_433c5(plan, y, decrease, current)
+        and decrease > 5000000.00 USD
+        and decrease * 100.0 >= current * 5.0;
+    then csec_assumption_change_needs_approval_433c5(plan, y);
+}
+
+// ---------------------------------------------------------------------
+// (d) Extension; (e) Alternative minimum funding standard account
+// ---------------------------------------------------------------------
+
+pub relation csec_extension_years_requested_433d(plan: DefinedBenefitPlan, years: Integer) kind empirical {
+    label en unofficial "the number of years of extension of an amortization period the Secretary is asked to grant, case-asserted (section 433(d))";
+}
+
+pub relation csec_extension_secretary_findings_433d(plan: DefinedBenefitPlan) kind empirical {
+    label en unofficial "the Secretary determines that the extension carries out the purposes of ERISA with adequate protection for participants and that its refusal would risk the plan's voluntary continuation or curtail benefits or compensation, case-asserted";
+}
+
+pub relation csec_extension_permitted_433d(plan: DefinedBenefitPlan, years: Integer) kind institutional {
+    label en official "section 433(d): the Secretary may extend the amortization period by up to 10 years on the two determinations";
+}
+
+@source(IRC_S433_D, relation = formalizes, coverage = partial, quote = "may be extended by the Secretary for a period of time (not in excess of 10 years)")
+rule CsecExtensionPermitted433d(plan: DefinedBenefitPlan, years: Integer) strict {
+    label en official "PARTIAL: exact boundary 10 years; the determinations are one asserted fact (the Secretary's findings are judgments)";
+    when csec_extension_years_requested_433d(plan, years) and csec_extension_secretary_findings_433d(plan) and years >= 1 and years <= 10;
+    then csec_extension_permitted_433d(plan, years);
+}
+
+pub relation csec_normal_costs_433e(plan: DefinedBenefitPlan, y: TaxableYear, plan_method: Money, unit_credit: Money) kind empirical {
+    label en unofficial "the normal cost under the plan's funding method and under the unit credit method, case-asserted (section 433(e)(2)(A)(i))";
+}
+
+pub relation csec_pv_accrued_benefits_and_fmv_433e(plan: DefinedBenefitPlan, y: TaxableYear, pv: Money, fmv: Money) kind empirical {
+    label en unofficial "the present value of accrued benefits and the fair market value of assets, case-asserted ((A)(ii))";
+}
+
+pub relation csec_alt_prior_credits_and_charges_433e(plan: DefinedBenefitPlan, y: TaxableYear, credits: Money, charges: Money) kind empirical {
+    label en unofficial "the credits and the charges to the alternative account for all prior plan years, case-asserted ((A)(iii))";
+}
+
+pub relation csec_alternative_minimum_charge_433e2A(plan: DefinedBenefitPlan, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 433(e)(2)(A): the charge to the alternative minimum funding standard account";
+}
+
+@source(IRC_S433_E, relation = formalizes, coverage = exact, quote = "the lesser of normal cost under the funding method used under the plan or normal cost determined under the unit credit method")
+rule CsecAlternativeMinimumCharge433e2A(plan: DefinedBenefitPlan, y: TaxableYear, nc: Money, nc_uc: Money, pv: Money, fmv: Money, credits: Money, charges: Money) strict {
+    label en official "min(normal costs) + max(pv - fmv, 0) + max(prior credits - prior charges, 0), exact";
+    when csec_normal_costs_433e(plan, y, nc, nc_uc)
+        and csec_pv_accrued_benefits_and_fmv_433e(plan, y, pv, fmv)
+        and csec_alt_prior_credits_and_charges_433e(plan, y, credits, charges);
+    then csec_alternative_minimum_charge_433e2A(plan, y, min(nc, nc_uc) + max(pv - fmv, 0.00 USD) + max(credits - charges, 0.00 USD));
+}
+
+pub relation csec_uses_entry_age_or_higher_method_433e1(plan: DefinedBenefitPlan) kind empirical {
+    label en unofficial "the plan's funding method requires contributions in all years not less than those under the entry age normal funding method, case-asserted";
+}
+
+pub relation csec_alternative_account_available_433e1(plan: DefinedBenefitPlan) kind institutional {
+    label en official "section 433(e)(1): a CSEC plan with such a funding method may maintain an alternative minimum funding standard account";
+}
+
+@source(IRC_S433_E, relation = formalizes, coverage = exact, quote = "may maintain an alternative minimum funding standard account for any plan year")
+rule CsecAlternativeAccountAvailable433e1(plan: DefinedBenefitPlan) strict {
+    label en official "the method condition";
+    when csec_plan_414y(plan) and csec_uses_entry_age_or_higher_method_433e1(plan);
+    then csec_alternative_account_available_433e1(plan);
+}
+
+// ---------------------------------------------------------------------
+// (i), (f), (g) Funded current liability percentage, underpayments, lien
+// ---------------------------------------------------------------------
+
+pub relation csec_assets_c2_433(plan: DefinedBenefitPlan, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the value of the plan's assets determined under subsection (c)(2), case-asserted";
+}
+
+pub relation csec_current_liability_433h(plan: DefinedBenefitPlan, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the current liability under the plan, case-asserted (section 433(h)(1))";
+}
+
+pub relation funded_current_liability_percentage_433i(plan: DefinedBenefitPlan, y: TaxableYear, pct: Decimal) kind institutional {
+    label en official "section 433(i): the value of the plan's assets divided by the current liability, as a fraction";
+}
+
+@source(IRC_S433_I, relation = formalizes, coverage = exact, quote = "the term \"funded current liability percentage\" means, with respect to any plan year, the percentage which")
+rule FundedCurrentLiabilityPercentage433i(plan: DefinedBenefitPlan, y: TaxableYear, assets: Money, liability: Money) strict {
+    label en official "exact quotient (no rounding)";
+    when csec_assets_c2_433(plan, y, assets) and csec_current_liability_433h(plan, y, liability) and liability > 0.00 USD;
+    then funded_current_liability_percentage_433i(plan, y, assets / liability);
+}
+
+pub relation csec_preceding_year_fclp_433f1(plan: DefinedBenefitPlan, y: TaxableYear, pct: Decimal) kind empirical {
+    label en unofficial "the funded current liability percentage for the preceding plan year, case-asserted";
+}
+
+pub relation csec_plan_year_installment_underpaid_433f1(plan: DefinedBenefitPlan, y: TaxableYear) kind empirical {
+    label en unofficial "the plan fails to pay the full amount of a required installment for the plan year, case-asserted";
+}
+
+pub relation csec_underpayment_interest_rate_433f1(plan: DefinedBenefitPlan, y: TaxableYear, rate: Decimal) kind institutional {
+    label en official "section 433(f)(1): for an underpayment by a plan under 100 percent funded, the rate is the greater of 175 percent of the Federal mid-term rate and the plan's cost rate";
+}
+
+@source(IRC_S433_F, relation = formalizes, coverage = exact, quote = "175 percent of the Federal mid-term rate (as in effect under section 1274 for the 1st month of such plan year)")
+rule CsecUnderpaymentInterestRate433f1(plan: DefinedBenefitPlan, y: TaxableYear, fclp: Decimal, mid: Decimal, plan_rate: Decimal) strict {
+    label en official "max(1.75 x mid-term rate, plan rate); exact boundary: a preceding-year percentage of exactly 100 percent is not below 100 percent";
+    when csec_preceding_year_fclp_433f1(plan, y, fclp)
+        and fclp < 1.0
+        and csec_plan_year_installment_underpaid_433f1(plan, y)
+        and federal_mid_term_rate_first_month_433(plan, y, mid)
+        and csec_interest_rate_433(plan, y, plan_rate);
+    then csec_underpayment_interest_rate_433f1(plan, y, max(mid * 1.75, plan_rate));
+}
+
+pub relation csec_required_installment_433f2(plan: DefinedBenefitPlan, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the required installment, case-asserted (see the required annual payment rule below)";
+}
+
+pub relation csec_installment_contributed_433f2(plan: DefinedBenefitPlan, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the amount of the installment contributed on or before its due date, case-asserted (section 433(f)(2)(A)(ii))";
+}
+
+pub relation csec_installment_underpayment_433f2A(plan: DefinedBenefitPlan, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 433(f)(2)(A): the excess of the required installment over the amount contributed by the due date";
+}
+
+@source(IRC_S433_F, relation = formalizes, coverage = exact, quote = "The amount of the underpayment shall be the excess of")
+rule CsecInstallmentUnderpayment433f2A(plan: DefinedBenefitPlan, y: TaxableYear, required: Money, paid: Money) strict {
+    label en official "required - paid when positive";
+    when csec_required_installment_433f2(plan, y, required) and csec_installment_contributed_433f2(plan, y, paid) and required > paid;
+    then csec_installment_underpayment_433f2A(plan, y, required - paid);
+}
+
+pub relation csec_required_contribution_433f4(plan: DefinedBenefitPlan, y: TaxableYear, current: Money, prior: Money) kind empirical {
+    label en unofficial "the amount required to be contributed for the plan year and for the preceding plan year under section 412 (without a waiver), case-asserted (section 433(f)(4)(B))";
+}
+
+pub relation csec_preceding_year_was_12_months_433(plan: DefinedBenefitPlan, y: TaxableYear) kind empirical {
+    label en unofficial "the preceding plan year was a year of 12 months, case-asserted";
+}
+
+pub relation csec_required_annual_payment_433f4(plan: DefinedBenefitPlan, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 433(f)(4)(B): the lesser of 90 percent of the required contribution and 100 percent of the preceding year's";
+}
+
+@source(IRC_S433_F, relation = formalizes, coverage = exact, quote = "90 percent of the amount required to be contributed to or under the plan by the employer for the plan year under section 412")
+rule CsecRequiredAnnualPaymentWithPrior433f4(plan: DefinedBenefitPlan, y: TaxableYear, current: Money, prior: Money) strict {
+    label en official "min(0.90 x current, prior) when the preceding year had 12 months";
+    when csec_required_contribution_433f4(plan, y, current, prior) and csec_preceding_year_was_12_months_433(plan, y);
+    then csec_required_annual_payment_433f4(plan, y, min(round(current * 0.90, 2, "HALF_UP"), prior));
+}
+
+@source(IRC_S433_F, relation = formalizes, coverage = exact, quote = "Clause (ii) shall not apply if the preceding plan year was not a year of 12 months.")
+rule CsecRequiredAnnualPaymentNoPrior433f4(plan: DefinedBenefitPlan, y: TaxableYear, current: Money, prior: Money) strict {
+    label en official "90 percent of the current requirement only";
+    when csec_required_contribution_433f4(plan, y, current, prior) and not_known(csec_preceding_year_was_12_months_433(plan, y));
+    then csec_required_annual_payment_433f4(plan, y, round(current * 0.90, 2, "HALF_UP"));
+}
+
+pub relation csec_required_installment_amount_433f4a(plan: DefinedBenefitPlan, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 433(f)(4)(A): each required installment is 25 percent of the required annual payment";
+}
+
+@source(IRC_S433_F, relation = formalizes, coverage = exact, quote = "The amount of any required installment shall be 25 percent of the required annual payment.")
+rule CsecRequiredInstallmentAmount433f4a(plan: DefinedBenefitPlan, y: TaxableYear, annual: Money) strict {
+    label en official "25 percent, rounded to the cent";
+    when csec_required_annual_payment_433f4(plan, y, annual);
+    then csec_required_installment_amount_433f4a(plan, y, round(annual * 0.25, 2, "HALF_UP"));
+}
+
+pub relation csec_unpaid_balance_including_prior_433g(plan: DefinedBenefitPlan, sponsor: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the unpaid balance of the missed installment or payment (with interest) plus the balances of all preceding missed ones, case-asserted (section 433(g)(1)(B))";
+}
+
+pub relation csec_lien_triggered_433g(plan: DefinedBenefitPlan, sponsor: Person, y: TaxableYear) kind institutional {
+    label en official "section 433(g)(1): a lien in favor of the plan arises when the aggregate unpaid balance exceeds $1,000,000 for a plan under 100 percent funded";
+}
+
+@source(IRC_S433_G, relation = formalizes, coverage = partial, quote = "exceeds $1,000,000")
+rule CsecLienTriggered433g(plan: DefinedBenefitPlan, sponsor: Person, y: TaxableYear, balance: Money, fclp: Decimal) strict {
+    label en official "PARTIAL: strictly above $1,000,000 and a funded current liability percentage under 100 percent ((g)(2)); the ERISA section 4021 exclusion is not gated";
+    when csec_unpaid_balance_including_prior_433g(plan, sponsor, y, balance)
+        and balance > 1000000.00 USD
+        and funded_current_liability_percentage_433i(plan, y, fclp)
+        and fclp < 1.0;
+    then csec_lien_triggered_433g(plan, sponsor, y);
+}
+
+pub relation csec_installment_due_on_433g(plan: DefinedBenefitPlan, sponsor: Person, y: TaxableYear, due: Date) kind empirical {
+    label en unofficial "the due date of the missed installment or payment, case-asserted";
+}
+
+pub relation csec_pbgc_notified_433g4a(plan: DefinedBenefitPlan, sponsor: Person, y: TaxableYear) kind empirical {
+    label en unofficial "the person notified the PBGC of the failure within 10 days of the due date, case-asserted";
+}
+
+@source(IRC_S433_G, relation = formalizes, coverage = exact, quote = "shall notify the Pension Benefit Guaranty Corporation of such failure within 10 days of the due date for the required installment or other payment")
+rule CsecPbgcNoticeDuty433g4a(plan: DefinedBenefitPlan, sponsor: Person, y: TaxableYear, due: Date) strict {
+    label en official "10 days from the due date, exact date arithmetic";
+    when csec_lien_triggered_433g(plan, sponsor, y) and csec_installment_due_on_433g(plan, sponsor, y, due);
+    then duty CsecPbgcNoticeDutyPosition {
+        bearer sponsor;
+        beneficiary sponsor;
+        goal achievement {
+            condition csec_pbgc_notified_433g4a(plan, sponsor, y);
+            window [-infinity, add_calendar_period(due, 10 calendar_day)];
+        }
+    };
+}
+
+// (g)(4)(C): lien amount treated as taxes due; ERISA section 4068(c)–(e)
+// similar rules (G6-ERISA wire). G4-pattern: the 4068 rules are external —
+// the lien amount enters as a case fact, the similar-rules reference is
+// recorded, not re-derived. Pinned text in `us.erisa.definitions`
+// (erisa-sec4068-29usc1368-2023.pdf).
+
+pub relation csec_lien_amount_433g4c(plan: DefinedBenefitPlan, sponsor: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the amount with respect to which the CSEC lien is imposed under (g)(1), case-asserted";
+}
+
+pub relation csec_lien_amount_treated_as_taxes_due_433g4c(plan: DefinedBenefitPlan, sponsor: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 433(g)(4)(C): the lien amount is treated as taxes due and owing the United States (rules similar to ERISA section 4068(c)–(e) apply — external, 29 USC 1368 pinned in us.erisa.definitions)";
+}
+
+@source(IRC_S433_G, relation = formalizes, coverage = partial, quote = "Any amount with respect to which a lien is imposed under paragraph (1) shall be treated as taxes due and owing the United States and rules similar to the rules of subsections (c), (d), and (e) of section 4068 of the Employee Retirement Income Security Act of 1974 shall apply with respect to a lien imposed by subsection (a) and the amount with respect to such lien.")
+rule CsecLienAmountTreatedAsTaxesDue433g4c(plan: DefinedBenefitPlan, sponsor: Person, y: TaxableYear, amount: Money) strict {
+    label en official "PARTIAL: the ERISA 4068(c)–(e) similar rules are external, recorded not derived";
+    when csec_lien_amount_433g4c(plan, sponsor, y, amount);
+    then csec_lien_amount_treated_as_taxes_due_433g4c(plan, sponsor, y, amount);
+}
+
+// ---------------------------------------------------------------------
+// (f)(5) Liquidity shortfall
+// ---------------------------------------------------------------------
+
+pub relation csec_adjusted_disbursements_12_months_433f5(plan: DefinedBenefitPlan, y: TaxableYear, quarter: Integer, amount: Money) kind empirical {
+    label en unofficial "the sum of the adjusted disbursements for the 12 months ending on the last day of the quarter, case-asserted";
+}
+
+pub relation csec_liquid_assets_433f5(plan: DefinedBenefitPlan, y: TaxableYear, quarter: Integer, amount: Money) kind empirical {
+    label en unofficial "the value of the liquid assets on the last day of the quarter, case-asserted";
+}
+
+pub relation csec_liquidity_shortfall_433f5(plan: DefinedBenefitPlan, y: TaxableYear, quarter: Integer, amount: Money) kind institutional {
+    label en official "section 433(f)(5)(E): the excess of the base amount (3 times the 12-month adjusted disbursements) over the liquid assets";
+}
+
+@source(IRC_S433_F, relation = formalizes, coverage = partial, quote = "an amount equal to 3 times the sum of the adjusted disbursements from the plan for the 12 months ending on the last day of such quarter")
+rule CsecLiquidityShortfall433f5(plan: DefinedBenefitPlan, y: TaxableYear, quarter: Integer, disbursements: Money, liquid: Money) strict {
+    label en official "PARTIAL: 3 x disbursements - liquid assets when positive; the nonrecurring-circumstances exclusion is not derived";
+    when csec_adjusted_disbursements_12_months_433f5(plan, y, quarter, disbursements)
+        and csec_liquid_assets_433f5(plan, y, quarter, liquid)
+        and disbursements * 3.0 > liquid;
+    then csec_liquidity_shortfall_433f5(plan, y, quarter, disbursements * 3.0 - liquid);
+}
+
+// ---------------------------------------------------------------------
+// (j) Funding restoration
+// ---------------------------------------------------------------------
+
+pub relation csec_funded_percentage_inputs_433j(plan: DefinedBenefitPlan, y: TaxableYear, assets: Money, funding_liability: Money) kind empirical {
+    label en unofficial "the value of plan assets (as determined under subsection (c)(2)) and the funding liability (the present value of benefits accrued or earned at the beginning of the plan year), case-asserted (section 433(j)(5)(B), (C))";
+}
+
+pub relation csec_in_funding_restoration_status_433j5a(plan: DefinedBenefitPlan, y: TaxableYear) kind institutional {
+    label en official "section 433(j)(5)(A): a CSEC plan is in funding restoration status when its funded percentage at the beginning of the plan year is under 80 percent";
+}
+
+@source(IRC_S433_J, relation = formalizes, coverage = exact, quote = "A CSEC plan shall be treated as in funding restoration status for a plan year if the plan's funded percentage as of the beginning of such plan year is less than 80 percent.")
+rule CsecFundingRestorationStatus433j5a(plan: DefinedBenefitPlan, y: TaxableYear, assets: Money, liability: Money) strict {
+    label en official "exact by cross-multiplication: assets x 100 < liability x 80; exactly 80 percent is not under 80";
+    when csec_plan_414y(plan)
+        and csec_funded_percentage_inputs_433j(plan, y, assets, liability)
+        and liability > 0.00 USD
+        and assets * 100.0 < liability * 80.0;
+    then csec_in_funding_restoration_status_433j5a(plan, y);
+}
+
+pub relation csec_normal_cost_and_contributions_433j1(plan: DefinedBenefitPlan, y: TaxableYear, normal_cost: Money, contributed: Money) kind empirical {
+    label en unofficial "the normal cost of the plan for the plan year (entry age normal for a spread gain method) and the amount actually contributed, case-asserted (section 433(j)(1)(A)(ii))";
+}
+
+pub relation csec_restoration_accumulated_deficiency_433j1(plan: DefinedBenefitPlan, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 433(j)(1)(A): in funding restoration status, the accumulated funding deficiency is the greater of the (a) amount and the excess of the normal cost over the amount contributed";
+}
+
+@source(IRC_S433_J, relation = formalizes, coverage = partial, quote = "the excess of the normal cost of the plan for the plan year over the amount actually contributed to or under the plan for the plan year")
+rule CsecRestorationAccumulatedDeficiency433j1(plan: DefinedBenefitPlan, y: TaxableYear, a: Money, nc: Money, contributed: Money) strict {
+    label en official "PARTIAL: max((a) amount, normal cost - contributed, 0) in funding restoration status";
+    when csec_in_funding_restoration_status_433j5a(plan, y)
+        and csec_accumulated_funding_deficiency_433a(plan, a)
+        and csec_normal_cost_and_contributions_433j1(plan, y, nc, contributed);
+    then csec_restoration_accumulated_deficiency_433j1(plan, y, max(a, max(nc - contributed, 0.00 USD)));
+}
+
+pub relation csec_amendment_increases_liabilities_433j2(sponsor: Person, plan: DefinedBenefitPlan, y: TaxableYear) kind empirical {
+    label en unofficial "an amendment takes effect that increases liabilities through increased benefits, new benefits, a changed accrual rate or a changed vesting rate, and is not required by applicable law, case-asserted (section 433(j)(2))";
+}
+
+@source(IRC_S433_J, relation = formalizes, coverage = exact, quote = "no amendment to such plan may take effect during such plan year if such amendment has the effect of increasing liabilities of the plan")
+rule CsecRestorationAmendmentProhibition433j2(plan: DefinedBenefitPlan, y: TaxableYear, sponsor: Person) strict {
+    label en official "prohibition while the plan is in funding restoration status; the exception for amendments required by law is inside the asserted action";
+    when csec_in_funding_restoration_status_433j5a(plan, y) and db_plan_sponsor_430(plan, sponsor);
+    then prohibition CsecRestorationAmendment {
+        bearer sponsor;
+        action csec_amendment_increases_liabilities_433j2(sponsor, plan, y);
+        window [-infinity, infinity];
+    };
+}
+
+pub relation csec_actuary_certification_received_on_433j3(plan: DefinedBenefitPlan, y: TaxableYear, on: Date) kind empirical {
+    label en unofficial "the date the plan sponsor receives the actuary's certification of funding restoration status, case-asserted (section 433(j)(3))";
+}
+
+pub relation csec_restoration_plan_established_433j3(plan: DefinedBenefitPlan, y: TaxableYear) kind empirical {
+    label en unofficial "the sponsor has established a written funding restoration plan, case-asserted";
+}
+
+@source(IRC_S433_J, relation = formalizes, coverage = partial, quote = "The sponsor of a CSEC plan shall establish a written funding restoration plan within 180 days of the receipt by the plan sponsor of a certification from the plan actuary")
+rule CsecRestorationPlanDuty433j3(plan: DefinedBenefitPlan, y: TaxableYear, sponsor: Person, received: Date) strict {
+    label en official "PARTIAL: the 180-day window from receipt; the required content (a period not longer than the greater of ...) is not derived";
+    when csec_in_funding_restoration_status_433j5a(plan, y)
+        and db_plan_sponsor_430(plan, sponsor)
+        and csec_actuary_certification_received_on_433j3(plan, y, received);
+    then duty EstablishFundingRestorationPlanDuty {
+        bearer sponsor;
+        beneficiary sponsor;
+        goal achievement {
+            condition csec_restoration_plan_established_433j3(plan, y);
+            window [-infinity, add_calendar_period(received, 180 calendar_day)];
+        }
+    };
+}
+
+pub relation csec_plan_year_start_433(plan: DefinedBenefitPlan, y: TaxableYear, start: Date) kind empirical {
+    label en unofficial "the first day of the plan year, case-asserted";
+}
+
+pub relation csec_actuary_433(plan: DefinedBenefitPlan, actuary: Person) kind empirical {
+    label en unofficial "the plan actuary of the CSEC plan, case-asserted";
+}
+
+pub relation csec_status_certified_433j4(plan: DefinedBenefitPlan, y: TaxableYear) kind empirical {
+    label en unofficial "the plan actuary has certified to the plan sponsor whether the plan is in funding restoration status, case-asserted";
+}
+
+@source(IRC_S433_J, relation = formalizes, coverage = exact, quote = "Not later than the 90th day of each plan year of a CSEC plan, the plan actuary shall certify to the plan sponsor whether or not the plan is in funding restoration status for the plan year")
+rule CsecActuaryCertificationDuty433j4(plan: DefinedBenefitPlan, y: TaxableYear, actuary: Person, sponsor: Person, start: Date) strict {
+    label en official "the 90th day of the plan year is day 89 after its first day, exact date arithmetic";
+    when csec_plan_414y(plan)
+        and csec_actuary_433(plan, actuary)
+        and db_plan_sponsor_430(plan, sponsor)
+        and csec_plan_year_start_433(plan, y, start);
+    then duty CsecActuaryCertificationDutyPosition {
+        bearer actuary;
+        beneficiary sponsor;
+        goal achievement {
+            condition csec_status_certified_433j4(plan, y);
+            window [-infinity, add_calendar_period(start, 89 calendar_day)];
+        }
+    };
+}

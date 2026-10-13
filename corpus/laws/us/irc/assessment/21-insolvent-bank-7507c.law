@@ -1,0 +1,122 @@
+// Assessment -- WIRE-6 (26.09.2026, DECISION-0379, implemented_unverified): section 7507(c)(1) and (c)(4) read the owner's bar.
+//
+// The bar itself (`us.irc.administration::s7507_bars_assessment_or_collection`) is the owner's `pub` institutional
+// relation (module 07 of `administration`, sections 7507(a)-(b)); nothing is restated here. This module is the
+// CONSUMER side that the `administration` package could not write without importing `assessment` (which already imports
+// it): (c)(1) erroneous collection and its refund under the section 6511 claim limits, and (c)(4) suspension of the
+// section 6501 assessment period and the section 6502 collection period during the bar plus 90 days.
+//
+// JUDGMENT CALLS.
+//  - The owner's bar is a state at the case snapshot, not a dated interval; the dates of the bar are case inputs
+//    (`insolvent_bank_bar_began`, `insolvent_bank_bar_ended`), gated by the bar relation, so the suspension is derived only
+//    for a bank the owner already holds barred.
+//  - Subsection (d) (employment taxes of chapters 21 and 23 are outside section 7507) is applied here by excluding
+//    `FicaCh21` and `FutaCh23` from both rules; the owner's `s7507_bars_assessment_or_collection` is tax-kind free.
+//  - "Any such tax collected": a payment of tax on account of the bank on or after the bar began. A payment before the bar
+//    began is outside the text.
+//  - "Subject to all provisions and limitations of law relating to the refunding of taxes": modeled by the timeliness of the
+//    refund claim, `refund_claim_timely` (module 08, section 6511(a)); the refund amount is the collected amount.
+//  - (c)(4): the running is suspended "during, and for 90 days beyond" the bar: the interval is [began, ended + 90 days].
+//    An unfinished bar (no end date) yields no interval: the suspension is open-ended and is not shifted to a date.
+//    The stated re-assessment window (collection "might have been made" without abatement) is not modeled (TECH-GAPS G7507).
+
+language "law.core" version "0.2";
+package us.irc.assessment version "0.1.1";
+namespace "urn:us:irc:assessment:clir";
+
+use self::{
+    Assessment,
+    CollectionSuspensionKind,
+    Person,
+    Return,
+    SuspendingEventKind,
+    TaxKind,
+    TaxableYear,
+    amount_paid_as_tax,
+    collection_period_suspension,
+    refund_claim_timely,
+    suspension_period,
+};
+
+pub relation insolvent_bank_bar_began(bank: Person, began: Date) kind empirical {
+    label en unofficial "the date from which assessment or collection on account of the bank may not be made pursuant to section 7507 (a) or (b)";
+}
+pub relation insolvent_bank_bar_ended(bank: Person, ended: Date) kind empirical {
+    label en unofficial "the date on which the section 7507 bar on assessment or collection on account of the bank ended";
+}
+
+// --- (c)(1) -- collected tax is erroneously collected; refund under the general limits ---------------------------
+
+pub relation collected_while_barred_7507(bank: Person, y: TaxableYear, k: TaxKind, amount: Money, paidOn: Date) kind institutional {
+    label en official "any such tax collected shall be deemed to be erroneously collected";
+}
+// 26 U.S.C. 7507(c): "Any such tax collected shall be deemed to be erroneously collected" (no @source: the fragment belongs to `administration` and is not exported, LDC-E1105)
+rule S7507c1TaxCollectedWhileBarredIsErroneous defeasible {
+    label en official "tax paid on account of a bank while the section 7507 bar applies is deemed erroneously collected (employment taxes of chapters 21 and 23 excepted by subsection (d))";
+    for bank: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for amount: Money;
+    for paidOn: Date;
+    for began: Date;
+    when us.irc.administration::s7507_bars_assessment_or_collection(bank)
+        and insolvent_bank_bar_began(bank, began)
+        and amount_paid_as_tax(bank, y, k, amount, paidOn)
+        and paidOn >= began
+        and k != us.irc.core::FicaCh21
+        and k != us.irc.core::FutaCh23;
+    then collected_while_barred_7507(bank, y, k, amount, paidOn);
+}
+pub relation erroneous_collection_refundable_7507(bank: Person, y: TaxableYear, k: TaxKind, amount: Money) kind institutional {
+    label en official "shall be refunded subject to all provisions and limitations of law, so far as applicable, relating to the refunding of taxes";
+}
+// 26 U.S.C. 7507(c): "shall be refunded subject to all provisions and limitations of law, so far as applicable, relating to the refunding of taxes" (no @source: the fragment belongs to `administration` and is not exported, LDC-E1105)
+rule S7507c1RefundSubjectToClaimLimitations defeasible {
+    label en official "the erroneously collected amount is refundable when the claim is timely under section 6511(a)";
+    for bank: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for amount: Money;
+    for paidOn: Date;
+    when collected_while_barred_7507(bank, y, k, amount, paidOn)
+        and refund_claim_timely(bank, y, k);
+    then erroneous_collection_refundable_7507(bank, y, k, amount);
+}
+
+// --- (c)(4) -- suspension of the assessment period and of the collection period -----------------------------------
+
+// 26 U.S.C. 7507(c): "The running of the statute of limitations on the making of assessment and collection shall be suspended during, and for 90 days beyond, the period for which, pursuant to this section, assessment or collection may not be made" (no @source: the fragment belongs to `administration` and is not exported, LDC-E1105)
+rule S7507c4SuspendsAssessmentPeriodDuringBarPlus90Days defeasible {
+    label en official "the section 6501 assessment period is suspended during the section 7507 bar and for 90 days beyond it";
+    for r: Return;
+    for bank: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for began: Date;
+    for ended: Date;
+    when us.irc.core::return_of(r, bank, y, k)
+        and us.irc.administration::s7507_bars_assessment_or_collection(bank)
+        and insolvent_bank_bar_began(bank, began)
+        and insolvent_bank_bar_ended(bank, ended)
+        and k != us.irc.core::FicaCh21
+        and k != us.irc.core::FutaCh23;
+    then suspension_period(bank, y, k, InsolventBankBar, began, add_calendar_period(ended, 90 calendar_day));
+}
+// 26 U.S.C. 7507(c): "The running of the statute of limitations on the making of assessment and collection shall be suspended during, and for 90 days beyond, the period for which, pursuant to this section, assessment or collection may not be made" (no @source: the fragment belongs to `administration` and is not exported, LDC-E1105)
+rule S7507c4SuspendsCollectionPeriodDuringBarPlus90Days defeasible {
+    label en official "the section 6502 collection period of an assessment against the bank is suspended during the section 7507 bar and for 90 days beyond it";
+    for a: Assessment;
+    for bank: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for amount: Money;
+    for began: Date;
+    for ended: Date;
+    when us.irc.core::assessment_of(a, bank, y, k, amount)
+        and us.irc.administration::s7507_bars_assessment_or_collection(bank)
+        and insolvent_bank_bar_began(bank, began)
+        and insolvent_bank_bar_ended(bank, ended)
+        and k != us.irc.core::FicaCh21
+        and k != us.irc.core::FutaCh23;
+    then collection_period_suspension(a, InsolventBankBar, began, add_calendar_period(ended, 90 calendar_day));
+}

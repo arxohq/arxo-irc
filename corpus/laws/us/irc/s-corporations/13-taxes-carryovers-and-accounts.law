@@ -1,0 +1,1187 @@
+// Stage 3 (26.09.2026) — what stage 1 left as tech gaps in sections 1363(d),
+// 1366(d)-(f), 1367(b), 1368(e), 1371(c), 1374(b)-(d), 1375(b)(4) and
+// 1362(d)(3)(B)-(C).
+//
+// Method. Where a stage-1 rule read a case-asserted total, the total stays
+// asserted and this module derives the statutory refinement beside it, with a
+// default that reproduces the stage-1 result when the refinement's fact is
+// absent (`not_known(<asserted flag>)` in the body of the default rule; an
+// exception atom could not bind the head's computed amount). The stage-1
+// consumers are re-pointed at the refined relation in 05-, 07-, 08- and
+// 09-*.law; nothing is copied.
+//
+// Rounding. Money results the statute gives no rounding for are cents
+// HALF_UP (AGENT-BRIEF corpus convention, JUDGMENT CALL); fractions of
+// Money use the `div_round(base * (a / 1.00 USD), b / 1.00 USD, 2, ...)` form.
+
+// --- 1368(e)(1)(C): AAA available for the year's distributions -----------
+
+use self::{
+    Asset,
+    Corporation,
+    IRC_S1362_D,
+    IRC_S1363_D,
+    IRC_S1366_B,
+    IRC_S1366_D,
+    IRC_S1366_F,
+    IRC_S1367_B,
+    IRC_S1368_E,
+    IRC_S1371_C,
+    IRC_S1371_D,
+    IRC_S1374_B,
+    IRC_S1374_D,
+    IRC_S1375_B,
+    IRC_S1377_A,
+    Person,
+    PttpKind,
+    SCorpElection,
+    SCorpTaxKind,
+    Secretary,
+    TaxableYear,
+    aaa_balance,
+    aaa_items_stated,
+    aaa_opening_balance,
+    bank_or_depository_holding_company,
+    basis_decrease_total,
+    basis_increase_total,
+    c_corporation,
+    corporation_deductions_excluding_separately_stated,
+    corporation_gross_income,
+    corporation_has_accumulated_e_and_p,
+    distribution_amount,
+    distribution_dividend_portion,
+    distribution_remaining_after_aaa,
+    loss_limitation_ceiling,
+    net_recognized_built_in_gain,
+    net_unrealized_built_in_gain,
+    next_taxable_year,
+    passive_investment_income_total,
+    pttp_counts_for_loss_allowance_1366d3,
+    s_corp_tax,
+    s_corporation,
+    s_election_effective_year,
+    s_election_made_validly,
+    shareholder_loss_carryover,
+    shareholder_ownership_fraction,
+    shares_outstanding,
+    subchapter_c_transaction_e_and_p_adjustment_applies,
+};
+
+pub relation aaa_available_for_distributions(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the AAA as of the close of y, determined without regard to any net negative adjustment for y, when it is applied to distributions made during y (section 1368(e)(1)(C)(i)); the adjustment is approximated by the nonseparately computed income or loss (gross income less deductions), as in aaa_balance";
+}
+@source(IRC_S1368_E, coverage = partial, quote = "the amount in the accumulated adjustments account as of the close of such taxable year shall be determined without regard to any net negative adjustment for such taxable year")
+rule S1368E1CNetPositiveAdjustmentCounts defeasible {
+    label en official "a net increase for the year counts in full: opening AAA plus the net adjustment";
+    for c: Corporation; for y: TaxableYear; for opening: Money; for gi: Money; for ded: Money;
+    when aaa_opening_balance(c, y, opening);
+    when corporation_gross_income(c, y, gi);
+    when corporation_deductions_excluding_separately_stated(c, y, ded);
+    when gi - ded >= 0.00 USD;
+    when not_known(aaa_items_stated(c, y));
+    then aaa_available_for_distributions(c, y, opening + (gi - ded));
+}
+@source(IRC_S1368_E, coverage = partial, quote = "the reductions in the account for the taxable year (other than for distributions), over")
+rule S1368E1CNetNegativeAdjustmentDisregarded defeasible {
+    label en official "a net negative adjustment for the year is disregarded: only the opening AAA is available (section 1368(e)(1)(C))";
+    for c: Corporation; for y: TaxableYear; for opening: Money; for gi: Money; for ded: Money;
+    when aaa_opening_balance(c, y, opening);
+    when corporation_gross_income(c, y, gi);
+    when corporation_deductions_excluding_separately_stated(c, y, ded);
+    when gi - ded < 0.00 USD;
+    when not_known(aaa_items_stated(c, y));
+    then aaa_available_for_distributions(c, y, opening);
+}
+
+// --- 1368(e)(1)(B): AAA adjustment on a redemption ----------------------
+
+pub relation redemption_treated_as_exchange_shares(c: Corporation, y: TaxableYear, on: Date, redeemed: Decimal) kind empirical {
+    label en official "a redemption on date on is treated as an exchange under section 302(a) or 303(a); redeemed is the number of shares redeemed";
+}
+pub relation aaa_redemption_adjustment(c: Corporation, y: TaxableYear, on: Date, reduction: Money) kind institutional {
+    label en official "the adjustment in the AAA for a redemption treated as an exchange: the balance in the account times the shares redeemed over the shares of stock immediately before the redemption (section 1368(e)(1)(B)); shares_outstanding at the redemption date is taken as the count immediately before it";
+}
+@source(IRC_S1368_E, coverage = partial, quote = "the adjustment in the accumulated adjustments account shall be an amount which bears the same ratio to the balance in such account as the number of shares redeemed in such redemption bears to the number of shares of stock in the corporation immediately before such redemption")
+rule S1368E1BRedemptionAdjustment strict {
+    for c: Corporation; for y: TaxableYear; for on: Date; for redeemed: Decimal; for total: Decimal; for aaa: Money;
+    when redemption_treated_as_exchange_shares(c, y, on, redeemed);
+    when shares_outstanding(c, on, total);
+    when total > 0.00;
+    when aaa_balance(c, y, aaa);
+    then aaa_redemption_adjustment(c, y, on, div_round(aaa * redeemed, total, 2, "HALF_UP"));
+}
+
+// --- 1368(e)(3): election to distribute earnings first -----------------------
+
+pub relation affected_shareholder_of_year(sh: Person, c: Corporation, y: TaxableYear) kind institutional {
+    label en official "sh is a shareholder to whom a distribution is made by the S corporation during y (section 1368(e)(3)(B))";
+}
+rule S1368E3BAffectedShareholder strict {
+    for sh: Person; for c: Corporation; for y: TaxableYear; for on: Date; for amount: Money; for b: Date; for en: Date;
+    when distribution_amount(sh, c, on, amount);
+    when us.irc.core::year_of(c, y);
+    when us.irc.core::begins(y, b);
+    when us.irc.core::ends(y, en);
+    when on >= b;
+    when on <= en;
+    then affected_shareholder_of_year(sh, c, y);
+}
+pub relation shareholder_consents_to_earnings_first(sh: Person, c: Corporation, y: TaxableYear) kind empirical {
+    label en official "sh consents to the section 1368(e)(3) election for y";
+}
+pub relation earnings_first_consent_complete(c: Corporation, y: TaxableYear) kind institutional {
+    label en official "all affected shareholders consent to the election (section 1368(e)(3)(A))";
+}
+@source(IRC_S1368_E, coverage = partial, quote = "with the consent of all of its affected shareholders")
+rule S1368E3AConsentComplete strict {
+    for c: Corporation; for y: TaxableYear; for anyone: Person;
+    when affected_shareholder_of_year(anyone, c, y);
+    when count(collect sh: Person where affected_shareholder_of_year(sh, c, y)) ==
+         count(collect sh: Person where affected_shareholder_of_year(sh, c, y) and shareholder_consents_to_earnings_first(sh, c, y));
+    then earnings_first_consent_complete(c, y);
+}
+pub relation elects_to_distribute_earnings_first(c: Corporation, y: TaxableYear, on: Date) kind empirical {
+    label en official "the S corporation elects that section 1368(c)(1) not apply to all distributions made during y";
+}
+pub relation earnings_first_election_in_effect(c: Corporation, y: TaxableYear) kind institutional {
+    label en official "a validly exercised section 1368(e)(3) election for y: (c)(1) does not apply, so the whole distribution is a dividend to the extent of accumulated E&P and only then treated under (b)";
+}
+@source(IRC_S1368_E, coverage = partial, quote = "An S corporation may, with the consent of all of its affected shareholders, elect to have paragraph (1) of subsection (c) not apply to all distributions made during the taxable year for which the election is made.")
+rule S1368E3ElectionPower strict {
+    label en official "an S corporation with accumulated E&P may elect to distribute earnings first, on the consent of every affected shareholder (section 1368(e)(3))";
+    for c: Corporation; for y: TaxableYear; for on: Date;
+    when elects_to_distribute_earnings_first(c, y, on);
+    then power S1368E3EarningsFirstPower {
+        holder c;
+        over c;
+        exercise elects_to_distribute_earnings_first(c, y, on);
+        valid_when earnings_first_consent_complete(c, y);
+        effect create(earnings_first_election_in_effect(c, y));
+        window [@1982-01-01, infinity);
+    };
+}
+// With the election in effect, the amount "remaining after the application of
+// paragraph (1)" (section 1368(c)(2)) is the whole distribution.
+@source(IRC_S1368_E, coverage = partial, quote = "elect to have paragraph (1) of subsection (c) not apply to all distributions made during the taxable year")
+rule S1368E3WholeDistributionIsRemainder defeasible {
+    for sh: Person; for c: Corporation; for on: Date; for amount: Money; for y: TaxableYear;
+    when distribution_amount(sh, c, on, amount);
+    when us.irc.core::year_of(c, y);
+    when corporation_has_accumulated_e_and_p(c, y);
+    when earnings_first_election_in_effect(c, y);
+    then distribution_remaining_after_aaa(sh, c, on, amount);
+}
+
+// --- 1371(c)(3): the dividend portion is an E&P-adjustment exception ------
+
+pub relation e_and_p_adjustment_exception(c: Corporation, y: TaxableYear) kind institutional {
+    label en official "an exception to the section 1371(c)(1) bar: a subchapter C transaction (c)(2), or a distribution portion treated as a dividend under section 1368(c)(2) (c)(3)";
+}
+rule EAndPExceptionSubchapterC defeasible {
+    for c: Corporation; for y: TaxableYear;
+    when subchapter_c_transaction_e_and_p_adjustment_applies(c, y);
+    then e_and_p_adjustment_exception(c, y);
+}
+@source(IRC_S1371_C, coverage = partial, quote = "Paragraph (1) shall not apply with respect to that portion of a distribution which is treated as a dividend under section 1368(c)(2).")
+rule EAndPExceptionDividendPortion defeasible {
+    for sh: Person; for c: Corporation; for y: TaxableYear; for on: Date; for amount: Money; for b: Date; for en: Date;
+    when distribution_dividend_portion(sh, c, on, amount);
+    when us.irc.core::year_of(c, y);
+    when us.irc.core::begins(y, b);
+    when us.irc.core::ends(y, en);
+    when on >= b;
+    when on <= en;
+    when amount > 0.00 USD;
+    then e_and_p_adjustment_exception(c, y);
+}
+
+// --- 1374(b): amount of the built-in gains tax ---------------------------
+
+pub relation c_year_loss_carryforwards_available(c: Corporation, y: TaxableYear, nol: Money, capital_loss: Money) kind empirical {
+    label en official "the net operating loss carryforward and the capital loss carryforward arising in taxable years for which the corporation was a C corporation, available in y (section 1374(b)(2)); case-asserted, pending the property-transactions and deductions owners; assert 0.00 USD for the one that does not exist";
+}
+pub relation c_year_carryforward_asserted(c: Corporation, y: TaxableYear) kind institutional {
+    label en official "a C-year carryforward amount is asserted for y (helper, so the no-carryforward default can be defeated)";
+}
+rule CYearCarryforwardAsserted strict {
+    for c: Corporation; for y: TaxableYear; for nol: Money; for cap: Money;
+    when c_year_loss_carryforwards_available(c, y, nol, cap);
+    then c_year_carryforward_asserted(c, y);
+}
+pub relation built_in_gain_after_carryforwards(c: Corporation, y: TaxableYear, base: Money) kind institutional {
+    label en official "the net recognized built-in gain against which the section 1374(b)(1) rate is applied, after the C-year net operating loss and capital loss carryforwards allowed by (b)(2) as a deduction against it";
+}
+@source(IRC_S1374_B, coverage = partial, quote = "shall be allowed for purposes of this section as a deduction against the net recognized built-in gain of the S corporation for the taxable year")
+rule S1374B2CarryforwardsDeducted defeasible {
+    label en official "C-year loss carryforwards reduce the net recognized built-in gain, not below zero (section 1374(b)(2), first sentence)";
+    for c: Corporation; for y: TaxableYear; for gain: Money; for nol: Money; for cap: Money;
+    when net_recognized_built_in_gain(c, y, gain);
+    when c_year_loss_carryforwards_available(c, y, nol, cap);
+    then built_in_gain_after_carryforwards(c, y, gain - min(gain, nol + cap));
+}
+rule S1374B2NoCarryforwardDefault defeasible {
+    for c: Corporation; for y: TaxableYear; for gain: Money;
+    when net_recognized_built_in_gain(c, y, gain);
+    when not_known(c_year_carryforward_asserted(c, y));
+    then built_in_gain_after_carryforwards(c, y, gain);
+}
+pub relation c_year_loss_used_against_built_in_gain(c: Corporation, y: TaxableYear, absorbed: Money) kind institutional {
+    label en official "the amount of the C-year carryforwards used against the built-in gain: for determining how much loss may be carried to later years, the net recognized built-in gain is treated as taxable income (section 1374(b)(2), second and third sentences)";
+}
+@source(IRC_S1374_B, coverage = partial, quote = "the amount of the net recognized built-in gain shall be treated as taxable income")
+rule S1374B2LossAbsorbed defeasible {
+    for c: Corporation; for y: TaxableYear; for gain: Money; for nol: Money; for cap: Money;
+    when net_recognized_built_in_gain(c, y, gain);
+    when c_year_loss_carryforwards_available(c, y, nol, cap);
+    then c_year_loss_used_against_built_in_gain(c, y, min(gain, nol + cap));
+}
+
+// (b)(3): credits against the tax.
+pub enum CreditAgainst1374 {
+    FuelCreditSection34;
+    OtherPartIVCredit;
+    BusinessCreditCarryforwardFromCYear;
+    label en unofficial "the credits section 1374(b)(3) sorts: the section 34 credit, any other part IV of subchapter A credit, and a section 39 business credit carryforward from a C year";
+}
+pub relation credit_claimed_against_1374_tax(c: Corporation, y: TaxableYear, kind: CreditAgainst1374, amount: Money) kind empirical {
+    label en official "a credit of the given kind is claimed against the section 1374 tax for y; for a business credit carryforward the amount is the allowable amount as if the tax were imposed by section 11 (the limitation of section 38(c) belongs to the credits owner)";
+}
+pub relation credit_allowed_against_1374_tax(c: Corporation, y: TaxableYear, kind: CreditAgainst1374, amount: Money) kind institutional {
+    label en official "a credit allowable against the section 1374 tax: the section 34 credit and a C-year business credit carryforward; no other part IV credit (section 1374(b)(3))";
+}
+@source(IRC_S1374_B, coverage = partial, quote = "no credit shall be allowable under part IV of subchapter A of this chapter (other than under section 34) against the tax imposed by subsection (a)")
+rule S1374B3ASection34Allowed strict {
+    for c: Corporation; for y: TaxableYear; for a: Money;
+    when credit_claimed_against_1374_tax(c, y, FuelCreditSection34, a);
+    then credit_allowed_against_1374_tax(c, y, FuelCreditSection34, a);
+}
+@source(IRC_S1374_B, coverage = partial, quote = "any business credit carryforward under section 39 arising in a taxable year for which the corporation was a C corporation shall be allowed as a credit against the tax imposed by subsection (a)")
+rule S1374B3BBusinessCreditCarryforwardAllowed strict {
+    for c: Corporation; for y: TaxableYear; for a: Money;
+    when credit_claimed_against_1374_tax(c, y, BusinessCreditCarryforwardFromCYear, a);
+    then credit_allowed_against_1374_tax(c, y, BusinessCreditCarryforwardFromCYear, a);
+}
+pub relation credit_disallowed_against_1374_tax(c: Corporation, y: TaxableYear, kind: CreditAgainst1374, amount: Money) kind institutional {
+    label en official "a part IV credit other than section 34 and a C-year business credit carryforward is not allowed against the section 1374 tax (section 1374(b)(3)(A))";
+}
+rule S1374B3ADisallowed strict {
+    for c: Corporation; for y: TaxableYear; for a: Money;
+    when credit_claimed_against_1374_tax(c, y, OtherPartIVCredit, a);
+    then credit_disallowed_against_1374_tax(c, y, OtherPartIVCredit, a);
+}
+pub relation credit_allowed_exists_1374(c: Corporation, y: TaxableYear, tax: Money) kind institutional {
+    label en official "some allowable credit is claimed against the section 1374 tax of y (helper for the no-credit default)";
+}
+rule CreditAllowedExists1374 defeasible {
+    for c: Corporation; for y: TaxableYear; for tax: Money; for k: CreditAgainst1374; for a: Money;
+    when s_corp_tax(c, y, BuiltInGainsTax1374, tax);
+    when credit_allowed_against_1374_tax(c, y, k, a);
+    then credit_allowed_exists_1374(c, y, tax);
+}
+pub relation built_in_gains_tax_after_credits(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the section 1374 tax after the credits section 1374(b)(3) allows, not below zero";
+}
+rule BuiltInGainsTaxAfterCredits defeasible {
+    for c: Corporation; for y: TaxableYear; for tax: Money;
+    when s_corp_tax(c, y, BuiltInGainsTax1374, tax);
+    when credit_allowed_exists_1374(c, y, tax);
+    then built_in_gains_tax_after_credits(c, y, tax - min(tax, sum all a: Money for k: CreditAgainst1374 where credit_allowed_against_1374_tax(c, y, k, a)));
+}
+rule BuiltInGainsTaxNoCredits defeasible {
+    for c: Corporation; for y: TaxableYear; for tax: Money;
+    when s_corp_tax(c, y, BuiltInGainsTax1374, tax);
+    unless credit_allowed_exists_1374(c, y, tax);
+    then built_in_gains_tax_after_credits(c, y, tax);
+}
+
+// --- 1374(d)(5): built-in items; (d)(7): recognition period -------------
+
+pub relation pre_s_income_item_taken_into_account(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "an item of income properly taken into account in y, during the recognition period, that is attributable to periods before the first S year (section 1374(d)(5)(A))";
+}
+pub relation pre_s_deduction_item_allowable(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "an amount allowable as a deduction in y, during the recognition period and without regard to any carryover, attributable to periods before the first S year (section 1374(d)(5)(B))";
+}
+pub relation treated_as_recognized_built_in_gain(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the income item is treated as a recognized built-in gain for the year in which it is properly taken into account (section 1374(d)(5)(A))";
+}
+@source(IRC_S1374_D, coverage = partial, quote = "shall be treated as a recognized built-in gain for the taxable year in which it is properly taken into account")
+rule S1374D5AIncomeItemIsBuiltInGain strict {
+    for c: Corporation; for y: TaxableYear; for a: Money;
+    when pre_s_income_item_taken_into_account(c, y, a);
+    then treated_as_recognized_built_in_gain(c, y, a);
+}
+pub relation treated_as_recognized_built_in_loss(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the deduction item is treated as a recognized built-in loss for the year for which it is allowable as a deduction (section 1374(d)(5)(B))";
+}
+@source(IRC_S1374_D, coverage = partial, quote = "shall be treated as a recognized built-in loss for the taxable year for which it is allowable as a deduction")
+rule S1374D5BDeductionItemIsBuiltInLoss strict {
+    for c: Corporation; for y: TaxableYear; for a: Money;
+    when pre_s_deduction_item_allowable(c, y, a);
+    then treated_as_recognized_built_in_loss(c, y, a);
+}
+pub relation built_in_item_totals_over_recognition_period(c: Corporation, income_total: Money, deduction_total: Money) kind empirical {
+    label en official "the totals of the section 1374(d)(5)(A) income items and (B) deduction items that would be treated as recognized built-in gains or losses if properly taken into account or allowable in the recognition period, for the adjustment of (C)";
+}
+pub relation built_in_item_adjustment_asserted(c: Corporation) kind institutional {
+    label en official "item totals are asserted for c (helper for the no-adjustment default)";
+}
+rule BuiltInItemAdjustmentAsserted strict {
+    for c: Corporation; for i: Money; for d: Money;
+    when built_in_item_totals_over_recognition_period(c, i, d);
+    then built_in_item_adjustment_asserted(c);
+}
+pub relation net_unrealized_built_in_gain_adjusted(c: Corporation, amount: Money) kind institutional {
+    label en official "the net unrealized built-in gain adjusted for amounts that would be treated as recognized built-in gains or losses under (d)(5) (section 1374(d)(5)(C))";
+}
+@source(IRC_S1374_D, coverage = partial, quote = "The amount of the net unrealized built-in gain shall be properly adjusted for amounts which would be treated as recognized built-in gains or losses under this paragraph")
+rule S1374D5CAdjustNubig defeasible {
+    for c: Corporation; for nubig: Money; for i: Money; for d: Money;
+    when net_unrealized_built_in_gain(c, nubig);
+    when built_in_item_totals_over_recognition_period(c, i, d);
+    then net_unrealized_built_in_gain_adjusted(c, nubig + i - d);
+}
+rule S1374D5CNoAdjustmentDefault defeasible {
+    for c: Corporation; for nubig: Money;
+    when net_unrealized_built_in_gain(c, nubig);
+    when not_known(built_in_item_adjustment_asserted(c));
+    then net_unrealized_built_in_gain_adjusted(c, nubig);
+}
+
+pub relation most_recent_s_election_of(c: Corporation, e: SCorpElection) kind empirical {
+    label en official "e is the corporation's most recent election under section 1362";
+}
+pub relation first_s_year_for_1374(c: Corporation, y: TaxableYear) kind institutional {
+    label en official "the 1st taxable year for which the corporation was an S corporation pursuant to its most recent election under section 1362 (section 1374(d)(9))";
+}
+@source(IRC_S1374_D, coverage = partial, quote = "Any reference in this section to the 1st taxable year for which the corporation was an S corporation shall be treated as a reference to the 1st taxable year for which the corporation was an S corporation pursuant to its most recent election under section 1362.")
+rule S1374D9FirstYear defeasible {
+    for c: Corporation; for e: SCorpElection; for y: TaxableYear;
+    when most_recent_s_election_of(c, e);
+    when s_election_effective_year(c, e, y);
+    then first_s_year_for_1374(c, y);
+}
+pub relation recognition_period(c: Corporation, from: Date, to: Date) kind institutional {
+    label en official "the 5-year period beginning with the 1st day of the 1st taxable year for which the corporation was an S corporation (section 1374(d)(7)(A))";
+}
+@source(IRC_S1374_D, coverage = partial, quote = "The term \"recognition period\" means the 5-year period beginning with the 1st day of the 1st taxable year for which the corporation was an S corporation.")
+rule S1374D7ARecognitionPeriod defeasible {
+    for c: Corporation; for y: TaxableYear; for b: Date;
+    for calendar_before_1: Date;
+    when first_s_year_for_1374(c, y);
+    when us.irc.core::begins(y, b)
+        and us.irc.core::civil_calendar_boundary_before(add_calendar_period(b, 5 calendar_year), 1, us.irc.core::CalendarDay, calendar_before_1);
+    then recognition_period(c, b, calendar_before_1);
+}
+pub relation installment_sale_payment(c: Corporation, sale_year: TaxableYear, payment_year: TaxableYear) kind empirical {
+    label en official "a payment received in payment_year on an asset the S corporation sold in sale_year and reported under the installment method of section 453";
+}
+pub relation installment_payment_governed_by_sale_year(c: Corporation, payment_year: TaxableYear, sale_year: TaxableYear) kind institutional {
+    label en official "the treatment of all payments is governed by the provisions of section 1374 applicable to the year of the sale (section 1374(d)(7)(B))";
+}
+@source(IRC_S1374_D, coverage = partial, quote = "the treatment of all payments received shall be governed by the provisions of this paragraph applicable to the taxable year in which such sale was made")
+rule S1374D7BInstallmentSale strict {
+    for c: Corporation; for s: TaxableYear; for p: TaxableYear;
+    when installment_sale_payment(c, s, p);
+    then installment_payment_governed_by_sale_year(c, p, s);
+}
+
+// (d)(8): assets acquired from a C corporation with a carryover basis.
+pub relation asset_acquired_with_c_corporation_carryover_basis(c: Corporation, asset: Asset, acquired_on: Date) kind empirical {
+    label en official "the S corporation acquired the asset on acquired_on and its basis is determined, in whole or in part, by reference to the basis of the asset (or any other property) in the hands of a C corporation (section 1374(d)(8)(A))";
+}
+pub relation transferred_asset_recognition_period(c: Corporation, asset: Asset, from: Date, to: Date) kind institutional {
+    label en official "for the asset, the 5-year recognition period begins on the day the asset was acquired, in lieu of the beginning of the first S year (section 1374(d)(8)(B)(i), (d)(7)(A))";
+}
+@source(IRC_S1374_D, coverage = partial, quote = "The preceding paragraphs of this subsection shall be applied by taking into account the day on which the assets were acquired by the S corporation in lieu of the beginning of the 1st taxable year for which the corporation was an S corporation.")
+rule S1374D8BiRecognitionPeriodFromAcquisition strict {
+    for c: Corporation; for a: Asset; for d: Date;
+    for calendar_before_1: Date;
+    when asset_acquired_with_c_corporation_carryover_basis(c, a, d)
+        and us.irc.core::civil_calendar_boundary_before(add_calendar_period(d, 5 calendar_year), 1, us.irc.core::CalendarDay, calendar_before_1);
+    then transferred_asset_recognition_period(c, a, d, calendar_before_1);
+}
+pub relation all_years_exception_not_applicable_to_asset(c: Corporation, asset: Asset) kind institutional {
+    label en official "subsection (c)(1), the all-years-S-corporation exception, does not apply to the tax on a carryover-basis asset (section 1374(d)(8)(B)(ii))";
+}
+@source(IRC_S1374_D, coverage = partial, quote = "Subsection (c)(1) shall not apply.")
+rule S1374D8BiiNoAllYearsException strict {
+    for c: Corporation; for a: Asset; for d: Date;
+    when asset_acquired_with_c_corporation_carryover_basis(c, a, d);
+    then all_years_exception_not_applicable_to_asset(c, a);
+}
+pub relation net_recognized_built_in_gain_from_transferred_asset(c: Corporation, y: TaxableYear, asset: Asset, amount: Money) kind empirical {
+    label en official "the net recognized built-in gain attributable to the carryover-basis asset for y, computed by the rules of section 1374 with the acquisition date as the start (section 1374(d)(8)(A)); case-asserted";
+}
+pub relation tax_on_transferred_asset_built_in_gain(c: Corporation, y: TaxableYear, asset: Asset, tax: Money) kind institutional {
+    label en official "the tax imposed on net recognized built-in gain attributable to the asset for a taxable year beginning in the asset's recognition period, at the highest section 11(b) rate (section 1374(d)(8)(A), (b)(1))";
+}
+@source(IRC_S1374_D, coverage = partial, quote = "then a tax is hereby imposed on any net recognized built-in gain attributable to any such assets for any taxable year beginning in the recognition period")
+rule S1374D8ATaxOnTransferredAsset strict {
+    for c: Corporation; for y: TaxableYear; for a: Asset; for gain: Money; for b: Date; for from: Date; for to: Date; for rate: Decimal;
+    when net_recognized_built_in_gain_from_transferred_asset(c, y, a, gain);
+    when transferred_asset_recognition_period(c, a, from, to);
+    when us.irc.core::begins(y, b);
+    when b >= from;
+    when b <= to;
+    when us.irc.corporations::maximum_section_11b_rate(y, rate);
+    then tax_on_transferred_asset_built_in_gain(c, y, a, round(gain * rate, 2, "HALF_UP"));
+}
+
+// --- 1375(b)(4): passive investment income without built-in items --------
+
+pub relation built_in_gain_or_loss_within_passive_income(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the net recognized built-in gain (or, negative, loss) of y, in the recognition period, that is included in the passive investment income figure (section 1375(b)(4)); case-asserted";
+}
+pub relation built_in_item_in_passive_income_asserted(c: Corporation, y: TaxableYear) kind institutional {
+    label en official "a built-in item within passive investment income is asserted for y (helper for the default)";
+}
+rule BuiltInItemInPassiveIncomeAsserted strict {
+    for c: Corporation; for y: TaxableYear; for a: Money;
+    when built_in_gain_or_loss_within_passive_income(c, y, a);
+    then built_in_item_in_passive_income_asserted(c, y);
+}
+pub relation passive_investment_income_1375(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the passive investment income for section 1375, determined without taking into account any recognized built-in gain or loss in the recognition period (section 1375(b)(3)-(4))";
+}
+@source(IRC_S1375_B, coverage = partial, quote = "the amount of passive investment income shall be determined by not taking into account any recognized built-in gain or loss of the S corporation for any taxable year in the recognition period")
+rule S1375B4ExcludeBuiltInItems defeasible {
+    for c: Corporation; for y: TaxableYear; for pii: Money; for b: Money;
+    when passive_investment_income_total(c, y, pii);
+    when built_in_gain_or_loss_within_passive_income(c, y, b);
+    then passive_investment_income_1375(c, y, pii - b);
+}
+rule S1375B4NoBuiltInItemsDefault defeasible {
+    for c: Corporation; for y: TaxableYear; for pii: Money;
+    when passive_investment_income_total(c, y, pii);
+    when not_known(built_in_item_in_passive_income_asserted(c, y));
+    then passive_investment_income_1375(c, y, pii);
+}
+
+// --- 1362(d)(3)(B)-(C): gross receipts and passive investment income -----
+
+pub enum PassiveReceiptKind {
+    Royalties;
+    Rents;
+    Dividends;
+    Interest;
+    Annuities;
+    label en unofficial "the five kinds of gross receipts section 1362(d)(3)(C)(i) makes passive investment income";
+}
+pub relation passive_receipts_of_kind(c: Corporation, y: TaxableYear, kind: PassiveReceiptKind, amount: Money) kind empirical {
+    label en official "gross receipts of y derived from royalties, rents, dividends, interest or annuities, before the exclusions of (C)(ii)-(v)";
+}
+pub relation passive_receipts_before_exclusions(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the sum of the receipts of the five kinds (section 1362(d)(3)(C)(i))";
+}
+@source(IRC_S1362_D, coverage = partial, quote = "the term \"passive investment income\" means gross receipts derived from royalties, rents, dividends, interest, and annuities")
+rule S1362D3CiReceiptsSum strict {
+    for c: Corporation; for y: TaxableYear; for k0: PassiveReceiptKind; for a0: Money;
+    when passive_receipts_of_kind(c, y, k0, a0);
+    then passive_receipts_before_exclusions(c, y, sum all a: Money for k: PassiveReceiptKind where passive_receipts_of_kind(c, y, k, a));
+}
+pub relation inventory_sale_note_interest(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "interest on an obligation acquired in the ordinary course of the trade or business from a sale of property described in section 1221(a)(1) (section 1362(d)(3)(C)(ii))";
+}
+pub relation meets_section_542c6_for_year(c: Corporation, y: TaxableYear) kind empirical {
+    label en official "the S corporation meets the requirements of section 542(c)(6) for y (section 1362(d)(3)(C)(iii)); case-asserted, the section 542 owner is the corporations package";
+}
+pub relation lending_or_finance_business_receipts(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "gross receipts derived directly from the active and regular conduct of a lending or finance business as defined in section 542(d)(1)";
+}
+pub relation dividends_from_active_c_subsidiary(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "dividends from a C corporation meeting section 1504(a)(2), to the extent attributable to earnings and profits derived from the active conduct of a trade or business (section 1362(d)(3)(C)(iv))";
+}
+pub relation bank_interest_income(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "interest income earned by the bank or depository institution holding company (section 1362(d)(3)(C)(v)(I))";
+}
+pub relation dividends_on_assets_required_to_be_held(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "dividends on assets required to be held by the bank or company, including Federal Reserve Bank, Federal Home Loan Bank, Federal Agricultural Mortgage Bank stock and Federal Intermediate Credit Bank participation certificates (section 1362(d)(3)(C)(v)(II))";
+}
+pub enum PassiveExclusionKind {
+    InventorySaleNoteInterest;
+    LendingOrFinanceReceipts;
+    ActiveSubsidiaryDividends;
+    BankInterest;
+    BankRequiredAssetDividends;
+    label en unofficial "the five exclusions of section 1362(d)(3)(C)(ii)-(v)";
+}
+pub relation passive_exclusion_amount(c: Corporation, y: TaxableYear, kind: PassiveExclusionKind, amount: Money) kind institutional {
+    label en official "an amount excluded from passive investment income by the given exclusion of section 1362(d)(3)(C)";
+}
+@source(IRC_S1362_D, coverage = partial, quote = "shall not include interest on any obligation acquired in the ordinary course of the corporation's trade or business from its sale of property described in section 1221(a)(1)")
+rule S1362D3CiiExcludeInventoryNoteInterest strict {
+    for c: Corporation; for y: TaxableYear; for a: Money;
+    when inventory_sale_note_interest(c, y, a);
+    then passive_exclusion_amount(c, y, InventorySaleNoteInterest, a);
+}
+@source(IRC_S1362_D, coverage = partial, quote = "the term \"passive investment income\" shall not include gross receipts for the taxable year which are derived directly from the active and regular conduct of a lending or finance business")
+rule S1362D3CiiiExcludeLendingFinance strict {
+    for c: Corporation; for y: TaxableYear; for a: Money;
+    when meets_section_542c6_for_year(c, y);
+    when lending_or_finance_business_receipts(c, y, a);
+    then passive_exclusion_amount(c, y, LendingOrFinanceReceipts, a);
+}
+@source(IRC_S1362_D, coverage = partial, quote = "the term \"passive investment income\" shall not include dividends from such C corporation to the extent such dividends are attributable to the earnings and profits of such C corporation derived from the active conduct of a trade or business")
+rule S1362D3CivExcludeActiveSubsidiaryDividends strict {
+    for c: Corporation; for y: TaxableYear; for a: Money;
+    when dividends_from_active_c_subsidiary(c, y, a);
+    then passive_exclusion_amount(c, y, ActiveSubsidiaryDividends, a);
+}
+@source(IRC_S1362_D, coverage = partial, quote = "interest income earned by such bank or company")
+rule S1362D3CvIBankInterest strict {
+    for c: Corporation; for y: TaxableYear; for a: Money;
+    when bank_or_depository_holding_company(c);
+    when bank_interest_income(c, y, a);
+    then passive_exclusion_amount(c, y, BankInterest, a);
+}
+@source(IRC_S1362_D, coverage = partial, quote = "dividends on assets required to be held by such bank or company")
+rule S1362D3CvIIBankDividends strict {
+    for c: Corporation; for y: TaxableYear; for a: Money;
+    when bank_or_depository_holding_company(c);
+    when dividends_on_assets_required_to_be_held(c, y, a);
+    then passive_exclusion_amount(c, y, BankRequiredAssetDividends, a);
+}
+pub relation passive_exclusion_present(c: Corporation, y: TaxableYear, before: Money) kind institutional {
+    label en official "some exclusion of (C)(ii)-(v) applies to y (helper for the no-exclusion default)";
+}
+rule PassiveExclusionPresent strict {
+    for c: Corporation; for y: TaxableYear; for before: Money; for k: PassiveExclusionKind; for a: Money;
+    when passive_receipts_before_exclusions(c, y, before);
+    when passive_exclusion_amount(c, y, k, a);
+    then passive_exclusion_present(c, y, before);
+}
+pub relation passive_investment_income_1362d3(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "passive investment income within section 1362(d)(3)(C): the receipts of the five kinds less the exclusions of (ii)-(v)";
+}
+rule S1362D3CWithExclusions defeasible {
+    for c: Corporation; for y: TaxableYear; for before: Money;
+    when passive_receipts_before_exclusions(c, y, before);
+    when passive_exclusion_present(c, y, before);
+    then passive_investment_income_1362d3(c, y, before - sum all a: Money for k: PassiveExclusionKind where passive_exclusion_amount(c, y, k, a));
+}
+rule S1362D3CNoExclusions defeasible {
+    for c: Corporation; for y: TaxableYear; for before: Money;
+    when passive_receipts_before_exclusions(c, y, before);
+    unless passive_exclusion_present(c, y, before);
+    then passive_investment_income_1362d3(c, y, before);
+}
+// (B): the gross receipts the 25-percent test is taken against.
+pub relation ordinary_gross_receipts(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "gross receipts of y other than from dispositions of capital assets and of stock or securities";
+}
+pub relation capital_asset_disposition_receipts(c: Corporation, y: TaxableYear, gross: Money, capital_gain_net_income: Money) kind empirical {
+    label en official "gross receipts from dispositions of capital assets (other than stock and securities) and the capital gain net income from them";
+}
+pub relation stock_or_securities_sale_gain(c: Corporation, y: TaxableYear, gain: Money) kind empirical {
+    label en official "the gains from sales or exchanges of stock or securities in y";
+}
+pub relation gross_receipts_1362d3(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "gross receipts as section 1362(d)(3)(B) counts them: capital-asset dispositions only to the extent of capital gain net income, stock and securities sales only to the extent of the gains";
+}
+@source(IRC_S1362_D, coverage = partial, quote = "gross receipts from such dispositions shall be taken into account only to the extent of the capital gain net income therefrom")
+rule S1362D3BGrossReceipts strict {
+    label en official "ordinary receipts plus min(gross, capital gain net income) from capital assets plus the gains from stock and securities; a loss counts as zero";
+    for c: Corporation; for y: TaxableYear; for ordinary: Money; for gross: Money; for cgni: Money; for gain: Money;
+    when ordinary_gross_receipts(c, y, ordinary);
+    when capital_asset_disposition_receipts(c, y, gross, cgni);
+    when stock_or_securities_sale_gain(c, y, gain);
+    then gross_receipts_1362d3(c, y, ordinary + min(gross, max(cgni, 0.00 USD)) + max(gain, 0.00 USD));
+}
+
+// --- 1366(d)-(f) --------------------------------------------------------
+
+// (d)(2)(B): a section 1041(a) transfer redirects the carryover.
+pub relation section_1041_transfer_of_s_stock(transferor: Person, transferee: Person, c: Corporation, on: Date) kind empirical {
+    label en official "a transfer described in section 1041(a) (between spouses or incident to divorce) of stock of the S corporation";
+}
+pub relation loss_carryover_redirected_to_transferee(sh: Person, c: Corporation, y: TaxableYear, ny: TaxableYear, amount: Money) kind institutional {
+    label en official "a section 1041(a) transfer of the stock in y redirects the carryover to the transferee (section 1366(d)(2)(B))";
+}
+@source(IRC_S1366_D, coverage = partial, quote = "any loss or deduction described in subparagraph (A) with respect such stock shall be treated as incurred by the corporation in the succeeding taxable year with respect to the transferee")
+rule S1366D2BRedirected defeasible {
+    for sh: Person; for c: Corporation; for y: TaxableYear; for ny: TaxableYear; for amount: Money; for to: Person; for on: Date; for b: Date; for en: Date;
+    when shareholder_loss_carryover(sh, c, y, ny, amount);
+    when section_1041_transfer_of_s_stock(sh, to, c, on);
+    when us.irc.core::begins(y, b);
+    when us.irc.core::ends(y, en);
+    when on >= b;
+    when on <= en;
+    then loss_carryover_redirected_to_transferee(sh, c, y, ny, amount);
+}
+pub relation loss_carryover_treated_as_incurred_for(holder: Person, c: Corporation, to_year: TaxableYear, amount: Money) kind institutional {
+    label en official "the shareholder with respect to whom the disallowed loss or deduction is treated as incurred by the corporation in the succeeding year (section 1366(d)(2))";
+}
+rule LossCarryoverToOriginalHolder defeasible {
+    for sh: Person; for c: Corporation; for y: TaxableYear; for ny: TaxableYear; for amount: Money;
+    when shareholder_loss_carryover(sh, c, y, ny, amount);
+    unless loss_carryover_redirected_to_transferee(sh, c, y, ny, amount);
+    then loss_carryover_treated_as_incurred_for(sh, c, ny, amount);
+}
+rule LossCarryoverToTransferee defeasible {
+    for sh: Person; for c: Corporation; for y: TaxableYear; for ny: TaxableYear; for amount: Money; for to: Person; for on: Date;
+    when shareholder_loss_carryover(sh, c, y, ny, amount);
+    when loss_carryover_redirected_to_transferee(sh, c, y, ny, amount);
+    when section_1041_transfer_of_s_stock(sh, to, c, on);
+    then loss_carryover_treated_as_incurred_for(to, c, ny, amount);
+}
+
+// (d)(3): the loss allowance in a post-termination transition period.
+pub relation last_s_year_of(c: Corporation, e: SCorpElection, y: TaxableYear) kind empirical {
+    label en official "y is the last taxable year of the corporation for which it was an S corporation";
+}
+pub relation stock_basis_at_pttp_end(sh: Person, c: Corporation, e: SCorpElection, amount: Money) kind empirical {
+    label en official "the shareholder's adjusted basis of stock at the close of the last day of the post-termination transition period, without regard to section 1366(d)(3) (section 1366(d)(3)(B))";
+}
+pub relation loss_treated_as_incurred_in_pttp(sh: Person, c: Corporation, e: SCorpElection, amount: Money) kind institutional {
+    label en official "the loss or deduction disallowed for the last S year by (d)(1), allowed as incurred on the last day of the post-termination transition period, but not more than the stock basis (section 1366(d)(3)(A)-(B))";
+}
+@source(IRC_S1366_D, coverage = partial, quote = "such loss or deduction shall be treated as incurred by the shareholder on the last day of any post-termination transition period")
+rule S1366D3AAllowedAtPttpEnd defeasible {
+    for sh: Person; for c: Corporation; for e: SCorpElection; for y: TaxableYear; for ny: TaxableYear; for loss: Money; for basis: Money; for from: Date; for to: Date;
+    when last_s_year_of(c, e, y);
+    when shareholder_loss_carryover(sh, c, y, ny, loss);
+    when pttp_counts_for_loss_allowance_1366d3(c, e, AfterLastSYear, from, to);
+    when stock_basis_at_pttp_end(sh, c, e, basis);
+    then loss_treated_as_incurred_in_pttp(sh, c, e, min(loss, basis));
+}
+pub relation pttp_stock_basis_reduction(sh: Person, c: Corporation, e: SCorpElection, amount: Money) kind institutional {
+    label en official "the shareholder's stock basis is reduced by the amount allowed as a deduction by reason of (d)(3) (section 1366(d)(3)(C))";
+}
+@source(IRC_S1366_D, coverage = partial, quote = "The shareholder's basis in the stock of the corporation shall be reduced by the amount allowed as a deduction by reason of this paragraph.")
+rule S1366D3CBasisReduction defeasible {
+    for sh: Person; for c: Corporation; for e: SCorpElection; for amount: Money;
+    when loss_treated_as_incurred_in_pttp(sh, c, e, amount);
+    then pttp_stock_basis_reduction(sh, c, e, amount);
+}
+pub relation at_risk_disallowed_last_s_year(sh: Person, c: Corporation, e: SCorpElection, amount: Money) kind empirical {
+    label en official "losses disallowed for the last S year by reason of section 465(a)";
+}
+pub relation basis_increase_that_would_have_increased_at_risk(sh: Person, c: Corporation, e: SCorpElection, amount: Money) kind empirical {
+    label en official "the part of the (d)(3)(B) basis increase that would have increased the amount at risk under section 465 had it occurred on the day preceding the start of the period";
+}
+pub relation at_risk_loss_treated_as_incurred_in_pttp(sh: Person, c: Corporation, e: SCorpElection, amount: Money) kind institutional {
+    label en official "rules similar to (A)-(C) apply to losses disallowed by section 465(a), to the extent of the basis increase that would have increased the amount at risk (section 1366(d)(3)(D))";
+}
+@source(IRC_S1366_D, coverage = partial, quote = "rules similar to the rules described in subparagraphs (A) through (C) shall apply to any losses disallowed by reason of section 465(a)")
+rule S1366D3DAtRisk strict {
+    for sh: Person; for c: Corporation; for e: SCorpElection; for loss: Money; for inc: Money;
+    when at_risk_disallowed_last_s_year(sh, c, e, loss);
+    when basis_increase_that_would_have_increased_at_risk(sh, c, e, inc);
+    then at_risk_loss_treated_as_incurred_in_pttp(sh, c, e, min(loss, inc));
+}
+
+// (d)(4): the charitable-contribution carve-out from the (d)(1) limit.
+pub relation charitable_contribution_share(sh: Person, c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the shareholder's pro rata share of a charitable contribution of property to which the second sentence of section 1367(a)(2) applies";
+}
+pub relation charitable_property_basis_share(sh: Person, c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the shareholder's pro rata share of the adjusted basis of the contributed property";
+}
+pub relation charitable_excess_outside_basis_limit(sh: Person, c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the excess of the share of the contribution over the share of the property's adjusted basis, to which paragraph (1) does not apply (section 1366(d)(4))";
+}
+@source(IRC_S1366_D, coverage = partial, quote = "paragraph (1) shall not apply to the extent of the excess (if any) of")
+rule S1366D4Excess strict {
+    for sh: Person; for c: Corporation; for y: TaxableYear; for contribution: Money; for basisShare: Money;
+    when charitable_contribution_share(sh, c, y, contribution);
+    when charitable_property_basis_share(sh, c, y, basisShare);
+    when contribution > basisShare;
+    then charitable_excess_outside_basis_limit(sh, c, y, contribution - basisShare);
+}
+pub relation charitable_excess_asserted(sh: Person, c: Corporation, y: TaxableYear) kind institutional {
+    label en official "a section 1366(d)(4) excess exists for the shareholder and year (helper for the default)";
+}
+rule CharitableExcessAsserted strict {
+    for sh: Person; for c: Corporation; for y: TaxableYear; for a: Money;
+    when charitable_excess_outside_basis_limit(sh, c, y, a);
+    then charitable_excess_asserted(sh, c, y);
+}
+pub relation loss_limitation_ceiling_effective(sh: Person, c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the section 1366(d)(1) ceiling, raised by the section 1366(d)(4) charitable excess that the limitation does not reach";
+}
+rule LossCeilingWithCharitableExcess defeasible {
+    for sh: Person; for c: Corporation; for y: TaxableYear; for ceiling: Money; for excess: Money;
+    when loss_limitation_ceiling(sh, c, y, ceiling);
+    when charitable_excess_outside_basis_limit(sh, c, y, excess);
+    then loss_limitation_ceiling_effective(sh, c, y, ceiling + excess);
+}
+rule LossCeilingNoCharitableExcess defeasible {
+    for sh: Person; for c: Corporation; for y: TaxableYear; for ceiling: Money;
+    when loss_limitation_ceiling(sh, c, y, ceiling);
+    when not_known(charitable_excess_asserted(sh, c, y));
+    then loss_limitation_ceiling_effective(sh, c, y, ceiling);
+}
+
+// (f)(2): the section 1374 tax is a loss; character follows the built-in gains.
+pub relation recognized_built_in_gain_item(c: Corporation, y: TaxableYear, item: Text, amount: Money) kind empirical {
+    label en official "a recognized built-in gain item of y giving rise to the section 1374 tax, with its character carried by the item name";
+}
+pub relation built_in_gains_tax_treated_as_loss(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the amount of the section 1374 tax is treated as a loss sustained by the S corporation during y for the section 1366(a) pass-through (section 1366(f)(2))";
+}
+@source(IRC_S1366_F, coverage = partial, quote = "the amount so imposed shall be treated as a loss sustained by the S corporation during such taxable year")
+rule S1366F2TaxIsLoss defeasible {
+    for c: Corporation; for y: TaxableYear; for tax: Money;
+    when s_corp_tax(c, y, BuiltInGainsTax1374, tax);
+    then built_in_gains_tax_treated_as_loss(c, y, tax);
+}
+pub relation built_in_gain_items_total(c: Corporation, y: TaxableYear, total: Money) kind institutional {
+    label en official "the total of the recognized built-in gain items of y";
+}
+rule BuiltInGainItemsTotal strict {
+    for c: Corporation; for y: TaxableYear; for i0: Text; for a0: Money;
+    when recognized_built_in_gain_item(c, y, i0, a0);
+    then built_in_gain_items_total(c, y, sum all a: Money for i: Text where recognized_built_in_gain_item(c, y, i, a));
+}
+pub relation built_in_gains_tax_loss_by_item(c: Corporation, y: TaxableYear, item: Text, amount: Money) kind institutional {
+    label en official "the part of the section 1374 tax loss whose character is that of the given recognized built-in gain item: allocated proportionately among the items (section 1366(f)(2), second sentence)";
+}
+@source(IRC_S1366_F, coverage = partial, quote = "The character of such loss shall be determined by allocating the loss proportionately among the recognized built-in gains giving rise to such tax.")
+rule S1366F2CharacterByItem defeasible {
+    for c: Corporation; for y: TaxableYear; for item: Text; for a: Money; for total: Money; for tax: Money;
+    when built_in_gains_tax_treated_as_loss(c, y, tax);
+    when recognized_built_in_gain_item(c, y, item, a);
+    when built_in_gain_items_total(c, y, total);
+    when total > 0.00 USD;
+    then built_in_gains_tax_loss_by_item(c, y, item, div_round(tax * (a / 1.00 USD), total / 1.00 USD, 2, "HALF_UP"));
+}
+
+// (f)(3): each passive investment income item is reduced by the section 1375 tax.
+pub relation passive_income_item(c: Corporation, y: TaxableYear, item: Text, amount: Money) kind empirical {
+    label en official "an item of passive investment income of y";
+}
+pub relation passive_income_items_total(c: Corporation, y: TaxableYear, total: Money) kind institutional {
+    label en official "the total passive investment income of y over the asserted items";
+}
+rule PassiveIncomeItemsTotal strict {
+    for c: Corporation; for y: TaxableYear; for i0: Text; for a0: Money;
+    when passive_income_item(c, y, i0, a0);
+    then passive_income_items_total(c, y, sum all a: Money for i: Text where passive_income_item(c, y, i, a));
+}
+pub relation passive_income_item_after_1375_tax(c: Corporation, y: TaxableYear, item: Text, amount: Money) kind institutional {
+    label en official "the item reduced by an amount which bears the same ratio to the section 1375 tax as the item bears to the total passive investment income (section 1366(f)(3))";
+}
+@source(IRC_S1366_F, coverage = partial, quote = "each item of passive investment income shall be reduced by an amount which bears the same ratio to the amount of such tax as")
+rule S1366F3ReducePassiveItem defeasible {
+    for c: Corporation; for y: TaxableYear; for item: Text; for a: Money; for total: Money; for tax: Money;
+    when s_corp_tax(c, y, ExcessNetPassiveIncomeTax1375, tax);
+    when passive_income_item(c, y, item, a);
+    when passive_income_items_total(c, y, total);
+    when total > 0.00 USD;
+    then passive_income_item_after_1375_tax(c, y, item, a - div_round(tax * (a / 1.00 USD), total / 1.00 USD, 2, "HALF_UP"));
+}
+
+// --- 1367(b)(2)(B): restoration of debt basis ahead of stock basis --------
+
+pub relation unrestored_debt_basis_reduction(sh: Person, c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the reduction of the shareholder's basis in the corporation's indebtedness under section 1367(b)(2)(A) for a taxable year beginning after December 31, 1982, not yet restored at the start of y";
+}
+pub relation net_increase_for_year(sh: Person, c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the net increase for y after the application of section 1367(a)(1) and (2), when positive";
+}
+rule NetIncreaseForYear strict {
+    for sh: Person; for c: Corporation; for y: TaxableYear; for inc: Money; for dec: Money;
+    when basis_increase_total(sh, c, y, inc);
+    when basis_decrease_total(sh, c, y, dec);
+    when inc > dec;
+    then net_increase_for_year(sh, c, y, inc - dec);
+}
+pub relation debt_basis_restored(sh: Person, c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the part of the net increase applied to restore an earlier reduction in debt basis before any of it increases stock basis (section 1367(b)(2)(B))";
+}
+@source(IRC_S1367_B, coverage = partial, quote = "any net increase (after the application of paragraphs (1) and (2) of subsection (a)) for any subsequent taxable year shall be applied to restore such reduction in basis before any of it may be used to increase the shareholder's basis in the stock of the S corporation")
+rule S1367B2BRestoration strict {
+    for sh: Person; for c: Corporation; for y: TaxableYear; for net: Money; for unrestored: Money;
+    when net_increase_for_year(sh, c, y, net);
+    when unrestored_debt_basis_reduction(sh, c, y, unrestored);
+    then debt_basis_restored(sh, c, y, min(net, unrestored));
+}
+pub relation net_increase_left_for_stock_basis(sh: Person, c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the net increase remaining, after restoring debt basis, to increase stock basis (section 1367(b)(2)(B))";
+}
+rule S1367B2BRemainderToStock strict {
+    for sh: Person; for c: Corporation; for y: TaxableYear; for net: Money; for unrestored: Money;
+    when net_increase_for_year(sh, c, y, net);
+    when unrestored_debt_basis_reduction(sh, c, y, unrestored);
+    then net_increase_left_for_stock_basis(sh, c, y, net - min(net, unrestored));
+}
+
+// --- 1363(d): LIFO recapture ------------------------------------------------
+
+pub relation uses_retail_method_under_472(c: Corporation, y: TaxableYear) kind empirical {
+    label en official "the corporation uses the retail method of valuing inventories under section 472 (section 1363(d)(4)(C)(i))";
+}
+pub relation retail_method_inventory_amount(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the inventory amount of the assets valued by the retail method";
+}
+pub relation inventory_cost_amount(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the cost of the inventory assets";
+}
+pub relation inventory_market_amount(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the market value of the inventory assets";
+}
+pub relation lifo_inventory_amount(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the inventory amount of the inventory assets under the LIFO method authorized by section 472 (section 1363(d)(4)(A)), determined as of the close of y";
+}
+pub relation fifo_inventory_amount(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the inventory amount under a method authorized by section 471: the retail method if the corporation uses it, otherwise cost or market, whichever is lower (section 1363(d)(4)(C))";
+}
+@source(IRC_S1363_D, coverage = partial, quote = "if the corporation uses the retail method of valuing inventories under section 472, by using such method")
+rule S1363D4CiRetail strict {
+    for c: Corporation; for y: TaxableYear; for a: Money;
+    when uses_retail_method_under_472(c, y);
+    when retail_method_inventory_amount(c, y, a);
+    then fifo_inventory_amount(c, y, a);
+}
+@source(IRC_S1363_D, coverage = partial, quote = "if clause (i) does not apply, by using cost or market, whichever is lower")
+rule S1363D4CiiCostOrMarket strict {
+    for c: Corporation; for y: TaxableYear; for cost: Money; for market: Money;
+    when inventory_cost_amount(c, y, cost);
+    when inventory_market_amount(c, y, market);
+    when not_known(uses_retail_method_under_472(c, y));
+    then fifo_inventory_amount(c, y, min(cost, market));
+}
+pub relation lifo_recapture_amount(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the amount by which the inventory amount under the FIFO method of section 471 exceeds the inventory amount under the LIFO method, as of the close of y (section 1363(d)(3))";
+}
+@source(IRC_S1363_D, coverage = partial, quote = "the inventory amount of the inventory asset under the first-in, first-out method authorized by section 471, exceeds")
+rule S1363D3LifoRecaptureAmount strict {
+    for c: Corporation; for y: TaxableYear; for fifo: Money; for lifo: Money;
+    when fifo_inventory_amount(c, y, fifo);
+    when lifo_inventory_amount(c, y, lifo);
+    when fifo > lifo;
+    then lifo_recapture_amount(c, y, fifo - lifo);
+}
+pub relation inventoried_goods_under_lifo(c: Corporation, y: TaxableYear) kind empirical {
+    label en official "the corporation inventoried goods under the LIFO method for y (section 1363(d)(1)(B))";
+}
+pub relation last_c_year_before_s_election(c: Corporation, e: SCorpElection, y: TaxableYear) kind institutional {
+    label en official "y is the last taxable year before the first taxable year for which the election under section 1362(a) was effective, and the corporation was a C corporation for it (section 1363(d)(1)(A))";
+}
+@source(IRC_S1363_D, coverage = partial, quote = "an S corporation was a C corporation for the last taxable year before the first taxable year for which the election under section 1362(a) was effective")
+rule S1363D1ALastCYear defeasible {
+    for c: Corporation; for e: SCorpElection; for y: TaxableYear; for first: TaxableYear;
+    when s_election_effective_year(c, e, first);
+    when next_taxable_year(y, first);
+    when c_corporation(c, y);
+    then last_c_year_before_s_election(c, e, y);
+}
+pub relation lifo_recapture_included_in_gross_income(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the LIFO recapture amount is included in the gross income of the corporation for its last C year (section 1363(d)(1))";
+}
+@source(IRC_S1363_D, coverage = partial, quote = "the LIFO recapture amount shall be included in the gross income of the corporation for such last taxable year")
+rule S1363D1Inclusion defeasible {
+    for c: Corporation; for e: SCorpElection; for y: TaxableYear; for a: Money;
+    when last_c_year_before_s_election(c, e, y);
+    when inventoried_goods_under_lifo(c, y);
+    when lifo_recapture_amount(c, y, a);
+    then lifo_recapture_included_in_gross_income(c, y, a);
+}
+pub relation inventory_basis_adjusted_for_recapture(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "appropriate adjustments to the basis of inventory are made to take into account the amount included in gross income (section 1363(d)(1))";
+}
+rule S1363D1BasisAdjustment defeasible {
+    for c: Corporation; for y: TaxableYear; for a: Money;
+    when lifo_recapture_included_in_gross_income(c, y, a);
+    then inventory_basis_adjusted_for_recapture(c, y, a);
+}
+pub relation not_affiliated_group_member_for_lifo_recapture(c: Corporation, y: TaxableYear) kind institutional {
+    label en official "except as provided in regulations, the corporation is not treated as a member of an affiliated group with respect to the amount included in gross income (section 1363(d)(4)(D))";
+}
+@source(IRC_S1363_D, coverage = partial, quote = "the corporation referred to in paragraph (1) shall not be treated as a member of an affiliated group with respect to the amount included in gross income under paragraph (1)")
+rule S1363D4DNotAffiliated defeasible {
+    for c: Corporation; for y: TaxableYear; for a: Money;
+    when lifo_recapture_included_in_gross_income(c, y, a);
+    then not_affiliated_group_member_for_lifo_recapture(c, y);
+}
+pub relation lifo_tax_increase_excluded_from_basis_and_ep_rules(c: Corporation, y: TaxableYear) kind institutional {
+    label en official "sections 1367(a)(2)(D) and 1371(c)(1) do not apply to the increase in tax by reason of the recapture (section 1363(d)(5))";
+}
+@source(IRC_S1363_D, coverage = partial, quote = "Sections 1367(a)(2)(D) and 1371(c)(1) shall not apply with respect to any increase in the tax imposed by reason of this subsection.")
+rule S1363D5NoBasisOrEpEffect defeasible {
+    for c: Corporation; for y: TaxableYear; for a: Money;
+    when lifo_recapture_included_in_gross_income(c, y, a);
+    then lifo_tax_increase_excluded_from_basis_and_ep_rules(c, y);
+}
+// (d)(2): the increase in tax is payable in 4 equal installments.
+pub relation lifo_recapture_tax_increase(c: Corporation, amount: Money) kind empirical {
+    label en official "the increase in the tax imposed by chapter 1 by reason of section 1363(d) (section 1363(d)(2)(A)); its computation is the tax owner's";
+}
+pub relation return_due_date_without_extensions(c: Corporation, y: TaxableYear, due: Date) kind empirical {
+    label en official "the due date for the corporation's return for y, determined without regard to extensions; case-asserted, the returns owner's date";
+}
+pub relation lifo_installment_due(c: Corporation, n: Integer, due: Date, amount: Money) kind institutional {
+    label en official "installment n (1 to 4) of the LIFO recapture tax increase: one quarter of the increase, due on or before the return due date, without extensions, for the last C year (n = 1) and for each of the 3 succeeding taxable years";
+}
+@source(IRC_S1363_D, coverage = partial, quote = "shall be payable in 4 equal installments")
+rule S1363D2Installment1 defeasible {
+    for c: Corporation; for e: SCorpElection; for y: TaxableYear; for inc: Money; for due: Date;
+    when last_c_year_before_s_election(c, e, y);
+    when lifo_recapture_tax_increase(c, inc);
+    when return_due_date_without_extensions(c, y, due);
+    then lifo_installment_due(c, 1, due, div_round(inc, 4.0, 2, "HALF_UP"));
+}
+rule S1363D2Installment2 defeasible {
+    for c: Corporation; for e: SCorpElection; for y: TaxableYear; for y2: TaxableYear; for inc: Money; for due: Date;
+    when last_c_year_before_s_election(c, e, y);
+    when next_taxable_year(y, y2);
+    when lifo_recapture_tax_increase(c, inc);
+    when return_due_date_without_extensions(c, y2, due);
+    then lifo_installment_due(c, 2, due, div_round(inc, 4.0, 2, "HALF_UP"));
+}
+rule S1363D2Installment3 defeasible {
+    for c: Corporation; for e: SCorpElection; for y: TaxableYear; for y2: TaxableYear; for y3: TaxableYear; for inc: Money; for due: Date;
+    when last_c_year_before_s_election(c, e, y);
+    when next_taxable_year(y, y2);
+    when next_taxable_year(y2, y3);
+    when lifo_recapture_tax_increase(c, inc);
+    when return_due_date_without_extensions(c, y3, due);
+    then lifo_installment_due(c, 3, due, div_round(inc, 4.0, 2, "HALF_UP"));
+}
+rule S1363D2Installment4 defeasible {
+    for c: Corporation; for e: SCorpElection; for y: TaxableYear; for y2: TaxableYear; for y3: TaxableYear; for y4: TaxableYear; for inc: Money; for due: Date;
+    when last_c_year_before_s_election(c, e, y);
+    when next_taxable_year(y, y2);
+    when next_taxable_year(y2, y3);
+    when next_taxable_year(y3, y4);
+    when lifo_recapture_tax_increase(c, inc);
+    when return_due_date_without_extensions(c, y4, due);
+    then lifo_installment_due(c, 4, due, div_round(inc, 4.0, 2, "HALF_UP"));
+}
+pub relation lifo_installment_paid(c: Corporation, n: Integer) kind empirical {
+    label en official "installment n of the LIFO recapture tax increase has been paid";
+}
+@source(IRC_S1363_D, coverage = partial, quote = "shall be paid on or before the due date (determined without regard to extensions)")
+rule S1363D2BPayInstallment defeasible {
+    label en official "the corporation shall pay each installment on or before its due date (section 1363(d)(2)(B))";
+    for c: Corporation; for n: Integer; for due: Date; for amount: Money;
+    when lifo_installment_due(c, n, due, amount);
+    then duty PayLifoRecaptureInstallment {
+        bearer c;
+        beneficiary Secretary;
+        goal achievement {
+            condition lifo_installment_paid(c, n);
+            window [-infinity, due];
+        }
+    };
+}
+pub relation section_6601_payment_date_for_lifo_installment(c: Corporation, n: Integer, date_prescribed: Date) kind institutional {
+    label en official "for section 6601 the date prescribed for payment of each installment is determined under paragraph (2), not under section 6601(b) (section 1363(d)(2)(C)); the interest computation itself is the interest owner's";
+}
+@source(IRC_S1363_D, coverage = partial, quote = "Notwithstanding section 6601(b), for purposes of section 6601, the date prescribed for the payment of each installment under this paragraph shall be determined under this paragraph.")
+rule S1363D2CInterestDate defeasible {
+    for c: Corporation; for n: Integer; for due: Date; for amount: Money;
+    when lifo_installment_due(c, n, due, amount);
+    then section_6601_payment_date_for_lifo_installment(c, n, due);
+}
+
+// --- 1371(d): investment credit recapture ---------------------------------
+
+pub relation s_election_mere_change_in_form(c: Corporation, e: SCorpElection) kind institutional {
+    label en official "an election under section 1362 is treated as a mere change in the form of conducting a trade or business for purposes of the second sentence of section 50(a)(5) (section 1371(d)(1)); the section 50(a)(5) consequence is the credits owner's";
+}
+@source(IRC_S1371_D, coverage = partial, quote = "shall be treated as a mere change in the form of conducting a trade or business for purposes of the second sentence of section 50(a)(5)")
+rule S1371D1MereChangeInForm defeasible {
+    for c: Corporation; for e: SCorpElection; for on: Date;
+    when s_election_made_validly(c, e, on);
+    then s_election_mere_change_in_form(c, e);
+}
+pub relation recapture_increase_for_non_s_year_credits(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "an increase in tax under section 49(b) or 50(a) attributable to credits allowed for taxable years for which the corporation was not an S corporation; the increase itself is computed by the credits owner";
+}
+pub relation s_corp_continues_liable_for_recapture(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "notwithstanding an election under section 1362, the S corporation continues to be liable for the increase (section 1371(d)(2))";
+}
+@source(IRC_S1371_D, coverage = partial, quote = "an S corporation shall continue to be liable for any increase in tax under section 49(b) or 50(a) attributable to credits allowed for taxable years for which such corporation was not an S corporation")
+rule S1371D2ContinuesLiable defeasible {
+    for c: Corporation; for y: TaxableYear; for a: Money;
+    when recapture_increase_for_non_s_year_credits(c, y, a);
+    when s_corporation(c, y);
+    then s_corp_continues_liable_for_recapture(c, y, a);
+}
+@source(IRC_S1371_D, coverage = partial, quote = "Paragraph (1) of subsection (c) shall not apply to any increase in tax under section 49(b) or 50(a) for which the S corporation is liable.")
+rule EAndPExceptionRecapture defeasible {
+    label en official "the E&P bar of section 1371(c)(1) does not apply to a recapture increase for which the S corporation is liable (section 1371(d)(3))";
+    for c: Corporation; for y: TaxableYear; for a: Money;
+    when s_corp_continues_liable_for_recapture(c, y, a);
+    then e_and_p_adjustment_exception(c, y);
+}
+
+// --- 1366(b): character of passed-through items ------------------------------
+
+pub relation corporation_item_character(c: Corporation, y: TaxableYear, item: Text, character: Text) kind empirical {
+    label en official "the character an item of the corporation has, as if realized directly from the source from which the corporation realized it or incurred in the same manner as the corporation incurred it";
+}
+pub relation shareholder_item_character(sh: Person, c: Corporation, y: TaxableYear, item: Text, character: Text) kind institutional {
+    label en official "the character of an item included in the shareholder's pro rata share is determined as if realized directly by the shareholder from the source from which the corporation realized it (section 1366(b))";
+}
+@source(IRC_S1366_B, coverage = partial, quote = "shall be determined as if such item were realized directly from the source from which realized by the corporation, or incurred in the same manner as incurred by the corporation")
+rule S1366BCharacterPassesThrough defeasible {
+    for sh: Person; for c: Corporation; for y: TaxableYear; for item: Text; for character: Text; for f: Decimal;
+    when shareholder_ownership_fraction(sh, c, y, f);
+    when corporation_item_character(c, y, item, character);
+    then shareholder_item_character(sh, c, y, item, character);
+}
+
+// --- 1367(b)(1): income items taken into account only as included --------------
+
+pub relation amount_required_to_be_included(sh: Person, c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "an amount required to be included in the shareholder's gross income (section 1367(b)(1))";
+}
+pub relation amount_included_on_return(sh: Person, c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the amount included in the shareholder's gross income on his return";
+}
+pub relation redetermination_adjustment(sh: Person, c: Corporation, y: TaxableYear, adjustment: Money) kind empirical {
+    label en official "the increase (positive) or decrease (negative) of the amount in a redetermination of the shareholder's tax liability; assert 0.00 USD when there is none";
+}
+pub relation income_item_taken_into_account_for_basis(sh: Person, c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the amount taken into account under section 1367(a)(1)(A) or (B): only to the extent included in the shareholder's gross income on his return, increased or decreased by any redetermination adjustment";
+}
+@source(IRC_S1367_B, coverage = partial, quote = "only to the extent such amount is included in the shareholder's gross income on his return, increased or decreased by any adjustment of such amount in a redetermination of the shareholder's tax liability")
+rule S1367B1TakenIntoAccountAsIncluded defeasible {
+    for sh: Person; for c: Corporation; for y: TaxableYear; for required: Money; for included: Money; for adj: Money;
+    when amount_required_to_be_included(sh, c, y, required);
+    when amount_included_on_return(sh, c, y, included);
+    when redetermination_adjustment(sh, c, y, adj);
+    then income_item_taken_into_account_for_basis(sh, c, y, min(required, included + adj));
+}
+
+// --- 1363(d)(4)(A)-(B): LIFO method and inventory assets -----------------------
+
+pub relation method_authorized_by_472_used(c: Corporation, y: TaxableYear) kind empirical {
+    label en official "the corporation uses the method authorized by section 472";
+}
+pub relation lifo_method_of(c: Corporation, y: TaxableYear) kind institutional {
+    label en official "the LIFO method: the method authorized by section 472 (section 1363(d)(4)(A))";
+}
+@source(IRC_S1363_D, coverage = partial, quote = "The term \"LIFO method\" means the method authorized by section 472.")
+rule S1363D4ALifoMethod strict {
+    for c: Corporation; for y: TaxableYear;
+    when method_authorized_by_472_used(c, y);
+    then lifo_method_of(c, y);
+}
+pub relation stock_in_trade_of(a: Asset, c: Corporation) kind empirical {
+    label en official "a is stock in trade of the corporation";
+}
+pub relation property_of_kind_included_in_inventory(a: Asset, c: Corporation) kind empirical {
+    label en official "a is other property of a kind which would properly be included in the inventory of the corporation if on hand at the close of the taxable year";
+}
+pub relation inventory_asset_of(a: Asset, c: Corporation) kind institutional {
+    label en official "a is an inventory asset of the corporation (section 1363(d)(4)(B))";
+}
+@source(IRC_S1363_D, coverage = partial, quote = "The term \"inventory assets\" means stock in trade of the corporation")
+rule S1363D4BStockInTrade strict {
+    for a: Asset; for c: Corporation;
+    when stock_in_trade_of(a, c);
+    then inventory_asset_of(a, c);
+}
+rule S1363D4BInventoryKind strict {
+    for a: Asset; for c: Corporation;
+    when property_of_kind_included_in_inventory(a, c);
+    then inventory_asset_of(a, c);
+}
+
+// --- 1377(a)(2): election to terminate the year (two-year treatment) ---------
+
+pub relation shareholder_terminates_interest_on(sh: Person, c: Corporation, y: TaxableYear, d: Date) kind empirical {
+    label en official "sh terminates the shareholder's entire interest in the corporation during y, on date d";
+}
+pub relation shares_transferred_by_terminating_shareholder(sh: Person, transferee: Person, c: Corporation, y: TaxableYear) kind empirical {
+    label en official "the terminating shareholder sh transferred shares to transferee during y";
+}
+pub relation terminating_shareholder_transferred_to_corporation(sh: Person, c: Corporation, y: TaxableYear) kind empirical {
+    label en official "the terminating shareholder sh transferred shares to the corporation itself during y";
+}
+pub relation shareholder_at_any_time_in_year(p: Person, c: Corporation, y: TaxableYear) kind empirical {
+    label en official "p is a shareholder of c at some time during y";
+}
+pub relation affected_shareholder_1377a2(p: Person, c: Corporation, y: TaxableYear) kind institutional {
+    label en official "an affected shareholder: the shareholder whose interest is terminated and all shareholders to whom that shareholder transferred shares during the year; if the shares went to the corporation, all persons who are shareholders during the year (section 1377(a)(2)(B))";
+}
+@source(IRC_S1377_A, coverage = partial, quote = "the term \"affected shareholders\" means the shareholder whose interest is terminated and all shareholders to whom such shareholder has transferred shares during the taxable year")
+rule S1377A2BTerminatingShareholder strict {
+    for sh: Person; for c: Corporation; for y: TaxableYear; for d: Date;
+    when shareholder_terminates_interest_on(sh, c, y, d);
+    then affected_shareholder_1377a2(sh, c, y);
+}
+rule S1377A2BTransferees strict {
+    for sh: Person; for tr: Person; for c: Corporation; for y: TaxableYear; for d: Date;
+    when shareholder_terminates_interest_on(sh, c, y, d);
+    when shares_transferred_by_terminating_shareholder(sh, tr, c, y);
+    then affected_shareholder_1377a2(tr, c, y);
+}
+@source(IRC_S1377_A, coverage = partial, quote = "If such shareholder has transferred shares to the corporation, the term \"affected shareholders\" shall include all persons who are shareholders during the taxable year.")
+rule S1377A2BAllShareholdersIfTransferToCorporation strict {
+    for sh: Person; for p: Person; for c: Corporation; for y: TaxableYear; for d: Date;
+    when shareholder_terminates_interest_on(sh, c, y, d);
+    when terminating_shareholder_transferred_to_corporation(sh, c, y);
+    when shareholder_at_any_time_in_year(p, c, y);
+    then affected_shareholder_1377a2(p, c, y);
+}
+pub relation affected_shareholder_agrees_to_1377a2(p: Person, c: Corporation, y: TaxableYear) kind empirical {
+    label en official "p agrees to the application of section 1377(a)(2)";
+}
+pub relation corporation_agrees_to_1377a2(c: Corporation, y: TaxableYear) kind empirical {
+    label en official "the corporation agrees to the application of section 1377(a)(2)";
+}
+pub relation all_agree_to_1377a2(c: Corporation, y: TaxableYear) kind institutional {
+    label en official "all affected shareholders and the corporation agree to the application of paragraph (2) (section 1377(a)(2)(A))";
+}
+rule S1377A2AllAgree strict {
+    for c: Corporation; for y: TaxableYear; for anyone: Person;
+    when affected_shareholder_1377a2(anyone, c, y);
+    when corporation_agrees_to_1377a2(c, y);
+    when count(collect p: Person where affected_shareholder_1377a2(p, c, y)) ==
+         count(collect p: Person where affected_shareholder_1377a2(p, c, y) and affected_shareholder_agrees_to_1377a2(p, c, y));
+    then all_agree_to_1377a2(c, y);
+}
+pub relation elects_1377a2_year_termination(c: Corporation, y: TaxableYear, on: Date) kind empirical {
+    label en official "the corporation and the affected shareholders apply section 1377(a)(2) to y";
+}
+pub relation year_treated_as_two_years_for_affected_shareholders(c: Corporation, y: TaxableYear) kind institutional {
+    label en official "paragraph (1) is applied to the affected shareholders as if the taxable year consisted of 2 taxable years, the first of which ends on the date of the termination (section 1377(a)(2)(A))";
+}
+@source(IRC_S1377_A, coverage = partial, quote = "paragraph (1) shall be applied to the affected shareholders as if the taxable year consisted of 2 taxable years the first of which ends on the date of the termination")
+rule S1377A2ElectionPower strict {
+    label en official "under regulations, on the agreement of all affected shareholders and the corporation the pro rata share is computed as if the year were two years ending at the termination (section 1377(a)(2))";
+    for c: Corporation; for y: TaxableYear; for on: Date;
+    when elects_1377a2_year_termination(c, y, on);
+    then power S1377A2YearTerminationPower {
+        holder c;
+        over c;
+        exercise elects_1377a2_year_termination(c, y, on);
+        valid_when all_agree_to_1377a2(c, y);
+        effect create(year_treated_as_two_years_for_affected_shareholders(c, y));
+        window [@1982-01-01, infinity);
+    };
+}
+
+// --- 1374(d)(6): asset with a substituted basis (one hop) ----------------------
+
+pub relation asset_held_at_start_of_first_s_year(c: Corporation, a: Asset) kind empirical {
+    label en official "the S corporation held the asset as of the beginning of the 1st taxable year for which it was an S corporation";
+}
+pub relation asset_basis_determined_by_reference_to(a: Asset, other: Asset) kind empirical {
+    label en official "the adjusted basis of a is determined, in whole or in part, by reference to the adjusted basis of other";
+}
+pub relation treated_as_held_at_start_of_first_s_year(c: Corporation, a: Asset) kind institutional {
+    label en official "the asset is treated as held by the S corporation at the beginning of its 1st S year because its basis is determined by reference to another asset held then (section 1374(d)(6)(A)); one hop only, a chain through a third asset is not derived (TECH-GAPS G24 class, recursion over object keys)";
+}
+@source(IRC_S1374_D, coverage = partial, quote = "such asset shall be treated as held by the S corporation as of the beginning of such 1st taxable year")
+rule S1374D6ATreatedAsHeld strict {
+    for c: Corporation; for a: Asset; for other: Asset;
+    when asset_basis_determined_by_reference_to(a, other);
+    when asset_held_at_start_of_first_s_year(c, other);
+    then treated_as_held_at_start_of_first_s_year(c, a);
+}
+pub relation reference_asset_for_built_in_tests(c: Corporation, a: Asset, other: Asset) kind institutional {
+    label en official "the determinations under (d)(3)(B) and (4)(B) for a are made by reference to the fair market value and adjusted basis of other as of the beginning of the 1st S year (section 1374(d)(6)(B))";
+}
+@source(IRC_S1374_D, coverage = partial, quote = "any determination under paragraph (3)(B) or (4)(B) with respect to such asset shall be made by reference to the fair market value and adjusted basis of such other asset as of the beginning of such 1st taxable year")
+rule S1374D6BReferenceAsset strict {
+    for c: Corporation; for a: Asset; for other: Asset;
+    when asset_basis_determined_by_reference_to(a, other);
+    when asset_held_at_start_of_first_s_year(c, other);
+    then reference_asset_for_built_in_tests(c, a, other);
+}

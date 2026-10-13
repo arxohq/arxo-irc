@@ -1,0 +1,300 @@
+// Section 1001 (determination of amount of and recognition of gain or
+// loss), section 1011 (adjusted basis pointer) and section 1012 (cost
+// basis). Stage 1, priority sections (AGENT-BRIEF/PLAN task for A05).
+//
+// METHOD: `gain_realized`/`loss_realized` are the section 1001(a) "excess"
+// relation, derived from `amount_realized` (1001(b)) and `us.irc.core::
+// adjusted_basis` (whose owning computation is section 1011/1012/1014/1015/
+// 1016, all in THIS package). `gain_recognized`/`loss_recognized` are the
+// section 1001(c) default ("entire amount... shall be recognized") guarded
+// by `not_known(nonrecognition_exception_applies(...))`: modules 03
+// (sections 1031/1033/1041) and 04 (section 1091) each assert that switch
+// relation and conclude their OWN, narrower `gain_recognized`/
+// `loss_recognized` fact for the transactions they cover — so the general
+// rule here and the section-specific rules never both fire for the same
+// transaction (no `priority` needed: the switch is exclusive by
+// construction, not by arbitration between conflicting defeasible rules).
+//
+// SIMPLIFICATION (documented, not hidden): section 1001(b)(1)-(2) (the
+// section 164(d) real-property-tax proration adjustment to amount
+// realized) and section 1001(d) (installment-method cross-reference to
+// section 453, owned by `accounting`) are NOT modelled as executable rules
+// this stage — TECH_GAP for (b)(1)-(2) (needs an additive/subtractive
+// adjustment layered onto the basic amount-realized rule; a narrow
+// proration fact pattern), EXTERNAL_DEPENDENCY on `accounting` for (d).
+// Section 1001(e) (term interests: sale of a life/term interest disregards
+// the ratable portion of basis allocated to the term interest, unless the
+// entire property interest is transferred) is modelled as a narrower
+// alternative basis-for-gain-computation rule.
+
+
+use self::{
+    IRC_S1001_A,
+    IRC_S1001_B,
+    IRC_S1001_C,
+    IRC_S1001_E,
+    IRC_S1011_A,
+    IRC_S1011_B,
+    IRC_S1012_A,
+    IRC_S1012_B,
+    IRC_S1012_D,
+    net_basis_adjustment_1016,
+};
+
+type Person = us.irc.core::Person;
+type Asset = us.irc.core::Asset;
+type Lot = us.irc.core::Lot;
+type TaxableYear = us.irc.core::TaxableYear;
+type CoreTransaction = us.irc.core::Transaction;
+
+// --- Section 1001: gain or loss on a transaction --------------------------
+
+pub entity Transaction : CoreTransaction {
+    label en unofficial "a sale or other disposition of property for purposes of section 1001";
+}
+
+@source(IRC_S1001_A, quote = "The gain from the sale or other disposition of property shall be the excess of the amount realized therefrom over the adjusted basis provided in section 1011 for determining gain, and the loss shall be the excess of the adjusted basis provided in such section for determining loss over the amount realized.")
+pub relation sale_or_disposition(t: Transaction, p: Person, a: Asset, on: Date) kind empirical {
+    label en unofficial "a sale or other disposition of an asset by a person on a date, for purposes of section 1001";
+}
+
+@source(IRC_S1001_B, quote = "The amount realized from the sale or other disposition of property shall be the sum of any money received plus the fair market value of the property (other than money) received.")
+pub relation money_received(t: Transaction, amount: Money) kind empirical {
+    label en official "any money received";
+}
+pub relation fmv_of_property_received(t: Transaction, amount: Money) kind empirical {
+    label en official "the fair market value of the property (other than money) received";
+}
+pub relation amount_realized(p: Person, t: Transaction, amount: Money) kind institutional {
+    label en official "the amount realized from the sale or other disposition of property";
+}
+
+@source(IRC_S1001_B, relation = formalizes, coverage = partial, quote = "The amount realized from the sale or other disposition of property shall be the sum of any money received plus the fair market value of the property (other than money) received.")
+rule AmountRealizedRule(p: Person, t: Transaction, a: Asset, on: Date, money: Money, fmv: Money) strict {
+    label en official "section 1001(b): the amount realized is the sum of any money received plus the fair market value of the property (other than money) received";
+    when sale_or_disposition(t, p, a, on);
+    when money_received(t, money);
+    when fmv_of_property_received(t, fmv);
+    then amount_realized(p, t, money + fmv);
+}
+
+pub relation gain_realized(p: Person, t: Transaction, amount: Money) kind institutional {
+    label en official "the gain from the sale or other disposition of property: the excess of the amount realized over the adjusted basis provided in section 1011 for determining gain";
+}
+pub relation loss_realized(p: Person, t: Transaction, amount: Money) kind institutional {
+    label en official "the loss from the sale or other disposition of property: the excess of the adjusted basis provided in section 1011 for determining loss over the amount realized";
+}
+
+@source(IRC_S1001_A, quote = "The gain from the sale or other disposition of property shall be the excess of the amount realized therefrom over the adjusted basis provided in section 1011 for determining gain")
+rule GainRealizedRule(p: Person, t: Transaction, a: Asset, on: Date, realized: Money, basis: Money) strict {
+    label en official "section 1001(a): gain is the excess of amount realized over adjusted basis";
+    when sale_or_disposition(t, p, a, on);
+    when amount_realized(p, t, realized);
+    when us.irc.core::adjusted_basis(p, a, on, basis);
+    when realized > basis;
+    then gain_realized(p, t, realized - basis);
+}
+@source(IRC_S1001_A, quote = "the loss shall be the excess of the adjusted basis provided in such section for determining loss over the amount realized.")
+rule LossRealizedRule(p: Person, t: Transaction, a: Asset, on: Date, realized: Money, basis: Money) strict {
+    label en official "section 1001(a): loss is the excess of adjusted basis over amount realized";
+    when sale_or_disposition(t, p, a, on);
+    when amount_realized(p, t, realized);
+    when us.irc.core::adjusted_basis(p, a, on, basis);
+    when basis > realized;
+    then loss_realized(p, t, basis - realized);
+}
+
+// --- Section 1001(c): recognition ------------------------------------------
+
+pub relation nonrecognition_exception_applies(p: Person, t: Transaction) kind institutional {
+    label en unofficial "a named nonrecognition provision (section 1031, 1033, 1041 or 1091 of this package) displaces the default full-recognition rule of section 1001(c) for this transaction; asserted by the module implementing that provision, never by this module";
+}
+pub relation gain_recognized(p: Person, t: Transaction, amount: Money) kind institutional {
+    label en official "the entire amount of the gain, determined under section 1001, on the sale or exchange of property, recognized except as otherwise provided in this subtitle";
+}
+pub relation loss_recognized(p: Person, t: Transaction, amount: Money) kind institutional {
+    label en official "the entire amount of the loss, determined under section 1001, on the sale or exchange of property, recognized except as otherwise provided in this subtitle";
+}
+
+@source(IRC_S1001_C, quote = "Except as otherwise provided in this subtitle, the entire amount of the gain or loss, determined under this section, on the sale or exchange of property shall be recognized.")
+rule GainRecognizedDefaultRule(p: Person, t: Transaction, amount: Money) defeasible {
+    label en official "section 1001(c): the entire realized gain is recognized, except as otherwise provided in this subtitle";
+    when gain_realized(p, t, amount);
+    when not_known(nonrecognition_exception_applies(p, t));
+    then gain_recognized(p, t, amount);
+}
+@source(IRC_S1001_C, quote = "Except as otherwise provided in this subtitle, the entire amount of the gain or loss, determined under this section, on the sale or exchange of property shall be recognized.")
+rule LossRecognizedDefaultRule(p: Person, t: Transaction, amount: Money) defeasible {
+    label en official "section 1001(c): the entire realized loss is recognized, except as otherwise provided in this subtitle";
+    when loss_realized(p, t, amount);
+    when not_known(nonrecognition_exception_applies(p, t));
+    then loss_recognized(p, t, amount);
+}
+
+// --- Section 1001(e): term interests ---------------------------------------
+//
+// (e)(1)-(2): on a sale of a term interest (a life interest, a term-of-years
+// interest, or an income interest in a trust), the portion of basis
+// determined under section 1014 (basis from a decedent) or section 1015
+// (basis by gift) that is allocable to the term interest is DISREGARDED in
+// computing gain or loss, UNLESS (e)(3)) the entire property interest
+// (both the term interest and the remainder) is transferred to the same
+// person in the same transaction.
+
+pub relation term_interest_disposition(t: Transaction, p: Person, a: Asset, on: Date) kind empirical {
+    label en official "a sale or other disposition of a term interest in property (a life interest, an interest for a term of years, or an income interest in a trust)";
+}
+pub relation term_interest_basis_from_decedent_or_gift(t: Transaction, allocable_basis: Money) kind empirical {
+    label en unofficial "the portion of the adjusted basis of the term interest that is determined under section 1014 or 1015 (in whole or in part)";
+}
+pub relation entire_property_interest_transferred_together(t: Transaction) kind empirical {
+    label en official "the entire interest in the property (the term interest and the remainder interest) is transferred to any person in the transaction (section 1001(e)(3))";
+}
+
+@source(IRC_S1001_E, quote = "In determining gain or loss from the sale or other disposition of a term interest in property, that portion of the adjusted basis of such interest which is determined pursuant to section 1014, 1015, or 1041 (to the extent that such adjusted basis is a portion of the entire adjusted basis of the property) shall be disregarded")
+rule TermInterestBasisDisregardedRule(p: Person, t: Transaction, a: Asset, on: Date, realized: Money, allocable_basis: Money) defeasible {
+    label en official "section 1001(e)(1): the portion of basis of a term interest determined under section 1014/1015/1041 is disregarded in computing gain, unless the entire interest is transferred together (e)(3)";
+    when term_interest_disposition(t, p, a, on);
+    when amount_realized(p, t, realized);
+    when term_interest_basis_from_decedent_or_gift(t, allocable_basis);
+    when not_known(entire_property_interest_transferred_together(t));
+    then gain_realized(p, t, realized);
+}
+
+// --- Section 1011: adjusted basis pointer -----------------------------------
+
+@source(IRC_S1011_A, quote = "The adjusted basis for determining the gain or loss from the sale or other disposition of property, whenever acquired, shall be the basis (determined under section 1012 or other applicable sections of this subchapter and subchapters C (relating to corporate distributions and adjustments), K (relating to partners and partnerships), and P (relating to capital gains and losses)), adjusted as provided in section 1016.")
+rule AdjustedBasisRule(p: Person, a: Asset, on: Date, base_cost: Money, adjustment: Money) strict {
+    label en official "section 1011(a): adjusted basis is the section 1012 (or other applicable) basis, adjusted as provided in section 1016";
+    when cost_basis(p, a, base_cost);
+    when net_basis_adjustment_1016(p, a, on, adjustment);
+    then us.irc.core::adjusted_basis(p, a, on, base_cost + adjustment);
+}
+
+// section 1011(b): bargain sale to charity — the seller's basis for
+// determining GAIN is allocated between the portion sold and the portion
+// treated as a charitable contribution, in the ratio the amount realized
+// bears to the fair market value of the property (section 170 charitable
+// contribution deduction is `deductions`' own norm; this package supplies
+// only the basis-allocation mechanics section 1011(b) itself states).
+pub relation bargain_sale_to_charity(t: Transaction, p: Person, a: Asset, fmv: Money) kind empirical {
+    label en official "a sale of property, part of which qualifies for a section 170 charitable-contribution deduction, by reason of the sale";
+}
+pub relation section_170_deduction_allowable(t: Transaction) kind empirical {
+    label en unofficial "a deduction is allowable under section 170 by reason of this sale (owner: deductions — asserted as a case fact here pending the typed dependency contract)";
+}
+
+@source(IRC_S1011_B, quote = "If a deduction is allowable under section 170 (relating to charitable contributions) by reason of a sale, then the adjusted basis for determining the gain from such sale shall be that portion of the adjusted basis which bears the same ratio to the adjusted basis as the amount realized bears to the fair market value of the property.")
+rule BargainSaleToCharityBasisAllocationRule(p: Person, t: Transaction, a: Asset, on: Date, fmv: Money, realized: Money, full_basis: Money) strict {
+    label en official "section 1011(b): basis for determining gain on a bargain sale to charity is prorated by the ratio of amount realized to fair market value";
+    when bargain_sale_to_charity(t, p, a, fmv);
+    when section_170_deduction_allowable(t);
+    when sale_or_disposition(t, p, a, on);
+    when amount_realized(p, t, realized);
+    when us.irc.core::adjusted_basis(p, a, on, full_basis);
+    then bargain_sale_basis_for_gain(t, full_basis * (realized / fmv));
+}
+pub relation bargain_sale_basis_for_gain(t: Transaction, amount: Money) kind institutional {
+    label en unofficial "the section 1011(b) prorated basis used (instead of the full adjusted basis) for determining gain on a bargain sale to charity";
+}
+
+// --- Section 1012: cost basis ------------------------------------------------
+
+@source(IRC_S1012_A, quote = "The basis of property shall be the cost of such property, except as otherwise provided in this subchapter and subchapters C (relating to corporate distributions and adjustments), K (relating to partners and partnerships), and P (relating to capital gains and losses).")
+pub relation purchase_price(p: Person, a: Asset, amount: Money) kind empirical {
+    label en unofficial "the price paid to acquire an asset, before the section 1012(b) real-property-tax exclusion";
+}
+pub relation real_property_tax_treated_as_imposed_on_taxpayer_at_purchase(p: Person, a: Asset, amount: Money) kind empirical {
+    label en unofficial "an amount included in the purchase price that represents real property taxes treated under section 164(d) as imposed on the taxpayer (purchaser) rather than the seller";
+}
+pub relation cost_basis(p: Person, a: Asset, amount: Money) kind institutional {
+    label en official "the cost of property, section 1012(a)-(b): purchase price excluding any amount representing section 164(d) real property taxes";
+}
+
+@source(IRC_S1012_A, quote = "The basis of property shall be the cost of such property")
+rule CostBasisWithoutPropertyTaxAdjustmentRule(p: Person, a: Asset, price: Money) defeasible {
+    label en official "section 1012(a): basis is cost, absent a section 1012(b) real-property-tax adjustment";
+    when purchase_price(p, a, price);
+    when not_known(real_property_tax_treated_as_imposed_on_taxpayer_at_purchase(p, a, Zero));
+    then cost_basis(p, a, price);
+}
+const Zero: Money = 0.00 USD { label en unofficial "zero, for the not_known guard's argument shape"; };
+@source(IRC_S1012_B, quote = "The cost of real property shall not include any amount in respect of real property taxes which are treated under section 164(d) as imposed on the taxpayer.")
+rule CostBasisExcludingPropertyTaxRule(p: Person, a: Asset, price: Money, tax_portion: Money) strict {
+    label en official "section 1012(b): the cost of real property excludes amounts representing section 164(d) real property taxes imposed on the taxpayer";
+    when purchase_price(p, a, price);
+    when real_property_tax_treated_as_imposed_on_taxpayer_at_purchase(p, a, tax_portion);
+    then cost_basis(p, a, price - tax_portion);
+}
+
+// section 1012(c): identification of stock — a classification of WHICH
+// identification method governs a specified security sold from a broker
+// account, rather than a computation this package can perform itself (the
+// account-by-account convention and the default method are prescribed "by
+// regulations under this section" — an EXTERNAL_DEPENDENCY on Treasury
+// regulations this package does not invent). Modelled as a case-asserted
+// classification fact plus the mechanical consequence: the identified lot's
+// OWN basis (not a re-derived average) is used.
+
+pub enum StockIdentificationMethod {
+    SpecificIdentification;
+    FirstInFirstOut;
+    AverageBasisRic;
+    label en unofficial "the method by which a taxpayer's basis in identical shares of a specified security is identified on disposition (section 1012(c), (d))";
+}
+pub relation specified_security(a: Asset) kind institutional {
+    label en unofficial "an asset which is a specified security within the meaning of section 6045(g) (section 1012(c)(3))";
+}
+pub relation brokerage_account_of(lot: Lot, account: Integer) kind empirical {
+    label en unofficial "the broker account (section 1012(c)(1) account-by-account unit) a lot of a specified security is held in";
+}
+pub relation stock_identification_method(p: Person, account: Integer, method: StockIdentificationMethod) kind empirical {
+    label en unofficial "the identification method a taxpayer applies, on an account-by-account basis, to a specified security (section 1012(c)(1)); the specific regulatory convention for each method is an EXTERNAL_DEPENDENCY on Treasury regulations, not invented here";
+}
+pub relation identified_lot_for_disposition(lot: Lot, a: Asset) kind empirical {
+    label en unofficial "the specific tax lot the taxpayer identifies as sold, out of the asset's several lots";
+}
+// JUDGMENT CALL (stratfix2, 26.09.2026): no strict bridge from the identified
+// lot's adjusted basis back into `cost_basis` is stated here. The earlier
+// `SpecificIdentificationUsesIdentifiedLotBasisRule` (strict:
+// `adjusted_basis(p, lot)` → `cost_basis(p, lot)`) closed a predicate-level
+// cycle `core#adjusted_basis → cost_basis → core#adjusted_basis` with
+// `AdjustedBasisRule` (§1011(a), kept), fatal at execution as
+// NON_EXECUTABLE_UNSTRATIFIED (§110/§103: only monotone supported(P) edges
+// may cycle). A monotone wrapper was rejected: `cost(lot) = cost(lot) +
+// adjustment_1016(lot)` is not well-founded (diverges for nonzero
+// adjustment) and conflates distinct statutory concepts (§1011 vs §1012).
+// The lot's basis still derives through the general chain
+// `purchase_price(lot)` → §1012(a)/(b) → `cost_basis(lot)` → §1011(a)+§1016
+// → `adjusted_basis(lot)` (a `Lot` is an `Asset`, so the §1012(a)/(b) rules
+// apply to lots directly); the relations above keep the §1012(c) election
+// vocabulary for cases, and gain/loss reads `adjusted_basis` per asset.
+
+// section 1012(d): average basis for RIC (and dividend-reinvestment-plan)
+// stock — a single, blended basis per share replaces lot-by-lot basis for
+// stock as to which the average-basis method is elected/applies. The
+// computation of the average itself (total basis divided by number of
+// shares held in the account) is a straightforward Decimal division; the
+// ELECTION mechanics (subparagraph (c)(2)(B)) and the pre-2012/post-2012
+// separate-account split are classification facts, not re-derived here.
+
+pub relation average_basis_method_applies(p: Person, a: Asset, account: Integer) kind institutional {
+    label en official "the average basis method under section 1012(d) applies to a regulated-investment-company (or dividend-reinvestment-plan) stock account";
+}
+pub relation account_total_basis(p: Person, account: Integer, on: Date, total: Money) kind empirical {
+    label en unofficial "the aggregate unadjusted basis of all shares of the RIC (or dividend-reinvestment-plan) stock held in the account as of the date, before averaging";
+}
+pub relation account_share_count(p: Person, account: Integer, on: Date, shares: Decimal) kind empirical {
+    label en unofficial "the number of shares of the stock held in the account as of the date";
+}
+pub relation average_basis_per_share(p: Person, account: Integer, on: Date, amount: Money) kind institutional {
+    label en official "section 1012(d): the average basis per share of RIC stock for which the average basis method applies";
+}
+@source(IRC_S1012_D, quote = "In the case of any stock acquired after December 31, 2011, in connection with a dividend reinvestment plan, the basis of such stock while held as part of such plan shall be determined using one of the methods which may be used for determining the basis of stock in a regulated investment company.")
+rule AverageBasisPerShareRule(p: Person, a: Asset, account: Integer, on: Date, total: Money, shares: Decimal) strict {
+    label en official "section 1012(d): average basis per share is the account's total basis divided by the number of shares held";
+    when average_basis_method_applies(p, a, account);
+    when account_total_basis(p, account, on, total);
+    when account_share_count(p, account, on, shares);
+    then average_basis_per_share(p, account, on, total / shares);
+}

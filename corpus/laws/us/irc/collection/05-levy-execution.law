@@ -1,0 +1,875 @@
+// §6332 (surrender of property subject to levy; the 21-day bank rule),
+// §6334 (property exempt from levy), §6335 (sale of seized property), §6343
+// (release of levy; wrongful levy return) — the sections named by the
+// owner's stage-1 anchor list, taken as far as executable.
+//
+// JUDGMENT CALLS (see report):
+//  - §6332(c)'s "only after 21 days after service of levy" is a CALENDAR-day
+//    count (not business days — confirmed by the package-wide grep in
+//    package.law's header), computable directly with `days_between`; no
+//    calendar snapshot dependency.
+//  - §6334(a)(1)-(13) is modelled as ONE shared pub relation
+//    (`property_exempt_from_levy`) with thirteen independent rules — see
+//    package.law's header for why this is not the §61(a)/`GrossIncomeItemKind`
+//    self-reference cycle.
+//  - §6334(d)'s exempt-wage-amount computation depends on the standard
+//    deduction and the §151 personal-exemption aggregate — BOTH owned by
+//    `gross-income` (concurrent/pending; §151 itself is also collection's
+//    own stage 2, per the owner's assignment). Modelled as a typed
+//    institutional dependency contract (`standard_deduction_amount`,
+//    `personal_exemptions_deduction_amount`), `coverage/collection.deps.json`,
+//    status pending — TECH_GAP for the final dollar amount, not invented.
+//  - §6334(g)'s inflation adjustment to the $6,250/$3,125 amounts is a
+//    published (Rev. Proc.) indexed value with no IRB source pinned in this
+//    package's sources — `MISSING_PARAMETER_VALUE`/TECH_GAP, per the
+//    convention other IRC owners use for indexed statutory dollar figures
+//    (only the base statutory amounts are used in the rules below).
+//  - §6343(f) (retirement-plan rollover treatment of a returned levied
+//    distribution) is NOT modelled: it is a chapter-1 tax-treatment
+//    cross-reference of real complexity or its own (interacting with
+//    §402/§408/§408A rollover rules owned by other, unformalized packages)
+//    with no independent collection-law consequence — left
+//    `unreviewed`/"stage 2".
+//  - §6343(e) (release of a wage levy upon a "not collectible" agreement) IS
+//    modelled (it is short and completes the release picture); §6335(e)(2)'s
+//    regulatory-content paragraphs (which the Secretary "shall by
+//    regulations prescribe") are `non_normative` except the two sub-items
+//    with their own numeric caps (deferred-payment period, adjournment
+//    period), which are modelled as validity conditions on the sale
+//    mechanics they qualify.
+
+language "law.core" version "0.2";
+package us.irc.collection version "0.1.1";
+namespace "urn:us:irc:collection:clir";
+
+use self::{
+    Assessment,
+    ExemptPropertyKind,
+    IRC_S6332_A,
+    IRC_S6332_B,
+    IRC_S6332_C,
+    IRC_S6332_D,
+    IRC_S6332_E,
+    IRC_S6332_F,
+    IRC_S6334_A,
+    IRC_S6334_B,
+    IRC_S6334_C,
+    IRC_S6334_E,
+    IRC_S6335_A,
+    IRC_S6335_B,
+    IRC_S6335_C,
+    IRC_S6335_D,
+    IRC_S6335_E,
+    IRC_S6335_F,
+    IRC_S6343_A,
+    IRC_S6343_B,
+    IRC_S6343_C,
+    IRC_S6343_D,
+    IRC_S6343_E,
+    Levy,
+    Person,
+    Secretary,
+    assessment_of_person,
+    jeopardy_finding,
+};
+
+// ============================================================================
+// §6332 — Surrender of property subject to levy
+// ============================================================================
+
+relation person_holds_property_subject_to_levy(holder: Person, levy: Levy) kind empirical;
+relation property_under_judicial_attachment_or_execution(holder: Person, levy: Levy) kind empirical {
+    label en unofficial "at the time of the Secretary's demand, the part of the property is subject to an attachment or execution under judicial process — §6332(a)'s own carve-out";
+}
+relation secretary_demanded_surrender(holder: Person, levy: Levy, on: Date) kind empirical;
+
+@source(IRC_S6332_A, relation = formalizes, coverage = exact, quote = "any person in possession of (or obligated with respect to) property or rights to property subject to levy upon which a levy has been made shall, upon demand of the Secretary, surrender such property or rights (or discharge such obligation) to the Secretary, except such part of the property or rights as is, at the time of such demand, subject to an attachment or execution under any judicial process")
+rule S6332aSurrenderDuty defeasible {
+    for holder: Person;
+    for levy: Levy;
+    for demanded_on: Date;
+    when person_holds_property_subject_to_levy(holder, levy)
+        and secretary_demanded_surrender(holder, levy, demanded_on);
+    then duty SurrenderLeviedProperty {
+        bearer holder;
+        beneficiary Secretary;
+        goal achievement {
+            condition property_surrendered(holder, levy);
+            window [demanded_on, infinity];
+        }
+    };
+    unless property_under_judicial_attachment_or_execution(holder, levy) and person_holds_property_subject_to_levy(holder, levy) and secretary_demanded_surrender(holder, levy, demanded_on);
+}
+relation property_surrendered(holder: Person, levy: Levy) kind empirical;
+
+// §6332(b): life insurance/endowment contract levy.
+relation life_insurance_levy_notice_served_on(org: Person, levy: Levy, on: Date) kind empirical;
+pub relation life_insurance_levy_deemed_demand(org: Person, levy: Levy) kind institutional {
+    label en unofficial "the levy on a life insurance/endowment contract issuer constitutes a demand for payment of the advance amount, without surrender of the policy document — §6332(b)(1)";
+}
+@source(IRC_S6332_B, relation = formalizes, coverage = partial, quote = "A levy on an organization with respect to a life insurance or endowment contract issued by such organization shall, without necessity for the surrender of the contract document, constitute a demand by the Secretary for payment of the amount described in paragraph (2) and the exercise of the right of the person against whom the tax is assessed to the advance of such amount.")
+rule S6332bLevyIsDeemedDemand strict {
+    for org: Person;
+    for levy: Levy;
+    for on: Date;
+    when life_insurance_levy_notice_served_on(org, levy, on);
+    then life_insurance_levy_deemed_demand(org, levy);
+}
+pub relation life_insurance_levy_payment_due_date(org: Person, levy: Levy, due: Date) kind institutional {
+    label en unofficial "the organization must pay over the advance amount 90 days after service of the notice of levy — §6332(b)(1)";
+}
+@source(IRC_S6332_B, relation = formalizes, coverage = exact, quote = "Such organization shall pay over such amount 90 days after service of notice of levy.")
+rule S6332bNinetyDayPaymentDate strict {
+    for org: Person;
+    for levy: Levy;
+    for on: Date;
+    when life_insurance_levy_notice_served_on(org, levy, on);
+    then life_insurance_levy_payment_due_date(org, levy, add_calendar_period(on, 90 calendar_day));
+}
+
+// §6332(c): the 21-day bank rule.
+relation bank_holds_deposit_subject_to_levy(bank: Person, levy: Levy) kind empirical;
+relation deposit_under_judicial_attachment_or_execution(bank: Person, levy: Levy) kind empirical;
+
+@source(IRC_S6332_C, relation = formalizes, coverage = exact, quote = "Any bank (as defined in section 408(n)) shall surrender (subject to an attachment or execution under judicial process) any deposits (including interest thereon) in such bank only after 21 days after service of levy.")
+rule S6332cBankSurrenderDuty defeasible {
+    for bank: Person;
+    for levy: Levy;
+    for served_on: Date;
+    when bank_holds_deposit_subject_to_levy(bank, levy)
+        and secretary_demanded_surrender(bank, levy, served_on);
+    then duty SurrenderBankDeposit {
+        bearer bank;
+        beneficiary Secretary;
+        goal achievement {
+            condition property_surrendered(bank, levy);
+            window [add_calendar_period(served_on, 21 calendar_day), infinity];
+        }
+    };
+    unless deposit_under_judicial_attachment_or_execution(bank, levy) and bank_holds_deposit_subject_to_levy(bank, levy) and secretary_demanded_surrender(bank, levy, served_on);
+}
+
+// §6332(d): liability for failure to surrender.
+pub relation surrender_failure_liability(holder: Person, levy: Levy, amount: Money) kind institutional {
+    label en unofficial "the person who failed or refused to surrender levied property is personally liable to the United States for the value not surrendered (capped at the tax the levy was made to collect), plus costs and underpayment-rate interest from the date of levy (or, for a continuing wage levy, from the date each amount would otherwise have been payable) — §6332(d)(1)";
+}
+relation failed_or_refused_to_surrender(holder: Person, levy: Levy, value_not_surrendered: Money) kind empirical;
+@source(IRC_S6332_D, relation = formalizes, coverage = partial, quote = "Any person who fails or refuses to surrender any property or rights to property, subject to levy, upon demand by the Secretary, shall be liable in his own person and estate to the United States in a sum equal to the value of the property or rights not so surrendered, but not exceeding the amount of taxes for the collection of which such levy has been made, together with costs and interest on such sum at the underpayment rate established under section 6621 from the date of such levy")
+rule S6332dSurrenderFailureLiability strict {
+    for holder: Person;
+    for levy: Levy;
+    for value_not_surrendered: Money;
+    when failed_or_refused_to_surrender(holder, levy, value_not_surrendered);
+    then surrender_failure_liability(holder, levy, value_not_surrendered);
+}
+
+external judgment relation surrender_failure_without_reasonable_cause(holder: Person, levy: Levy) {
+    authority TaxCourt;
+    label en unofficial "the failure or refusal to surrender, without reasonable cause, is established (DECISION-0194 evaluative channel) — §6332(d)(2)'s own gate on the 50% penalty";
+}
+pub relation surrender_failure_penalty(holder: Person, levy: Levy, base_amount: Money) kind institutional {
+    label en unofficial "a penalty equal to 50% of the §6332(d)(1) recoverable amount, not creditable against the underlying tax liability — §6332(d)(2)";
+}
+@source(IRC_S6332_D, relation = formalizes, coverage = exact, quote = "if any person required to surrender property or rights to property fails or refuses to surrender such property or rights to property without reasonable cause, such person shall be liable for a penalty equal to 50 percent of the amount recoverable under paragraph (1)")
+rule S6332dPenaltyForWillfulFailure strict {
+    for holder: Person;
+    for levy: Levy;
+    for base_amount: Money;
+    when surrender_failure_liability(holder, levy, base_amount)
+        and surrender_failure_without_reasonable_cause(holder, levy);
+    then surrender_failure_penalty(holder, levy, base_amount);
+}
+
+// §6332(e): discharge upon surrender.
+pub relation discharged_from_further_liability_on_surrender(holder: Person, levy: Levy) kind institutional {
+    label en unofficial "a person who surrenders levied property (or pays the §6332(d)(1) liability) is discharged from any further obligation or liability to the delinquent taxpayer and any other person arising from the surrender or payment — §6332(e)";
+}
+@source(IRC_S6332_E, relation = formalizes, coverage = partial, quote = "Any person in possession of (or obligated with respect to) property or rights to property subject to levy upon which a levy has been made who, upon demand by the Secretary, surrenders such property or rights to property (or discharges such obligation) to the Secretary (or who pays a liability under subsection (d)(1)) shall be discharged from any obligation or liability to the delinquent taxpayer and any other person with respect to such property or rights to property arising from such surrender or payment")
+rule S6332eDischargedOnSurrender defeasible {
+    for holder: Person;
+    for levy: Levy;
+    when property_surrendered(holder, levy);
+    then discharged_from_further_liability_on_surrender(holder, levy);
+}
+
+// §6332(f): "person" extended to a duty-bound officer/employee/member.
+relation officer_or_member_under_duty_to_surrender(p: Person, org_entity: Person, levy: Levy) kind empirical {
+    label en unofficial "the person is an officer/employee of a corporation, or a member/employee of a partnership, who as such is under a duty to surrender the property or discharge the obligation — §6332(f)";
+}
+pub relation surrender_duty_extends_to_officer(p: Person, levy: Levy) kind institutional;
+@source(IRC_S6332_F, relation = formalizes, coverage = exact, quote = "The term \"person,\" as used in subsection (a), includes an officer or employee of a corporation or a member or employee of a partnership, who as such officer, employee, or member is under a duty to surrender the property or rights to property, or to discharge the obligation.")
+rule S6332fPersonExtendsToOfficer strict {
+    for p: Person;
+    for org_entity: Person;
+    for levy: Levy;
+    when officer_or_member_under_duty_to_surrender(p, org_entity, levy);
+    then surrender_duty_extends_to_officer(p, levy);
+}
+
+// ============================================================================
+// §6334(a) — Property exempt from levy (thirteen items)
+// ============================================================================
+
+pub relation property_exempt_from_levy(p: Person, kind: ExemptPropertyKind) kind institutional {
+    label en unofficial "an immunity of the taxpayer: property of this kind is exempt from levy — §6334(a)";
+}
+
+relation wearing_apparel_or_school_books_necessary(p: Person) kind empirical;
+@source(IRC_S6334_A, relation = formalizes, coverage = exact, quote = "Such items of wearing apparel and such school books as are necessary for the taxpayer or for members of his family;")
+rule S6334a1WearingApparelExempt strict {
+    for p: Person;
+    when wearing_apparel_or_school_books_necessary(p);
+    then property_exempt_from_levy(p, WearingApparelAndSchoolBooks);
+}
+
+relation household_fuel_furniture_effects_value(p: Person, value: Money) kind empirical;
+@source(IRC_S6334_A, relation = formalizes, coverage = exact, quote = "So much of the fuel, provisions, furniture, and personal effects in the taxpayer's household, and of the arms for personal use, livestock, and poultry of the taxpayer, as does not exceed $6,250 in value;")
+rule S6334a2HouseholdEffectsExempt strict {
+    for p: Person;
+    for value: Money;
+    when household_fuel_furniture_effects_value(p, value) and value <= 6250.00 USD;
+    then property_exempt_from_levy(p, HouseholdFuelFurnitureAndEffects);
+}
+
+relation books_and_tools_of_trade_value(p: Person, value: Money) kind empirical;
+@source(IRC_S6334_A, relation = formalizes, coverage = exact, quote = "So many of the books and tools necessary for the trade, business, or profession of the taxpayer as do not exceed in the aggregate $3,125 in value.")
+rule S6334a3BooksAndToolsExempt strict {
+    for p: Person;
+    for value: Money;
+    when books_and_tools_of_trade_value(p, value) and value <= 3125.00 USD;
+    then property_exempt_from_levy(p, BooksAndToolsOfTrade);
+}
+
+relation unemployment_compensation_payable(p: Person) kind empirical;
+@source(IRC_S6334_A, relation = formalizes, coverage = exact, quote = "Any amount payable to an individual with respect to his unemployment (including any portion thereof payable with respect to dependents) under an unemployment compensation law of the United States, of any State, or of the District of Columbia or of the Commonwealth of Puerto Rico.")
+rule S6334a4UnemploymentBenefitsExempt strict {
+    for p: Person;
+    when unemployment_compensation_payable(p);
+    then property_exempt_from_levy(p, UnemploymentBenefits);
+}
+
+relation undelivered_mail_addressed_to(p: Person) kind empirical;
+@source(IRC_S6334_A, relation = formalizes, coverage = exact, quote = "Mail, addressed to any person, which has not been delivered to the addressee.")
+rule S6334a5UndeliveredMailExempt strict {
+    for p: Person;
+    when undelivered_mail_addressed_to(p);
+    then property_exempt_from_levy(p, UndeliveredMail);
+}
+
+relation railroad_or_medal_of_honor_or_retainer_pay(p: Person) kind empirical {
+    label en unofficial "railroad retirement annuity/pension, railroad unemployment insurance benefit, Medal of Honor special pension, or chapter 73 title 10 retired/retainer pay — §6334(a)(6)";
+}
+@source(IRC_S6334_A, relation = formalizes, coverage = exact, quote = "Annuity or pension payments under the Railroad Retirement Act, benefits under the Railroad Unemployment Insurance Act, special pension payments received by a person whose name has been entered on the Army, Navy, Air Force, and Coast Guard Medal of Honor roll (38 U.S.C. 1562), and annuities based on retired or retainer pay under chapter 73 of title 10 of the United States Code.")
+rule S6334a6RailroadAndVeteransBenefitsExempt strict {
+    for p: Person;
+    when railroad_or_medal_of_honor_or_retainer_pay(p);
+    then property_exempt_from_levy(p, CertainRailroadAndVeteransBenefits);
+}
+
+relation workmens_compensation_payable(p: Person) kind empirical;
+@source(IRC_S6334_A, relation = formalizes, coverage = exact, quote = "Any amount payable to an individual as workmen's compensation (including any portion thereof payable with respect to dependents) under a workmen's compensation law of the United States, any State, the District of Columbia, or the Commonwealth of Puerto Rico.")
+rule S6334a7WorkmensCompensationExempt strict {
+    for p: Person;
+    when workmens_compensation_payable(p);
+    then property_exempt_from_levy(p, WorkmensCompensation);
+}
+
+relation court_ordered_child_support_amount_necessary(p: Person) kind empirical {
+    label en unofficial "a pre-levy court judgment requires the taxpayer to contribute to minor children's support, and this much salary/wages/income is necessary to comply — §6334(a)(8)";
+}
+@source(IRC_S6334_A, relation = formalizes, coverage = exact, quote = "If the taxpayer is required by judgment of a court of competent jurisdiction, entered prior to the date of levy, to contribute to the support of his minor children, so much of his salary, wages, or other income as is necessary to comply with such judgment.")
+rule S6334a8ChildSupportExempt strict {
+    for p: Person;
+    when court_ordered_child_support_amount_necessary(p);
+    then property_exempt_from_levy(p, CourtOrderedChildSupport);
+}
+
+relation wages_or_income_within_minimum_exempt_amount(p: Person) kind empirical {
+    label en unofficial "the total wages/salary/other-source income payable to or received by the individual during the period does not exceed the applicable §6334(d) exempt amount — §6334(a)(9)";
+}
+@source(IRC_S6334_A, relation = formalizes, coverage = partial, quote = "Any amount payable to or received by an individual as wages or salary for personal services, or as income derived from other sources, during any period, to the extent that the total of such amounts payable to or received by him during such period does not exceed the applicable exempt amount determined under subsection (d).")
+rule S6334a9MinimumWagesExempt strict {
+    for p: Person;
+    when wages_or_income_within_minimum_exempt_amount(p);
+    then property_exempt_from_levy(p, MinimumExemptWagesAndIncome);
+}
+
+relation service_connected_disability_benefit_payable(p: Person) kind empirical {
+    label en unofficial "a §101(16) of title 38 service-connected disability benefit under the named title 38 subchapters/chapters — §6334(a)(10)";
+}
+@source(IRC_S6334_A, relation = formalizes, coverage = partial, quote = "Any amount payable to an individual as a service-connected (within the meaning of section 101(16) of title 38, United States Code) disability benefit")
+rule S6334a10DisabilityBenefitExempt strict {
+    for p: Person;
+    when service_connected_disability_benefit_payable(p);
+    then property_exempt_from_levy(p, ServiceConnectedDisabilityBenefit);
+}
+
+relation public_assistance_payment_payable(p: Person) kind empirical {
+    label en unofficial "public assistance under title IV/title XVI of the Social Security Act, or a needs/income-tested State or local public-assistance program — §6334(a)(11)";
+}
+@source(IRC_S6334_A, relation = formalizes, coverage = exact, quote = "Any amount payable to an individual as a recipient of public assistance under")
+rule S6334a11PublicAssistanceExempt strict {
+    for p: Person;
+    when public_assistance_payment_payable(p);
+    then property_exempt_from_levy(p, PublicAssistancePayment);
+}
+
+relation jtpa_participant_payment_payable(p: Person) kind empirical;
+@source(IRC_S6334_A, relation = formalizes, coverage = exact, quote = "Any amount payable to a participant under the Job Training Partnership Act (29 U.S.C. 1501 et seq.) from funds appropriated pursuant to such Act.")
+rule S6334a12JTPAPaymentExempt strict {
+    for p: Person;
+    when jtpa_participant_payment_payable(p);
+    then property_exempt_from_levy(p, JobTrainingPartnershipActPayment);
+}
+
+relation levy_amount_at_most_5000(p: Person) kind empirical {
+    label en unofficial "the levy amount does not exceed $5,000, exempting the taxpayer's residence (or residential real property occupied by another) — §6334(a)(13)(A)";
+}
+relation principal_residence_or_business_property(p: Person) kind empirical {
+    label en unofficial "the property is the taxpayer's §121 principal residence, or tangible personal/real (non-rented) property used in an individual taxpayer's trade or business — §6334(a)(13)(B)";
+}
+relation e_exception_lifts_residence_or_business_exemption(p: Person) kind empirical {
+    label en unofficial "a §6334(e) approval (court order for a residence; district director/jeopardy for business property) lifts the (a)(13)(B) exemption";
+}
+@source(IRC_S6334_A, relation = formalizes, coverage = exact, quote = "If the amount of the levy does not exceed $5,000")
+rule S6334a13ALowValueLevyResidenceExempt strict {
+    for p: Person;
+    when levy_amount_at_most_5000(p);
+    then property_exempt_from_levy(p, ResidenceAndBusinessProperty);
+}
+@source(IRC_S6334_A, relation = formalizes, coverage = exact, quote = "Except to the extent provided in subsection (e)")
+rule S6334a13BPrincipalResidenceOrBusinessExempt defeasible {
+    for p: Person;
+    when principal_residence_or_business_property(p);
+    then property_exempt_from_levy(p, ResidenceAndBusinessProperty);
+    unless e_exception_lifts_residence_or_business_exemption(p) and principal_residence_or_business_property(p);
+}
+
+// §6334(b): appraisal duty.
+relation officer_seized_exempt_type_property(p: Person, kind: ExemptPropertyKind) kind empirical;
+@source(IRC_S6334_B, relation = formalizes, coverage = partial, quote = "The officer seizing property of the type described in subsection (a) shall appraise and set aside to the owner the amount of such property declared to be exempt.")
+rule S6334bAppraisalDuty strict {
+    for p: Person;
+    for kind: ExemptPropertyKind;
+    when officer_seized_exempt_type_property(p, kind);
+    then duty AppraiseAndSetAsideExemptProperty {
+        bearer Secretary;
+        beneficiary p;
+        goal maintenance {
+            condition true;
+            window [-infinity, infinity];
+        }
+    };
+}
+
+// §6334(c): exclusivity of the (a) list.
+pub relation no_other_exemption_from_levy(p: Person) kind institutional {
+    label en unofficial "no property or rights to property are exempt from levy other than as specifically made exempt by §6334(a) — §6334(c)";
+}
+@source(IRC_S6334_C, relation = formalizes, coverage = exact, quote = "Notwithstanding any other law of the United States (including section 207 of the Social Security Act), no property or rights to property shall be exempt from levy other than the property specifically made exempt by subsection (a).")
+rule S6334cExclusiveListOfExemptions strict {
+    for p: Person;
+    for a: Assessment;
+    when assessment_of_person(a, p);
+    then no_other_exemption_from_levy(p);
+}
+
+// §6334(e): loss of the residence/business-property exemption.
+relation court_approves_residence_levy_in_writing(p: Person) kind empirical;
+@source(IRC_S6334_E, relation = formalizes, coverage = exact, quote = "A principal residence shall not be exempt from levy if a judge or magistrate of a district court of the United States approves (in writing) the levy of such residence.")
+rule S6334e1CourtApprovedResidenceLevy strict {
+    for p: Person;
+    when court_approves_residence_levy_in_writing(p);
+    then e_exception_lifts_residence_or_business_exemption(p);
+}
+relation district_director_approves_business_property_levy(p: Person) kind empirical;
+relation official_confirms_other_assets_insufficient(p: Person) kind empirical {
+    label en unofficial "the approving official determined the taxpayer's other assets subject to collection are insufficient to pay the amount due plus expenses — §6334(e)(2)'s own gate on the district-director approval";
+}
+@source(IRC_S6334_E, relation = formalizes, coverage = exact, quote = "a district director or assistant district director of the Internal Revenue Service personally approves (in writing) the levy of such property")
+rule S6334e2DistrictDirectorApprovedBusinessLevy strict {
+    for p: Person;
+    when district_director_approves_business_property_levy(p) and official_confirms_other_assets_insufficient(p);
+    then e_exception_lifts_residence_or_business_exemption(p);
+}
+@source(IRC_S6334_E, relation = formalizes, coverage = exact, quote = "the Secretary finds that the collection of tax is in jeopardy")
+rule S6334e2JeopardyLiftsBusinessExemption strict {
+    for p: Person;
+    when jeopardy_finding(p);
+    then e_exception_lifts_residence_or_business_exemption(p);
+}
+
+// ============================================================================
+// §6335 — Sale of seized property
+// ============================================================================
+
+relation property_seized(p: Person, on: Date) kind empirical;
+relation within_seizure_internal_revenue_district(p: Person) kind empirical {
+    label en unofficial "the owner (or possessor, for personal property) has a dwelling or place of business within the internal revenue district where the seizure was made — §6335(a)'s own routing condition";
+}
+@source(IRC_S6335_A, relation = formalizes, coverage = partial, quote = "As soon as practicable after seizure of property, notice in writing shall be given by the Secretary to the owner of the property (or, in the case of personal property, the possessor thereof), or shall be left at his usual place of abode or business if he has such within the internal revenue district where the seizure is made.")
+rule S6335aSeizureNoticeDuty strict {
+    for p: Person;
+    for on: Date;
+    when property_seized(p, on);
+    then duty NotifyOwnerOfSeizure {
+        bearer Secretary;
+        beneficiary p;
+        goal maintenance {
+            condition true;
+            window [-infinity, infinity];
+        }
+    };
+}
+
+pub relation sale_notice_published(p: Person, on: Date) kind empirical;
+@source(IRC_S6335_B, relation = formalizes, coverage = partial, quote = "The Secretary shall as soon as practicable after the seizure of the property give notice to the owner, in the manner prescribed in subsection (a), and shall cause a notification to be published in some newspaper published or generally circulated within the county wherein such seizure is made")
+rule S6335bPublicationNoticeDuty strict {
+    for p: Person;
+    for on: Date;
+    when property_seized(p, on);
+    then duty PublishNoticeOfSale {
+        bearer Secretary;
+        beneficiary p;
+        goal maintenance {
+            condition true;
+            window [-infinity, infinity];
+        }
+    };
+}
+
+pub relation whole_property_sold_when_indivisible(p: Person) kind institutional {
+    label en unofficial "if property liable to levy is not divisible so that a partial sale could raise the whole tax and expenses, the whole of the property is sold — §6335(c)";
+}
+relation property_not_divisible_for_sale(p: Person) kind empirical;
+@source(IRC_S6335_C, relation = formalizes, coverage = exact, quote = "If any property liable to levy is not divisible, so as to enable the Secretary by sale of a part thereof to raise the whole amount of the tax and expenses, the whole of such property shall be sold.")
+rule S6335cIndivisiblePropertySoldWhole strict {
+    for p: Person;
+    when property_not_divisible_for_sale(p);
+    then whole_property_sold_when_indivisible(p);
+}
+
+pub relation sale_time_within_window(p: Person, published_on: Date, sale_on: Date) kind institutional {
+    label en unofficial "the time of sale is not less than 10 days nor more than 40 days from the time public notice was given — §6335(d)";
+}
+@source(IRC_S6335_D, relation = formalizes, coverage = partial, quote = "The time of sale shall not be less than 10 days nor more than 40 days from the time of giving public notice under subsection (b).")
+relation sale_conducted_on(p: Person, on: Date) kind empirical {
+    label en unofficial "case fact: the date the §6335 sale was actually (or is proposed to be) conducted";
+}
+
+rule S6335dSaleTimingWindow strict {
+    for p: Person;
+    for published_on: Date;
+    for sale_on: Date;
+    when sale_notice_published(p, published_on)
+        and sale_conducted_on(p, sale_on)
+        and days_between(published_on, sale_on) >= 10
+        and days_between(published_on, sale_on) <= 40;
+    then sale_time_within_window(p, published_on, sale_on);
+}
+
+// §6335(e)(1): minimum price and sale outcome.
+relation minimum_price_determined(p: Person, minimum: Money) kind empirical;
+relation us_purchase_at_minimum_in_best_interest(p: Person) kind empirical;
+relation highest_bid_at_least_minimum(p: Person, bid: Money, minimum: Money) kind empirical;
+relation no_bid_at_least_minimum(p: Person, minimum: Money) kind empirical;
+
+enum SaleOutcome {
+    SoldToHighestBidder;
+    SoldToUnitedStates;
+    ReleasedToOwner;
+}
+pub relation seized_property_sale_outcome(p: Person, outcome: SaleOutcome) kind institutional;
+pub relation sale_outcome_recorded(p: Person) kind institutional {
+    label en unofficial "some §6335(e)(1) sale outcome (sold to bidder, sold to the United States, or released to owner) has been recorded for this seizure";
+}
+@source(IRC_S6335_E, relation = formalizes, coverage = partial, quote = "the property shall be declared sold to the highest bidder")
+rule S6335eSaleOutcomeRecordedFromBidder strict {
+    for p: Person;
+    when seized_property_sale_outcome(p, SoldToHighestBidder);
+    then sale_outcome_recorded(p);
+}
+@source(IRC_S6335_E, relation = formalizes, coverage = partial, quote = "the property shall be declared to be sold to the United States at such minimum price")
+rule S6335eSaleOutcomeRecordedFromUS strict {
+    for p: Person;
+    when seized_property_sale_outcome(p, SoldToUnitedStates);
+    then sale_outcome_recorded(p);
+}
+@source(IRC_S6335_E, relation = formalizes, coverage = partial, quote = "the property shall be released to the owner thereof")
+rule S6335eSaleOutcomeRecordedFromRelease strict {
+    for p: Person;
+    when seized_property_sale_outcome(p, ReleasedToOwner);
+    then sale_outcome_recorded(p);
+}
+@source(IRC_S6335_E, relation = formalizes, coverage = exact, quote = "If, at the sale, one or more persons offer to purchase such property for not less than the amount of the minimum price, the property shall be declared sold to the highest bidder.")
+rule S6335e1bSoldToHighestBidder strict {
+    for p: Person;
+    for bid: Money;
+    for minimum: Money;
+    when highest_bid_at_least_minimum(p, bid, minimum);
+    then seized_property_sale_outcome(p, SoldToHighestBidder);
+}
+@source(IRC_S6335_E, relation = formalizes, coverage = exact, quote = "If no person offers the amount of the minimum price for such property at the sale and the Secretary has determined that the purchase of such property by the United States would be in the best interest of the United States, the property shall be declared to be sold to the United States at such minimum price.")
+rule S6335e1cSoldToUnitedStates strict {
+    for p: Person;
+    for minimum: Money;
+    when no_bid_at_least_minimum(p, minimum) and us_purchase_at_minimum_in_best_interest(p);
+    then seized_property_sale_outcome(p, SoldToUnitedStates);
+}
+@source(IRC_S6335_E, relation = formalizes, coverage = exact, quote = "If, at the sale, the property is not declared sold under subparagraph (B) or (C), the property shall be released to the owner thereof and the expense of the levy and sale shall be added to the amount of tax for the collection of which the levy was made.")
+rule S6335e1dReleasedToOwnerWhenNotSold strict {
+    for p: Person;
+    for minimum: Money;
+    when no_bid_at_least_minimum(p, minimum) and not_known(us_purchase_at_minimum_in_best_interest(p));
+    then seized_property_sale_outcome(p, ReleasedToOwner);
+}
+pub relation released_property_remains_subject_to_lien(p: Person) kind institutional {
+    label en unofficial "property released to the owner because it was not sold remains subject to any subchapter C lien — §6335(e)(1)(D)";
+}
+@source(IRC_S6335_E, relation = formalizes, coverage = exact, quote = "Any property released under this subparagraph shall remain subject to any lien imposed by subchapter C.")
+rule S6335e1dReleasedPropertyRemainsLiened strict {
+    for p: Person;
+    when seized_property_sale_outcome(p, ReleasedToOwner);
+    then released_property_remains_subject_to_lien(p);
+}
+
+// §6335(e)(2): the two numeric caps within the regulatory-content list.
+relation deferred_payment_period_requested(p: Person, months: Integer) kind empirical;
+pub relation deferred_payment_period_valid(p: Person, months: Integer) kind institutional {
+    label en unofficial "a deferred portion of the sale payment may be allowed for a period not exceeding 1 month — §6335(e)(2)(D)";
+}
+@source(IRC_S6335_E, relation = formalizes, coverage = exact, quote = "whether a part of such payment may be deferred for such period (not to exceed 1 month) as may be determined by the Secretary to be appropriate")
+rule S6335e2dDeferredPaymentCap strict {
+    for p: Person;
+    for months: Integer;
+    when deferred_payment_period_requested(p, months) and months <= 1;
+    then deferred_payment_period_valid(p, months);
+}
+relation adjournment_total_months_requested(p: Person, months: Integer) kind empirical;
+pub relation adjournment_period_valid(p: Person, months: Integer) kind institutional {
+    label en unofficial "the Secretary may adjourn the sale from time to time, but not for a total period exceeding 1 month — §6335(e)(2)(F)";
+}
+@source(IRC_S6335_E, relation = formalizes, coverage = exact, quote = "Under what circumstances the Secretary may adjourn the sale from time to time (but such adjournments shall not be for a period to exceed in all 1 month).")
+rule S6335e2fAdjournmentCap strict {
+    for p: Person;
+    for months: Integer;
+    when adjournment_total_months_requested(p, months) and months <= 1;
+    then adjournment_period_valid(p, months);
+}
+// §6335(e)(2)(A),(B),(C),(E) direct the Secretary to prescribe regulations
+// on sale method, lotting, and price-announcement timing — `non_normative`
+// (regulatory-content directives, no independent operative test here).
+
+relation full_payment_not_paid_at_acceptance(p: Person) kind empirical;
+@source(IRC_S6335_E, relation = formalizes, coverage = exact, quote = "If payment in full is required at the time of acceptance of a bid and is not then and there paid, the Secretary shall forthwith proceed to again sell the property in the manner provided in this subsection.")
+rule S6335e3ResaleOnNonpayment strict {
+    for p: Person;
+    when full_payment_not_paid_at_acceptance(p);
+    then duty ResellPropertyOnNonpayment {
+        bearer Secretary;
+        beneficiary p;
+        goal maintenance {
+            condition true;
+            window [-infinity, infinity];
+        }
+    };
+}
+
+// §6335(f): owner's request for sale within 60 days (or a longer,
+// owner-specified period). JUDGMENT CALL: the default 60-day case is
+// computed with a literal calendar-day quantity; the "or within such longer
+// period as may be specified by the owner" branch is a case-asserted window
+// (the owner's own chosen end date IS the fact, not a count this package
+// re-derives) rather than a `Quantity`-typed variable count into
+// `add_calendar_period` — kept to the literal-count idiom used throughout
+// this package's other date arithmetic.
+relation owner_requested_sale_on(p: Person, on: Date) kind empirical;
+relation owner_specified_longer_period_end(p: Person, on: Date, end: Date) kind empirical {
+    label en unofficial "the owner specified a longer period than 60 days, ending on this date — §6335(f)'s own parenthetical";
+}
+pub relation owner_requested_sale_window(p: Person, start: Date, end: Date) kind institutional;
+@source(IRC_S6335_F, relation = formalizes, coverage = partial, quote = "The owner of any property seized by levy may request that the Secretary sell such property within 60 days after such request")
+rule S6335fRequestedSaleWindowDefault strict {
+    for p: Person;
+    for on: Date;
+    when owner_requested_sale_on(p, on);
+    then owner_requested_sale_window(p, on, add_calendar_period(on, 60 calendar_day));
+}
+@source(IRC_S6335_F, relation = formalizes, coverage = exact, quote = "(or within such longer period as may be specified by the owner)")
+rule S6335fRequestedSaleWindowOwnerSpecified strict {
+    for p: Person;
+    for on: Date;
+    for end: Date;
+    when owner_requested_sale_on(p, on) and owner_specified_longer_period_end(p, on, end);
+    then owner_requested_sale_window(p, on, end);
+}
+relation secretary_determines_sale_not_in_best_interest(p: Person, notified_within_period: Boolean) kind empirical;
+@source(IRC_S6335_F, relation = formalizes, coverage = exact, quote = "The Secretary shall comply with such request unless the Secretary determines (and notifies the owner within such period) that such compliance would not be in the best interests of the United States.")
+rule S6335fComplianceDuty defeasible {
+    for p: Person;
+    for start: Date;
+    for end: Date;
+    when owner_requested_sale_window(p, start, end);
+    then duty SellPropertyOnOwnersRequest {
+        bearer Secretary;
+        beneficiary p;
+        goal achievement {
+            condition sale_outcome_recorded(p);
+            window [start, end];
+        }
+    };
+    unless secretary_determines_sale_not_in_best_interest(p, true) and owner_requested_sale_window(p, start, end);
+}
+
+// ============================================================================
+// §6343(a) — Release of levy
+// ============================================================================
+
+enum LevyReleaseGround {
+    LiabilitySatisfiedOrUnenforceable;
+    ReleaseFacilitatesCollection;
+    InstallmentAgreementEntered;
+    EconomicHardship;
+    ExcessFairMarketValuePartialRelease;
+}
+relation levy_release_ground_met(p: Person, levy: Levy, ground: LevyReleaseGround) kind empirical;
+relation installment_agreement_provides_otherwise(p: Person, levy: Levy) kind empirical {
+    label en unofficial "the §6159 installment agreement itself provides that this levy is not released — §6343(a)(1)'s own carve-out on the (C) ground";
+}
+relation release_would_jeopardize_secured_creditor_status(p: Person, levy: Levy) kind empirical {
+    label en unofficial "release would jeopardize the Secretary's secured-creditor status — §6343(a)(1)'s own carve-out on the (C) ground";
+}
+
+pub relation levy_release_required(p: Person, levy: Levy) kind institutional {
+    label en unofficial "one of §6343(a)(1)'s five grounds for release is met — the Secretary must release the levy and promptly notify the person";
+}
+@source(IRC_S6343_A, relation = formalizes, coverage = exact, quote = "the liability for which such levy was made is satisfied or becomes unenforceable by reason of lapse of time")
+rule S6343a1SatisfiedOrUnenforceableGround strict {
+    for p: Person;
+    for levy: Levy;
+    when levy_release_ground_met(p, levy, LiabilitySatisfiedOrUnenforceable);
+    then levy_release_required(p, levy);
+}
+@source(IRC_S6343_A, relation = formalizes, coverage = exact, quote = "release of such levy will facilitate the collection of such liability")
+rule S6343a1FacilitatesCollectionGround strict {
+    for p: Person;
+    for levy: Levy;
+    when levy_release_ground_met(p, levy, ReleaseFacilitatesCollection);
+    then levy_release_required(p, levy);
+}
+@source(IRC_S6343_A, relation = formalizes, coverage = exact, quote = "the taxpayer has entered into an agreement under section 6159 to satisfy such liability by means of installment payments, unless such agreement provides otherwise")
+rule S6343a1InstallmentAgreementGround defeasible {
+    for p: Person;
+    for levy: Levy;
+    when levy_release_ground_met(p, levy, InstallmentAgreementEntered);
+    then levy_release_required(p, levy);
+    unless installment_agreement_provides_otherwise(p, levy) and levy_release_ground_met(p, levy, InstallmentAgreementEntered);
+    unless release_would_jeopardize_secured_creditor_status(p, levy) and levy_release_ground_met(p, levy, InstallmentAgreementEntered);
+}
+@source(IRC_S6343_A, relation = formalizes, coverage = exact, quote = "the Secretary has determined that such levy is creating an economic hardship due to the financial condition of the taxpayer")
+rule S6343a1EconomicHardshipGround strict {
+    for p: Person;
+    for levy: Levy;
+    when levy_release_ground_met(p, levy, EconomicHardship);
+    then levy_release_required(p, levy);
+}
+@source(IRC_S6343_A, relation = formalizes, coverage = exact, quote = "the fair market value of the property exceeds such liability and release of the levy on a part of such property could be made without hindering the collection of such liability")
+rule S6343a1ExcessValuePartialReleaseGround strict {
+    for p: Person;
+    for levy: Levy;
+    when levy_release_ground_met(p, levy, ExcessFairMarketValuePartialRelease);
+    then levy_release_required(p, levy);
+}
+@source(IRC_S6343_A, relation = formalizes, coverage = exact, quote = "the Secretary shall release the levy upon all, or part of, the property or rights to property levied upon and shall promptly notify the person upon whom such levy was made (if any) that such levy has been released")
+rule S6343aReleaseDuty strict {
+    for p: Person;
+    for levy: Levy;
+    when levy_release_required(p, levy);
+    then duty ReleaseLevyAndNotify {
+        bearer Secretary;
+        beneficiary p;
+        goal maintenance {
+            condition true;
+            window [-infinity, infinity];
+        }
+    };
+}
+
+relation tangible_personal_property_essential_to_business(p: Person, levy: Levy) kind empirical;
+@source(IRC_S6343_A, relation = formalizes, coverage = exact, quote = "In the case of any tangible personal property essential in carrying on the trade or business of the taxpayer, the Secretary shall provide for an expedited determination under paragraph (1) if levy on such tangible personal property would prevent the taxpayer from carrying on such trade or business.")
+rule S6343a2ExpeditedDeterminationDuty strict {
+    for p: Person;
+    for levy: Levy;
+    when tangible_personal_property_essential_to_business(p, levy);
+    then duty ExpediteReleaseDetermination {
+        bearer Secretary;
+        beneficiary p;
+        goal maintenance {
+            condition true;
+            window [-infinity, infinity];
+        }
+    };
+}
+
+pub relation levy_release_does_not_bar_subsequent_levy(p: Person, levy: Levy) kind institutional;
+@source(IRC_S6343_A, relation = formalizes, coverage = exact, quote = "The release of levy on any property under paragraph (1) shall not prevent any subsequent levy on such property.")
+rule S6343a3ReleaseDoesNotBarSubsequentLevy defeasible {
+    for p: Person;
+    for levy: Levy;
+    when levy_release_required(p, levy);
+    then levy_release_does_not_bar_subsequent_levy(p, levy);
+}
+
+// §6343(e): release of a wage levy upon a not-collectible agreement.
+relation wage_levy_not_collectible_agreement(p: Person, levy: Levy) kind empirical;
+@source(IRC_S6343_E, relation = formalizes, coverage = exact, quote = "In the case of a levy on the salary or wages payable to or received by the taxpayer, upon agreement with the taxpayer that the tax is not collectible, the Secretary shall release such levy as soon as practicable.")
+rule S6343eWageLevyNotCollectibleRelease strict {
+    for p: Person;
+    for levy: Levy;
+    when wage_levy_not_collectible_agreement(p, levy);
+    then duty ReleaseWageLevyAsSoonAsPracticable {
+        bearer Secretary;
+        beneficiary p;
+        goal maintenance {
+            condition true;
+            window [-infinity, infinity];
+        }
+    };
+}
+
+// ============================================================================
+// §6343(b) — Wrongful levy return; §6343(d) — treated-as-wrongful cases
+// ============================================================================
+
+enum WrongfulLevyReturnForm {
+    SpecificProperty;
+    MoneyEqualToAmountLevied;
+    MoneyEqualToSaleProceeds;
+}
+relation levy_wrongful(p: Person, levy: Levy) kind empirical;
+pub relation wrongful_levy_return_permitted(p: Person, levy: Levy, form: WrongfulLevyReturnForm) kind institutional {
+    label en unofficial "the Secretary may lawfully return property (or its money equivalent) wrongfully levied upon — §6343(b)";
+}
+@source(IRC_S6343_B, relation = formalizes, coverage = exact, quote = "If the Secretary determines that property has been wrongfully levied upon, it shall be lawful for the Secretary to return")
+rule S6343bReturnSpecificProperty strict {
+    for p: Person;
+    for levy: Levy;
+    when levy_wrongful(p, levy);
+    then wrongful_levy_return_permitted(p, levy, SpecificProperty);
+}
+@source(IRC_S6343_B, relation = formalizes, coverage = exact, quote = "(2) an amount of money equal to the amount of money levied upon, or")
+rule S6343bReturnMoneyEqualToLevied strict {
+    for p: Person;
+    for levy: Levy;
+    when levy_wrongful(p, levy);
+    then wrongful_levy_return_permitted(p, levy, MoneyEqualToAmountLevied);
+}
+@source(IRC_S6343_B, relation = formalizes, coverage = exact, quote = "(3) an amount of money equal to the amount of money received by the United States from a sale of such property.")
+rule S6343bReturnMoneyEqualToSaleProceeds strict {
+    for p: Person;
+    for levy: Levy;
+    when levy_wrongful(p, levy);
+    then wrongful_levy_return_permitted(p, levy, MoneyEqualToSaleProceeds);
+}
+
+pub relation wrongful_levy_money_return_window(p: Person, levy: Levy, levy_on: Date, deadline: Date) kind institutional {
+    label en unofficial "a money return under §6343(b)(2)/(3) may be made at any time before the expiration of 2 years from the date of the levy — §6343(b) (the specific-property return of (1) has no such deadline)";
+}
+@source(IRC_S6343_B, relation = formalizes, coverage = exact, quote = "An amount equal to the amount of money levied upon or received from such sale may be returned at any time before the expiration of 2 years from the date of such levy.")
+relation levy_occurred_on(levy: Levy, p: Person, on: Date) kind empirical {
+    label en unofficial "case fact: the date the levy referred to in a §6343 wrongful-levy/interest computation occurred";
+}
+
+rule S6343bMoneyReturnTwoYearWindow strict {
+    for p: Person;
+    for levy: Levy;
+    for levy_on: Date;
+    when levy_wrongful(p, levy) and levy_occurred_on(levy, p, levy_on);
+    then wrongful_levy_money_return_window(p, levy, levy_on, add_calendar_period(levy_on, 2 calendar_year));
+}
+
+enum WrongfulTreatmentGround {
+    PrematureOrProcedurallyDefective;
+    InstallmentAgreementEntered;
+    ReturnFacilitatesCollection;
+    ConsentAndTaxpayerAdvocateBestInterest;
+}
+relation treated_as_wrongful_ground_met(p: Person, levy: Levy, ground: WrongfulTreatmentGround) kind empirical;
+pub relation levy_treated_as_wrongful(p: Person, levy: Levy) kind institutional {
+    label en unofficial "the levy is treated the same as a wrongful levy under §6343(b), EXCEPT that no §6343(c) interest is allowed — §6343(d)";
+}
+@source(IRC_S6343_D, relation = formalizes, coverage = partial, quote = "the levy on such property was premature or otherwise not in accordance with administrative procedures of the Secretary")
+rule S6343dPrematureOrDefectiveTreatment strict {
+    for p: Person;
+    for levy: Levy;
+    when treated_as_wrongful_ground_met(p, levy, PrematureOrProcedurallyDefective);
+    then levy_treated_as_wrongful(p, levy);
+}
+@source(IRC_S6343_D, relation = formalizes, coverage = partial, quote = "the taxpayer has entered into an agreement under section 6159 to satisfy the tax liability for which the levy was imposed by means of installment payments, unless such agreement provides otherwise")
+rule S6343dInstallmentAgreementTreatment defeasible {
+    for p: Person;
+    for levy: Levy;
+    when treated_as_wrongful_ground_met(p, levy, InstallmentAgreementEntered);
+    then levy_treated_as_wrongful(p, levy);
+    unless installment_agreement_provides_otherwise(p, levy) and treated_as_wrongful_ground_met(p, levy, InstallmentAgreementEntered);
+}
+@source(IRC_S6343_D, relation = formalizes, coverage = partial, quote = "the return of such property will facilitate the collection of the tax liability")
+rule S6343dFacilitatesCollectionTreatment strict {
+    for p: Person;
+    for levy: Levy;
+    when treated_as_wrongful_ground_met(p, levy, ReturnFacilitatesCollection);
+    then levy_treated_as_wrongful(p, levy);
+}
+@source(IRC_S6343_D, relation = formalizes, coverage = partial, quote = "with the consent of the taxpayer or the National Taxpayer Advocate, the return of such property would be in the best interests of the taxpayer (as determined by the National Taxpayer Advocate) and the United States")
+rule S6343dConsentBestInterestTreatment strict {
+    for p: Person;
+    for levy: Levy;
+    when treated_as_wrongful_ground_met(p, levy, ConsentAndTaxpayerAdvocateBestInterest);
+    then levy_treated_as_wrongful(p, levy);
+}
+
+// §6343(c): interest on a wrongful-levy return — depends on the §6621
+// overpayment rate, owned by `payment-refunds-interest` (concurrent/pending
+// per the owner's assignment). Modelled as a typed institutional dependency
+// contract; TECH_GAP for the numeric rate.
+relation overpayment_rate_6621(on: Date, rate: Decimal) kind institutional {
+    label en unofficial "PENDING CONTRACT (owner: us.irc.payment_refunds_interest, §6621 — not modelled by this package)";
+}
+pub relation wrongful_levy_interest_accrual_window(p: Person, levy: Levy, from: Date, to: Date) kind institutional {
+    label en unofficial "the §6343(c) interest-accrual window: from the date the Secretary received the money (or the date of sale) to a Secretary-chosen date not more than 30 days before the date of return — §6343(c)(1)-(2)";
+}
+relation money_received_or_sale_date(p: Person, levy: Levy, form: WrongfulLevyReturnForm, received_or_sold_on: Date) kind empirical;
+relation return_made_on(p: Person, levy: Levy, on: Date) kind empirical;
+relation interest_accrual_end_chosen(p: Person, levy: Levy, to: Date) kind empirical {
+    label en unofficial "case fact: the Secretary's chosen end date for §6343(c) interest accrual, preceding the date of return by not more than 30 days";
+}
+@source(IRC_S6343_C, relation = formalizes, coverage = partial, quote = "in a case described in subsection (b)(2), from the date the Secretary receives the money to a date (to be determined by the Secretary) preceding the date of return by not more than 30 days")
+rule S6343cInterestWindowMoneyLevied strict {
+    for p: Person;
+    for levy: Levy;
+    for received_on: Date;
+    for returned_on: Date;
+    for to: Date;
+    when money_received_or_sale_date(p, levy, MoneyEqualToAmountLevied, received_on)
+        and return_made_on(p, levy, returned_on)
+        and interest_accrual_end_chosen(p, levy, to)
+        and days_between(to, returned_on) <= 30 and to <= returned_on;
+    then wrongful_levy_interest_accrual_window(p, levy, received_on, to);
+}
+@source(IRC_S6343_C, relation = formalizes, coverage = partial, quote = "in a case described in subsection (b)(3), from the date of the sale of the property to a date (to be determined by the Secretary) preceding the date of return by not more than 30 days")
+rule S6343cInterestWindowSaleProceeds strict {
+    for p: Person;
+    for levy: Levy;
+    for sold_on: Date;
+    for returned_on: Date;
+    for to: Date;
+    when money_received_or_sale_date(p, levy, MoneyEqualToSaleProceeds, sold_on)
+        and return_made_on(p, levy, returned_on)
+        and interest_accrual_end_chosen(p, levy, to)
+        and days_between(to, returned_on) <= 30 and to <= returned_on;
+    then wrongful_levy_interest_accrual_window(p, levy, sold_on, to);
+}
+// §6343(d)'s own final clause ("except that no interest shall be allowed
+// under subsection (c)") is enforced simply by NOT calling the (c) interest
+// rules from a §6343(d) scenario — there is no rule concluding interest for
+// a `levy_treated_as_wrongful` case, so none is ever computed for it.

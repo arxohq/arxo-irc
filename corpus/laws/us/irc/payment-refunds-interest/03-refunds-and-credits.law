@@ -1,0 +1,431 @@
+// 26 U.S.C. §§6401-6403 — Chapter 65, Subchapter A: what counts as an
+// overpayment (§6401), the Secretary's power/duty to credit or refund it in
+// the statutory priority order (§6402), and the special rule for an
+// overpaid installment (§6403).
+//
+// JUDGMENT CALLS AND GAPS (see report):
+//  - §6401(a) is stated as its own classification rule (an amount collected
+//    after limitations is an overpayment) rather than folded into the
+//    general "paid more than owed" reading of `remaining_balance` in
+//    00-shared.law, because the LIMITATION fact is independent of the
+//    balance arithmetic.
+//  - §6401(b) (excess refundable credits) is EXTERNAL_DEPENDENCY/TECH_GAP:
+//    which credits are "refundable" under subpart C of part IV of subchapter
+//    A of chapter 1 is computed by owners this stage does not formalize
+//    (income-tax credit packages); the excess itself is read as a
+//    case-asserted amount so the overpayment classification is not lost.
+//  - §6402(a)'s crediting order is modeled as a SEQUENTIAL chain of four
+//    offset steps in the statutory priority — (a) against the person's own
+//    internal-revenue liability, (c) past-due support, (d) federal-agency
+//    debt, (e) state income tax obligation, (f) unemployment compensation
+//    debt — each capped at the balance remaining after the prior step, with
+//    a `priority` declaration recording the LEGALLY established order
+//    between the corresponding rules (not just the arithmetic chaining,
+//    which alone would not show that a rule reading a LATER step must not
+//    fire before an EARLIER one is resolved). §6402(b) (credit against
+//    estimated tax) is a taxpayer-elected alternative to refund, not part of
+//    the mandatory chain, and is modeled as a separate power. The chain is
+//    kept keyed to one (person, year, tax-kind) triple rather than the
+//    statute's broader "any overpayment by a person" (which can span years
+//    and tax kinds within one Secretary action) — a scope simplification
+//    noted here because no scenario in this package's stage needs a
+//    cross-year offset.
+//  - §6402(c)-(f)'s four debt kinds are one `entity OffsetObligation` with an
+//    `OffsetKind` discriminator rather than four separate entities: the
+//    notice/evidence procedures of (c)(4), (d)(3), (e)(4), (f)(3) are
+//    largely parallel and none of them is read by another stage-1 section;
+//    kept at the level of "an obligation exists and is asserted", not the
+//    full notice-and-hearing procedure — NON_NORMATIVE-adjacent, see
+//    coverage rows 26/6402/c/*, 26/6402/d/*, 26/6402/e/*, 26/6402/f/*.
+//  - §6402(g) (no judicial review of a reduction) is modeled as a
+//    `prohibition` on bringing such an action; §6402(h)-(n) (definitions,
+//    cross-references, disallowance explanation, earliest-refund-date rule,
+//    misdirected-deposit procedure) are classified individually below —
+//    (l) and (m) are executable, the rest are NON_NORMATIVE/EXTERNAL_DEPENDENCY.
+//  - §6403 reads §6402 directly (`credited or refunded as provided in
+//    section 6402`) — modeled as triggering the same overpayment/refund
+//    machinery once the installment-level overpayment is established.
+
+language "law.core" version "0.2";
+package us.irc.payment_refunds_interest version "0.1.1";
+namespace "urn:us:irc:payment_refunds_interest:clir";
+
+use self::{
+    Claim,
+    IRC_S6151_A,
+    IRC_S6401_A,
+    IRC_S6401_B,
+    IRC_S6401_C,
+    IRC_S6402_A,
+    IRC_S6402_B,
+    IRC_S6402_C,
+    IRC_S6402_D,
+    IRC_S6402_E,
+    IRC_S6402_F,
+    IRC_S6402_G,
+    IRC_S6402_L,
+    IRC_S6402_M,
+    IRC_S6403,
+    Person,
+    Secretary,
+    TaxKind,
+    TaxableYear,
+    offset_applied_federal,
+    offset_applied_state_group,
+    offset_applied_support,
+    remaining_balance,
+};
+
+// ============================================================================
+// §6401 — Amounts treated as overpayments
+// ============================================================================
+
+pub relation overpayment_amount(p: Person, y: TaxableYear, kind: TaxKind, amount: Money) kind institutional {
+    label en unofficial "an amount §6401/§6402 treats as an overpayment of internal revenue tax by the person for the year/kind";
+}
+
+// The general case: the person's applied payments exceed the liability.
+@source(IRC_S6151_A, relation = applies, coverage = contextual, quote = "shall pay such tax")
+rule OverpaymentFromExcessPayment strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for bal: Money;
+    when remaining_balance(p, y, kind, bal) and bal < 0 USD;
+    then overpayment_amount(p, y, kind, 0 USD - bal);
+}
+
+// §6401(a): assessed or collected after the limitations period.
+relation collected_after_limitations_period(p: Person, y: TaxableYear, kind: TaxKind, amount: Money) kind empirical {
+    label en official "that part of the amount of the payment of any internal revenue tax which is assessed or collected after the expiration of the period of limitation properly applicable thereto";
+}
+@source(IRC_S6401_A, relation = formalizes, coverage = exact, quote = "The term \"overpayment\" includes that part of the amount of the payment of any internal revenue tax which is assessed or collected after the expiration of the period of limitation properly applicable thereto.")
+rule S6401OverpaymentAfterLimitations strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for amount: Money;
+    when collected_after_limitations_period(p, y, kind, amount);
+    then overpayment_amount(p, y, kind, amount);
+}
+
+// §6401(b): excess refundable credits — TECH_GAP/EXTERNAL_DEPENDENCY on the
+// credit computation itself (see header note); read as a case fact.
+relation excess_refundable_credit_amount(p: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "TECH_GAP: the amount by which refundable credits under subpart C of part IV of subchapter A of chapter 1 exceed the subtitle A tax (as reduced by subparts A, B, D and G) — the credit computation is not formalized in this stage";
+}
+@source(IRC_S6401_B, relation = formalizes, coverage = partial, quote = "If the amount allowable as credits under subpart C of part IV of subchapter A of chapter 1 (relating to refundable credits) exceeds the tax imposed by subtitle A (reduced by the credits allowable under subparts A, B, D, and G of such part IV), the amount of such excess shall be considered an overpayment.")
+rule S6401OverpaymentFromExcessRefundableCredit strict {
+    for p: Person;
+    for y: TaxableYear;
+    for amount: Money;
+    when excess_refundable_credit_amount(p, y, amount);
+    then overpayment_amount(p, y, us.irc.core::IncomeCh1, amount);
+}
+
+// §6401(c): a payment is not excluded from being an overpayment merely
+// because there was no tax liability to which it corresponds.
+relation paid_with_no_liability(p: Person, y: TaxableYear, kind: TaxKind, amount: Money) kind empirical {
+    label en official "there was no tax liability in respect of which such amount was paid";
+}
+@source(IRC_S6401_C, relation = formalizes, coverage = exact, quote = "An amount paid as tax shall not be considered not to constitute an overpayment solely by reason of the fact that there was no tax liability in respect of which such amount was paid.")
+rule S6401OverpaymentDespiteNoLiability strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for amount: Money;
+    when paid_with_no_liability(p, y, kind, amount);
+    then overpayment_amount(p, y, kind, amount);
+}
+
+// ============================================================================
+// §6402 — Authority to make credits or refunds
+// ============================================================================
+
+entity OffsetObligation { label en unofficial "a debt against which an overpayment is offset under §6402(c)-(f)"; }
+enum OffsetKind {
+    PastDueSupport;                // (c)
+    FederalAgencyDebt;              // (d)
+    StateIncomeTaxObligation;       // (e)
+    UnemploymentCompensationDebt;   // (f)
+    label en unofficial "which §6402 offset paragraph the obligation is offset under";
+}
+pub relation offset_obligation_kind(o: OffsetObligation, k: OffsetKind) kind institutional;
+pub relation offset_obligation_owed_by(o: OffsetObligation, p: Person, amount: Money) kind empirical {
+    label en unofficial "the named person owes this debt (§6402(c)-(f) notice from the collecting agency/State)";
+}
+
+// --- Step 0: the amount the Secretary elects to credit against the person's
+// own internal-revenue liability under §6402(a) (a power, not a mandatory
+// deduction). Modeled with `sum all` over an EMPIRICAL case-asserted
+// election (`credits_against_own_liability`): when the case never asserts
+// the Secretary exercising this power, the sum is 0 and the balance is
+// simply the overpayment — no separate "when none" companion rule and no
+// negation-on-absence is needed (AGENT-BRIEF's aggregate-over-case-facts
+// method note).
+
+relation credits_against_own_liability(p: Person, y: TaxableYear, kind: TaxKind, amount: Money) kind empirical {
+    label en unofficial "the Secretary exercises the §6402(a) power to credit this much of the overpayment against another internal-revenue liability of the same person";
+}
+pub relation own_liability_credit_applied(p: Person, y: TaxableYear, kind: TaxKind, amount: Money) kind institutional;
+
+relation own_liability_credit_within_overpayment(p: Person, y: TaxableYear, kind: TaxKind) kind institutional {
+    label en unofficial "the amount the Secretary elects to credit under §6402(a) does not exceed the overpayment";
+}
+rule S6402CreditWithinOverpayment strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for overamt: Money;
+    for wants: Money;
+    when overpayment_amount(p, y, kind, overamt) and credits_against_own_liability(p, y, kind, wants) and wants <= overamt;
+    then own_liability_credit_within_overpayment(p, y, kind);
+}
+
+@source(IRC_S6402_A, relation = formalizes, coverage = partial, quote = "the Secretary, within the applicable period of limitations, may credit the amount of such overpayment, including any interest allowed thereon, against any liability in respect of an internal revenue tax on the part of the person who made the overpayment")
+rule S6402CreditAgainstOwnLiability strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for overamt: Money;
+    for wants: Money;
+    when overpayment_amount(p, y, kind, overamt) and credits_against_own_liability(p, y, kind, wants);
+    then power S6402CreditOwnLiabilityPower {
+        holder Secretary;
+        over p;
+        exercise credits_against_own_liability(p, y, kind, wants);
+        valid_when own_liability_credit_within_overpayment(p, y, kind);
+        effect create(own_liability_credit_applied(p, y, kind, min(wants, overamt)));
+    };
+}
+
+pub relation refund_balance_after_own_liability_credit(p: Person, y: TaxableYear, kind: TaxKind, amount: Money) kind institutional;
+rule S6402BalanceAfterOwnLiabilityCredit strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for overamt: Money;
+    when overpayment_amount(p, y, kind, overamt);
+    then refund_balance_after_own_liability_credit(p, y, kind,
+        max(0 USD, overamt - (sum all c: Money for k2: TaxKind where own_liability_credit_applied(p, y, k2, c) and k2 == kind)));
+}
+
+// --- Steps 1-4: the MANDATORY (c)-(f) offsets, each a `sum all` over the
+// EMPIRICAL debt-notice relation `offset_obligation_owed_by` (defaults to 0
+// with no matching obligation — same reasoning as step 0).
+
+pub relation refund_balance_after_support_offset(p: Person, y: TaxableYear, kind: TaxKind, amount: Money) kind institutional;
+@source(IRC_S6402_C, relation = formalizes, coverage = partial, quote = "The amount of any overpayment to be refunded to the person making the overpayment shall be reduced by the amount of any past-due support")
+rule S6402OffsetPastDueSupport defeasible {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for before: Money;
+    when refund_balance_after_own_liability_credit(p, y, kind, before);
+    then refund_balance_after_support_offset(p, y, kind,
+        max(0 USD, before - (sum all applied: Money for o: OffsetObligation where offset_applied_support(o, p, y, kind, applied))));
+}
+
+pub relation refund_balance_after_federal_agency_offset(p: Person, y: TaxableYear, kind: TaxKind, amount: Money) kind institutional;
+@source(IRC_S6402_D, relation = formalizes, coverage = partial, quote = "reduce the amount of any overpayment payable to such person by the amount of such debt")
+rule S6402OffsetFederalAgencyDebt defeasible {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for before: Money;
+    when refund_balance_after_support_offset(p, y, kind, before);
+    then refund_balance_after_federal_agency_offset(p, y, kind,
+        max(0 USD, before - (sum all applied: Money for o: OffsetObligation where offset_applied_federal(o, p, y, kind, applied))));
+}
+
+pub relation refund_balance_after_state_tax_offset(p: Person, y: TaxableYear, kind: TaxKind, amount: Money) kind institutional;
+@source(IRC_S6402_E, relation = formalizes, coverage = partial, quote = "reduce the amount of any overpayment payable to such person by the amount of such State income tax obligation")
+rule S6402OffsetStateIncomeTax defeasible {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for before: Money;
+    when refund_balance_after_federal_agency_offset(p, y, kind, before);
+    then refund_balance_after_state_tax_offset(p, y, kind,
+        max(0 USD, before - (sum all applied: Money for o: OffsetObligation where offset_applied_state_group(o, p, y, kind, applied) and offset_obligation_kind(o, StateIncomeTaxObligation))));
+}
+
+pub relation refund_balance_after_unemployment_offset(p: Person, y: TaxableYear, kind: TaxKind, amount: Money) kind institutional {
+    label en unofficial "the final amount the Secretary is under a duty to refund to the person under §6402(a)'s closing clause";
+}
+@source(IRC_S6402_F, relation = formalizes, coverage = partial, quote = "reduce the amount of any overpayment payable to such person by the amount of such covered unemployment compensation debt")
+rule S6402OffsetUnemploymentCompensationDebt defeasible {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for before: Money;
+    when refund_balance_after_federal_agency_offset(p, y, kind, before);
+    then refund_balance_after_unemployment_offset(p, y, kind,
+        max(0 USD, before - (sum all applied: Money for o: OffsetObligation where offset_applied_state_group(o, p, y, kind, applied))));
+}
+
+// The legally established priority (a) -> (c) -> (d) -> (e) -> (f) is encoded
+// as the DATA-FLOW dependency of each offset step above (each step's `when`
+// reads the PRIOR step's `refund_balance_after_*` output), not as a
+// `priority` declaration: `priority` (§116/§192) resolves conflicting
+// DEFEASIBLE conclusions about the SAME head predicate, and these four
+// rules conclude four DIFFERENT predicates that never compete for the same
+// fact — a `priority` between them is vacuous (LDC-E4107) and was removed.
+// The statutory ordering is nonetheless load-bearing here: swapping which
+// `refund_balance_after_*` relation a step reads from would silently change
+// the legal order of the (c)-(f) offsets.
+
+// --- §6402(a) closing clause: duty to refund the final balance -------------
+
+relation refund_paid(p: Person, y: TaxableYear, kind: TaxKind) kind institutional;
+@source(IRC_S6402_A, relation = formalizes, coverage = partial, quote = "shall, subject to subsections (c), (d), (e), and (f), refund any balance to such person")
+rule S6402DutyToRefundBalance strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for balance: Money;
+    when refund_balance_after_unemployment_offset(p, y, kind, balance) and balance > 0 USD;
+    then duty RefundOverpaymentBalance {
+        bearer Secretary;
+        beneficiary p;
+        goal achievement {
+            condition refund_paid(p, y, kind);
+            window [-infinity, infinity];
+        }
+    };
+}
+
+// --- §6402(b): credit against estimated tax (elected alternative) ---------
+
+relation elects_credit_against_estimated_tax(p: Person, y: TaxableYear) kind empirical {
+    label en unofficial "the taxpayer (or the Secretary, under regulations) elects to credit the INCOME TAX overpayment against the estimated income tax for the following year rather than receive a refund — limited to the income tax by section 6402(b) own text";
+}
+relation credited_against_estimated_tax(p: Person, y: TaxableYear) kind institutional;
+@source(IRC_S6402_B, relation = formalizes, coverage = exact, quote = "The Secretary is authorized to prescribe regulations providing for the crediting against the estimated income tax for any taxable year of the amount determined by the taxpayer or the Secretary to be an overpayment of the income tax for a preceding taxable year.")
+rule S6402CreditAgainstEstimatedTax strict {
+    for p: Person;
+    for y: TaxableYear;
+    when elects_credit_against_estimated_tax(p, y);
+    then power S6402CreditAgainstEstimatedTaxPower {
+        holder Secretary;
+        over p;
+        exercise elects_credit_against_estimated_tax(p, y);
+        valid_when elects_credit_against_estimated_tax(p, y);
+        effect create(credited_against_estimated_tax(p, y));
+    };
+}
+
+// --- §6402(g): no judicial review of a reduction ----------------------------
+
+relation brings_action_to_review_reduction(who: Person, o: OffsetObligation) kind empirical;
+@source(IRC_S6402_G, relation = formalizes, coverage = partial, quote = "No court of the United States shall have jurisdiction to hear any action, whether legal or equitable, brought to restrain or review a reduction authorized by subsection (c), (d), (e), or (f).")
+rule S6402NoJudicialReviewOfReduction strict {
+    for who: Person;
+    for o: OffsetObligation;
+    when brings_action_to_review_reduction(who, o);
+    then prohibition NoJudicialReviewOfOffsetReduction {
+        bearer who;
+        action brings_action_to_review_reduction(who, o);
+        window [-infinity, infinity];
+    };
+}
+
+// --- §6402(l): explanation of disallowance (executable duty) --------------
+
+relation refund_claim_disallowed(c: Claim) kind empirical;
+relation disallowance_explanation_provided(c: Claim) kind institutional;
+@source(IRC_S6402_L, relation = formalizes, coverage = exact, quote = "In the case of a disallowance of a claim for refund, the Secretary shall provide the taxpayer with an explanation for such disallowance.")
+rule S6402ExplainDisallowance strict {
+    for c: Claim;
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for amt: Money;
+    when refund_claim_disallowed(c) and us.irc.core::claim_of(c, p, y, kind, amt);
+    then duty ExplainRefundDisallowance {
+        bearer Secretary;
+        beneficiary p;
+        goal achievement {
+            condition disallowance_explanation_provided(c);
+            window [-infinity, infinity];
+        }
+    };
+}
+
+// --- §6402(m): earliest date for certain refunds (executable) -------------
+
+relation refund_involves_eitc_or_actc(p: Person, y: TaxableYear) kind empirical {
+    label en official "a credit is allowed to such taxpayer under section 24 (by reason of subsection (d) thereof) or 32 for such taxable year";
+}
+relation taxable_year_close_date(y: TaxableYear, d: Date) kind institutional;
+relation earliest_refund_date(y: TaxableYear, d: Date) kind institutional;
+@source(IRC_S6402_M, relation = formalizes, coverage = exact, quote = "No credit or refund of an overpayment for a taxable year shall be made to a taxpayer before the 15th day of the second month following the close of such taxable year if a credit is allowed to such taxpayer under section 24 (by reason of subsection (d) thereof) or 32 for such taxable year.")
+rule S6402EarliestRefundDateForEitcActc strict {
+    for y: TaxableYear;
+    for close: Date;
+    when taxable_year_close_date(y, close);
+    then earliest_refund_date(y, add_calendar_period(close, 1 calendar_month));
+}
+relation refund_before_earliest_date(p: Person, y: TaxableYear, kind: TaxKind, on: Date) kind empirical;
+@source(IRC_S6402_M, relation = formalizes, coverage = exact, quote = "No credit or refund of an overpayment for a taxable year shall be made to a taxpayer before the 15th day of the second month following the close of such taxable year")
+rule S6402NoRefundBeforeEarliestDate strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for on: Date;
+    for earliest: Date;
+    when refund_involves_eitc_or_actc(p, y) and refund_before_earliest_date(p, y, kind, on) and earliest_refund_date(y, earliest) and on < earliest;
+    then prohibition NoEarlyEitcActcRefund {
+        bearer Secretary;
+        action refund_before_earliest_date(p, y, kind, on);
+        window [-infinity, infinity];
+    };
+}
+
+// §6402(h) (definition of "Federal agency"), (i) (treatment of payments to
+// States), (j) (cross reference to 31 U.S.C. 3721), (k) (fiduciary refunds
+// for insolvent affiliated-group members) and (n) (misdirected direct
+// deposit procedure) are NON_NORMATIVE/EXTERNAL_DEPENDENCY at this stage:
+// (h) is a plain definitional gloss with no independent testable condition
+// beyond feeding "Federal agency" into (d) (already read as a case fact
+// there); (i)/(k) are Secretary discretion with no numeric or deadline
+// content; (j) is a pure cross-reference; (n) directs a regulatory
+// procedure this snapshot does not need to execute. See coverage rows
+// 26/6402/h/u1, 26/6402/i/u1, 26/6402/j/u1, 26/6402/k/u1, 26/6402/n/u1.
+
+// ============================================================================
+// §6403 — Overpayment of installment
+// ============================================================================
+
+relation installment_overpaid(p: Person, y: TaxableYear, kind: TaxKind, installment_excess: Money) kind empirical {
+    label en official "the taxpayer has paid as an installment of the tax more than the amount determined to be the correct amount of such installment";
+}
+relation unpaid_installments_exist(p: Person, y: TaxableYear, kind: TaxKind) kind empirical;
+relation installment_excess_credited(p: Person, y: TaxableYear, kind: TaxKind) kind institutional;
+
+@source(IRC_S6403, relation = formalizes, coverage = partial, quote = "if the taxpayer has paid as an installment of the tax more than the amount determined to be the correct amount of such installment, the overpayment shall be credited against the unpaid installments, if any")
+rule S6403CreditInstallmentExcessAgainstUnpaidInstallments strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for excess: Money;
+    when installment_overpaid(p, y, kind, excess) and unpaid_installments_exist(p, y, kind);
+    then duty CreditInstallmentExcessAgainstUnpaidInstallments {
+        bearer Secretary;
+        beneficiary p;
+        goal achievement {
+            condition installment_excess_credited(p, y, kind);
+            window [-infinity, infinity];
+        }
+    };
+}
+
+@source(IRC_S6403, relation = formalizes, coverage = exact, quote = "If the amount already paid, whether or not on the basis of installments, exceeds the amount determined to be the correct amount of the tax, the overpayment shall be credited or refunded as provided in section 6402.")
+rule S6403OverallExcessIsOverpaymentUnderS6402 strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for excess: Money;
+    when installment_overpaid(p, y, kind, excess) and not unpaid_installments_exist(p, y, kind);
+    then overpayment_amount(p, y, kind, excess);
+}

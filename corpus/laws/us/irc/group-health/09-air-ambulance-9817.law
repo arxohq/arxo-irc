@@ -1,0 +1,199 @@
+// 26 U.S.C. §9817 — Ending surprise air ambulance bills. Parallels §9816's
+// cost-sharing cap and IDR window chain for air ambulance services
+// specifically; modeled with its OWN entity (`AirAmbulanceClaim`) rather
+// than reusing `EmergencyServiceClaim`, since §9817(a) applies regardless of
+// whether the transport was for an emergency (air ambulance services need
+// not be "emergency services" under §9816(a)(3)(C)). Stage 1b (IRC-18-K).
+
+use self::{
+    GroupHealthPlan,
+    IRC_S9817_A,
+    IRC_S9817_B,
+    IRC_S9817_C,
+    Person,
+    plan_in_network_cost_sharing_rate,
+    plan_sponsor,
+};
+
+pub entity AirAmbulanceClaim {
+    label en unofficial "one item/service furnished as air ambulance transport (section 9817(c)(1): medical transport by helicopter or airplane for patients) to a participant or beneficiary";
+}
+pub relation air_ambulance_claim_for(svc_claim: AirAmbulanceClaim, person: Person, plan: GroupHealthPlan) kind empirical {
+    label en unofficial "case fact: this claim is for air ambulance services furnished to this person under this plan";
+}
+pub relation air_ambulance_claim_nonparticipating(svc_claim: AirAmbulanceClaim) kind empirical {
+    label en unofficial "case fact: the air ambulance services were furnished by a nonparticipating provider (section 9816(a)(3)(G), cross-referenced by section 9817(c)(3))";
+}
+pub relation air_ambulance_claim_would_be_covered_if_participating(svc_claim: AirAmbulanceClaim) kind empirical {
+    label en unofficial "case fact: the services would be covered if furnished by a participating provider (section 9817(a) gate)";
+}
+
+@source(IRC_S9817_C, relation = formalizes, coverage = exact, quote = "The term \"qualifying payment amount\" has the meaning given such term in section 9816(a)(3).")
+pub relation air_ambulance_recognized_amount(svc_claim: AirAmbulanceClaim, amount: Money) kind empirical {
+    label en unofficial "case fact: the section 9816(a)(3)(H)-style recognized amount for this air ambulance claim, cross-referenced by section 9817(c)(2)-(3) rather than separately defined";
+}
+@source(IRC_S9817_A, relation = formalizes, coverage = partial, quote = "the cost-sharing requirement with respect to such services shall be the same requirement that would apply if such services were provided by such a participating provider, and any coinsurance or deductible shall be based on rates that would apply for such services if they were furnished by such a participating provider")
+pub relation air_ambulance_in_network_cost_sharing_amount(svc_claim: AirAmbulanceClaim, amount: Money) kind institutional {
+    label en unofficial "the cost-sharing amount that would apply under the plan had the air ambulance services been furnished by a participating provider — computed via the plan's ordinary in-network cost-sharing rate, as in section 9816(a)";
+}
+rule AirAmbulanceInNetworkCostSharingAmount(svc_claim: AirAmbulanceClaim, plan: GroupHealthPlan, person: Person, recognized: Money, rate: Decimal) strict {
+    when air_ambulance_claim_for(svc_claim, person, plan)
+        and air_ambulance_recognized_amount(svc_claim, recognized)
+        and plan_in_network_cost_sharing_rate(plan, rate);
+    then air_ambulance_in_network_cost_sharing_amount(svc_claim, recognized * rate);
+}
+pub relation air_ambulance_actual_cost_sharing_imposed(svc_claim: AirAmbulanceClaim, amount: Money) kind empirical {
+    label en unofficial "case fact: the cost-sharing amount the plan actually imposed for this air ambulance claim";
+}
+pub relation air_ambulance_cost_sharing_excessive(svc_claim: AirAmbulanceClaim) kind institutional {
+    label en unofficial "classification: the plan imposed cost-sharing on this air ambulance claim greater than the in-network-equivalent amount";
+}
+rule AirAmbulanceCostSharingExcessive(svc_claim: AirAmbulanceClaim, actual: Money, cap: Money) strict {
+    when air_ambulance_actual_cost_sharing_imposed(svc_claim, actual)
+        and air_ambulance_in_network_cost_sharing_amount(svc_claim, cap)
+        and actual > cap;
+    then air_ambulance_cost_sharing_excessive(svc_claim);
+}
+@source(IRC_S9817_A, relation = formalizes, coverage = partial, quote = "if such services would be covered if provided by a participating provider")
+rule S9817ExcessiveCostSharingProhibition(svc_claim: AirAmbulanceClaim, person: Person, plan: GroupHealthPlan, sponsor: Person, actual: Money) defeasible {
+    when air_ambulance_cost_sharing_excessive(svc_claim)
+        and air_ambulance_claim_for(svc_claim, person, plan)
+        and air_ambulance_claim_nonparticipating(svc_claim)
+        and air_ambulance_claim_would_be_covered_if_participating(svc_claim)
+        and air_ambulance_actual_cost_sharing_imposed(svc_claim, actual)
+        and plan_sponsor(plan, sponsor);
+    then prohibition S9817ExcessiveCostSharing {
+        bearer sponsor;
+        action air_ambulance_actual_cost_sharing_imposed(svc_claim, actual);
+        window [-infinity, infinity];
+    };
+}
+
+@source(IRC_S9817_A, relation = formalizes, coverage = partial, quote = "not later than 30 calendar days after the bill for such services is transmitted by such provider, send to the provider, an initial payment or notice of denial of payment")
+pub relation air_ambulance_bill_transmitted_on(svc_claim: AirAmbulanceClaim, on: Date) kind empirical {
+    label en unofficial "case fact: the date the provider transmitted the bill for this air ambulance claim";
+}
+pub relation air_ambulance_initial_payment_or_denial_sent_on(svc_claim: AirAmbulanceClaim, on: Date) kind empirical {
+    label en unofficial "case fact: the date the plan sent an initial payment or notice of denial for this claim";
+}
+rule S9817InitialPaymentOrDenialDuty(svc_claim: AirAmbulanceClaim, person: Person, plan: GroupHealthPlan, sponsor: Person, transmitted: Date) strict {
+    label en official "section 9817(a)(3)(A): the plan must send an initial payment or notice of denial within 30 calendar days of the bill being transmitted";
+    when air_ambulance_bill_transmitted_on(svc_claim, transmitted)
+        and air_ambulance_claim_for(svc_claim, person, plan)
+        and plan_sponsor(plan, sponsor);
+    then duty S9817InitialPaymentOrDenial {
+        bearer sponsor;
+        beneficiary person;
+        goal achievement {
+            condition air_ambulance_initial_payment_or_denial_sent_on(svc_claim, _);
+            window [transmitted, add_calendar_period(transmitted, 30 calendar_day)];
+        }
+    };
+}
+
+// --- (b): IDR window chain, parallel to section 9816(c) --------------------
+
+pub entity AirAmbulanceIdrDispute {
+    label en unofficial "one independent-dispute-resolution matter over the out-of-network rate for air ambulance services (section 9817(b))";
+}
+pub relation air_ambulance_idr_dispute_for(dispute: AirAmbulanceIdrDispute, svc_claim: AirAmbulanceClaim) kind empirical {
+    label en unofficial "case fact: this IDR dispute concerns this air ambulance claim";
+}
+pub relation air_ambulance_payment_received_on(dispute: AirAmbulanceIdrDispute, on: Date) kind empirical {
+    label en unofficial "case fact: the date the provider received the payment or statement of denial that starts the section 9817(b)(1)(A) 30-day open-negotiation window";
+}
+@source(IRC_S9817_B, relation = formalizes, coverage = exact, quote = "the provider or plan may, during the 30-day period beginning on the day the provider receives a payment or a statement of denial of payment from the plan regarding a claim for payment for such service, initiate open negotiations")
+pub relation air_ambulance_open_negotiation_initiated_on(dispute: AirAmbulanceIdrDispute, on: Date) kind empirical {
+    label en unofficial "case fact: the date open negotiation was initiated";
+}
+pub relation air_ambulance_open_negotiation_timely(dispute: AirAmbulanceIdrDispute) kind institutional {
+    label en unofficial "the section 9817(b)(1)(A) open negotiation was initiated within the 30-day window";
+}
+rule AirAmbulanceOpenNegotiationTimely(dispute: AirAmbulanceIdrDispute, received: Date, initiated: Date) strict {
+    when air_ambulance_payment_received_on(dispute, received)
+        and air_ambulance_open_negotiation_initiated_on(dispute, initiated)
+        and initiated >= received
+        and initiated <= add_calendar_period(received, 30 calendar_day);
+    then air_ambulance_open_negotiation_timely(dispute);
+}
+
+@source(IRC_S9817_B, relation = formalizes, coverage = exact, quote = "the provider or group health plan that was party to such negotiations may, during the 4-day period beginning on the day after such open negotiation period, initiate the independent dispute resolution process")
+pub relation air_ambulance_idr_initiated_on(dispute: AirAmbulanceIdrDispute, on: Date) kind empirical {
+    label en unofficial "case fact: the date a party submitted the IDR-initiation notification";
+}
+pub relation air_ambulance_idr_initiation_timely(dispute: AirAmbulanceIdrDispute) kind institutional {
+    label en unofficial "the section 9817(b)(1)(B) IDR-process initiation was made within the 4-day window after the open negotiation period ended";
+}
+rule AirAmbulanceIdrInitiationTimely(dispute: AirAmbulanceIdrDispute, received: Date, initiated: Date) strict {
+    when air_ambulance_payment_received_on(dispute, received)
+        and air_ambulance_idr_initiated_on(dispute, initiated)
+        and initiated > add_calendar_period(received, 30 calendar_day)
+        and initiated <= add_calendar_period(add_calendar_period(received, 30 calendar_day), 4 calendar_day);
+    then air_ambulance_idr_initiation_timely(dispute);
+}
+
+@source(IRC_S9817_B, relation = formalizes, coverage = exact, quote = "Not later than 10 days after the date of selection of the certified IDR entity with respect to a determination for qualified IDR air ambulance services, the provider and the group health plan party to such determination")
+pub relation air_ambulance_idr_entity_selected_on(dispute: AirAmbulanceIdrDispute, on: Date) kind empirical {
+    label en unofficial "case fact: the date the certified IDR entity was selected for this dispute";
+}
+pub relation air_ambulance_idr_offer_submitted_on(dispute: AirAmbulanceIdrDispute, party: Person, on: Date) kind empirical {
+    label en unofficial "case fact: the date this party submitted its payment offer to the certified IDR entity";
+}
+rule S9817OfferSubmissionDuty(dispute: AirAmbulanceIdrDispute, svc_claim: AirAmbulanceClaim, person: Person, plan: GroupHealthPlan, sponsor: Person, selected: Date) strict {
+    label en official "section 9817(b)(5)(B): each party shall submit its offer not later than 10 days after selection of the certified IDR entity";
+    when air_ambulance_idr_entity_selected_on(dispute, selected)
+        and air_ambulance_idr_dispute_for(dispute, svc_claim)
+        and air_ambulance_claim_for(svc_claim, person, plan)
+        and plan_sponsor(plan, sponsor);
+    then duty S9817OfferSubmission {
+        bearer sponsor;
+        beneficiary person;
+        goal achievement {
+            condition air_ambulance_idr_offer_submitted_on(dispute, sponsor, _);
+            window [selected, add_calendar_period(selected, 10 calendar_day)];
+        }
+    };
+}
+
+@source(IRC_S9817_B, relation = formalizes, coverage = exact, quote = "Not later than 30 days after the date of selection of the certified IDR entity with respect to a determination for qualified IDR ambulance services, the certified IDR entity shall")
+pub relation air_ambulance_idr_determination_made_on(dispute: AirAmbulanceIdrDispute, on: Date) kind empirical {
+    label en unofficial "case fact: the date the certified IDR entity made its payment determination";
+}
+pub relation air_ambulance_idr_determination_timely(dispute: AirAmbulanceIdrDispute) kind institutional {
+    label en unofficial "the section 9817(b)(5)(A) 30-day determination window was met";
+}
+rule AirAmbulanceIdrDeterminationTimely(dispute: AirAmbulanceIdrDispute, selected: Date, determined: Date) strict {
+    when air_ambulance_idr_entity_selected_on(dispute, selected)
+        and air_ambulance_idr_determination_made_on(dispute, determined)
+        and determined <= add_calendar_period(selected, 30 calendar_day);
+    then air_ambulance_idr_determination_timely(dispute);
+}
+
+@source(IRC_S9817_B, relation = formalizes, coverage = exact, quote = "The total plan payment required pursuant to subsection (a)(3), with respect to qualified IDR air ambulance services for which a determination is made under paragraph (5)(A) or with respect to air ambulance services for which a payment amount is determined under open negotiations under paragraph (1), shall be made directly to the nonparticipating provider not later than 30 days after the date on which such determination is made.")
+pub relation air_ambulance_payment_made_on(dispute: AirAmbulanceIdrDispute, on: Date) kind empirical {
+    label en unofficial "case fact: the date the plan made the total plan payment to the nonparticipating provider";
+}
+rule S9817TimingOfPaymentDuty(dispute: AirAmbulanceIdrDispute, svc_claim: AirAmbulanceClaim, person: Person, plan: GroupHealthPlan, sponsor: Person, determined: Date) strict {
+    label en official "section 9817(b)(6): the total plan payment must be made not later than 30 days after the determination (or agreed amount) date";
+    when air_ambulance_idr_determination_made_on(dispute, determined)
+        and air_ambulance_idr_dispute_for(dispute, svc_claim)
+        and air_ambulance_claim_for(svc_claim, person, plan)
+        and plan_sponsor(plan, sponsor);
+    then duty S9817TimingOfPayment {
+        bearer sponsor;
+        beneficiary person;
+        goal achievement {
+            condition air_ambulance_payment_made_on(dispute, _);
+            window [determined, add_calendar_period(determined, 30 calendar_day)];
+        }
+    };
+}
+
+// --- (c): definitions (case-asserted classifications; the substantive
+// content is cross-referenced from section 9816(a)(3), read directly there
+// rather than re-derived here) ---
+
+@source(IRC_S9817_C, relation = formalizes, coverage = exact, quote = "The term \"air ambulance service\" means medical transport by helicopter or airplane for patients.")
+pub relation air_ambulance_service(transport: Person) kind empirical {
+    label en unofficial "case fact/classification: this transport is medical transport by helicopter or airplane for patients (section 9817(c)(1))";
+}

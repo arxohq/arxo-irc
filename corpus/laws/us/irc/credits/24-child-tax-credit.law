@@ -1,0 +1,380 @@
+// Section 24 — Child tax credit. Stage 1 (IRC-06 stage 1).
+//
+// Three editions of the base credit are modelled as `effective`-windowed
+// rules over the SAME `child_tax_credit`/`refundable_child_tax_credit`
+// relations: (1) the pre-2018/post-2025 base text ($1,000; §24(a)-(d)); (2)
+// the 2018-2025 TCJA text (§24(h): $2,000, $500 ODC, $1,400+COLA refundable
+// cap, SSN); (3) the 2021-only ARPA text (§24(i): $3,000/$3,600, fully
+// refundable, age 18, lower thresholds) — a closed historical window under
+// the pinned 2024-Edition base text (like §21(g)/§32(n)). PL 119-21 §70104
+// (permanent $2,000 baseline, additional inflation adjustment from 2025) is
+// NOT carried into a fourth `effective` window: `sources.law` pins only the
+// 2024-Edition USC snapshot per DECISION-0379 D-01/D-03 (the same limitation
+// `income_individual/rates.law` notes for its own OBBBA figures), so a
+// taxable year beginning in 2026 under PL 119-21 is a SOURCE_GAP here — the
+// (h) window as pinned literally ends 2026-01-01 and (a)'s $1,000 base would
+// otherwise apply, which is now superseded by public law text this package
+// does not have an `@source` anchor for.
+
+// --- §24(c): qualifying child ----------------------------------------------------
+
+use self::{
+    IRC_S24_A,
+    IRC_S24_B,
+    IRC_S24_C,
+    IRC_S24_D,
+    IRC_S24_H,
+    IRC_S24_I,
+    Individual,
+    Person,
+    TaxableYear,
+    disallowed_by_final_determination_24g,
+    earned_income_32,
+};
+
+pub relation child_tax_credit_qualifying_child(child: Person, taxpayer: Individual, y: TaxableYear) kind institutional {
+    label en official "a qualifying child for purposes of section 24 (section 24(c)(1))";
+}
+relation section_151_deduction_allowed_for(child: Person, taxpayer: Individual, y: TaxableYear) kind institutional {
+    label en official "the taxpayer is allowed a section 151 deduction for this qualifying child — dependency contract, producer: income_individual/deductions (pending)";
+}
+relation under_age_17(child: Person, y: TaxableYear) kind empirical { label en official "has not attained age 17 (section 24(c)(1))"; }
+relation under_age_18_arpa(child: Person, y: TaxableYear) kind empirical { label en official "has not attained age 18 (section 24(i)(2)(A), 2021 only)"; }
+relation not_a_152b3a_dependent_without_us_residency(child: Person, taxpayer: Individual, y: TaxableYear) kind empirical {
+    label en official "would not be a dependent if section 152(b)(3)(A) were applied without regard to all that follows 'resident of the United States' (section 24(c)(2)) — dependency contract narrowing";
+}
+
+@source(IRC_S24_C, quote = "a qualifying child of the taxpayer (as defined in section 152(c)) who has not attained age 17")
+rule QualifyingChildBaseAndTcja(child: Person, taxpayer: Individual, y: TaxableYear) strict {
+    label en official "a section 152(c) qualifying child under 17, for whom a section 151 deduction is allowed, and not disqualified by the residency proviso, is a qualifying child under this section";
+    effective (@0001-01-01, @2021-01-01);
+    when us.irc.gross_income::qualifying_child_of(child, taxpayer, y);
+    when section_151_deduction_allowed_for(child, taxpayer, y);
+    when under_age_17(child, y);
+    when not not_a_152b3a_dependent_without_us_residency(child, taxpayer, y);
+    then child_tax_credit_qualifying_child(child, taxpayer, y);
+}
+rule QualifyingChildBaseAndTcjaAfter2021(child: Person, taxpayer: Individual, y: TaxableYear) strict {
+    label en official "same test, resuming after the 2021-only age-18 window";
+    effective [@2022-01-01, @9999-01-01);
+    when us.irc.gross_income::qualifying_child_of(child, taxpayer, y);
+    when section_151_deduction_allowed_for(child, taxpayer, y);
+    when under_age_17(child, y);
+    when not not_a_152b3a_dependent_without_us_residency(child, taxpayer, y);
+    then child_tax_credit_qualifying_child(child, taxpayer, y);
+}
+@source(IRC_S24_I, quote = "by substituting \"age 18\" for \"age 17\" in subsection (c)(1)")
+rule QualifyingChildArpa2021(child: Person, taxpayer: Individual, y: TaxableYear) strict {
+    label en official "for 2021 only, the age ceiling is 18 rather than 17";
+    effective [@2021-01-01, @2022-01-01);
+    when us.irc.gross_income::qualifying_child_of(child, taxpayer, y);
+    when section_151_deduction_allowed_for(child, taxpayer, y);
+    when under_age_18_arpa(child, y);
+    when not not_a_152b3a_dependent_without_us_residency(child, taxpayer, y);
+    then child_tax_credit_qualifying_child(child, taxpayer, y);
+}
+
+// --- §24(h)(4): credit for other dependents (ODC), TCJA window only -------------
+
+pub relation credit_for_other_dependents_count(taxpayer: Individual, y: TaxableYear, n: Integer) kind institutional {
+    label en official "the number of dependents (section 152) other than qualifying children, for the $500 credit of section 24(h)(4)(A)";
+}
+relation other_dependent_24h4(dependent: Person, taxpayer: Individual, y: TaxableYear) kind institutional {
+    label en official "a dependent of the taxpayer (section 152) other than a qualifying child described in subsection (c), or a qualifying child denied the credit by reason of paragraph (7) (SSN) — section 24(h)(4)(A)/(C). Dependency contract for the general section 152 dependent test: income_individual/definitions (pending)";
+}
+
+// --- §24(a)/(b)/(h): base credit amount and MAGI phase-out ----------------------
+
+pub relation child_tax_credit_before_phaseout(taxpayer: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the credit determined under section 24(a) (with the (h)(2) $2,000 substitution where in effect), before the (b)/(h)(3) phase-out and before the (h)(4) other-dependent addition";
+}
+@source(IRC_S24_A, quote = "an amount equal to $1,000")
+rule CreditBeforePhaseoutBase(taxpayer: Individual, y: TaxableYear) defeasible {
+    label en official "$1,000 per qualifying child, before the base-text phase-out";
+    effective (@0001-01-01, @2018-01-01);
+    when us.irc.income_individual::filing_status(taxpayer, y, _);
+    then child_tax_credit_before_phaseout(taxpayer, y,
+        1000.00 USD * count(collect child: Person where child_tax_credit_qualifying_child(child, taxpayer, y)));
+}
+rule CreditBeforePhaseoutBasePostTcja(taxpayer: Individual, y: TaxableYear) defeasible {
+    label en official "$1,000 per qualifying child, resuming after the TCJA window per the pinned 2024-Edition text (see module header: PL 119-21 permanence is a SOURCE_GAP)";
+    effective [@2026-01-01, @9999-01-01);
+    when us.irc.income_individual::filing_status(taxpayer, y, _);
+    then child_tax_credit_before_phaseout(taxpayer, y,
+        1000.00 USD * count(collect child: Person where child_tax_credit_qualifying_child(child, taxpayer, y)));
+}
+@source(IRC_S24_H, quote = "Subsection (a) shall be applied by substituting \"$2,000\" for \"$1,000\"")
+rule CreditBeforePhaseoutTcja(taxpayer: Individual, y: TaxableYear) defeasible {
+    label en official "$2,000 per qualifying child during the TCJA window";
+    effective [@2018-01-01, @2026-01-01);
+    when us.irc.income_individual::filing_status(taxpayer, y, _);
+    then child_tax_credit_before_phaseout(taxpayer, y,
+        2000.00 USD * count(collect child: Person where child_tax_credit_countable_for_amount(child, taxpayer, y)));
+}
+@source(IRC_S24_I, quote = "\"$3,000 ($3,600 in the case of a qualifying child who has not attained age 6 as of the close of the calendar year in which the taxable year of the taxpayer begins)\" for \"$1,000\"")
+rule CreditBeforePhaseoutArpa2021(taxpayer: Individual, y: TaxableYear) defeasible {
+    label en official "for 2021 only, $3,600 per qualifying child under 6, $3,000 per other qualifying child";
+    effective [@2021-01-01, @2022-01-01);
+    when us.irc.income_individual::filing_status(taxpayer, y, _);
+    then child_tax_credit_before_phaseout(taxpayer, y,
+        3600.00 USD * count(collect child: Person where child_tax_credit_countable_for_amount(child, taxpayer, y) and under_age_6_at_close_of_calendar_year(child, y))
+        + 3000.00 USD * count(collect child: Person where child_tax_credit_countable_for_amount(child, taxpayer, y) and not under_age_6_at_close_of_calendar_year(child, y)));
+}
+relation under_age_6_at_close_of_calendar_year(child: Person, y: TaxableYear) kind empirical {
+    label en official "has not attained age 6 as of the close of the calendar year in which the taxable year begins (section 24(i)(3))";
+}
+
+pub relation child_tax_credit_threshold_amount(taxpayer: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the threshold amount for the section 24(b) phase-out (section 24(b)(2), or the (h)(3) substitution)";
+}
+@source(IRC_S24_B, quote = "$110,000 in the case of a joint return")
+rule ThresholdJointBase(taxpayer: Individual, y: TaxableYear) strict {
+    effective (@0001-01-01, @2018-01-01); label en official "$110,000 threshold, joint, base text";
+    when us.irc.income_individual::filing_status(taxpayer, y, us.irc.income_individual::Joint);
+    then child_tax_credit_threshold_amount(taxpayer, y, 110000.00 USD);
+}
+@source(IRC_S24_B, quote = "$75,000 in the case of an individual who is not married")
+rule ThresholdUnmarriedBase(taxpayer: Individual, y: TaxableYear) strict {
+    effective (@0001-01-01, @2018-01-01); label en official "$75,000 threshold, unmarried, base text";
+    when us.irc.income_individual::filing_status(taxpayer, y, us.irc.income_individual::Unmarried);
+    then child_tax_credit_threshold_amount(taxpayer, y, 75000.00 USD);
+}
+@source(IRC_S24_B, quote = "$55,000 in the case of a married individual filing a separate return")
+rule ThresholdMarriedSeparateBase(taxpayer: Individual, y: TaxableYear) strict {
+    effective (@0001-01-01, @2018-01-01); label en official "$55,000 threshold, married filing separately, base text";
+    when us.irc.income_individual::filing_status(taxpayer, y, us.irc.income_individual::MarriedSeparate);
+    then child_tax_credit_threshold_amount(taxpayer, y, 55000.00 USD);
+}
+@source(IRC_S24_H, quote = "the threshold amount shall be $400,000 in the case of a joint return ($200,000 in any other case)")
+rule ThresholdJointTcja(taxpayer: Individual, y: TaxableYear) strict {
+    effective [@2018-01-01, @2026-01-01); label en official "$400,000 threshold, joint, TCJA";
+    when us.irc.income_individual::filing_status(taxpayer, y, us.irc.income_individual::Joint);
+    then child_tax_credit_threshold_amount(taxpayer, y, 400000.00 USD);
+}
+rule ThresholdOtherTcja(taxpayer: Individual, y: TaxableYear, s: us.irc.income_individual::FilingStatus) strict {
+    effective [@2018-01-01, @2026-01-01); label en official "$200,000 threshold, any other case, TCJA";
+    when us.irc.income_individual::filing_status(taxpayer, y, s);
+    when s != us.irc.income_individual::Joint;
+    then child_tax_credit_threshold_amount(taxpayer, y, 200000.00 USD);
+}
+// The ARPA 2021 lower thresholds ($150,000/$112,500/$75,000, section
+// 24(i)(4)(B)) apply to a SEPARATE, additional phase-out step under (i)(4)
+// that is capped and coordinated with the (b) phase-out via (i)(4)(C)/(D) —
+// a materially more intricate two-tier phase-out than (b) alone. Given
+// stage-1 scope and time, the 2021 SECOND tier is recorded as TECH_GAP
+// (structure pinned by the quotes above; not reduced to a rule this pass)
+// rather than approximated; the ARPA base amount and qualifying-child age
+// rules above are fully modelled independent of this gap.
+
+pub relation modified_agi_24(taxpayer: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en official "modified adjusted gross income for section 24 purposes: AGI increased by amounts excluded under sections 911, 931, or 933 (section 24(b)(1))";
+}
+@source(IRC_S24_B, quote = "the term \"modified adjusted gross income\" means adjusted gross income increased by any amount excluded from gross income under section 911, 931, or 933")
+rule ModifiedAgiEqualsAgiWhenNoExclusion(taxpayer: Individual, y: TaxableYear, agi: Money) strict {
+    label en official "absent an asserted section 911/931/933 exclusion, modified AGI equals AGI";
+    when us.irc.gross_income::adjusted_gross_income(taxpayer, y, agi);
+    when not_known(has_section_911_931_933_exclusion(taxpayer, y));
+    then modified_agi_24(taxpayer, y, agi);
+}
+rule ModifiedAgiWithExclusion(taxpayer: Individual, y: TaxableYear, agi: Money, excl: Money) strict {
+    label en official "with a section 911/931/933 exclusion, modified AGI is AGI plus the excluded amount";
+    when us.irc.gross_income::adjusted_gross_income(taxpayer, y, agi);
+    when section_911_931_933_exclusion(taxpayer, y, excl);
+    then modified_agi_24(taxpayer, y, agi + excl);
+}
+relation section_911_931_933_exclusion(taxpayer: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en official "amount excluded from gross income under section 911, 931, or 933 — dependency contract, producer: international (pending)";
+}
+relation has_section_911_931_933_exclusion(taxpayer: Individual, y: TaxableYear) kind institutional {
+    label en official "existence flag for section_911_931_933_exclusion, used only to test absence for the not_known branch above (a bare existential over the amount-carrying relation cannot itself appear inside not_known — E-0207/E-0165)";
+}
+rule HasSection911931933Exclusion(taxpayer: Individual, y: TaxableYear, excl: Money) strict {
+    label en official "the existence flag is derived whenever an exclusion amount is asserted";
+    when section_911_931_933_exclusion(taxpayer, y, excl);
+    then has_section_911_931_933_exclusion(taxpayer, y);
+}
+
+pub relation child_tax_credit(taxpayer: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the child tax credit allowed under section 24 for the taxable year (before the (d) additional/refundable credit split, the (g) short-period bar, and the (j) advance-payment reconciliation)";
+}
+@source(IRC_S24_B, quote = "The amount of the credit allowable under subsection (a) shall be reduced (but not below zero) by $50 for each $1,000 (or fraction thereof) by which the taxpayer's modified adjusted gross income exceeds the threshold amount")
+rule ChildTaxCreditAtOrBelowThreshold(taxpayer: Individual, y: TaxableYear, before: Money, magi: Money, threshold: Money, odc: Money) defeasible {
+    label en official "at or below the threshold, the credit equals the pre-phaseout amount plus any ODC add-on, unless the section 24(f) short-year bar or the section 24(g) fraud/reckless-disregard disallowance period applies";
+    when child_tax_credit_before_phaseout(taxpayer, y, before);
+    when modified_agi_24(taxpayer, y, magi);
+    when child_tax_credit_threshold_amount(taxpayer, y, threshold);
+    when magi <= threshold;
+    when odc_addon_24h4(taxpayer, y, odc);
+    when not_known(short_taxable_year_under_12_months(taxpayer, y));
+    when not_known(in_disallowance_period_24g(taxpayer, y));
+    when not_known(disallowed_by_final_determination_24g(taxpayer, y));
+    then child_tax_credit(taxpayer, y, before + odc);
+}
+rule ChildTaxCreditAboveThreshold(taxpayer: Individual, y: TaxableYear, before: Money, magi: Money, threshold: Money, odc: Money) defeasible {
+    label en official "above the threshold, the pre-phaseout amount is reduced $50 per $1,000 (or fraction) of excess MAGI, then the ODC add-on (itself phased out with the base amount under (h)(4)(A)'s parenthetical) is added, unless the section 24(f) short-year bar or the section 24(g) disallowance period applies";
+    when child_tax_credit_before_phaseout(taxpayer, y, before);
+    when modified_agi_24(taxpayer, y, magi);
+    when child_tax_credit_threshold_amount(taxpayer, y, threshold);
+    when magi > threshold;
+    when odc_addon_24h4(taxpayer, y, odc);
+    when not_known(short_taxable_year_under_12_months(taxpayer, y));
+    when not_known(in_disallowance_period_24g(taxpayer, y));
+    when not_known(disallowed_by_final_determination_24g(taxpayer, y));
+    then child_tax_credit(taxpayer, y,
+        max(0 USD, (before + odc) - 50.00 USD * round((magi - threshold) / 1000.00 USD, 0, "CEILING")));
+}
+pub relation odc_addon_24h4(taxpayer: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the section 24(h)(4) $500-per-other-dependent add-on (TCJA window only; zero outside it)";
+}
+@source(IRC_S24_H, quote = "increased by $500 for each dependent of the taxpayer (as defined in section 152) other than a qualifying child described in subsection (c)")
+rule OdcAddonTcja(taxpayer: Individual, y: TaxableYear) strict {
+    effective [@2018-01-01, @2026-01-01);
+    label en official "$500 per other dependent during the TCJA window";
+    when us.irc.income_individual::filing_status(taxpayer, y, _);
+    then odc_addon_24h4(taxpayer, y,
+        500.00 USD * count(collect dependent: Person where other_dependent_24h4(dependent, taxpayer, y)));
+}
+rule OdcAddonZeroOutsideTcja(taxpayer: Individual, y: TaxableYear) strict {
+    effective (@0001-01-01, @2018-01-01); label en official "no other-dependent add-on outside the TCJA window";
+    when us.irc.income_individual::filing_status(taxpayer, y, _);
+    then odc_addon_24h4(taxpayer, y, 0 USD);
+}
+rule OdcAddonZeroAfterTcja(taxpayer: Individual, y: TaxableYear) strict {
+    effective [@2026-01-01, @9999-01-01); label en official "no other-dependent add-on after the TCJA window, per pinned text";
+    when us.irc.income_individual::filing_status(taxpayer, y, _);
+    then odc_addon_24h4(taxpayer, y, 0 USD);
+}
+
+// --- §24(d)/(h)(5)/(h)(6): refundable additional child tax credit ---------------
+
+pub relation refundable_child_tax_credit(taxpayer: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the additional (refundable) child tax credit of section 24(d), added to the aggregate subpart C credits and reducing the nonrefundable section 24(a) credit dollar for dollar";
+}
+// `earned_income_32` is declared as `pub relation` in
+// 32-earned-income-credit.law (same package, no re-declaration needed here
+// per LDC-E1201 — this comment replaces what would otherwise be a duplicate
+// declaration).
+@source(IRC_S24_D, quote = "15 percent of so much of the taxpayer's earned income (within the meaning of section 32) which is taken into account in computing taxable income for the taxable year as exceeds $3,000")
+rule RefundableCtcFormulaBase(taxpayer: Individual, y: TaxableYear, before: Money, magi: Money, threshold: Money, earned: Money) defeasible {
+    label en official "outside the TCJA window, the refundable credit is capped at the lesser of the full pre-phaseout (a) credit or 15 percent of earned income over $3,000 (the 3-or-more-children social-security-tax alternative of (d)(1)(B)(ii) is a further, not-yet-modelled floor — TECH_GAP)";
+    effective (@0001-01-01, @2018-01-01);
+    when child_tax_credit_before_phaseout(taxpayer, y, before);
+    when earned_income_32(taxpayer, y, earned);
+    when earned > 3000.00 USD;
+    when not_known(short_taxable_year_under_12_months(taxpayer, y));
+    when not_known(in_disallowance_period_24g(taxpayer, y));
+    when not_known(disallowed_by_final_determination_24g(taxpayer, y));
+    then refundable_child_tax_credit(taxpayer, y, min(before, round(0.15 * (earned - 3000.00 USD), 2, "HALF_UP")));
+}
+@source(IRC_S24_H, quote = "shall not exceed $1,400")
+@source(IRC_S24_H, relation = formalizes, coverage = partial, quote = "by substituting \"$2,500\" for \"$3,000\"")
+rule RefundableCtcFormulaTcja(taxpayer: Individual, y: TaxableYear, earned: Money) defeasible {
+    label en official "during the TCJA window, the refundable credit per qualifying child is capped at $1,400 (unindexed statutory base; the section 1(f)(3) COLA increase of (h)(5)(B) is a SOURCE_GAP — no Rev. Proc. amount pinned), and the earned-income threshold is $2,500 rather than $3,000";
+    effective [@2018-01-01, @2026-01-01);
+    when earned_income_32(taxpayer, y, earned);
+    when earned > 2500.00 USD;
+    when not_known(short_taxable_year_under_12_months(taxpayer, y));
+    when not_known(in_disallowance_period_24g(taxpayer, y));
+    when not_known(disallowed_by_final_determination_24g(taxpayer, y));
+    then refundable_child_tax_credit(taxpayer, y,
+        min(1400.00 USD * count(collect child: Person where child_tax_credit_countable_for_amount(child, taxpayer, y)),
+            round(0.15 * (earned - 2500.00 USD), 2, "HALF_UP")));
+}
+@source(IRC_S24_I, quote = "so much of the credit determined under subsection (a) (after application of subparagraph (A)) as does not exceed the amount of such credit which would be so determined without regard to subsection (h)(4) shall be allowed under subpart C (and not allowed under this subpart)")
+rule RefundableCtcArpa2021(taxpayer: Individual, y: TaxableYear, before: Money) defeasible {
+    label en official "for 2021, if the taxpayer (or either spouse on a joint return) has a US principal place of abode for more than half the year or is a bona fide Puerto Rico resident, the ENTIRE (i)-computed credit (excluding the (h)(4) ODC portion, which does not apply in 2021 per (i)(2)(B)) is refundable and subsection (d) does not separately apply";
+    effective [@2021-01-01, @2022-01-01);
+    when principal_place_of_abode_in_us_more_than_half_year_24i(taxpayer, y) or bona_fide_puerto_rico_resident(taxpayer, y);
+    when child_tax_credit_before_phaseout(taxpayer, y, before);
+    when not_known(short_taxable_year_under_12_months(taxpayer, y));
+    when not_known(in_disallowance_period_24g(taxpayer, y));
+    when not_known(disallowed_by_final_determination_24g(taxpayer, y));
+    then refundable_child_tax_credit(taxpayer, y, before);
+}
+relation principal_place_of_abode_in_us_more_than_half_year_24i(taxpayer: Individual, y: TaxableYear) kind empirical {
+    label en official "principal place of abode in the United States for more than one-half of the taxable year (section 24(i)(1))";
+}
+relation bona_fide_puerto_rico_resident(taxpayer: Individual, y: TaxableYear) kind empirical {
+    label en official "a bona fide resident of Puerto Rico within the meaning of section 937(a) (section 24(i)(1), (k)(2)(B))";
+}
+
+// --- §24(e)/(f)/(g): SSN, 12-month, and fraud/reckless-disregard bars -----------
+
+relation ssn_included_and_timely_24e(taxpayer: Individual, child: Person, y: TaxableYear) kind empirical {
+    label en official "the taxpayer includes the qualifying child's name and TIN, issued on or before the return due date (section 24(e)(1)), and the taxpayer's own TIN was issued by that due date (section 24(e)(2))";
+}
+pub relation ssn_included_24h7(taxpayer: Individual, child: Person, y: TaxableYear) kind empirical {
+    label en official "the child's social security number, meeting the section 24(h)(7) citizenship/issuance requirements, is included on the return (TCJA window and later)";
+}
+// §24(e) name/TIN identification for the base-text credit is INTERPRETATION
+// narrowing `child_tax_credit_qualifying_child` case assertions directly
+// (a case package should not assert the predicate for a child lacking a
+// qualifying TIN in a base-text year). §24(h)(7), by contrast, is wired
+// explicitly below: it is a TCJA-window-only, per-child SSN condition on
+// the CREDIT AMOUNT (not on qualifying-child status itself), so it gates a
+// dedicated `child_tax_credit_countable_for_amount` relation used by the
+// TCJA/ARPA amount rules' `count(collect ...)` in place of the bare
+// qualifying-child predicate (coordinator follow-up, 25.09.2026).
+pub relation child_tax_credit_countable_for_amount(child: Person, taxpayer: Individual, y: TaxableYear) kind institutional {
+    label en official "a qualifying child counted toward the section 24(a)/(h)(2)/(i) dollar amount: during the TCJA window (section 24(h)(2) in effect, including its 2021 ARPA sub-window), also requires the section 24(h)(7) SSN; outside that window, section 24(h)(7) does not apply and every qualifying child counts";
+}
+@source(IRC_S24_H, quote = "No credit shall be allowed under this section to a taxpayer with respect to any qualifying child unless the taxpayer includes the social security number of such child on the return of tax for the taxable year")
+rule CountableChildTcjaWindow(child: Person, taxpayer: Individual, y: TaxableYear) strict {
+    label en official "during the TCJA window, a qualifying child counts toward the dollar amount only if the section 24(h)(7) SSN is included";
+    effective [@2018-01-01, @2026-01-01);
+    when child_tax_credit_qualifying_child(child, taxpayer, y);
+    when ssn_included_24h7(taxpayer, child, y);
+    then child_tax_credit_countable_for_amount(child, taxpayer, y);
+}
+rule CountableChildOutsideTcjaWindowBefore(child: Person, taxpayer: Individual, y: TaxableYear) strict {
+    label en official "outside the TCJA window (before it), section 24(h)(7) does not apply: every qualifying child counts";
+    effective (@0001-01-01, @2018-01-01);
+    when child_tax_credit_qualifying_child(child, taxpayer, y);
+    then child_tax_credit_countable_for_amount(child, taxpayer, y);
+}
+rule CountableChildOutsideTcjaWindowAfter(child: Person, taxpayer: Individual, y: TaxableYear) strict {
+    label en official "outside the TCJA window (after it, per the pinned 2024-Edition base text), section 24(h)(7) does not apply: every qualifying child counts";
+    effective [@2026-01-01, @9999-01-01);
+    when child_tax_credit_qualifying_child(child, taxpayer, y);
+    then child_tax_credit_countable_for_amount(child, taxpayer, y);
+}
+//
+// §24(f) (no credit for a short taxable year under 12 months, except a year
+// closed by the taxpayer's death) and §24(g) (10-year/2-year fraud and
+// reckless-disregard disallowance bar, mirroring §21(g)... wait, mirroring
+// the general disallowance-period idiom also used at §25A(b)(4) and
+// §32(k)) are case-level gating facts:
+relation short_taxable_year_under_12_months(taxpayer: Individual, y: TaxableYear) kind empirical {
+    label en official "a taxable year covering a period of less than 12 months, not closed by the taxpayer's death (section 24(f))";
+}
+relation in_disallowance_period_24g(taxpayer: Individual, y: TaxableYear) kind empirical {
+    label en official "the taxable year falls in the section 24(g) fraud (10-year) or reckless-disregard (2-year) disallowance period following a final determination";
+}
+// Wired via `not_known` guards (coordinator follow-up, 25.09.2026):
+// `ChildTaxCreditAtOrBelowThreshold`/`ChildTaxCreditAboveThreshold` above,
+// and `RefundableCtcFormulaBase`/`RefundableCtcFormulaTcja`/
+// `RefundableCtcArpa2021` below, all require `not_known` of BOTH facts.
+// A case asserting either fact makes the corresponding credit rule not
+// fire (NEITHER), matching the statute's flat bar; this is the same idiom
+// as `EarnedIncomeCreditGeneral`'s `in_disallowance_period_32k` guard in
+// 32-earned-income-credit.law.
+
+// --- §24(j): advance-payment (section 7527A) reconciliation --------------------
+//
+// EXTERNAL_DEPENDENCY: section 7527A (advance CTC payments) is not modelled
+// by any package in this corpus (it was operative only for months in 2021
+// and is currently dormant); the (j)(1)/(j)(2) reconciliation reads a
+// `payments_under_7527a` case fact this package declares but does not
+// produce. Recorded as a pending dependency (owner: payment-refunds-interest
+// or a dedicated `advance-payments` package, not yet assigned).
+relation payments_under_7527a(taxpayer: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en official "aggregate payments under section 7527A to the taxpayer during the taxable year — dependency contract, producer unresolved (pending)";
+}
+
+// --- §24(k): U.S. possessions -----------------------------------------------------
+//
+// Mirror-code payments to possessions and the coordinating denial of a
+// double CTC to possession residents (section 24(k)(1)) are, like section
+// 21(h), an inter-governmental payment and eligibility-coordination
+// provision outside this package's domestic `Person`/`Individual` domain.
+// Classified EXTERNAL_DEPENDENCY/institutional_effect, recorded not modeled.

@@ -1,0 +1,463 @@
+// 26 U.S.C. §643 — definitions: (a) distributable net income (DNI), (b)
+// "income" for this subchapter, (e) basis of distributed property and its
+// fair-market-value election, (f) multiple-trust aggregation, (g) the
+// estimated-tax-payment election; §644 (calendar year for trusts); §645
+// (election to treat a revocable trust as part of the estate). Also
+// assembles the final section 641(b) taxable income now that section
+// 642(b)/(c) (module 02) and the distribution deduction (modules 04-05)
+// exist. (§643(c) "beneficiary" is in 00-shared.law.)
+//
+// JUDGMENT CALLS:
+//  - §643(a)(1)-(2): "no deduction for the distribution deduction / personal
+//    exemption" are modeled by STARTING DNI from
+//    `taxable_income_before_distribution_and_exemption` (already excludes
+//    both), not by a subtraction rule — avoids the circularity of a DNI
+//    figure that would otherwise depend on a deduction capped BY that DNI.
+//  - §643(a)(4) ("for purposes only of subpart B... extraordinary dividends
+//    or taxable stock dividends... allocable to corpus") produces a
+//    SEPARATE `distributable_net_income_for_simple_trust` figure used only
+//    by the section 651 deduction limit, per the text's own "for purposes
+//    only of subpart B" qualifier — not folded into the general DNI.
+//  - §643(a)(6) (foreign trust) and §643(a)(7) second sentence (charitable-
+//    allocable reduction of the tax-exempt-interest/foreign-income
+//    modifications) are executable over case-asserted component amounts
+//    (`dni_addition`/`dni_subtraction` tagged by `DniAdjustmentKind` from
+//    00-shared.law); §643(a)(7) first sentence (regulatory anti-abuse
+//    authority) is NON_NORMATIVE (a delegation, not itself a rule).
+//  - §643(e)(3) (fair-market-value election) is a `power` per E-0239:
+//    valid_when the manner-of-election condition, effect switching which of
+//    two basis rules applies.
+//  - §643(f) (multiple-trust aggregation) is EVALUATIVE/EXTERNAL_DEPENDENCY
+//    for "a principal purpose... is avoidance" — modeled as an
+//    `external judgment relation` with the Secretary as authority, per
+//    DECISION-0194 (same channel shape as the accounting package's
+//    business-purpose tests).
+//  - §645 is modeled as a `power` jointly exercised by the executor and
+//    trustee, `valid_when` the timely-election condition, `effect` merging
+//    the trust into the estate for return-filing purposes; the "applicable
+//    date" window end is computed directly from the two paragraph (b)(2)
+//    branches.
+
+language "law.core" version "0.2";
+package us.irc.trusts_estates version "0.1.1";
+namespace "urn:us:irc:trusts_estates:clir";
+
+use self::{
+    Asset,
+    DniAdjustmentKind,
+    Election,
+    Estate,
+    IRC_S643_A,
+    IRC_S643_B,
+    IRC_S643_E,
+    IRC_S643_F,
+    IRC_S643_G,
+    IRC_S644_A,
+    IRC_S644_B,
+    IRC_S645_A,
+    IRC_S645_B,
+    IRC_S645_C,
+    Person,
+    TaxableYear,
+    Trust,
+    charitable_set_aside_deduction,
+    dni_addition,
+    dni_subtraction,
+    estate_or_trust_terminated,
+    foreign_trust_capital_gain_rule_643a6C,
+    section_642b_deduction,
+    section_651_distribution_deduction,
+    section_661_distribution_deduction,
+    taxable_income_before_distribution_and_exemption,
+};
+
+// ============================================================================
+// §643(a): distributable net income
+// ============================================================================
+
+@source(IRC_S643_A, relation = formalizes, coverage = exact, quote = "the term \"distributable net income\" means, with respect to any taxable year, the taxable income of the estate or trust computed with the following modification")
+pub relation distributable_net_income(et: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "distributable net income (DNI): the taxable income of the estate or trust, computed without the distribution deduction or the personal-exemption-equivalent deduction and with the further modifications of section 643(a)(3)-(7) (section 643(a))";
+}
+pub relation dni_additions_total(et: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "intermediate value: the sum of all section 643(a) additions (tax-exempt interest net, foreign-trust addback) for the year";
+}
+rule S643aDniAdditionsTotal(et: Person, y: TaxableYear) defeasible {
+    when taxable_income_before_distribution_and_exemption(et, y, _);
+    then dni_additions_total(et, y,
+        sum all a: Money for k: DniAdjustmentKind where dni_addition(et, y, k, a));
+}
+pub relation dni_subtractions_total(et: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "intermediate value: the sum of all section 643(a) subtractions (capital gain allocated to corpus, foreign-trust charitable-allocable reduction) for the year";
+}
+rule S643aDniSubtractionsTotal(et: Person, y: TaxableYear) defeasible {
+    when taxable_income_before_distribution_and_exemption(et, y, _);
+    then dni_subtractions_total(et, y,
+        sum all s: Money for k: DniAdjustmentKind where dni_subtraction(et, y, k, s));
+}
+rule S643aDistributableNetIncome(et: Person, y: TaxableYear, pretax: Money, additions: Money, subtractions: Money) defeasible {
+    label en official "DNI starts from taxable income computed WITHOUT the section 651/661 distribution deduction and WITHOUT the section 642(b) personal exemption (section 643(a)(1)-(2)), then applies the additions and subtractions of section 643(a)(3),(5),(6)";
+    when taxable_income_before_distribution_and_exemption(et, y, pretax);
+    when dni_additions_total(et, y, additions);
+    when dni_subtractions_total(et, y, subtractions);
+    then distributable_net_income(et, y, pretax + additions - subtractions);
+}
+
+pub relation capital_gain_allocated_to_corpus_not_distributable(et: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "gains from the sale or exchange of capital assets allocated to corpus and not paid, credited, or required to be distributed to any beneficiary during the year, and not permanently set aside/used for a section 642(c) purpose (case-asserted; section 643(a)(3))";
+}
+@source(IRC_S643_A, relation = formalizes, coverage = exact, quote = "Gains from the sale or exchange of capital assets shall be excluded to the extent that such gains are allocated to corpus and are not")
+rule S643aCapitalGainExclusionFeedsDni(et: Person, y: TaxableYear, amount: Money) defeasible {
+    label en official "capital gains allocated to corpus and not paid, credited, or required to be distributed to a beneficiary, and not set aside for charity, are excluded in computing DNI (section 643(a)(3))";
+    when capital_gain_allocated_to_corpus_not_distributable(et, y, amount);
+    unless foreign_trust_capital_gain_rule_643a6C(et, y) and capital_gain_allocated_to_corpus_not_distributable(et, y, amount);
+    then dni_subtraction(et, y, CapitalGainAllocatedToCorpusNotDistributable, amount);
+}
+
+pub relation tax_exempt_interest_net_of_disbursements(et: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "tax-exempt interest under section 103, reduced by amounts deductible in respect of disbursements allocable to that interest (case-asserted net figure; section 643(a)(5))";
+}
+@source(IRC_S643_A, relation = formalizes, coverage = exact, quote = "There shall be included any tax-exempt interest to which section 103 applies, reduced by any amounts which would be deductible in respect of disbursements allocable to such interest")
+rule S643aTaxExemptInterestFeedsDni(et: Person, y: TaxableYear, amount: Money) defeasible {
+    label en official "net tax-exempt interest under section 103 is included in DNI (section 643(a)(5))";
+    when tax_exempt_interest_net_of_disbursements(et, y, amount);
+    then dni_addition(et, y, TaxExemptInterestNetOfDisbursements, amount);
+}
+
+// §643(a)(6): foreign trust adjustments.
+pub relation foreign_source_gross_income_net_of_disbursements(t: Trust, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "for a foreign trust, gross income from sources without the United States, reduced by amounts deductible in respect of disbursements allocable to it (case-asserted; section 643(a)(6)(A))";
+}
+@source(IRC_S643_A, relation = formalizes, coverage = exact, quote = "There shall be included the amounts of gross income from sources without the United States, reduced by any amounts which would be deductible in respect of disbursements allocable to such income")
+rule S643a6ForeignSourceIncomeFeedsDni(t: Trust, y: TaxableYear, amount: Money) defeasible {
+    label en official "for a foreign trust, net foreign-source gross income is included in DNI (section 643(a)(6)(A))";
+    when us.irc.definitions::foreign_trust(t);
+    when foreign_source_gross_income_net_of_disbursements(t, y, amount);
+    then dni_addition(t, y, ForeignTrustForeignSourceGrossIncomeAddback, amount);
+}
+
+pub relation foreign_trust_charitable_allocable_reduction(t: Trust, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the amount by which the section 643(a)(5)/(6)(A) modifications are reduced because they are allocable to a section 642(c) charitable deduction the trust is allowed (case-asserted; section 643(a)(7), second sentence)";
+}
+@source(IRC_S643_A, relation = formalizes, coverage = exact, quote = "If the estate or trust is allowed a deduction under section 642(c), the amount of the modifications specified in paragraphs (5) and (6) shall be reduced")
+rule S643a7CharitableAllocableReduction(t: Trust, y: TaxableYear, amount: Money) defeasible {
+    label en official "the section 643(a)(5)/(6) modifications are reduced by the portion allocable to a section 642(c) charitable deduction the trust is allowed (section 643(a)(7), second sentence)";
+    when charitable_set_aside_deduction(t, y, _);
+    when foreign_trust_charitable_allocable_reduction(t, y, amount);
+    then dni_subtraction(t, y, ForeignTrustCharitableAllocableReduction, amount);
+}
+
+// §643(a)(4): a SEPARATE DNI figure, "for purposes only of subpart B".
+pub relation extraordinary_dividend_allocated_to_corpus_not_credited(t: Trust, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "extraordinary dividends or taxable stock dividends the fiduciary in good faith does not pay or credit to any beneficiary because it determines they are allocable to corpus (case-asserted; section 643(a)(4))";
+}
+@source(IRC_S643_A, relation = formalizes, coverage = exact, quote = "there shall be excluded those items of gross income constituting extraordinary dividends or taxable stock dividends which the fiduciary, acting in good faith, does not pay or credit to any beneficiary by reason of his determination that such dividends are allocable to corpus")
+pub relation distributable_net_income_for_simple_trust(t: Trust, y: TaxableYear, amount: Money) kind institutional {
+    label en official "distributable net income computed FOR PURPOSES ONLY OF SUBPART B (simple trusts): the general DNI figure further reduced by extraordinary/stock dividends the fiduciary in good faith allocates to corpus (section 643(a)(4))";
+}
+rule S643a4SimpleTrustDni(t: Trust, y: TaxableYear, general: Money, excluded: Money) defeasible {
+    when distributable_net_income(t, y, general);
+    when extraordinary_dividend_allocated_to_corpus_not_credited(t, y, excluded);
+    then distributable_net_income_for_simple_trust(t, y, general - excluded);
+}
+rule S643a4SimpleTrustDniNoExclusion(t: Trust, y: TaxableYear, general: Money) defeasible {
+    label en unofficial "when no section 643(a)(4) extraordinary-dividend exclusion is asserted, the subpart-B DNI figure equals the general DNI figure";
+    when distributable_net_income(t, y, general);
+    unless extraordinary_dividend_allocated_to_corpus_not_credited(t, y, _) and distributable_net_income(t, y, general);
+    then distributable_net_income_for_simple_trust(t, y, general);
+}
+
+// ============================================================================
+// §643(b): "income" (fiduciary accounting income) for this subchapter
+// ============================================================================
+
+@source(IRC_S643_B, relation = formalizes, coverage = exact, quote = "the term \"income\", when not preceded by the words \"taxable\", \"distributable net\", \"undistributed net\", or \"gross\", means the amount of income of the estate or trust for the taxable year determined under the terms of the governing instrument and applicable local law")
+pub relation fiduciary_accounting_income(et: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "fiduciary accounting income: the amount of income for the year determined under the governing instrument and applicable local law (case-asserted trust/probate-accounting fact; section 643(b)) — not recomputed by this package, which owns federal tax law, not state trust accounting";
+}
+
+// ============================================================================
+// §643(e): basis of property distributed in kind, and the FMV election
+// ============================================================================
+
+pub relation distributed_to(prop: Asset, b: Person) kind empirical {
+    label en unofficial "the estate or trust distributed this property to this beneficiary (case-asserted link between the property and its distributee)";
+}
+pub relation adjusted_basis_in_hands_of_estate_or_trust_before_distribution(prop: Asset, on: Date, amount: Money) kind empirical {
+    label en unofficial "the adjusted basis of the distributed property in the hands of the estate or trust immediately before the distribution (case-asserted; section 643(e)(1)(A))";
+}
+pub relation gain_or_loss_recognized_on_distribution(prop: Asset, amount: Money) kind empirical {
+    label en unofficial "gain or loss recognized to the estate or trust on the distribution of the property (case-asserted; section 643(e)(1)(B))";
+}
+@source(IRC_S643_E, relation = formalizes, coverage = exact, quote = "The basis of any property received by a beneficiary in a distribution from an estate or trust shall be—")
+pub relation distributed_property_basis_to_beneficiary(prop: Asset, b: Person, amount: Money) kind institutional {
+    label en official "the basis of property received by a beneficiary in a distribution from an estate or trust equals its adjusted basis in the estate's or trust's hands immediately before distribution, adjusted for gain or loss recognized to the estate or trust on the distribution (section 643(e)(1))";
+}
+rule S643e1BeneficiaryBasis(prop: Asset, b: Person, before: Money, gain_or_loss: Money) defeasible {
+    when distributed_to(prop, b);
+    when adjusted_basis_in_hands_of_estate_or_trust_before_distribution(prop, _, before);
+    when gain_or_loss_recognized_on_distribution(prop, gain_or_loss);
+    then distributed_property_basis_to_beneficiary(prop, b, before + gain_or_loss);
+}
+
+pub relation distributed_property_fmv(prop: Asset, amount: Money) kind empirical {
+    label en unofficial "the fair market value of property (other than cash) distributed by an estate or trust (case-asserted; section 643(e)(2)(B))";
+}
+@source(IRC_S643_E, relation = formalizes, coverage = exact, quote = "the amount taken into account under sections 661(a)(2) and 662(a)(2) shall be the lesser of")
+pub relation section_643e2_amount_taken_into_account(prop: Asset, b: Person, amount: Money) kind institutional {
+    label en official "absent the section 643(e)(3) election, the amount taken into account under section 661(a)(2)/662(a)(2) for a distribution of property (other than cash) is the LESSER of the beneficiary's section 643(e)(1) basis or the property's fair market value (section 643(e)(2)); with the election in effect, it is the fair market value itself (section 643(e)(3)(A)(iii))";
+}
+rule S643e2LesserOfBasisOrFmvBasisLower(prop: Asset, b: Person, basis: Money, fmv: Money) defeasible {
+    when distributed_property_basis_to_beneficiary(prop, b, basis);
+    when distributed_property_fmv(prop, fmv);
+    when basis <= fmv;
+    unless section_643e3_fmv_election_in_effect(prop) and distributed_property_basis_to_beneficiary(prop, b, basis) and distributed_property_fmv(prop, fmv);
+    then section_643e2_amount_taken_into_account(prop, b, basis);
+}
+rule S643e2LesserOfBasisOrFmvFmvLower(prop: Asset, b: Person, basis: Money, fmv: Money) defeasible {
+    when distributed_property_basis_to_beneficiary(prop, b, basis);
+    when distributed_property_fmv(prop, fmv);
+    when fmv < basis;
+    unless section_643e3_fmv_election_in_effect(prop) and distributed_property_basis_to_beneficiary(prop, b, basis) and distributed_property_fmv(prop, fmv);
+    then section_643e2_amount_taken_into_account(prop, b, fmv);
+}
+rule S643e3AmountIsFmvUnderElection(prop: Asset, b: Person, fmv: Money) defeasible {
+    label en official "with the section 643(e)(3) fair-market-value election in effect, the amount taken into account under section 661(a)(2)/662(a)(2) is the fair market value of the distributed property (section 643(e)(3)(A)(iii))";
+    when section_643e3_fmv_election_in_effect(prop);
+    when distributed_property_fmv(prop, fmv);
+    when distributed_to(prop, b);
+    then section_643e2_amount_taken_into_account(prop, b, fmv);
+}
+
+pub relation section_643e3_election_made(et: Person, y: TaxableYear, e: Election) kind empirical {
+    label en unofficial "the estate or trust made the section 643(e)(3) fair-market-value election on its return for the taxable year of distribution (case-asserted)";
+}
+pub relation section_643e3_election_properly_made(et: Person, y: TaxableYear, e: Election) kind institutional {
+    label en unofficial "the section 643(e)(3)(B) manner-of-election conditions (return for the year, applies to ALL distributions in that year) are satisfied — folded into one atom for valid_when (compiler constraint)";
+}
+rule S643e3ElectionProperlyMade(et: Person, y: TaxableYear, e: Election) defeasible {
+    when section_643e3_election_made(et, y, e);
+    then section_643e3_election_properly_made(et, y, e);
+}
+pub relation section_643e3_fmv_election_in_effect(prop: Asset) kind institutional {
+    label en unofficial "the section 643(e)(3) fair-market-value election is in effect for distributions of this property (derived from the election being in effect for the distributing estate's or trust's taxable year — a case links the property to the election's estate/trust/year)";
+}
+@source(IRC_S643_E, relation = formalizes, coverage = exact, quote = "gain or loss shall be recognized by the estate or trust in the same manner as if such property had been sold to the distributee at its fair market value")
+rule S643e3ElectionPowerRule(et: Person, y: TaxableYear, e: Election) defeasible {
+    label en official "the estate or trust may elect to recognize gain or loss on a distribution of property (other than cash) as if sold to the distributee at fair market value, applicable to all distributions during the taxable year; once made, the election may be revoked only with the Secretary's consent (section 643(e)(3))";
+    when section_643e3_election_made(et, y, e);
+    then power S643e3FmvElectionPower {
+        holder et;
+        over e;
+        exercise section_643e3_election_made(et, y, e);
+        valid_when section_643e3_election_properly_made(et, y, e);
+        effect create(section_643e3_fmv_election_applies_to_year(et, y));
+        subject Election;
+        window [-infinity, infinity);
+    };
+}
+pub relation section_643e3_fmv_election_applies_to_year(et: Person, y: TaxableYear) kind institutional {
+    label en unofficial "the section 643(e)(3) election, once validly made, applies to ALL distributions by the estate or trust during the taxable year (section 643(e)(3)(B), sentence 1)";
+}
+pub relation section_643e3_revoked(et: Person, y: TaxableYear, e: Election) kind empirical {
+    label en unofficial "the estate or trust revoked its section 643(e)(3) election, with the Secretary's consent (case-asserted)";
+}
+rule S643e3RevocationPowerRule(et: Person, y: TaxableYear, e: Election) defeasible {
+    label en official "the section 643(e)(3) election, once made, may be revoked only with the consent of the Secretary (section 643(e)(3)(B), sentence 2)";
+    when section_643e3_revoked(et, y, e);
+    then power S643e3RevocationPower {
+        holder et;
+        over e;
+        exercise section_643e3_revoked(et, y, e);
+        valid_when secretary_consented_to_643e3_revocation(et, y, e);
+        effect remove(section_643e3_fmv_election_applies_to_year(et, y));
+        subject Election;
+        window [-infinity, infinity);
+    };
+}
+pub relation secretary_consented_to_643e3_revocation(et: Person, y: TaxableYear, e: Election) kind empirical {
+    label en unofficial "the Secretary consented to revocation of the section 643(e)(3) election (case-asserted)";
+}
+
+@source(IRC_S643_E, relation = formalizes, coverage = exact, quote = "This subsection shall not apply to any distribution described in section 663(a).")
+pub relation section_643e_inapplicable_to_663a_distribution(prop: Asset) kind institutional {
+    label en official "section 643(e) does not apply to a distribution described in section 663(a) (specific bequests, section 642(c) amounts, and amounts distributed from prior years) (section 643(e)(4))";
+}
+
+// ============================================================================
+// §643(f): multiple trusts treated as one
+// ============================================================================
+
+pub relation substantially_same_grantors(t1: Trust, t2: Trust) kind empirical {
+    label en unofficial "two trusts have substantially the same grantor or grantors, treating husband and wife as one person (case-asserted; section 643(f) sentence 1, flush language)";
+}
+pub relation substantially_same_primary_beneficiaries(t1: Trust, t2: Trust) kind empirical {
+    label en unofficial "two trusts have substantially the same primary beneficiary or beneficiaries (case-asserted; section 643(f)(1))";
+}
+external judgment relation principal_purpose_is_tax_avoidance_643f(t1: Trust, t2: Trust) {
+    authority Secretary;
+    label en official "a principal purpose of the trusts is the avoidance of the tax imposed by chapter 1 (section 643(f)(2)) — an open-textured purpose test committed to the Secretary's judgment (regulations under section 643(f)), DECISION-0194 channel";
+}
+@source(IRC_S643_F, relation = formalizes, coverage = exact, quote = "2 or more trusts shall be treated as 1 trust if")
+pub relation trusts_aggregated_as_one_643f(t1: Trust, t2: Trust) kind institutional {
+    label en official "two or more trusts with substantially the same grantor(s) and substantially the same primary beneficiary(ies), a principal purpose of which is chapter-1 tax avoidance, are treated as one trust (section 643(f))";
+}
+rule S643fAggregation(t1: Trust, t2: Trust) defeasible {
+    when substantially_same_grantors(t1, t2);
+    when substantially_same_primary_beneficiaries(t1, t2);
+    when principal_purpose_is_tax_avoidance_643f(t1, t2);
+    then trusts_aggregated_as_one_643f(t1, t2);
+}
+
+// ============================================================================
+// §643(g): election to treat trust estimated tax payments as beneficiary's
+// ============================================================================
+
+pub relation estimated_tax_payment_by_trust(t: Trust, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "a payment of estimated tax made by the trust for the taxable year (case-asserted; section 643(g) chapeau)";
+}
+pub relation section_643g_election_made(t: Trust, y: TaxableYear, e: Election, b: Person, amount: Money) kind empirical {
+    label en unofficial "the trustee elects, for the taxable year, to treat the stated portion of the trust's estimated tax payment as a payment made by beneficiary b (case-asserted; section 643(g)(1)(A))";
+}
+pub relation section_643g_election_timely(t: Trust, y: TaxableYear, e: Election) kind institutional {
+    label en unofficial "the section 643(g) election is made on or before the 65th day after the close of the trust's taxable year, in the manner the Secretary prescribes (folded into one atom for valid_when; the day-65 deadline computation mirrors section 663(b)'s, see 05-complex-trusts.law)";
+}
+@source(IRC_S643_G, relation = formalizes, coverage = exact, quote = "the trustee may elect to treat any portion of a payment of estimated tax made by such trust for any taxable year of the trust as a payment made by a beneficiary of such trust")
+rule S643gElectionPowerRule(t: Trust, y: TaxableYear, e: Election, b: Person, amount: Money) defeasible {
+    label en official "the trustee may elect to treat any portion of the trust's estimated-tax payment as made by a beneficiary; the amount so treated is treated as paid or credited to the beneficiary on the last day of the trust's taxable year and, for subtitle F, as the beneficiary's own estimated-tax payment made January 15 following the year, not the trust's (section 643(g)(1))";
+    when section_643g_election_made(t, y, e, b, amount);
+    then power S643gElectionPower {
+        holder t;
+        over e;
+        exercise section_643g_election_made(t, y, e, b, amount);
+        valid_when section_643g_election_timely(t, y, e);
+        effect create(section_643g_amount_treated_as_beneficiary_payment(t, y, b, amount));
+        subject Election;
+        window [-infinity, infinity);
+    };
+}
+pub relation section_643g_amount_treated_as_beneficiary_payment(t: Trust, y: TaxableYear, b: Person, amount: Money) kind institutional {
+    label en official "the elected amount is treated as paid or credited to the beneficiary on the last day of the trust's taxable year, and, for subtitle F purposes, as the beneficiary's own estimated-tax payment made on January 15 following the year, not as a payment by the trust (section 643(g)(1)(B)-(C))";
+}
+
+@source(IRC_S643_G, relation = formalizes, coverage = exact, quote = "In the case of a taxable year reasonably expected to be the last taxable year of an estate")
+pub relation section_643g_extends_to_final_year_estate(e: Estate, y: TaxableYear) kind institutional {
+    label en official "in the case of a taxable year reasonably expected to be an estate's last taxable year, section 643(g) applies to the estate with its fiduciary treated as the trustee (section 643(g)(3))";
+}
+rule S643gExtendsToFinalYearEstate(e: Estate, y: TaxableYear) defeasible {
+    when estate_or_trust_terminated(e, y);
+    then section_643g_extends_to_final_year_estate(e, y);
+}
+
+// ============================================================================
+// §644: taxable year of trusts — calendar year
+// ============================================================================
+
+@source(IRC_S644_A, relation = formalizes, coverage = exact, quote = "the taxable year of any trust shall be the calendar year")
+pub relation trust_taxable_year_is_calendar_year(t: Trust, y: TaxableYear) kind institutional {
+    label en official "the taxable year of a trust is the calendar year (section 644(a))";
+}
+pub relation trust_exempt_under_501a_or_4947a1(t: Trust) kind empirical {
+    label en unofficial "the trust is exempt from taxation under section 501(a), or is described in section 4947(a)(1) (case-asserted; section 644(b) exception)";
+}
+rule S644aCalendarYearDefault(t: Trust, y: TaxableYear) defeasible {
+    when us.irc.core::year_of(t, y);
+    unless trust_exempt_under_501a_or_4947a1(t) and us.irc.core::year_of(t, y);
+    then trust_taxable_year_is_calendar_year(t, y);
+}
+@source(IRC_S644_B, relation = formalizes, coverage = exact, quote = "Subsection (a) shall not apply to a trust exempt from taxation under section 501(a) or to a trust described in section 4947(a)(1).")
+pub relation section_644a_inapplicable(t: Trust) kind institutional {
+    label en official "the calendar-year requirement of section 644(a) does not apply to a trust exempt under section 501(a) or described in section 4947(a)(1) (section 644(b))";
+}
+rule S644bException(t: Trust) defeasible {
+    when trust_exempt_under_501a_or_4947a1(t);
+    then section_644a_inapplicable(t);
+}
+
+// ============================================================================
+// §645: election to treat a qualified revocable trust as part of the estate
+// ============================================================================
+
+pub relation qualified_revocable_trust(t: Trust, decedent: Person) kind empirical {
+    label en unofficial "the trust was treated under section 676 as owned by the decedent by reason of a power exercisable by the decedent alone or with any other person to revoke the trust (case-asserted; section 645(b)(1))";
+}
+pub relation section_645_election_made(e: Estate, t: Trust, y: TaxableYear, election: Election) kind empirical {
+    label en unofficial "both the executor of the estate (if any) and the trustee of the qualified revocable trust elect the section 645 treatment (case-asserted joint election)";
+}
+pub relation return_of_tax_under_chapter_11_required(decedent: Person) kind empirical {
+    label en unofficial "a return of tax imposed by chapter 11 (estate tax) is required to be filed with respect to the decedent's estate (case-asserted; section 645(b)(2))";
+}
+pub relation chapter_11_liability_finally_determined_on(decedent: Person, d: Date) kind empirical {
+    label en unofficial "the date of the final determination of the chapter 11 (estate tax) liability, when a chapter 11 return is required (case-asserted; section 645(b)(2)(B))";
+}
+pub relation decedent_death_date(decedent: Person, d: Date) kind empirical {
+    label en unofficial "the date of the decedent's death (case-asserted; section 645(b)(2)(A))";
+}
+
+@source(IRC_S645_B, relation = formalizes, coverage = exact, quote = "if no return of tax imposed by chapter 11 is required to be filed, the date which is 2 years after the date of the decedent's death")
+pub relation section_645_applicable_date(decedent: Person, d: Date) kind institutional {
+    label en official "the section 645 \"applicable date\": 2 years after the decedent's death if no chapter 11 return is required, or 6 months after final determination of the chapter 11 liability if one is required (section 645(b)(2))";
+}
+rule S645ApplicableDateNoReturn(decedent: Person, death: Date) defeasible {
+    when decedent_death_date(decedent, death);
+    unless return_of_tax_under_chapter_11_required(decedent) and decedent_death_date(decedent, death);
+    then section_645_applicable_date(decedent, add_calendar_period(death, 24 calendar_month));
+}
+rule S645ApplicableDateWithReturn(decedent: Person, final: Date) defeasible {
+    when return_of_tax_under_chapter_11_required(decedent);
+    when chapter_11_liability_finally_determined_on(decedent, final);
+    then section_645_applicable_date(decedent, add_calendar_period(final, 6 calendar_month));
+}
+
+@source(IRC_S645_A, relation = formalizes, coverage = exact, quote = "if both the executor (if any) of an estate and the trustee of a qualified revocable trust elect the treatment provided in this section, such trust shall be treated and taxed as part of such estate")
+rule S645ElectionPowerRule(e: Estate, t: Trust, y: TaxableYear, election: Election, decedent: Person) defeasible {
+    label en official "if both the executor of the estate and the trustee of the qualified revocable trust elect, the trust is treated and taxed (and not treated as a separate trust) as part of the estate, for all taxable years of the estate ending after the decedent's death and before the applicable date (section 645(a))";
+    when section_645_election_made(e, t, y, election);
+    when qualified_revocable_trust(t, decedent);
+    then power S645ElectionPower {
+        holder e;
+        over election;
+        exercise section_645_election_made(e, t, y, election);
+        valid_when section_645_election_timely(e, t, election);
+        effect create(trust_treated_as_part_of_estate_645(e, t, decedent));
+        subject Election;
+        window [-infinity, infinity);
+    };
+}
+pub relation trust_treated_as_part_of_estate_645(e: Estate, t: Trust, decedent: Person) kind institutional {
+    label en official "the qualified revocable trust is treated and taxed as part of the estate (not as a separate trust) for the section 645 election period (section 645(a))";
+}
+pub relation section_645_election_timely(e: Estate, t: Trust, election: Election) kind institutional {
+    label en unofficial "the section 645 election is made not later than the time prescribed for filing the return of tax for the estate's first taxable year (folded into one atom for valid_when; section 645(c))";
+}
+@source(IRC_S645_C, relation = formalizes, coverage = exact, quote = "The election under subsection (a) shall be made not later than the time prescribed for filing the return of tax imposed by this chapter for the first taxable year of the estate")
+rule S645ElectionTimelinessFromReturnDueDate(e: Estate, t: Trust, election: Election, made_on: Date, due: Date) defeasible {
+    when section_645_election_made_on(e, t, election, made_on);
+    when us.irc.core::due_date(_, due);
+    when made_on <= due;
+    then section_645_election_timely(e, t, election);
+}
+pub relation section_645_election_made_on(e: Estate, t: Trust, election: Election, d: Date) kind empirical {
+    label en unofficial "the date the section 645 election was actually made (case-asserted)";
+}
+
+// ============================================================================
+// §641(b) final assembly: taxable income after the section 642(b) exemption
+// and the section 651/661 distribution deduction (the latter defined in
+// 04-simple-trusts.law / 05-complex-trusts.law)
+// ============================================================================
+
+rule S641bFinalTaxableIncomeSimpleTrust(t: Trust, y: TaxableYear, pretax: Money, exemption: Money, dist: Money) defeasible {
+    label en official "final section 641(b) taxable income for a simple trust: pre-distribution income less the section 642(b) exemption and the section 651 distribution deduction";
+    when taxable_income_before_distribution_and_exemption(t, y, pretax);
+    when section_642b_deduction(t, y, exemption);
+    when section_651_distribution_deduction(t, y, dist);
+    then us.irc.income_individual::taxable_income(t, y, pretax - exemption - dist);
+}
+rule S641bFinalTaxableIncomeComplexEstateOrTrust(et: Person, y: TaxableYear, pretax: Money, exemption: Money, dist: Money) defeasible {
+    label en official "final section 641(b) taxable income for an estate or complex trust: pre-distribution income less the section 642(b) exemption and the section 661 distribution deduction";
+    when taxable_income_before_distribution_and_exemption(et, y, pretax);
+    when section_642b_deduction(et, y, exemption);
+    when section_661_distribution_deduction(et, y, dist);
+    then us.irc.income_individual::taxable_income(et, y, pretax - exemption - dist);
+}

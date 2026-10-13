@@ -1,0 +1,133 @@
+// Section 25B — Elective deferrals and IRA contributions by certain
+// individuals ("saver's credit"). Stage 1 (IRC-06 stage 1).
+
+use self::{
+    IRC_S25B_A,
+    IRC_S25B_B,
+    IRC_S25B_C,
+    IRC_S25B_D,
+    Individual,
+    TaxableYear,
+};
+
+pub enum RetirementContributionKind {
+    QualifiedRetirementContribution219E;   // (d)(1)(A)
+    ElectiveDeferral;                      // (d)(1)(B)(i)/(ii)
+    VoluntaryEmployeeContribution;         // (d)(1)(C)
+    AbleAccountContribution;               // (d)(1)(D), before 2026
+}
+pub relation retirement_contribution_item(p: Individual, y: TaxableYear, kind: RetirementContributionKind, amount: Money) kind empirical {
+    label en official "a contribution described in section 25B(d)(1)(A)-(D)";
+}
+relation testing_period_distributions_total(p: Individual, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the AGGREGATE distribution during the entire section 25B(d)(2)(B) testing period (this year, the 2 preceding years, and the post-year filing-extension period) from an entity to which qualified retirement savings contributions may be made, other than an excluded rollover/trustee-to-trustee transfer or a distribution listed in (d)(2)(C) (section 25B(d)(2)(A)) — asserted as a single pre-aggregated case fact pending a general multi-year-window aggregation primitive";
+}
+
+pub relation qualified_retirement_savings_contributions(p: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en official "qualified retirement savings contributions (section 25B(d))";
+}
+@source(IRC_S25B_D, quote = "the sum of—")
+rule QualifiedRetirementSavingsContributionsSum(p: Individual, y: TaxableYear, distributions: Money) strict {
+    label en official "qualified retirement savings contributions are the sum of the four listed items, reduced (not below zero) by testing-period distributions";
+    when testing_period_distributions_total(p, y, distributions);
+    then qualified_retirement_savings_contributions(p, y,
+        max(0 USD,
+            (sum all amount: Money for kind: RetirementContributionKind where retirement_contribution_item(p, y, kind, amount))
+            - distributions));
+}
+
+// --- §25B(c): eligible individual --------------------------------------------------
+
+pub relation saver_eligible_individual(p: Individual, y: TaxableYear) kind institutional {
+    label en official "an eligible individual for the saver's credit (section 25B(c))";
+}
+relation attained_age_18_close_of_year(p: Individual, y: TaxableYear) kind empirical { label en official "has attained age 18 as of the close of the taxable year (section 25B(c)(1))"; }
+relation claimed_as_dependent_25b(p: Individual, y: TaxableYear) kind institutional {
+    label en official "a section 151 deduction is allowed to another taxpayer for this individual (section 25B(c)(2)(A)) — read from us.irc.gross_income::is_dependent_of_anyone_base (WIRE-3; INTERPRETATION: the BASE qualifying-child/relative eligibility, not the final 152(b)-resolved dependent_of, exactly as gross_income's own 151(b)/(d) helper reads it)";
+}
+@source(IRC_S25B_C, quote = "any individual with respect to whom a deduction under section 151 is allowed to another taxpayer for a taxable year beginning in the calendar year in which such individual's taxable year begins")
+rule ClaimedAsDependent25b(p: Individual, y: TaxableYear) strict {
+    label en official "an individual who is a dependent of some taxpayer (base test) is one for whom a section 151 deduction is allowed to another taxpayer";
+    when us.irc.gross_income::is_dependent_of_anyone_base(p, y);
+    then claimed_as_dependent_25b(p, y);
+}
+relation is_student_152f2(p: Individual, y: TaxableYear) kind empirical { label en official "a student, as defined in section 152(f)(2) (section 25B(c)(2)(B))"; }
+
+@source(IRC_S25B_C, quote = "any individual if such individual has attained the age of 18 as of the close of the taxable year")
+rule SaverEligibleIndividual(p: Individual, y: TaxableYear) strict {
+    label en official "an individual who has attained age 18, is not claimed as another's dependent, and is not a student, is an eligible individual";
+    when attained_age_18_close_of_year(p, y);
+    when not_known(claimed_as_dependent_25b(p, y));
+    when not is_student_152f2(p, y);
+    then saver_eligible_individual(p, y);
+}
+
+// --- §25B(b): applicable percentage -----------------------------------------------
+// Bracket data for the three filing-status groups lives in the three
+// `.lawtable.json` sidecars beside this file, following the
+// `income-individual/rates.law` decision-table idiom.
+
+// The section 25B(b)(1) breakpoints ($30,000/$32,500/$50,000) are pinned
+// literally in the joint-return table below; (b)(2) scales EVERY dollar
+// amount by 75 percent (head of household) or 50 percent (any other case)
+// rather than restating three separate tables — reproduced here by scaling
+// the taxpayer's AGI by the RECIPROCAL before the joint-table lookup
+// (equivalent: AGI <= 0.75 * breakpoint  iff  AGI / 0.75 <= breakpoint).
+relation saver_bracket_joint(agi: Money, pct: Decimal) kind institutional;
+
+pub relation saver_applicable_percentage(p: Individual, y: TaxableYear, pct: Decimal) kind institutional {
+    label en official "the applicable percentage (section 25B(b))";
+}
+@source(IRC_S25B_B, quote = "if the adjusted gross income of the taxpayer is not over $30,000, 50 percent")
+rule SaverApplicablePercentageJoint(p: Individual, y: TaxableYear, agi: Money, pct: Decimal) strict {
+    label en official "joint-return applicable percentage from the section 25B(b)(1) table";
+    when us.irc.income_individual::filing_status(p, y, us.irc.income_individual::Joint);
+    when us.irc.gross_income::adjusted_gross_income(p, y, agi);
+    when saver_bracket_joint(agi, pct);
+    then saver_applicable_percentage(p, y, pct);
+}
+@source(IRC_S25B_B, quote = "a head of household, the applicable percentage shall be determined under paragraph (1) except that such paragraph shall be applied by substituting for each dollar amount therein (as adjusted under paragraph (3)) a dollar amount equal to 75 percent of such dollar amount")
+rule SaverApplicablePercentageHoh(p: Individual, y: TaxableYear, agi: Money, pct: Decimal) strict {
+    label en official "head-of-household applicable percentage: the (b)(1) table applied to AGI scaled up by 1/0.75, since every breakpoint there is itself scaled down to 75 percent";
+    when us.irc.income_individual::filing_status(p, y, us.irc.income_individual::HeadOfHousehold);
+    when us.irc.gross_income::adjusted_gross_income(p, y, agi);
+    when saver_bracket_joint(round(agi / 0.75, 2, "HALF_UP"), pct);
+    then saver_applicable_percentage(p, y, pct);
+}
+@source(IRC_S25B_B, quote = "any taxpayer not described in paragraph (1) or subparagraph (A), the applicable percentage shall be determined under paragraph (1) except that such paragraph shall be applied by substituting for each dollar amount therein (as adjusted under paragraph (3)) a dollar amount equal to 50 percent of such dollar amount")
+rule SaverApplicablePercentageOther(p: Individual, y: TaxableYear, s: us.irc.income_individual::FilingStatus, agi: Money, pct: Decimal) strict {
+    label en official "any other taxpayer's applicable percentage: the (b)(1) table applied to AGI scaled up by 1/0.50";
+    when us.irc.income_individual::filing_status(p, y, s);
+    when s != us.irc.income_individual::Joint and s != us.irc.income_individual::HeadOfHousehold;
+    when us.irc.gross_income::adjusted_gross_income(p, y, agi);
+    when saver_bracket_joint(round(agi / 0.50, 2, "HALF_UP"), pct);
+    then saver_applicable_percentage(p, y, pct);
+}
+// §25B(b)(3): the post-2006 section 1(f)(3) COLA adjustment of the four
+// dollar breakpoints, rounded to the nearest $500, is a SOURCE_GAP: no Rev.
+// Proc. published breakpoint for any year is pinned here; `saver_bracket_
+// joint` carries only the unadjusted 2001-Act statutory breakpoints.
+
+// --- §25B(a): the credit ------------------------------------------------------------
+
+pub relation savers_credit(p: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the credit for elective deferrals and IRA contributions (section 25B)";
+}
+@source(IRC_S25B_A, quote = "an amount equal to the applicable percentage of so much of the qualified retirement savings contributions of the eligible individual for the taxable year as do not exceed $2,000")
+rule SaversCredit(p: Individual, y: TaxableYear, pct: Decimal, contributions: Money) strict {
+    label en official "the credit is the applicable percentage of qualified retirement savings contributions up to $2,000";
+    when saver_eligible_individual(p, y);
+    when saver_applicable_percentage(p, y, pct);
+    when qualified_retirement_savings_contributions(p, y, contributions);
+    then savers_credit(p, y, round(pct * min(contributions, 2000.00 USD), 2, "HALF_UP"));
+}
+// §25B(e): AGI for this section is determined without regard to sections
+// 911/931/933 — the same addback pattern as §§23(b)(2)(B)/24(b)(1)/25A(d)(2);
+// recorded as INTERPRETATION reusing `us.irc.gross_income::
+// adjusted_gross_income` directly rather than re-deriving a fourth identical
+// addback relation, pending the shared international dependency.
+//
+// §25B(f) (the credit does not reduce investment-in-the-contract basis under
+// section 72) is NON_NORMATIVE for this package: it is a coordinating rule
+// for a DIFFERENT computation (section 72 investment-in-contract, owned by
+// whichever package formalizes annuity taxation, stage 2 elsewhere).

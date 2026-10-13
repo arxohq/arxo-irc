@@ -1,0 +1,366 @@
+// 26 U.S.C. §706(d), §708, §761(c), §761(f) — stage 2 (DECISION-0379, priority
+// order): the varying-interest allocation method, continuation/termination of
+// a partnership on merger/consolidation/division, partnership-agreement
+// modifications, and the qualified-joint-venture election.
+//
+// JUDGMENT CALLS AND GAPS (see report):
+//  - §706(d)(1)-(2)(A): the statute's own two-step day-by-day method
+//    ("assign the appropriate portion of the item to each day... then
+//    allocate the portion assigned to a day among the partners in
+//    proportion to their interests at the close of that day") is a
+//    self-recursive day ledger if built from raw dates (LDC-E4102, see
+//    TECH-GAPS.md). This module instead partitions the taxable year into
+//    case-asserted VaryingInterestPeriod segments over which every partner's
+//    interest is constant (the ordinary shape of a mid-year admission,
+//    retirement, or specified-percentage change): for a period over which
+//    interests do not vary, per-day assignment then per-day allocation by a
+//    CONSTANT share is arithmetically identical to allocating the whole
+//    period's item amount by that same share once — so the two-step
+//    statutory method and the one-step period method agree on their
+//    common domain. This covers (d)(1)'s general "varying interests" method
+//    and (d)(2)(A)'s "allocable cash basis item" method with the SAME
+//    machinery (the statute's own two methods differ only in which items
+//    they apply to and in (d)(2)(C)/(D)'s boundary rules, not in the
+//    day/period arithmetic) — `varying_interest_share` is agnostic to
+//    which items feed it.
+//  - §706(d)(2)(B) is a closed-item-class DEFINITION (`AllocableCashBasisItem`
+//    enum) with clause (iv) an open regulatory residual — EXTERNAL_DEPENDENCY,
+//    matching the package's existing "regulatory list" convention (see 01's
+//    header note on §702(a)(7)).
+//  - §706(d)(2)(C): boundary assignment of a cash-basis item's portion
+//    attributable to a period wholly before or after the taxable year is a
+//    small, non-recursive rule (assign to the first/last day of the year) —
+//    modeled directly as EXECUTABLE by treating "before the year" / "after
+//    the year" as its own zero-share-change period whose single "day" is
+//    the boundary; since day count does not appear in the constant-share
+//    formula, this reduces to asserting the boundary period's interest
+//    share the same way as any other period.
+//  - §706(d)(2)(D) (capitalization by a person who was not yet a partner on
+//    the first day of the year) needs a capitalization concept this package
+//    does not carry (that belongs to a deductions/basis package) — TECH_GAP,
+//    see TECH-GAPS.md row us.irc.partnerships-07-706d2d.
+//  - §706(d)(3) (tiered partnerships: a partnership that is itself a partner
+//    in a lower-tier partnership) needs a "partnership is a partner of
+//    another partnership" fact this package's ontology does not carry
+//    (`is_partner`'s first argument is typed `Person`, not `Partnership`) —
+//    TECH_GAP, see TECH-GAPS.md row us.irc.partnerships-07-706d3.
+//  - §706(d)(4) is INTERPRETATION, not a new rule: it instructs that for
+//    PURPOSES OF THIS SUBSECTION, the partnership's taxable year is read
+//    without regard to (c)(2)(A)'s early-closing rule. Wiring this into the
+//    existing `required_taxable_year`/(c)(2)(A) machinery of module 03 risks
+//    changing that machinery's already-locked behavior for its consumers
+//    (AGENT-BRIEF: "keep existing pub signatures stable"); this module's own
+//    `varying_interest_share` simply never reads (c)(2)(A)'s closing
+//    relation, which already satisfies (d)(4) by omission. Recorded here as
+//    an explicit reading, not left silent.
+//  - §708(b)(1): "no part of any business... continues to be carried on by
+//    any of its partners in a partnership" is modeled as the negation of a
+//    case-asserted `partnership_business_continues_in_successor` fact (an
+//    `unless` defeater on the general continuation rule), not as an
+//    enumerated list of successor forms.
+//  - §708(b)(2)(A)-(B) (merger/consolidation, division): modeled over
+//    case-asserted "which prior partnership fed into which resulting
+//    partnership, and what share of the resulting/prior partnership the
+//    prior/resulting partnership's own members hold" facts — the actual
+//    capital-and-profits percentage computation (aggregating individual
+//    members' interests) is the case's input, consistent with the finite
+//    partner-roster convention already used for §706(b)(4) in module 03.
+//  - §761(c): "the time prescribed by law for the filing of the partnership
+//    return... (not including extensions)" is a case-asserted due date (this
+//    package does not import the returns/filing-deadline machinery of
+//    `us.irc.returns`/`us.irc.administration`) — the comparison itself
+//    (modification date on or before that date) is EXECUTABLE and exact.
+//  - §761(f)(2)(B) "materially participate (within the meaning of section
+//    469(h)...)" is a cross-reference to `us.irc.accounting`'s §469 module,
+//    which models material participation only through the derived
+//    `is_passive_activity` relation (opposite polarity, activity-indexed) —
+//    not a directly importable "materially participates" predicate at the
+//    venture level this section needs. Modeled as a locally-named empirical
+//    fact (`spouses_materially_participate_469h`), with a pending dependency
+//    row recorded in partnerships.deps.json for the coordinator to wire a
+//    real cross-package import if/when `us.irc.accounting` exports one.
+
+language "law.core" version "0.2";
+package us.irc.partnerships version "0.1.1";
+namespace "urn:us:irc:partnerships:clir";
+
+use self::{
+    DistributiveShareItem,
+    IRC_S706_D,
+    IRC_S708_A,
+    IRC_S708_B,
+    IRC_S761_C,
+    IRC_S761_F,
+    Partnership,
+    Person,
+    TaxableYear,
+    is_partner,
+    partnership_level_item,
+};
+
+// ============================================================================
+// §706(d): distributive share when a partner's interest changes
+// ============================================================================
+
+type TimeSpan = us.irc.core::TimeSpan;
+
+pub entity VaryingInterestPeriod : TimeSpan {
+    label en unofficial "a case-asserted segment of a partnership taxable year over which no partner's interest in the partnership changes (section 706(d)(1)/(2)(A) 'period to which such portion is attributable')";
+}
+
+pub relation interest_period_of_year(period: VaryingInterestPeriod, pship: Partnership, y: TaxableYear) kind empirical {
+    label en unofficial "the period is one of the constant-interest segments partitioning the partnership's taxable year y (section 706(d)(1) input fact)";
+}
+
+pub relation item_amount_for_period(pship: Partnership, period: VaryingInterestPeriod, item: DistributiveShareItem, amount: Money) kind empirical {
+    label en unofficial "the portion of the partnership-level item attributable to this period, already assigned to it under the day-by-day rule of section 706(d)(2)(A)(i) (a case-computed input — see header note on avoiding a self-recursive day ledger)";
+}
+
+pub relation partner_interest_share_during_period(partner: Person, period: VaryingInterestPeriod, share: Decimal) kind empirical {
+    label en unofficial "the partner's constant interest in the partnership during this period (section 706(d)(1)/(2)(A)(ii) 'their interests in the partnership at the close of such day', constant throughout the period by construction)";
+}
+
+pub relation partner_item_share_for_period(partner: Person, pship: Partnership, y: TaxableYear, period: VaryingInterestPeriod, item: DistributiveShareItem, amount: Money) kind institutional {
+    label en unofficial "intermediate value: one period's contribution to the partner's distributive share of the item (the period's item amount times the partner's constant share during the period)";
+}
+@source(IRC_S706_D, relation = formalizes, coverage = partial, quote = "each partner's distributive share of any item of income, gain, loss, deduction, or credit of the partnership for such taxable year shall be determined by the use of any method prescribed by the Secretary by regulations which takes into account the varying interests of the partners in the partnership during such taxable year")
+rule S706dPartnerItemShareForPeriod(partner: Person, pship: Partnership, y: TaxableYear, period: VaryingInterestPeriod, item: DistributiveShareItem, amount: Money, share: Decimal) strict {
+    label en official "one constant-interest period's contribution to a partner's distributive share, computed by the period's item amount times the partner's share during that period (section 706(d)(1) varying-interests method, and section 706(d)(2)(A) for allocable cash basis items — see header note)";
+    when interest_period_of_year(period, pship, y);
+    when item_amount_for_period(pship, period, item, amount);
+    when partner_interest_share_during_period(partner, period, share);
+    then partner_item_share_for_period(partner, pship, y, period, item, amount * share);
+}
+
+pub relation varying_interest_share(partner: Person, pship: Partnership, y: TaxableYear, item: DistributiveShareItem, amount: Money) kind institutional {
+    label en official "the partner's distributive share of the item for the taxable year, determined by the varying-interests method of section 706(d)(1)-(2)(A): the sum, over every constant-interest period of the year, of that period's item-amount times the partner's interest share during the period";
+}
+rule S706dVaryingInterestShare(partner: Person, pship: Partnership, y: TaxableYear, item: DistributiveShareItem, some_period: VaryingInterestPeriod) strict {
+    when interest_period_of_year(some_period, pship, y);
+    when item_amount_for_period(pship, some_period, item, _);
+    when partner_interest_share_during_period(partner, some_period, _);
+    then varying_interest_share(partner, pship, y, item,
+        sum all a: Money for period: VaryingInterestPeriod where partner_item_share_for_period(partner, pship, y, period, item, a));
+}
+
+// --- §706(d)(2)(B): allocable cash basis item (closed class + regulatory residual)
+
+pub enum AllocableCashBasisItem {
+    InterestItem;
+    TaxesItem;
+    PaymentsForServicesOrPropertyUse;
+    OtherRegulatoryAllocableCashBasisItem;
+    label en unofficial "section 706(d)(2)(B)'s closed list of items a cash-basis partnership must prorate by the varying-interests day method; the fourth value is the open (i)-(iii) regulatory residual, EXTERNAL_DEPENDENCY (no Treasury list pinned by this snapshot)";
+}
+pub relation partnership_uses_cash_method(pship: Partnership) kind empirical {
+    label en unofficial "the partnership uses the cash receipts and disbursements method of accounting (section 706(d)(2)(B) chapeau)";
+}
+pub relation cash_basis_item_occurs(pship: Partnership, kind: AllocableCashBasisItem) kind empirical {
+    label en unofficial "the partnership has an item of this kind for the taxable year (case-asserted input binding the closed AllocableCashBasisItem enum to this partnership)";
+}
+pub relation is_allocable_cash_basis_item(pship: Partnership, kind: AllocableCashBasisItem) kind institutional {
+    label en official "the item kind is an 'allocable cash basis item' of this cash-method partnership under section 706(d)(2)(B)";
+}
+@source(IRC_S706_D, relation = formalizes, coverage = partial, quote = "the term \"allocable cash basis item\" means any of the following items with respect to which the partnership uses the cash receipts and disbursements method of accounting:")
+rule S706d2bAllocableCashBasisItem(pship: Partnership, kind: AllocableCashBasisItem) strict {
+    when partnership_uses_cash_method(pship);
+    when cash_basis_item_occurs(pship, kind);
+    then is_allocable_cash_basis_item(pship, kind);
+}
+
+// --- §706(d)(2)(C): item attributable to a period wholly before/after the year
+
+pub relation cash_basis_item_period_relative_to_year(pship: Partnership, y: TaxableYear, item: DistributiveShareItem, before_year: Boolean, after_year: Boolean) kind empirical {
+    label en unofficial "whether the portion of an allocable cash basis item is attributable to a period wholly before the taxable year began, or wholly after it closed (section 706(d)(2)(C) input fact)";
+}
+pub relation cash_basis_item_assigned_to_boundary_day(pship: Partnership, y: TaxableYear, item: DistributiveShareItem, first_day: Boolean, last_day: Boolean) kind institutional {
+    label en official "the pre-year portion is assigned to the first day of the taxable year, and the post-year portion to the last day, under section 706(d)(2)(C)(i)-(ii)";
+}
+@source(IRC_S706_D, relation = formalizes, coverage = exact, quote = "any period before the beginning of the taxable year, such portion shall be assigned under subparagraph (A)(i) to the first day of the taxable year, or")
+rule S706d2cBoundaryAssignment(pship: Partnership, y: TaxableYear, item: DistributiveShareItem) strict {
+    when cash_basis_item_period_relative_to_year(pship, y, item, true, false);
+    then cash_basis_item_assigned_to_boundary_day(pship, y, item, true, false);
+}
+@source(IRC_S706_D, relation = formalizes, coverage = exact, quote = "any period after the close of the taxable year, such portion shall be assigned under subparagraph (A)(i) to the last day of the taxable year.")
+rule S706d2cBoundaryAssignmentAfter(pship: Partnership, y: TaxableYear, item: DistributiveShareItem) strict {
+    when cash_basis_item_period_relative_to_year(pship, y, item, false, true);
+    then cash_basis_item_assigned_to_boundary_day(pship, y, item, false, true);
+}
+
+// ============================================================================
+// §708: continuation, termination, merger, and division of a partnership
+// ============================================================================
+
+pub relation partnership_business_continues_in_successor(pship: Partnership) kind empirical {
+    label en unofficial "some part of the business, financial operation, or venture of the (candidate-terminated) partnership continues to be carried on by any of its partners in a partnership (section 708(b)(1) negative condition, asserted in the affirmative)";
+}
+
+@source(IRC_S708_B, relation = formalizes, coverage = exact, quote = "For purposes of subsection (a), a partnership shall be considered as terminated only if no part of any business, financial operation, or venture of the partnership continues to be carried on by any of its partners in a partnership.")
+pub relation partnership_terminated(pship: Partnership) kind institutional {
+    label en official "the partnership is terminated: no part of any business, financial operation, or venture of the partnership continues to be carried on by any of its partners in a partnership (section 708(b)(1))";
+}
+rule S708bTerminationGeneralRule(pship: Partnership) defeasible {
+    label en official "an existing partnership is terminated only if no part of its business continues to be carried on by any of its partners in a partnership (section 708(b)(1))";
+    when is_partner(_, pship);
+    unless partnership_business_continues_in_successor(pship) and is_partner(_, pship);
+    then partnership_terminated(pship);
+}
+
+@source(IRC_S708_A, relation = formalizes, coverage = exact, quote = "For purposes of this subchapter, an existing partnership shall be considered as continuing if it is not terminated.")
+pub relation continuing_partnership(pship: Partnership) kind institutional {
+    label en official "the existing partnership is considered as continuing because it is not terminated (section 708(a))";
+}
+rule S708aContinuationRule(pship: Partnership) defeasible {
+    label en official "an existing partnership continues unless it is terminated under section 708(b) (section 708(a))";
+    when is_partner(_, pship);
+    unless partnership_terminated(pship) and is_partner(_, pship);
+    then continuing_partnership(pship);
+}
+
+// --- §708(b)(2)(A): merger or consolidation
+
+pub relation merging_partnerships(resulting: Partnership, prior: Partnership) kind empirical {
+    label en unofficial "prior was one of two or more partnerships that merged or consolidated into resulting (section 708(b)(2)(A) input fact)";
+}
+pub relation prior_partnership_members_interest_in_resulting(prior: Partnership, resulting: Partnership, share: Decimal) kind empirical {
+    label en unofficial "the aggregate interest in the capital and profits of the resulting partnership owned by the members of the prior (merging/consolidating) partnership (section 708(b)(2)(A) '>50 percent' test input, a finite-roster aggregate per the module 03 convention)";
+}
+pub relation resulting_partnership_continues_prior(resulting: Partnership, prior: Partnership) kind institutional {
+    label en official "the resulting partnership is, for purposes of section 708, considered the continuation of the prior (merging or consolidating) partnership whose members own more than 50 percent of the capital and profits of the resulting partnership (section 708(b)(2)(A))";
+}
+@source(IRC_S708_B, relation = formalizes, coverage = exact, quote = "In the case of the merger or consolidation of two or more partnerships, the resulting partnership shall, for purposes of this section, be considered the continuation of any merging or consolidating partnership whose members own an interest of more than 50 percent in the capital and profits of the resulting partnership.")
+rule S708b2aMergerContinuation(resulting: Partnership, prior: Partnership, share: Decimal) strict {
+    label en official "the resulting partnership continues any merging/consolidating partnership whose members own more than 50 percent of the resulting partnership's capital and profits (section 708(b)(2)(A))";
+    when merging_partnerships(resulting, prior);
+    when prior_partnership_members_interest_in_resulting(prior, resulting, share);
+    when share > 0.50;
+    then resulting_partnership_continues_prior(resulting, prior);
+}
+rule S708b2aMergerContinuationFeedsGeneral(resulting: Partnership, prior: Partnership) strict {
+    label en unofficial "a resulting partnership that continues a prior partnership under section 708(b)(2)(A) is itself a continuing partnership for section 708(a)/(b) purposes";
+    when resulting_partnership_continues_prior(resulting, prior);
+    then continuing_partnership(resulting);
+}
+
+// --- §708(b)(2)(B): division of a partnership
+
+pub relation division_resulting_partnerships(prior: Partnership, resulting: Partnership) kind empirical {
+    label en unofficial "resulting is one of two or more partnerships formed by dividing prior (section 708(b)(2)(B) input fact)";
+}
+pub relation resulting_partnership_members_interest_in_prior(resulting: Partnership, prior: Partnership, share: Decimal) kind empirical {
+    label en unofficial "the interest in the capital and profits of the PRIOR partnership that the members of a resulting (post-division) partnership had before the division (section 708(b)(2)(B) '>50 percent' test input)";
+}
+@source(IRC_S708_B, relation = formalizes, coverage = exact, quote = "In the case of a division of a partnership into two or more partnerships, the resulting partnerships (other than any resulting partnership the members of which had an interest of 50 percent or less in the capital and profits of the prior partnership) shall, for purposes of this section, be considered a continuation of the prior partnership.")
+rule S708b2bDivisionContinuation(resulting: Partnership, prior: Partnership, share: Decimal) strict {
+    label en official "a resulting partnership from a division is a continuation of the prior partnership, unless its members held 50 percent or less of the prior partnership's capital and profits (section 708(b)(2)(B))";
+    when division_resulting_partnerships(prior, resulting);
+    when resulting_partnership_members_interest_in_prior(resulting, prior, share);
+    when share > 0.50;
+    then resulting_partnership_continues_prior(resulting, prior);
+}
+
+// ============================================================================
+// §761(c): partnership agreement — timely modifications
+// ============================================================================
+
+pub relation modification_made_on_or_before_return_due_date(pship: Partnership, y: TaxableYear, return_due_date_without_extensions: Date, modification_date: Date) kind empirical {
+    label en unofficial "the modification was made on or before the (unextended) due date for filing the partnership's return for the taxable year — case-asserted dates, since this package does not import the filing-deadline machinery of us.irc.returns/us.irc.administration (section 761(c) timing input)";
+}
+pub relation modification_agreed_by_all_partners(pship: Partnership, y: TaxableYear, modification_date: Date) kind empirical {
+    label en unofficial "all the partners agreed to the modification (section 761(c), first alternative)";
+}
+pub relation modification_adopted_per_agreement_procedure(pship: Partnership, y: TaxableYear, modification_date: Date) kind empirical {
+    label en unofficial "the modification was adopted in the manner provided by the partnership agreement itself (section 761(c), second alternative)";
+}
+pub relation modification_timely(pship: Partnership, y: TaxableYear, modification_date: Date) kind institutional {
+    label en unofficial "the modification satisfies section 761(c)'s exact-date test: made on or before the return's unextended due date";
+}
+rule S761cModificationTimely(pship: Partnership, y: TaxableYear, due: Date, modification_date: Date) strict {
+    when modification_made_on_or_before_return_due_date(pship, y, due, modification_date);
+    then modification_timely(pship, y, modification_date);
+}
+
+@source(IRC_S761_C, relation = formalizes, coverage = exact, quote = "a partnership agreement includes any modifications of the partnership agreement made prior to, or at, the time prescribed by law for the filing of the partnership return for the taxable year (not including extensions) which are agreed to by all the partners, or which are adopted in such other manner as may be provided by the partnership agreement")
+pub relation partnership_agreement_includes_modification(pship: Partnership, y: TaxableYear, modification_date: Date) kind institutional {
+    label en official "the modification is part of the partnership agreement for purposes of Subchapter K: made by the return's unextended due date, and either agreed to by all partners or adopted per the agreement's own procedure (section 761(c))";
+}
+rule S761cAgreedByAllPartners(pship: Partnership, y: TaxableYear, modification_date: Date) strict {
+    when modification_timely(pship, y, modification_date);
+    when modification_agreed_by_all_partners(pship, y, modification_date);
+    then partnership_agreement_includes_modification(pship, y, modification_date);
+}
+rule S761cAdoptedPerProcedure(pship: Partnership, y: TaxableYear, modification_date: Date) strict {
+    when modification_timely(pship, y, modification_date);
+    when modification_adopted_per_agreement_procedure(pship, y, modification_date);
+    then partnership_agreement_includes_modification(pship, y, modification_date);
+}
+
+// ============================================================================
+// §761(f): qualified joint venture of a husband and wife
+// ============================================================================
+
+pub relation qualified_joint_venture_conducted(venture: Partnership, spouse1: Person, spouse2: Person, y: TaxableYear) kind empirical {
+    label en unofficial "spouse1 and spouse2, who file a joint return for the taxable year, conduct the venture as a qualified joint venture (section 761(f)(1) chapeau input)";
+}
+pub relation joint_venture_only_members_husband_and_wife(venture: Partnership, spouse1: Person, spouse2: Person) kind empirical {
+    label en unofficial "the only members of the joint venture are the husband and the wife (section 761(f)(2)(A))";
+}
+pub relation spouses_materially_participate_469h(venture: Partnership, spouse1: Person, spouse2: Person, y: TaxableYear) kind empirical {
+    label en unofficial "both spouses materially participate in the venture's trade or business, within the meaning of section 469(h) without regard to paragraph (5) thereof (section 761(f)(2)(B)) — a locally named cross-reference input; see header note and partnerships.deps.json (us.irc.accounting exports no venture-level 'materially participates' predicate to import)";
+}
+pub relation spouses_elect_qjv(venture: Partnership, spouse1: Person, spouse2: Person, y: TaxableYear) kind empirical {
+    label en unofficial "both spouses elect the application of section 761(f) for the taxable year (section 761(f)(2)(C) — a case-asserted election act)";
+}
+
+pub relation qjv_eligible(venture: Partnership, spouse1: Person, spouse2: Person, y: TaxableYear) kind institutional {
+    label en official "the venture meets the section 761(f)(2)(A)-(B) qualified-joint-venture conditions (membership and material participation), before the section 761(f)(2)(C) election is taken into account";
+}
+@source(IRC_S761_F, relation = formalizes, coverage = partial, quote = "the term \"qualified joint venture\" means any joint venture involving the conduct of a trade or business if—")
+rule S761f2QJVEligible(venture: Partnership, spouse1: Person, spouse2: Person, y: TaxableYear) strict {
+    when qualified_joint_venture_conducted(venture, spouse1, spouse2, y);
+    when joint_venture_only_members_husband_and_wife(venture, spouse1, spouse2);
+    when spouses_materially_participate_469h(venture, spouse1, spouse2, y);
+    then qjv_eligible(venture, spouse1, spouse2, y);
+}
+
+pub relation qualified_joint_venture(venture: Partnership, spouse1: Person, spouse2: Person, y: TaxableYear) kind institutional {
+    label en official "the venture is a qualified joint venture of the husband and wife for the taxable year, by valid election under section 761(f)(2)(C) (section 761(f)(1)-(2))";
+}
+@source(IRC_S761_F, relation = formalizes, coverage = exact, quote = "In the case of a qualified joint venture conducted by a husband and wife who file a joint return for the taxable year, for purposes of this title—")
+rule S761fQJVElectionPowerRule(venture: Partnership, spouse1: Person, spouse2: Person, y: TaxableYear) strict {
+    label en official "both spouses may elect, for an eligible venture, that it be a qualified joint venture not treated as a partnership for the taxable year (section 761(f)(1)-(2))";
+    when qjv_eligible(venture, spouse1, spouse2, y);
+    then power S761fQJVElectionPower {
+        holder spouse1;
+        over venture;
+        exercise spouses_elect_qjv(venture, spouse1, spouse2, y);
+        valid_when qjv_eligible(venture, spouse1, spouse2, y);
+        effect create(qualified_joint_venture(venture, spouse1, spouse2, y));
+        subject Partnership;
+        window [-infinity, infinity);
+    };
+}
+
+@source(IRC_S761_F, relation = formalizes, coverage = exact, quote = "such joint venture shall not be treated as a partnership")
+pub relation qjv_not_treated_as_partnership(venture: Partnership, y: TaxableYear) kind institutional {
+    label en official "a qualified joint venture is not treated as a partnership for purposes of this title (section 761(f)(1)(A))";
+}
+rule S761fNotAPartnership(venture: Partnership, spouse1: Person, spouse2: Person, y: TaxableYear) strict {
+    when qualified_joint_venture(venture, spouse1, spouse2, y);
+    then qjv_not_treated_as_partnership(venture, y);
+}
+
+pub relation qjv_spouse_venture_interest_share(spouse: Person, venture: Partnership, y: TaxableYear, item: DistributiveShareItem, share: Decimal) kind empirical {
+    label en unofficial "the spouse's respective interest in the venture used to divide an item between the spouses (section 761(f)(1)(B) input fact)";
+}
+pub relation qjv_spouse_item_amount(spouse: Person, venture: Partnership, y: TaxableYear, item: DistributiveShareItem, amount: Money) kind institutional {
+    label en official "the spouse's respective share of the venture's item, divided according to the spouses' respective interests in the venture and taken into account as if attributable to a trade or business conducted by the spouse as a sole proprietor (section 761(f)(1)(B)-(C))";
+}
+@source(IRC_S761_F, relation = formalizes, coverage = exact, quote = "all items of income, gain, loss, deduction, and credit shall be divided between the spouses in accordance with their respective interests in the venture, and")
+rule S761fItemDividedBetweenSpouses(spouse: Person, venture: Partnership, y: TaxableYear, item: DistributiveShareItem, share: Decimal, total: Money) strict {
+    label en official "an item of the qualified joint venture is divided between the spouses in proportion to their respective interests in the venture, each spouse taking their share into account as a sole proprietor (section 761(f)(1)(B)-(C))";
+    when qualified_joint_venture(venture, spouse, _, y);
+    when qjv_spouse_venture_interest_share(spouse, venture, y, item, share);
+    when partnership_level_item(venture, y, item, total);
+    then qjv_spouse_item_amount(spouse, venture, y, item, total * share);
+}

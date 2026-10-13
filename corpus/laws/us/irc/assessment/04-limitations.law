@@ -1,0 +1,572 @@
+// §6501 — Limitations on assessment and collection.
+//
+// METHOD NOTE: `assessment_period_ends(p, y, k, d)` (task's own signature) is
+// the deemed-filed date plus 3 years via `add_calendar_period`, `unless`
+// one of (c)'s no-limitation/6-year exceptions applies — in which case NO
+// `assessment_period_ends` fact is produced at all (matching "the tax may
+// be assessed ... at any time": absence of a time-bar fact, not a fact
+// with value `infinity`, since `add_calendar_period` has no infinite
+// input). The immunity that actually blocks assessment once the period
+// has run lives at the bottom of this module and is bound by the SAME
+// mechanism `03-restrictions-and-tax-court.law` uses for §6213(a): a
+// `window` on the immunity, not a body-level "now" comparison.
+//
+// JUDGMENT CALLS AND GAPS (see report):
+//  - (a)'s "return" (excludes a return of a person from whom the taxpayer
+//    received an item of income) is not separately modeled: this package
+//    reads `us.irc.core::return_of` as already scoped to the taxpayer's
+//    OWN return by construction (a third party's information return is a
+//    different `Return` instance under a different `return_of` triple).
+//  - (b)(3) (§6020(b) executed returns do not start the period) and (b)(4)
+//    (subtitle D single-return rule) are typed institutional dependency
+//    contracts / NON_NORMATIVE cross-references for this stage — (b)(3) in
+//    particular needs `us.irc.collection`'s §6020(b) norm (not yet
+//    formalized) to know when a return is "executed by the Secretary" at
+//    all.
+//  - (c)(1)/(2) (false/fraudulent return, willful attempt to evade) are
+//    DECISION-0194 evaluative elements channeled as `external judgment
+//    relation` (authority Tax Court, same simplification flagged in
+//    `03-restrictions-and-tax-court.law`).
+//  - (c)(5), (c)(6), (c)(8), (c)(9), (c)(10), (c)(12) are each typed
+//    institutional dependency contracts or narrow cross-references this
+//    stage does not compute (foreign tax credit adjustment under §905(c);
+//    private-foundation termination tax; the §6038-family information-
+//    return extension; listed-transaction nondisclosure; gift-tax 25%
+//    omission; BBA partnership adjustments) — see coverage rows for the
+//    per-item classification, each naming its pending owner package.
+//  - (d) (18-month fiduciary/corporation-dissolution request), (f)
+//    (personal holding company schedule), (g) (good-faith
+//    trust/exempt-organization/DISC misclassification), (l) (private
+//    foundation/IRA-specific rules), (m), (n), (o) are NOT modeled as
+//    executable rules this stage: each is a narrow, self-contained
+//    special rule whose own substantive predicates (dissolution begun in
+//    good faith, personal holding company status, IRA acquisition below
+//    fair market value) belong to packages not yet formalized
+//    (`estates`, `exempt-organizations`, `retirement-plans`). Classified
+//    EXTERNAL_DEPENDENCY/TECH_GAP in the coverage rows, not silently
+//    dropped.
+//  - (h), (i), (j), (k) (carryback special rules) are modeled ONLY for (h)
+//    (net operating loss/capital loss carryback) as the representative
+//    pattern the task's "as far as executable" instruction asks for; (i)
+//    (foreign tax carryback), (j) (credit carryback) and (k) (§6411
+//    tentative-carryback interaction) follow the exact same
+//    "deficiency-attributable-to-a-later-year's-carryback tracks that
+//    later year's own period" shape and are classified TECH_GAP
+//    (same-pattern, not separately encoded this stage) rather than
+//    silently omitted.
+
+language "law.core" version "0.2";
+package us.irc.assessment version "0.1.1";
+namespace "urn:us:irc:assessment:clir";
+
+use self::{
+    Assessment,
+    IRC_S6501_A,
+    IRC_S6501_B,
+    IRC_S6501_C,
+    IRC_S6501_D,
+    IRC_S6501_E,
+    IRC_S6501_H,
+    Person,
+    Return,
+    S6201AssessTax,
+    Secretary,
+    TaxKind,
+    TaxableYear,
+    general_three_year_period_displaced,
+    restitution_ordered,
+    secretary_makes_assessment,
+};
+
+// ============================================================================
+// §6501(a) — General 3-year period; §6501(b) — deemed filing date
+// ============================================================================
+
+pub relation deemed_filed_date(p: Person, y: TaxableYear, k: TaxKind, d: Date) kind institutional {
+    label en unofficial "the date a return is considered filed for purposes of §6501 (actual filing date, or the last prescribed day if filed early)";
+}
+@source(IRC_S6501_A, relation = formalizes, coverage = contextual, quote = "the amount of any tax imposed by this title shall be assessed within 3 years after the return was filed (whether or not such return was filed on or after the date prescribed)")
+rule S6501DeemedFiledOnActualDateGeneral defeasible {
+    for r: Return;
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for filedOn: Date;
+    when us.irc.core::return_of(r, p, y, k)
+        and us.irc.core::filed_on(r, filedOn)
+        and not_known(filed_before_last_prescribed_day(r, p, y, k))
+        and not_known(filed_before_april_15_of_succeeding_year(r, p, y, k));
+    then deemed_filed_date(p, y, k, filedOn);
+}
+pub relation is_chapter_3_4_21_or_24_return(k: TaxKind) kind institutional {
+    label en unofficial "the tax kind is chapter 3 (NRA withholding), 4 (FATCA), 21 (FICA) or 24 (wage withholding)";
+}
+rule S6501Chapter3IsWithholdingNra strict { then is_chapter_3_4_21_or_24_return(us.irc.core::WithholdingNraCh3); }
+rule S6501Chapter4IsFatca strict { then is_chapter_3_4_21_or_24_return(us.irc.core::FatcaCh4); }
+rule S6501Chapter21IsFica strict { then is_chapter_3_4_21_or_24_return(us.irc.core::FicaCh21); }
+rule S6501Chapter24IsWageWithholding strict { then is_chapter_3_4_21_or_24_return(us.irc.core::WithholdingWagesCh24); }
+pub relation filed_before_last_prescribed_day(r: Return, p: Person, y: TaxableYear, k: TaxKind) kind institutional {
+    label en unofficial "the return, of a tax OTHER than chapter 3/4/21/24, was filed before the last day prescribed by law or regulations for filing it (§6501(b)(1)) — bridged from `us.irc.core::due_date`, itself bridged from `us.irc.returns::statutory_due_date` below (the UNEXTENDED statutory date; see package.law's interpretation note)";
+}
+@source(IRC_S6501_B, relation = formalizes, coverage = exact, quote = "For purposes of this section, a return of tax imposed by this title, except tax imposed by chapter 3, 4, 21, or 24, filed before the last day prescribed by law or by regulations promulgated pursuant to law for the filing thereof, shall be considered as filed on such last day.")
+rule S6501DeemedFiledOnLastPrescribedDay strict {
+    for r: Return;
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for filedOn: Date;
+    for due: Date;
+    when not_known(is_chapter_3_4_21_or_24_return(k))
+        and us.irc.core::return_of(r, p, y, k)
+        and us.irc.core::filed_on(r, filedOn)
+        and us.irc.core::due_date(r, due)
+        and filedOn < due;
+    then filed_before_last_prescribed_day(r, p, y, k);
+    then deemed_filed_date(p, y, k, due);
+}
+rule S6501BridgeDueDateFromReturns strict {
+    for r: Return;
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for due: Date;
+    when us.irc.core::return_of(r, p, y, k) and us.irc.returns::statutory_due_date(p, y, k, due);
+    then us.irc.core::due_date(r, due);
+}
+pub relation filed_before_april_15_of_succeeding_year(r: Return, p: Person, y: TaxableYear, k: TaxKind) kind institutional;
+// JUDGMENT CALL: "April 15 of the succeeding calendar year" needs a
+// period-end-to-calendar-year mapping the language has no builtin for
+// (only `add_calendar_period` over a KNOWN date, not a "which calendar
+// year does this period end within" classification); the case supplies
+// that April 15 date directly as `april_15_of_succeeding_year`, anchored
+// to the period, rather than this rule deriving it from `periodEnd` with
+// an unverified calendar-year builtin.
+pub relation april_15_of_succeeding_year(y: TaxableYear, d: Date) kind empirical {
+    label en unofficial "April 15 of the calendar year following the one the taxable year (or other period) ends with or within (§6501(b)(2))";
+}
+@source(IRC_S6501_B, relation = formalizes, coverage = exact, quote = "For purposes of this section, if a return of tax imposed by chapter 3, 4, 21, or 24 for any period ending with or within a calendar year is filed before April 15 of the succeeding calendar year, such return shall be considered filed on April 15 of such calendar year.")
+rule S6501Chapter342124DeemedFiledApril15 strict {
+    for r: Return;
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for filedOn: Date;
+    for april15: Date;
+    when is_chapter_3_4_21_or_24_return(k)
+        and us.irc.core::return_of(r, p, y, k)
+        and us.irc.core::filed_on(r, filedOn)
+        and april_15_of_succeeding_year(y, april15)
+        and filedOn < april15;
+    then filed_before_april_15_of_succeeding_year(r, p, y, k);
+    then deemed_filed_date(p, y, k, april15);
+}
+
+pub relation assessment_period_ends(p: Person, y: TaxableYear, k: TaxKind, d: Date) kind institutional {
+    label en unofficial "the last date on which the amount of tax may be assessed (§6501(a)'s 3-year period, extended by (e)'s 6-year omission rule; ABSENT when (c)'s no-limitation exceptions apply)";
+}
+@source(IRC_S6501_A, relation = formalizes, coverage = exact, quote = "Except as otherwise provided in this section, the amount of any tax imposed by this title shall be assessed within 3 years after the return was filed (whether or not such return was filed on or after the date prescribed) or, if the tax is payable by stamp, at any time after such tax became due and before the expiration of 3 years after the date on which any part of such tax was paid, and no proceeding in court without assessment for the collection of such tax shall be begun after the expiration of such period.")
+pub rule S6501GeneralThreeYearPeriod defeasible {
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for filed: Date;
+    when deemed_filed_date(p, y, k, filed)
+        and not_known(false_or_fraudulent_return(p, y, k))
+        and not_known(willful_attempt_to_evade(p, y, k))
+        and not_known(no_return_filed(p, y, k))
+        and not_known(substantial_omission_from_gross_income(p, y, k))
+        and not_known(restitution_amount_under_6201a4(p, y, k))
+        and not_known(assessment_period_unlimited(p, y, k))
+        and not_known(general_three_year_period_displaced(p, y, k));
+    then assessment_period_ends(p, y, k, add_calendar_period(filed, 3 calendar_year));
+}
+// JUDGMENT CALL / TECH_GAP: the (c)(4) consent extension, (c)(7) 60-day
+// rule and (h) carryback rule each ADD a further `assessment_period_ends`
+// tuple for the same (p, y, k) rather than replacing this rule's own
+// (an earlier draft tried to defeat this rule via `unless
+// period_extended_by_consent(...)` etc., but that makes
+// `assessment_period_ends` depend on facts that themselves read
+// `assessment_period_ends` — an unstratifiable defeat cycle, LDC-E4102).
+// Consequence: once an extension applies, TWO `assessment_period_ends`
+// facts coexist (the general 3-year one and the extended one); a consumer
+// (in particular the limitations-bar immunity below) is expected to read
+// the LATEST one for the scenario at hand. This engine has no `max`
+// aggregate over dynamically produced tuples of the same relation (§111),
+// so the immunity cannot automatically prefer the later date on its own —
+// a scenario that asserts BOTH the general fact and an extension is
+// expected to supply ONLY the extended `assessment_period_ends` tuple as
+// the operative one (i.e. a scenario author does not also assert the
+// unextended fact once an extension is on the record). Flagged here as a
+// scope limitation, not silently presented as a general n-extension
+// solver.
+
+// ============================================================================
+// §6501(c) — Exceptions
+// ============================================================================
+
+external judgment relation false_or_fraudulent_return(p: Person, y: TaxableYear, k: TaxKind) {
+    authority TaxCourt;
+    label en official "a false or fraudulent return with the intent to evade tax";
+}
+external judgment relation willful_attempt_to_evade(p: Person, y: TaxableYear, k: TaxKind) {
+    authority TaxCourt;
+    label en official "a willful attempt in any manner to defeat or evade tax imposed by this title (other than tax imposed by subtitle A or B)";
+}
+pub relation no_return_filed(p: Person, y: TaxableYear, k: TaxKind) kind empirical {
+    label en official "failure to file a return";
+}
+pub relation restitution_amount_under_6201a4(p: Person, y: TaxableYear, k: TaxKind) kind institutional;
+rule S6501RestitutionNeverTimeBarred strict {
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for amount: Money;
+    when restitution_ordered(p, y, k, amount);
+    then restitution_amount_under_6201a4(p, y, k);
+}
+@source(IRC_S6501_C, relation = formalizes, coverage = exact, quote = "In the case of a false or fraudulent return with the intent to evade tax, the tax may be assessed, or a proceeding in court for collection of such tax may be begun without assessment, at any time.")
+rule S6501NoLimitationOnFraudulentReturn strict {
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    when false_or_fraudulent_return(p, y, k);
+    then assessment_period_unlimited(p, y, k);
+}
+@source(IRC_S6501_C, relation = formalizes, coverage = exact, quote = "In case of a willful attempt in any manner to defeat or evade tax imposed by this title (other than tax imposed by subtitle A or B), the tax may be assessed, or a proceeding in court for the collection of such tax may be begun without assessment, at any time.")
+rule S6501NoLimitationOnWillfulEvasion strict {
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    when willful_attempt_to_evade(p, y, k);
+    then assessment_period_unlimited(p, y, k);
+}
+@source(IRC_S6501_C, relation = formalizes, coverage = exact, quote = "In the case of failure to file a return, the tax may be assessed, or a proceeding in court for the collection of such tax may be begun without assessment, at any time.")
+rule S6501NoLimitationOnNoReturn strict {
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    when no_return_filed(p, y, k);
+    then assessment_period_unlimited(p, y, k);
+}
+@source(IRC_S6501_C, relation = formalizes, coverage = exact, quote = "In the case of any amount described in section 6201(a)(4), such amount may be assessed, or a proceeding in court for the collection of such amount may be begun without assessment, at any time.")
+rule S6501NoLimitationOnRestitution strict {
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    when restitution_amount_under_6201a4(p, y, k);
+    then assessment_period_unlimited(p, y, k);
+}
+pub relation assessment_period_unlimited(p: Person, y: TaxableYear, k: TaxKind) kind institutional {
+    label en unofficial "no period of limitations applies to assessment of this liability (the tax may be assessed at any time)";
+}
+
+// --- (c)(4) — Consent to extend --------------------------------------------
+
+pub relation secretary_and_taxpayer_consented_in_writing(p: Person, y: TaxableYear, k: TaxKind, until: Date, consentedOn: Date) kind empirical {
+    label en official "both the Secretary and the taxpayer have consented in writing to its assessment after such time";
+}
+pub relation consent_within_original_period(p: Person, y: TaxableYear, k: TaxKind, until: Date, consentedOn: Date) kind institutional {
+    label en unofficial "single-atom `valid_when` helper (§201): the consent was given before the expiration of the time otherwise prescribed for assessment";
+}
+@source(IRC_S6501_C, relation = formalizes, coverage = exact, quote = "Where, before the expiration of the time prescribed for the assessment of any tax imposed by this title, except the estate tax provided in chapter 11, both the Secretary and the taxpayer have consented in writing to its assessment after such time, the tax may be assessed at any time prior to the expiration of the period agreed upon.")
+rule S6501ConsentWithinOriginalPeriod defeasible {
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for until: Date;
+    for consentedOn: Date;
+    for periodEnd: Date;
+    when secretary_and_taxpayer_consented_in_writing(p, y, k, until, consentedOn)
+        and assessment_period_ends(p, y, k, periodEnd)
+        and consentedOn <= periodEnd
+        and not_known(is_chapter_11_estate_tax(k));
+    then consent_within_original_period(p, y, k, until, consentedOn);
+}
+pub relation is_chapter_11_estate_tax(k: TaxKind) kind institutional;
+rule S6501IsChapter11EstateTax strict { then is_chapter_11_estate_tax(us.irc.core::EstateCh11); }
+pub rule S6501ExtendPeriodByConsent strict {
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for until: Date;
+    for consentedOn: Date;
+    when consent_within_original_period(p, y, k, until, consentedOn);
+    then power S6501ExtendPeriodByConsentPower {
+        holder Secretary;
+        over p;
+        exercise secretary_and_taxpayer_consented_in_writing(p, y, k, until, consentedOn);
+        valid_when consent_within_original_period(p, y, k, until, consentedOn);
+        effect create(assessment_period_ends(p, y, k, until));
+    };
+}
+pub relation period_extended_by_consent(p: Person, y: TaxableYear, k: TaxKind) kind institutional;
+rule PeriodExtendedByConsentExistential defeasible {
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for until: Date;
+    for consentedOn: Date;
+    when consent_within_original_period(p, y, k, until, consentedOn);
+    then period_extended_by_consent(p, y, k);
+}
+pub relation requests_taxpayer_consent_to_extend(p: Person, y: TaxableYear, k: TaxKind) kind empirical {
+    label en unofficial "positive anchor (§190): the Secretary requests the taxpayer's consent to extend the period, triggering the (c)(4)(B) notice duty";
+}
+pub relation notifies_taxpayer_of_right_to_refuse_or_limit_extension(p: Person, y: TaxableYear, k: TaxKind) kind empirical;
+@source(IRC_S6501_C, relation = formalizes, coverage = exact, quote = "The Secretary shall notify the taxpayer of the taxpayer's right to refuse to extend the period of limitations, or to limit such extension to particular issues or to a particular period of time, on each occasion when the taxpayer is requested to provide such consent.")
+rule S6501NotifyRightToRefuseExtension defeasible {
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    when requests_taxpayer_consent_to_extend(p, y, k);
+    then duty S6501NotifyRightToRefuseExtensionDuty {
+        bearer Secretary;
+        beneficiary p;
+        goal achievement {
+            condition notifies_taxpayer_of_right_to_refuse_or_limit_extension(p, y, k);
+            window [-infinity, infinity];
+        }
+    };
+}
+
+// --- (c)(7) — 60-day rule for amended returns with additional tax ---------
+
+pub relation written_document_shows_additional_tax_owed(p: Person, y: TaxableYear, receivedOn: Date, periodOtherwiseExpires: Date) kind empirical {
+    label en official "within the 60-day period ending on the day on which the time prescribed in this section for the assessment of any tax imposed by subtitle A for any taxable year would otherwise expire, the Secretary receives a written document signed by the taxpayer showing that the taxpayer owes an additional amount of such tax";
+}
+@source(IRC_S6501_C, relation = formalizes, coverage = exact, quote = "the period for the assessment of such additional amount shall not expire before the day 60 days after the day on which the Secretary receives such document.")
+rule S6501SixtyDayRuleForLateAdditionalTaxDocument strict {
+    for p: Person;
+    for y: TaxableYear;
+    for receivedOn: Date;
+    for periodOtherwiseExpires: Date;
+    when written_document_shows_additional_tax_owed(p, y, receivedOn, periodOtherwiseExpires)
+        and receivedOn <= periodOtherwiseExpires
+        and periodOtherwiseExpires <= add_calendar_period(receivedOn, 60 calendar_day);
+    then assessment_period_ends(p, y, us.irc.core::IncomeCh1, add_calendar_period(receivedOn, 60 calendar_day));
+    then period_extended_by_sixty_day_rule(p, y, us.irc.core::IncomeCh1);
+}
+pub relation period_extended_by_sixty_day_rule(p: Person, y: TaxableYear, k: TaxKind) kind institutional;
+
+// ============================================================================
+// §6501(e) — Substantial omission from gross income (6-year period)
+// ============================================================================
+
+pub relation gross_income_stated_on_return(r: Return, amount: Money) kind empirical;
+pub relation amount_omitted_from_gross_income(r: Return, amount: Money) kind empirical {
+    label en unofficial "an amount properly includible in gross income that the taxpayer omitted from the return (disclosure-in-the-return items are excluded per (e)(1)(B)(iii) — a case simply does not assert a disclosed item here)";
+}
+pub relation omitted_amount_attributable_to_6038d_asset(r: Return) kind institutional {
+    label en unofficial "the omitted amount is attributable to one or more assets required to be reported under §6038D (pending: `international`/`information-reporting`, not this package's norm)";
+}
+@source(IRC_S6501_E, relation = formalizes, coverage = exact, quote = "(i) such amount is in excess of 25 percent of the amount of gross income stated in the return, or")
+rule S6501SubstantialOmissionTwentyFivePercent strict {
+    for r: Return;
+    for p: Person;
+    for y: TaxableYear;
+    for stated: Money;
+    for omitted: Money;
+    when us.irc.core::return_of(r, p, y, us.irc.core::IncomeCh1)
+        and gross_income_stated_on_return(r, stated)
+        and amount_omitted_from_gross_income(r, omitted)
+        and (omitted * 4.00) > stated;
+    then substantial_omission_from_gross_income(p, y, us.irc.core::IncomeCh1);
+}
+@source(IRC_S6501_E, relation = formalizes, coverage = exact, quote = "(II) is in excess of $5,000,")
+rule S6501SubstantialOmissionForeignAsset strict {
+    for r: Return;
+    for p: Person;
+    for y: TaxableYear;
+    for omitted: Money;
+    when us.irc.core::return_of(r, p, y, us.irc.core::IncomeCh1)
+        and amount_omitted_from_gross_income(r, omitted)
+        and omitted_amount_attributable_to_6038d_asset(r)
+        and omitted > 5000.00 USD;
+    then substantial_omission_from_gross_income(p, y, us.irc.core::IncomeCh1);
+}
+pub relation substantial_omission_from_gross_income(p: Person, y: TaxableYear, k: TaxKind) kind institutional;
+@source(IRC_S6501_E, relation = formalizes, coverage = exact, quote = "the tax may be assessed, or a proceeding in court for collection of such tax may be begun without assessment, at any time within 6 years after the return was filed.")
+rule S6501SixYearPeriodOnSubstantialOmission defeasible {
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for filed: Date;
+    when substantial_omission_from_gross_income(p, y, k) and deemed_filed_date(p, y, k, filed);
+    then assessment_period_ends(p, y, k, add_calendar_period(filed, 6 calendar_year));
+}
+
+// ============================================================================
+// §6501(c)(8) — Failure to notify Secretary of certain foreign transfers
+// ============================================================================
+//
+// STAGE 2b (25.09.2026). Creates a further `assessment_period_ends` tuple
+// (same "no max-over-derived" limitation as every other exception in this
+// module — a consumer needing the single controlling date composes every
+// tuple this package derives, per this module's own header).
+
+pub relation foreign_information_required_under_6038_family(r: Return, p: Person, y: TaxableYear, k: TaxKind) kind empirical {
+    label en unofficial "information required to be reported to the Secretary under an election under section 1295(b) or 1298(f), or under section 6038, 6038A, 6038B, 6038D, 6046, 6046A, or 6048, with respect to this return/event/period";
+}
+pub relation foreign_information_furnished_on(r: Return, furnishedOn: Date) kind empirical {
+    label en official "the date the Secretary is furnished the information required to be reported under section 1295(b)/1298(f)/6038/6038A/6038B/6038D/6046/6046A/6048";
+}
+@source(IRC_S6501_C, relation = formalizes, coverage = exact, quote = "the time for assessment of any tax imposed by this title with respect to any tax return, event, or period to which such information relates shall not expire before the date which is 3 years after the date on which the Secretary is furnished the information required to be reported under such section.")
+rule S6501ThreeYearsAfterForeignInformationFurnished defeasible {
+    for r: Return;
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for furnishedOn: Date;
+    when foreign_information_required_under_6038_family(r, p, y, k)
+        and foreign_information_furnished_on(r, furnishedOn)
+        and not_known(foreign_information_failure_due_to_reasonable_cause(r));
+    then assessment_period_ends(p, y, k, add_calendar_period(furnishedOn, 3 calendar_year));
+}
+pub relation foreign_information_failure_due_to_reasonable_cause(r: Return) kind institutional {
+    label en unofficial "section 6501(c)(8)(B): a DECISION-0194 evaluative element (reasonable cause, not willful neglect), channeled as an external judgment relation with authority the Secretary — when it applies, (8)(A) is limited to the item(s) related to the failure, a per-item scoping this stage does not further compute (TECH_GAP)";
+}
+
+// ============================================================================
+// §6501(d) — Request for prompt assessment (18 months)
+// ============================================================================
+//
+// STAGE 2b (25.09.2026). A `power` (holder: the executor/administrator/
+// fiduciary, or the corporation) shortening the assessment window via a
+// written request. JUDGMENT CALL: this rule does NOT compare its 18-month
+// result against the ordinary 3-year period to pick the earlier one (the
+// statute's own final clause, "but not after the expiration of 3 years
+// after the return was filed", is a CEILING on how much (d) can shorten
+// the period, not a floor) — the same "no max/min-over-derived" limitation
+// this module's header already documents applies; a consumer must compare
+// this tuple against the ordinary `assessment_period_ends` tuple itself.
+// The (1)-(3) corporate-dissolution conditions are folded into a single
+// `valid_when` helper per the compiler's one-atom constraint; this stage
+// models the corporate branch's (1) sub-case only (dissolution
+// contemplated and begun before the 18 months expire, then completed) —
+// (2) (dissolution already begun in good faith) and (3) (dissolution
+// already completed at the time of the request) are the SAME shape and
+// classified TECH_GAP (same-pattern, not separately encoded).
+
+pub relation prompt_assessment_requested(p: Person, y: TaxableYear, k: TaxKind, requestedOn: Date) kind empirical {
+    label en official "a written request for prompt assessment, filed after the return is made, in the manner and form the Secretary prescribes, by the executor/administrator/fiduciary of a decedent's estate or by a corporation";
+}
+pub relation corporation_prompt_assessment_request(p: Person) kind institutional {
+    label en unofficial "the requester is a corporation (section 6501(d)'s own extra conditions apply only to this case, not to the decedent/estate case)";
+}
+pub relation corporation_notified_contemplated_dissolution(p: Person, y: TaxableYear, requestedOn: Date) kind empirical {
+    label en official "the written request notifies the Secretary that the corporation contemplates dissolution at or before the expiration of the 18-month period (section 6501(d)(1)(A))";
+}
+pub relation corporation_dissolution_begun_in_good_faith_before_deadline(p: Person, y: TaxableYear, beganOn: Date) kind empirical {
+    label en official "the dissolution is in good faith begun before the expiration of the 18-month period (section 6501(d)(1)(B))";
+}
+pub relation corporation_dissolution_completed(p: Person, y: TaxableYear) kind empirical {
+    label en official "the dissolution is completed (section 6501(d)(1)(C))";
+}
+pub relation prompt_assessment_request_valid(p: Person, y: TaxableYear, k: TaxKind, requestedOn: Date) kind institutional {
+    label en unofficial "single-atom valid_when helper: for a decedent/estate requester, the request alone suffices; for a corporation, the (d)(1)(A)-(C) dissolution chain must also hold (this stage's modeled sub-case)";
+}
+rule S6501PromptAssessmentValidForDecedentOrEstate defeasible {
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for requestedOn: Date;
+    when prompt_assessment_requested(p, y, k, requestedOn)
+        and not_known(corporation_prompt_assessment_request(p));
+    then prompt_assessment_request_valid(p, y, k, requestedOn);
+}
+rule S6501PromptAssessmentValidForCorporationDissolutionContemplated defeasible {
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for requestedOn: Date;
+    for beganOn: Date;
+    when prompt_assessment_requested(p, y, k, requestedOn)
+        and corporation_prompt_assessment_request(p)
+        and corporation_notified_contemplated_dissolution(p, y, requestedOn)
+        and corporation_dissolution_begun_in_good_faith_before_deadline(p, y, beganOn)
+        and beganOn <= add_calendar_period(requestedOn, 18 calendar_month)
+        and corporation_dissolution_completed(p, y);
+    then prompt_assessment_request_valid(p, y, k, requestedOn);
+}
+@source(IRC_S6501_D, relation = formalizes, coverage = exact, quote = "the tax shall be assessed, and any proceeding in court without assessment for the collection of such tax shall be begun, within 18 months after written request therefor (filed after the return is made and filed in such manner and such form as may be prescribed by regulations of the Secretary) by the executor, administrator, or other fiduciary representing the estate of such decedent, or by the corporation")
+pub rule S6501RequestPromptAssessment defeasible {
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for requestedOn: Date;
+    when prompt_assessment_request_valid(p, y, k, requestedOn);
+    then power S6501RequestPromptAssessmentPower {
+        holder p;
+        over p;
+        exercise prompt_assessment_requested(p, y, k, requestedOn);
+        valid_when prompt_assessment_request_valid(p, y, k, requestedOn);
+        effect create(assessment_period_ends(p, y, k, add_calendar_period(requestedOn, 18 calendar_month)));
+    };
+}
+
+// ============================================================================
+// §6501(h) — Net operating loss / capital loss carryback deficiencies
+// (representative carryback pattern; see module header for (i)/(j)/(k))
+// ============================================================================
+
+pub relation deficiency_attributable_to_carryback(p: Person, y: TaxableYear, k: TaxKind, lossYear: TaxableYear) kind empirical {
+    label en official "a deficiency attributable to the application to the taxpayer of a net operating loss carryback or a capital loss carryback";
+}
+@source(IRC_S6501_H, relation = formalizes, coverage = exact, quote = "In the case of a deficiency attributable to the application to the taxpayer of a net operating loss carryback or a capital loss carryback (including deficiencies which may be assessed pursuant to the provisions of section 6213(b)(3)), such deficiency may be assessed at any time before the expiration of the period within which a deficiency for the taxable year of the net operating loss or net capital loss which results in such carryback may be assessed.")
+// JUDGMENT CALL: this rule writes a DEDICATED relation
+// (`assessment_period_ends_via_carryback`), never `assessment_period_ends`
+// itself — reading `assessment_period_ends(p, lossYear, k, ...)` (the LOSS
+// year's own period) and writing `assessment_period_ends(p, y, k, ...)`
+// (THIS year's period) is a self-reference on the SAME predicate name that
+// the compiler classifies as a non-stratifiable cycle regardless of the
+// distinct year keys (LDC-E4102: predicate-level, not argument-level,
+// cycle detection). A consumer that needs the carryback-driven period for
+// year `y` reads this dedicated relation instead.
+pub relation assessment_period_ends_via_carryback(p: Person, y: TaxableYear, k: TaxKind, d: Date) kind institutional;
+rule S6501CarrybackDeficiencyTracksLossYearPeriod defeasible {
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for lossYear: TaxableYear;
+    for lossYearPeriodEnd: Date;
+    when deficiency_attributable_to_carryback(p, y, k, lossYear)
+        and assessment_period_ends(p, lossYear, k, lossYearPeriodEnd);
+    then assessment_period_ends_via_carryback(p, y, k, lossYearPeriodEnd);
+}
+
+// ============================================================================
+// The time-bar immunity
+// ============================================================================
+
+pub relation limitations_expired(p: Person, y: TaxableYear, k: TaxKind) kind institutional {
+    label en unofficial "positive existential over `assessment_period_ends` used only to type the immunity's trigger; the actual bar is the immunity's `window`, not this fact";
+}
+rule LimitationsExpiredExistential defeasible {
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for d: Date;
+    when assessment_period_ends(p, y, k, d);
+    then limitations_expired(p, y, k);
+}
+@source(IRC_S6501_A, relation = formalizes, coverage = contextual, quote = "the amount of any tax imposed by this title shall be assessed within 3 years after the return was filed")
+pub rule S6501AssessmentBarredAfterPeriodEnds defeasible {
+    for a: Assessment;
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for amount: Money;
+    for periodEnd: Date;
+    when assessment_period_ends(p, y, k, periodEnd)
+        and not_known(assessment_period_unlimited(p, y, k))
+        and secretary_makes_assessment(a, p, y, k, amount);
+    then immunity S6501LimitationsBarImmunity {
+        holder p;
+        protected_effect us.irc.core::assessment_of(a, p, y, k, amount);
+        window [add_calendar_period(periodEnd, 1 calendar_day), infinity);
+    };
+}
+priority LimitationsBarImmunityOutranksAssessPower {
+    prefer S6501AssessmentBarredAfterPeriodEnds over S6201AssessTax;
+    reason lex_specialis;
+}

@@ -1,0 +1,470 @@
+// 26 U.S.C. §§6406, 6407 (earliest-date refinement), 6408, 6409, 6414, 6602,
+// 6603 and 6612 — Chapter 65 (Abatements, Credit, and Refund) and Chapter 67
+// (Interest) provisions that finish, block, or cost a refund. Stage 2.
+//
+// JUDGMENT CALLS AND GAPS
+//  - §6406 is an IMMUNITY of the Secretary's findings and decisions from
+//    review by any other officer of the United States. The holder is the
+//    Secretary (an Organ); the exceptions of the text (fraud or a mistake in
+//    mathematical calculation; review under subchapters C and D of chapter
+//    76) are two defeaters. "Any other administrative or accounting officer"
+//    is NOT enumerated: the protected effect is the review itself (a case
+//    fact), no roster of reviewers is modelled.
+//  - §6407 already existed in 04-abatements-and-reports.law as "any authorised
+//    date is the date of allowance". The statute says the date on which the
+//    Secretary FIRST authorizes: stage 2 replaces that rule with the
+//    earliest-of-candidates idiom (TECH-GAPS G136: candidates + "no strictly
+//    earlier candidate"), so two authorisations give one date.
+//  - §6408 is a prohibition on the Secretary (refund or interest that would
+//    escheat to a State) plus an evidentiary condition for refunds to the
+//    estate of a decedent. Whether a sum "would escheat" under State
+//    unclaimed-property law is a case fact (the State law is external).
+//  - §6409 is modelled as two immunities of the recipient individual: the
+//    refund is never income for benefit-eligibility purposes, and is not a
+//    resource for 12 months from receipt (the window end is a helper
+//    relation computed with `add_calendar_period(_, 12 calendar_month)`).
+//    The applicability boundary is Pub. L. 111-312 sec. 728(c) (amounts
+//    received after 2009-12-31); the 2012 amendment by Pub. L. 112-240
+//    (received after 2012-12-31) is a SOURCE_GAP: the pre-amendment text is
+//    not pinned, so the current text runs from 2010-01-01.
+//  - §6414 (refund of withheld taxes only to the extent not withheld) is a
+//    calculation over the case-asserted withheld amount.
+//  - §6602 (interest on erroneous refunds) reads the Federal short-term rate
+//    fact of 06-interest.law (`federal_short_term_rate`, no pinned values:
+//    TECH-GAPS G2620 records the SOURCE_GAP) plus 3 points; the "recoverable
+//    by suit pursuant to section 7405" gate is a case fact.
+//  - §6603 (deposits) is modelled as: a deposit treated as a payment for
+//    §6601 when made; a duty to return on written request (unless jeopardy);
+//    the LIFO returned-deposit order is TECH-GAPS G2621 (an order over a
+//    derived ledger of deposits); the disputable-tax portion of a returned
+//    deposit is a stated number the case asserts; the (d)(4) rate is the
+//    Federal short-term rate, daily compounding (the compounding step of
+//    06-interest.law is one day only: existing TECH_GAP).
+//  - §6612 (three cross-reference paragraphs) is NON_NORMATIVE.
+
+language "law.core" version "0.2";
+package us.irc.payment_refunds_interest version "0.1.1";
+namespace "urn:us:irc:payment_refunds_interest:clir";
+
+use self::{
+    Claim,
+    ErroneousRefund,
+    Estate,
+    IRC_S6406,
+    IRC_S6408,
+    IRC_S6409,
+    IRC_S6409_NOTE_5,
+    IRC_S6414,
+    IRC_S6602,
+    IRC_S6603_B,
+    IRC_S6603_C,
+    IRC_S6603_D,
+    IRC_S6603_E,
+    Individual,
+    Person,
+    Secretary,
+    TaxKind,
+    TaxableYear,
+    federal_short_term_rate,
+    overassessment_scheduling_authorized_on,
+    overpayment_amount,
+};
+
+// ============================================================================
+// §6406 — Prohibition of administrative review of decisions
+// ============================================================================
+
+relation secretary_decision_on_claim(c: Claim) kind empirical {
+    label en official "the findings of fact in and the decision of the Secretary upon the merits of any claim presented under or authorized by the internal revenue laws";
+}
+relation secretary_decision_on_interest_of_claim(c: Claim) kind empirical {
+    label en official "the allowance or non-allowance by the Secretary of interest on any credit or refund under the internal revenue laws";
+}
+relation fraud_or_mathematical_mistake_in_claim(c: Claim) kind empirical {
+    label en official "fraud or mistake in mathematical calculation";
+}
+relation decision_subject_to_tax_court_review(c: Claim) kind empirical {
+    label en official "review provided by subchapters C and D of chapter 76 (relating to the Tax Court)";
+}
+relation decision_reviewed_by_other_officer(c: Claim) kind empirical {
+    label en official "the decision is reviewed by another administrative or accounting officer, employee, or agent of the United States";
+}
+
+@source(IRC_S6406, relation = formalizes, coverage = partial, quote = "the findings of fact in and the decision of the Secretary upon the merits of any claim presented under or authorized by the internal revenue laws")
+rule S6406ClaimDecisionNotReviewableByOtherOfficers defeasible {
+    for c: Claim;
+    when secretary_decision_on_claim(c);
+    then immunity S6406ClaimDecisionFinality {
+        holder Secretary;
+        protected_effect decision_reviewed_by_other_officer(c);
+        window [-infinity, infinity];
+    };
+    unless fraud_or_mathematical_mistake_in_claim(c);
+    unless decision_subject_to_tax_court_review(c);
+}
+
+@source(IRC_S6406, relation = formalizes, coverage = partial, quote = "the allowance or non-allowance by the Secretary of interest on any credit or refund under the internal revenue laws shall not")
+rule S6406InterestDecisionNotReviewableByOtherOfficers defeasible {
+    for c: Claim;
+    when secretary_decision_on_interest_of_claim(c);
+    then immunity S6406InterestDecisionFinality {
+        holder Secretary;
+        protected_effect decision_reviewed_by_other_officer(c);
+        window [-infinity, infinity];
+    };
+    unless fraud_or_mathematical_mistake_in_claim(c);
+    unless decision_subject_to_tax_court_review(c);
+}
+
+// ============================================================================
+// §6407 — Date of allowance of refund or credit: the FIRST authorisation
+// ============================================================================
+
+relation earlier_overassessment_authorization_exists(p: Person, y: TaxableYear, kind: TaxKind, d: Date) kind institutional {
+    label en unofficial "helper: another authorisation to schedule an overassessment for the same tax is strictly earlier (TECH-GAPS G136 idiom for earliest-of-several-dates)";
+}
+rule S6407EarlierAuthorizationExists strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for d: Date;
+    for other: Date;
+    when overassessment_scheduling_authorized_on(p, y, kind, d)
+        and overassessment_scheduling_authorized_on(p, y, kind, other)
+        and other < d;
+    then earlier_overassessment_authorization_exists(p, y, kind, d);
+}
+
+// ============================================================================
+// §6408 — State escheat of refunds
+// ============================================================================
+
+relation refund_or_interest_would_escheat_to_state(p: Person, y: TaxableYear, kind: TaxKind) kind empirical {
+    label en official "the amount of such refund (or interest) would escheat to a State or would otherwise become the property of a State under any law relating to the disposition of unclaimed or abandoned property";
+}
+relation secretary_pays_refund_or_interest(p: Person, y: TaxableYear, kind: TaxKind) kind empirical {
+    label en unofficial "the Secretary refunds the overpayment (or pays interest on it) in the case";
+}
+@source(IRC_S6408, relation = formalizes, coverage = exact, quote = "No overpayment of any tax imposed by this title shall be refunded (and no interest with respect to any such overpayment shall be paid) if the amount of such refund (or interest) would escheat to a State or would otherwise become the property of a State under any law relating to the disposition of unclaimed or abandoned property.")
+rule S6408NoRefundThatWouldEscheat strict {
+    effective [@1987-12-22, infinity);
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    when refund_or_interest_would_escheat_to_state(p, y, kind) and secretary_pays_refund_or_interest(p, y, kind);
+    then prohibition NoRefundOfEscheatingOverpayment {
+        bearer Secretary;
+        beneficiary p;
+        action secretary_pays_refund_or_interest(p, y, kind);
+        window [-infinity, infinity];
+    };
+}
+
+relation refund_to_estate_of_decedent(est: Estate, y: TaxableYear, kind: TaxKind) kind empirical {
+    label en official "a refund (or payment of interest) to the estate of any decedent";
+}
+relation non_escheat_affirmatively_shown(est: Estate, y: TaxableYear, kind: TaxKind) kind empirical {
+    label en official "it is affirmatively shown that such amount will not escheat to a State or otherwise become the property of a State";
+}
+relation secretary_pays_estate_refund(est: Estate, y: TaxableYear, kind: TaxKind) kind empirical {
+    label en unofficial "the Secretary makes a refund or payment of interest to the estate";
+}
+@source(IRC_S6408, relation = formalizes, coverage = partial, quote = "No refund (or payment of interest) shall be made to the estate of any decedent unless it is affirmatively shown that such amount will not escheat to a State or otherwise become the property of a State")
+rule S6408NoEstateRefundWithoutShowingNoEscheat defeasible {
+    effective [@1987-12-22, infinity);
+    for est: Estate;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    when refund_to_estate_of_decedent(est, y, kind) and secretary_pays_estate_refund(est, y, kind);
+    then prohibition NoEstateRefundUnlessNonEscheatShown {
+        bearer Secretary;
+        beneficiary est;
+        action secretary_pays_estate_refund(est, y, kind);
+        window [-infinity, infinity];
+    };
+    unless non_escheat_affirmatively_shown(est, y, kind);
+}
+
+// ============================================================================
+// §6409 — Refunds disregarded in the administration of Federal programs
+// ============================================================================
+
+relation refund_paid_to_individual(p: Individual, received: Date) kind empirical {
+    label en official "any refund (or advance payment with respect to a refundable credit) made to any individual under this title";
+}
+relation refund_taken_into_account_as_income_for_benefits(p: Individual, received: Date) kind empirical {
+    label en official "taken into account as income for purposes of determining eligibility for benefits or assistance under a Federal, State, or local program financed with Federal funds";
+}
+relation refund_taken_into_account_as_resource_for_benefits(p: Individual, received: Date, on: Date) kind empirical {
+    label en official "taken into account as a resource on the date for purposes of determining eligibility for benefits or assistance";
+}
+relation refund_resource_disregard_ends(p: Individual, received: Date, until: Date) kind institutional {
+    label en official "a period of 12 months from receipt";
+}
+
+rule S6409ResourceDisregardPeriodEnd strict {
+    for p: Individual;
+    for received: Date;
+    when refund_paid_to_individual(p, received);
+    then refund_resource_disregard_ends(p, received, add_calendar_period(received, 12 calendar_month));
+}
+
+@source(IRC_S6409, relation = formalizes, coverage = partial, quote = "any refund (or advance payment with respect to a refundable credit) made to any individual under this title shall not be taken into account as income")
+@source(IRC_S6409_NOTE_5, relation = applies, coverage = exact, quote = "The amendments made by this section [enacting this section] shall apply to amounts received after December 31, 2009.")
+rule S6409RefundNotIncomeForBenefits strict {
+    effective [@2010-01-01, infinity);
+    for p: Individual;
+    for received: Date;
+    when refund_paid_to_individual(p, received);
+    then immunity S6409RefundNotIncome {
+        holder p;
+        protected_effect refund_taken_into_account_as_income_for_benefits(p, received);
+        window [received, infinity];
+    };
+}
+
+@source(IRC_S6409, relation = formalizes, coverage = partial, quote = "shall not be taken into account as resources for a period of 12 months from receipt")
+@source(IRC_S6409_NOTE_5, relation = applies, coverage = exact, quote = "The amendments made by this section [enacting this section] shall apply to amounts received after December 31, 2009.")
+rule S6409RefundNotResourceForTwelveMonths strict {
+    effective [@2010-01-01, infinity);
+    for p: Individual;
+    for received: Date;
+    for until: Date;
+    for on: Date;
+    when refund_resource_disregard_ends(p, received, until) and refund_taken_into_account_as_resource_for_benefits(p, received, on);
+    then immunity S6409RefundNotResource {
+        holder p;
+        protected_effect refund_taken_into_account_as_resource_for_benefits(p, received, on);
+        window [received, until];
+    };
+}
+
+// ============================================================================
+// §6414 — Income tax withheld: refund only to the extent not withheld
+// ============================================================================
+
+relation amount_deducted_and_withheld_by_agent(agent: Person, y: TaxableYear, kind: TaxKind, amount: Money) kind empirical {
+    label en official "the amount of such overpayment [that] was deducted and withheld by the employer or withholding agent";
+}
+pub relation refundable_to_withholding_agent(agent: Person, y: TaxableYear, kind: TaxKind, amount: Money) kind institutional {
+    label en official "refund or credit made to the employer or withholding agent only to the extent that the overpayment was not deducted and withheld";
+}
+@source(IRC_S6414, relation = formalizes, coverage = exact, quote = "refund or credit shall be made to the employer or to the withholding agent, as the case may be, only to the extent that the amount of such overpayment was not deducted and withheld by the employer or withholding agent")
+rule S6414RefundToAgentOnlyExtentNotWithheld strict {
+    for agent: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for over_amt: Money;
+    for withheld: Money;
+    when overpayment_amount(agent, y, kind, over_amt)
+        and (kind == us.irc.core::WithholdingNraCh3 or kind == us.irc.core::FatcaCh4 or kind == us.irc.core::WithholdingWagesCh24)
+        and amount_deducted_and_withheld_by_agent(agent, y, kind, withheld);
+    then refundable_to_withholding_agent(agent, y, kind, max(0 USD, over_amt - withheld));
+}
+
+// ============================================================================
+// §6602 — Interest on erroneous refunds recoverable by suit
+// ============================================================================
+
+relation erroneous_refund_recoverable_by_suit_under_7405(r: ErroneousRefund) kind empirical {
+    label en official "recoverable by suit pursuant to section 7405";
+}
+relation erroneous_refund_paid_on(r: ErroneousRefund, d: Date) kind empirical {
+    label en official "the date of the payment of the refund";
+}
+relation erroneous_refund_interest_runs_from(r: ErroneousRefund, d: Date) kind institutional {
+    label en official "shall bear interest ... from the date of the payment of the refund";
+}
+@source(IRC_S6602, relation = formalizes, coverage = partial, quote = "shall bear interest at the underpayment rate established under section 6621 from the date of the payment of the refund")
+rule S6602ErroneousRefundBearsInterestFromPayment strict {
+    for r: ErroneousRefund;
+    for d: Date;
+    when erroneous_refund_recoverable_by_suit_under_7405(r) and erroneous_refund_paid_on(r, d);
+    then erroneous_refund_interest_runs_from(r, d);
+}
+pub relation erroneous_refund_interest_rate(r: ErroneousRefund, quarter_start: Date, rate_percent: Decimal) kind institutional {
+    label en official "the underpayment rate established under section 6621(a)(2): the Federal short-term rate plus 3 percentage points";
+}
+@source(IRC_S6602, relation = formalizes, coverage = partial, quote = "shall bear interest at the underpayment rate established under section 6621")
+rule S6602InterestAtUnderpaymentRate strict {
+    for r: ErroneousRefund;
+    for d: Date;
+    for quarter_start: Date;
+    for base: Decimal;
+    when erroneous_refund_interest_runs_from(r, d) and federal_short_term_rate(quarter_start, base);
+    then erroneous_refund_interest_rate(r, quarter_start, base + 3.0);
+}
+
+// ============================================================================
+// §6603 — Deposits made to suspend running of interest on potential underpayments
+// ============================================================================
+
+entity Deposit { label en unofficial "a cash deposit made under section 6603(a)"; }
+relation deposit_made(d: Deposit, p: Person, amount: Money, on: Date) kind empirical {
+    label en official "a taxpayer may make a cash deposit with the Secretary";
+}
+relation deposit_for_unassessed_tax_kind(d: Deposit, kind: TaxKind) kind empirical {
+    label en official "any tax imposed under subtitle A or B or chapter 41, 42, 43, or 44 which has not been assessed at the time of the deposit";
+}
+relation deposit_valid_under_6603(d: Deposit) kind institutional {
+    label en official "a cash deposit that may be used by the Secretary to pay a not-yet-assessed tax of an eligible kind";
+}
+rule S6603DepositValid strict {
+    for d: Deposit;
+    for p: Person;
+    for amount: Money;
+    for on: Date;
+    for kind: TaxKind;
+    when deposit_made(d, p, amount, on) and deposit_for_unassessed_tax_kind(d, kind)
+        and (kind == us.irc.core::IncomeCh1 or kind == us.irc.core::SelfEmploymentCh2 or kind == us.irc.core::NiitCh2A
+            or kind == us.irc.core::WithholdingNraCh3 or kind == us.irc.core::FatcaCh4
+            or kind == us.irc.core::EstateCh11 or kind == us.irc.core::GiftCh12 or kind == us.irc.core::GstCh13
+            or kind == us.irc.core::ExpatriateGiftsCh15
+            or kind == us.irc.core::PublicCharitiesExciseCh41 or kind == us.irc.core::PrivateFoundationsExciseCh42
+            or kind == us.irc.core::QualifiedPlansExciseCh43 or kind == us.irc.core::InvestmentEntitiesExciseCh44);
+    then deposit_valid_under_6603(d);
+}
+
+relation deposit_used_to_pay_tax(d: Deposit, p: Person, y: TaxableYear, kind: TaxKind) kind empirical {
+    label en official "such deposit is used by the Secretary to pay tax";
+}
+pub relation deposit_treated_as_paid_on(p: Person, y: TaxableYear, kind: TaxKind, on: Date) kind institutional {
+    label en official "for purposes of section 6601, the tax shall be treated as paid when the deposit is made";
+}
+@source(IRC_S6603_B, relation = formalizes, coverage = exact, quote = "To the extent that such deposit is used by the Secretary to pay tax, for purposes of section 6601 (relating to interest on underpayments), the tax shall be treated as paid when the deposit is made.")
+rule S6603DepositUsedIsPaidWhenMade strict {
+    for d: Deposit;
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for amount: Money;
+    for on: Date;
+    when deposit_valid_under_6603(d) and deposit_used_to_pay_tax(d, p, y, kind) and deposit_made(d, p, amount, on);
+    then deposit_treated_as_paid_on(p, y, kind, on);
+}
+
+relation taxpayer_requests_return_of_deposit_in_writing(d: Deposit) kind empirical {
+    label en official "the taxpayer requests in writing";
+}
+relation collection_of_tax_is_in_jeopardy(p: Person) kind empirical {
+    label en official "the Secretary determines that collection of tax is in jeopardy";
+}
+relation deposit_returned(d: Deposit) kind institutional {
+    label en official "the Secretary returns to the taxpayer any amount of the deposit (to the extent not used for a payment of tax)";
+}
+@source(IRC_S6603_C, relation = formalizes, coverage = exact, quote = "Except in a case where the Secretary determines that collection of tax is in jeopardy, the Secretary shall return to the taxpayer any amount of the deposit (to the extent not used for a payment of tax) which the taxpayer requests in writing.")
+rule S6603DutyToReturnDepositOnRequest defeasible {
+    for d: Deposit;
+    for p: Person;
+    for amount: Money;
+    for on: Date;
+    when deposit_valid_under_6603(d) and deposit_made(d, p, amount, on) and taxpayer_requests_return_of_deposit_in_writing(d);
+    then duty ReturnDepositOnWrittenRequest {
+        bearer Secretary;
+        beneficiary p;
+        goal achievement {
+            condition deposit_returned(d);
+            window [on, infinity];
+        }
+    };
+    unless collection_of_tax_is_in_jeopardy(p) and deposit_made(d, p, amount, on);
+}
+
+// (d)(1): a returned deposit is a payment of tax for the overpayment-interest
+// rules only to the extent attributable to a disputable tax for the period.
+relation deposit_returned_amount_for_period(d: Deposit, p: Person, amount: Money, period_start: Date) kind empirical {
+    label en official "the amount of the returned deposit for the period";
+}
+relation deposit_disputable_tax_amount(d: Deposit, amount: Money) kind empirical {
+    label en official "the amount of tax specified at the time of the deposit as the taxpayer's reasonable estimate of the maximum amount of any tax attributable to disputable items";
+}
+relation letter_30_day_proposed_deficiency(d: Deposit, amount: Money) kind empirical {
+    label en official "a taxpayer who has been issued a 30-day letter: the amount of the proposed deficiency specified in such letter";
+}
+relation deposit_has_30_day_letter(d: Deposit) kind institutional {
+    label en unofficial "helper: a 30-day letter was issued to the depositor";
+}
+rule S6603DepositHasThirtyDayLetter strict {
+    for d: Deposit;
+    for proposed: Money;
+    when letter_30_day_proposed_deficiency(d, proposed);
+    then deposit_has_30_day_letter(d);
+}
+relation deposit_disputable_tax_effective(d: Deposit, amount: Money) kind institutional {
+    label en official "the maximum amount of tax specified as attributable to disputable items, not less than the proposed deficiency of a 30-day letter";
+}
+@source(IRC_S6603_D, relation = formalizes, coverage = partial, quote = "the term \"disputable tax\" means the amount of tax specified at the time of the deposit as the taxpayer's reasonable estimate of the maximum amount of any tax attributable to disputable items")
+rule S6603DisputableTaxAsStated strict {
+    for d: Deposit;
+    for stated: Money;
+    when deposit_disputable_tax_amount(d, stated) and not_known(deposit_has_30_day_letter(d));
+    then deposit_disputable_tax_effective(d, stated);
+}
+@source(IRC_S6603_D, relation = formalizes, coverage = exact, quote = "In the case of a taxpayer who has been issued a 30-day letter, the maximum amount of tax under subparagraph (A) shall not be less than the amount of the proposed deficiency specified in such letter.")
+rule S6603DisputableTaxNotLessThanProposedDeficiency strict {
+    for d: Deposit;
+    for stated: Money;
+    for proposed: Money;
+    when deposit_disputable_tax_amount(d, stated) and letter_30_day_proposed_deficiency(d, proposed);
+    then deposit_disputable_tax_effective(d, max(stated, proposed));
+}
+pub relation returned_deposit_treated_as_payment_amount(d: Deposit, amount: Money) kind institutional {
+    label en official "a deposit which is returned to a taxpayer shall be treated as a payment of tax for any period to the extent (and only to the extent) attributable to a disputable tax for such period";
+}
+@source(IRC_S6603_D, relation = formalizes, coverage = partial, quote = "a deposit which is returned to a taxpayer shall be treated as a payment of tax for any period to the extent (and only to the extent) attributable to a disputable tax for such period")
+rule S6603ReturnedDepositIsPaymentToDisputableExtent strict {
+    for d: Deposit;
+    for p: Person;
+    for returned: Money;
+    for period_start: Date;
+    for disputable: Money;
+    when deposit_returned(d) and deposit_returned_amount_for_period(d, p, returned, period_start) and deposit_disputable_tax_effective(d, disputable);
+    then returned_deposit_treated_as_payment_amount(d, min(returned, disputable));
+}
+
+// (e)(1): deposits are used for payment in the order deposited, unless the
+// taxpayer designates otherwise. Ordering by deposit date: earliest-of-
+// candidates idiom (G136).
+relation taxpayer_designates_deposit_use_order(p: Person) kind empirical {
+    label en official "except as otherwise provided by the taxpayer";
+}
+relation earlier_deposit_exists(p: Person, d: Deposit, on: Date) kind institutional {
+    label en unofficial "helper: another deposit of the same person was made strictly earlier";
+}
+rule S6603EarlierDepositExists strict {
+    for p: Person;
+    for d: Deposit;
+    for other: Deposit;
+    for amount: Money;
+    for amount2: Money;
+    for on: Date;
+    for on2: Date;
+    when deposit_made(d, p, amount, on) and deposit_made(other, p, amount2, on2) and on2 < on;
+    then earlier_deposit_exists(p, d, on);
+}
+relation deposit_first_in_order_of_use(d: Deposit) kind institutional {
+    label en official "deposits shall be treated as used for the payment of tax in the order deposited: this is the earliest deposit not yet used";
+}
+@source(IRC_S6603_E, relation = formalizes, coverage = partial, quote = "Except as otherwise provided by the taxpayer, deposits shall be treated as used for the payment of tax in the order deposited.")
+rule S6603FirstDepositUsedFirst defeasible {
+    for p: Person;
+    for d: Deposit;
+    for amount: Money;
+    for on: Date;
+    when deposit_made(d, p, amount, on) and not_known(earlier_deposit_exists(p, d, on));
+    then deposit_first_in_order_of_use(d);
+    unless taxpayer_designates_deposit_use_order(p) and deposit_made(d, p, amount, on);
+}
+
+// (d)(4): the rate of interest on the returned deposit is the Federal
+// short-term rate under §6621(b), compounded daily.
+pub relation deposit_return_interest_rate(quarter_start: Date, rate_percent: Decimal) kind institutional {
+    label en official "the rate of interest under this subsection shall be the Federal short-term rate determined under section 6621(b), compounded daily";
+}
+@source(IRC_S6603_D, relation = formalizes, coverage = partial, quote = "The rate of interest under this subsection shall be the Federal short-term rate determined under section 6621(b), compounded daily.")
+rule S6603ReturnInterestAtFederalShortTermRate strict {
+    for quarter_start: Date;
+    for base: Decimal;
+    when federal_short_term_rate(quarter_start, base);
+    then deposit_return_interest_rate(quarter_start, base);
+}

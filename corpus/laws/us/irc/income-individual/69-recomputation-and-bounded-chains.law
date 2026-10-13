@@ -1,0 +1,1656 @@
+// Stage 4 (26.09.2026, DECISION-0379 with deontics): the TECH_GAP rows of income-individual G5500-G5508.
+//
+// TECHNIQUE. Two devices, both bounded and both stated in the coverage rows:
+//  (1) A parallel rule set over the rate tables (a RERUN of section 1 at another income). The tax of section 1 is keyed
+//      by a (person, year) pair whose taxable income the case asserts (`taxable_income`), so it cannot be asked at
+//      another income. The ten rate tables are decision tables that answer for any income; this module repeats only the
+//      arithmetic of the table wording ("base tax plus the rate times the excess over the lower bound", rule
+//      `TaxUnderTable*` of `rates.law`) over a REQUESTED income (`requested_income_1993` / `requested_income_tcja`,
+//      the device of `amount_to_index`: the request tuple binds every head variable). The pinned tables are the 1993
+//      base table and the 2018 unindexed TCJA amounts, exactly what `tax_under_section_1` reads.
+//  (2) Year-to-year chains as UNROLLED predicates over a chain of years the case orders (`..._chain_year(k, y)`,
+//      k = 1 the earliest): a predicate cannot feed itself across years (LDC-E4102), but step k of the chain is its own
+//      predicate reading step k-1. The bound is stated at each chain (three years for the CFC adjustment, the financial
+//      statement net operating loss and the farm loss; three loss years by four deduction years for the alternative tax
+//      net operating loss; six years for the corporate AMT foreign tax credit, which covers the "first 5 succeeding
+//      taxable years"). A case whose chain is longer is outside the bound (recorded in TECH-GAPS G6706).
+//
+// The consumers of the pre-existing rules stay: a year outside a chain keeps the asserted-carryover reading of stage 3.
+
+language "law.core" version "0.2";
+package us.irc.income_individual version "0.1.1";
+namespace "urn:us:irc:income_individual:clir";
+
+use self::{
+    AmtAdjustmentKind,
+    Corporation,
+    FilingStatus,
+    IRC_S15_A,
+    IRC_S1_A,
+    IRC_S1_G,
+    IRC_S56A_C,
+    IRC_S56A_D,
+    IRC_S56_B,
+    IRC_S56_D,
+    IRC_S58_A,
+    IRC_S59_L,
+    Indebtedness,
+    Individual,
+    Person,
+    RateChange,
+    TaxableYear,
+    adjusted_financial_statement_income,
+    afsi_before_nol_deduction,
+    amt_adjustment,
+    amti_before_atnol_and_section_199,
+    applicable_corporation,
+    atnol_attributable_to_elected_applicable_loss,
+    atnol_deduction,
+    bracket_1986_estate_trust,
+    bracket_1986_hoh,
+    bracket_1986_joint,
+    bracket_1986_married_separate,
+    bracket_1986_unmarried,
+    bracket_tcja_estate_trust,
+    bracket_tcja_hoh,
+    bracket_tcja_joint,
+    bracket_tcja_married_separate,
+    bracket_tcja_unmarried,
+    cfc_adjustment_determined,
+    cfc_foreign_taxes_pro_rata_share,
+    cfc_pro_rata_share_of_items,
+    corporate_amt_foreign_tax_credit,
+    corporation_chooses_foreign_tax_credit_benefits,
+    farm_loss_carried_in_total,
+    farm_loss_current_total,
+    farm_loss_subject_to_denial,
+    filing_status,
+    financial_statement_nol_carryovers,
+    has_cfc_shareholding,
+    has_electing_child,
+    insolvency_amount,
+    investment_interest_for_amt,
+    loss_year_begins_on,
+    noncorporate_taxpayer_for_year,
+    own_foreign_taxes_on_financial_statement,
+    pab_interest_includible_for_163d,
+    pab_related_deduction_for_163d,
+    parent_gross_income_inclusion_from_child,
+    parent_tax_after_child_income_inclusion,
+    qualified_housing_interest_on,
+    rate_change_effective_date,
+    rate_change_prorates_year,
+    section_56a_c3_adjustment,
+    taxable_income,
+    tentative_tax_after_change,
+    tentative_tax_before_change,
+    united_states_shareholder_of_cfc,
+};
+
+// ============================================================================
+// Section 1 at a requested income (parallel rule set over the rate tables)
+// ============================================================================
+
+pub relation requested_income_1993(p: Person, y: TaxableYear, income: Money) kind institutional {
+    label en unofficial "the taxable income at which the tax of section 1 is recomputed under the 1993 base table (produced by the recomputation rules of this module)";
+}
+pub relation requested_income_tcja(p: Person, y: TaxableYear, income: Money) kind institutional {
+    label en unofficial "the taxable income at which the tax of section 1 is recomputed under the TCJA table of section 1(j)(2) (produced by the recomputation rules of this module)";
+}
+pub relation tax_at_income_1993_table(p: Person, y: TaxableYear, income: Money, tax: Money) kind institutional {
+    label en unofficial "the tax of section 1(a)-(e) at the requested income under the 1993 base table and the filing status of the person";
+}
+pub relation tax_at_income_tcja_table(p: Person, y: TaxableYear, income: Money, tax: Money) kind institutional {
+    label en unofficial "the tax of section 1(j)(2) at the requested income under the TCJA table and the filing status of the person";
+}
+pub relation hypothetical_tax_1(p: Person, y: TaxableYear, income: Money, tax: Money) kind institutional {
+    label en unofficial "the tax of section 1 at the requested income under the table of the year (the 1993 table for a year that begins before 2018, the TCJA table from 2018)";
+}
+@source(IRC_S1_A)
+rule Tax1993AtJoint(p: Person, y: TaxableYear, income: Money, lower: Money, base: Money, rate: Decimal) strict {
+    label en unofficial "1993 table, Joint: base tax plus the rate times the excess over the lower bound at the requested income";
+    when requested_income_1993(p, y, income);
+    when filing_status(p, y, Joint);
+    when bracket_1986_joint(income, lower, base, rate);
+    then tax_at_income_1993_table(p, y, income, base + rate * (income - lower));
+}
+@source(IRC_S1_A)
+rule TaxTcjaAtJoint(p: Person, y: TaxableYear, income: Money, lower: Money, base: Money, rate: Decimal) strict {
+    label en unofficial "Tcja table, Joint: base tax plus the rate times the excess over the lower bound at the requested income";
+    when requested_income_tcja(p, y, income);
+    when filing_status(p, y, Joint);
+    when bracket_tcja_joint(income, lower, base, rate);
+    then tax_at_income_tcja_table(p, y, income, base + rate * (income - lower));
+}
+@source(IRC_S1_A)
+rule Tax1993AtHeadOfHousehold(p: Person, y: TaxableYear, income: Money, lower: Money, base: Money, rate: Decimal) strict {
+    label en unofficial "1993 table, HeadOfHousehold: base tax plus the rate times the excess over the lower bound at the requested income";
+    when requested_income_1993(p, y, income);
+    when filing_status(p, y, HeadOfHousehold);
+    when bracket_1986_hoh(income, lower, base, rate);
+    then tax_at_income_1993_table(p, y, income, base + rate * (income - lower));
+}
+@source(IRC_S1_A)
+rule TaxTcjaAtHeadOfHousehold(p: Person, y: TaxableYear, income: Money, lower: Money, base: Money, rate: Decimal) strict {
+    label en unofficial "Tcja table, HeadOfHousehold: base tax plus the rate times the excess over the lower bound at the requested income";
+    when requested_income_tcja(p, y, income);
+    when filing_status(p, y, HeadOfHousehold);
+    when bracket_tcja_hoh(income, lower, base, rate);
+    then tax_at_income_tcja_table(p, y, income, base + rate * (income - lower));
+}
+@source(IRC_S1_A)
+rule Tax1993AtUnmarried(p: Person, y: TaxableYear, income: Money, lower: Money, base: Money, rate: Decimal) strict {
+    label en unofficial "1993 table, Unmarried: base tax plus the rate times the excess over the lower bound at the requested income";
+    when requested_income_1993(p, y, income);
+    when filing_status(p, y, Unmarried);
+    when bracket_1986_unmarried(income, lower, base, rate);
+    then tax_at_income_1993_table(p, y, income, base + rate * (income - lower));
+}
+@source(IRC_S1_A)
+rule TaxTcjaAtUnmarried(p: Person, y: TaxableYear, income: Money, lower: Money, base: Money, rate: Decimal) strict {
+    label en unofficial "Tcja table, Unmarried: base tax plus the rate times the excess over the lower bound at the requested income";
+    when requested_income_tcja(p, y, income);
+    when filing_status(p, y, Unmarried);
+    when bracket_tcja_unmarried(income, lower, base, rate);
+    then tax_at_income_tcja_table(p, y, income, base + rate * (income - lower));
+}
+@source(IRC_S1_A)
+rule Tax1993AtMarriedSeparate(p: Person, y: TaxableYear, income: Money, lower: Money, base: Money, rate: Decimal) strict {
+    label en unofficial "1993 table, MarriedSeparate: base tax plus the rate times the excess over the lower bound at the requested income";
+    when requested_income_1993(p, y, income);
+    when filing_status(p, y, MarriedSeparate);
+    when bracket_1986_married_separate(income, lower, base, rate);
+    then tax_at_income_1993_table(p, y, income, base + rate * (income - lower));
+}
+@source(IRC_S1_A)
+rule TaxTcjaAtMarriedSeparate(p: Person, y: TaxableYear, income: Money, lower: Money, base: Money, rate: Decimal) strict {
+    label en unofficial "Tcja table, MarriedSeparate: base tax plus the rate times the excess over the lower bound at the requested income";
+    when requested_income_tcja(p, y, income);
+    when filing_status(p, y, MarriedSeparate);
+    when bracket_tcja_married_separate(income, lower, base, rate);
+    then tax_at_income_tcja_table(p, y, income, base + rate * (income - lower));
+}
+@source(IRC_S1_A)
+rule Tax1993AtEstateOrTrust(p: Person, y: TaxableYear, income: Money, lower: Money, base: Money, rate: Decimal) strict {
+    label en unofficial "1993 table, EstateOrTrust: base tax plus the rate times the excess over the lower bound at the requested income";
+    when requested_income_1993(p, y, income);
+    when filing_status(p, y, EstateOrTrust);
+    when bracket_1986_estate_trust(income, lower, base, rate);
+    then tax_at_income_1993_table(p, y, income, base + rate * (income - lower));
+}
+@source(IRC_S1_A)
+rule TaxTcjaAtEstateOrTrust(p: Person, y: TaxableYear, income: Money, lower: Money, base: Money, rate: Decimal) strict {
+    label en unofficial "Tcja table, EstateOrTrust: base tax plus the rate times the excess over the lower bound at the requested income";
+    when requested_income_tcja(p, y, income);
+    when filing_status(p, y, EstateOrTrust);
+    when bracket_tcja_estate_trust(income, lower, base, rate);
+    then tax_at_income_tcja_table(p, y, income, base + rate * (income - lower));
+}
+rule HypotheticalTax1993Year(p: Person, y: TaxableYear, income: Money, tax: Money) strict {
+    label en unofficial "the year begins before 2018: the 1993 table answers";
+    when tax_at_income_1993_table(p, y, income, tax);
+    then hypothetical_tax_1(p, y, income, tax);
+}
+rule HypotheticalTaxTcjaYear(p: Person, y: TaxableYear, income: Money, tax: Money) strict {
+    label en unofficial "the year begins in 2018 or later: the TCJA table answers";
+    when tax_at_income_tcja_table(p, y, income, tax);
+    then hypothetical_tax_1(p, y, income, tax);
+}
+pub relation hypothetical_income_request_1(p: Person, y: TaxableYear, income: Money) kind institutional {
+    label en unofficial "the taxable income at which the tax of section 1 of the year is recomputed (produced by the recomputation rules of this module; the era of the year decides the table)";
+}
+rule RequestIncome1993ByYear(p: Person, y: TaxableYear, income: Money, d: Date) strict {
+    when hypothetical_income_request_1(p, y, income);
+    when us.irc.core::begins(y, d);
+    when d < @2018-01-01;
+    then requested_income_1993(p, y, income);
+}
+rule RequestIncomeTcjaByYear(p: Person, y: TaxableYear, income: Money, d: Date) strict {
+    when hypothetical_income_request_1(p, y, income);
+    when us.irc.core::begins(y, d);
+    when d >= @2018-01-01;
+    then requested_income_tcja(p, y, income);
+}
+
+// ============================================================================
+// §1(g)(7)(B)(ii)(I): the tax of the parent on the taxable income increased by the included income of the children
+// ============================================================================
+
+pub relation parent_taxable_income_with_child_inclusion(parent: Individual, y: TaxableYear, income: Money) kind institutional {
+    label en official "the taxable income of the parent after the gross income of the electing children is included (section 1(g)(7)(B)(i)): the taxable income plus the included amounts (JUDGMENT CALL: the included gross income raises taxable income dollar for dollar)";
+}
+@source(IRC_S1_G, relation = formalizes, coverage = exact, quote = "(i) the gross income of each child to whom such election applies (to the extent the gross income of such child exceeds twice the amount described in paragraph (4)(A)(ii)(I)) shall be included in such parent's gross income for the taxable year,")
+rule ParentTaxableIncomeWithChildInclusion(parent: Individual, y: TaxableYear, ti: Money) strict {
+    label en official "section 1(g)(7)(B)(i): taxable income plus the total inclusion";
+    when has_electing_child(parent, y);
+    when taxable_income(parent, y, ti);
+    then parent_taxable_income_with_child_inclusion(parent, y, ti + sum all amount: Money for child: Person where parent_gross_income_inclusion_from_child(parent, child, y, amount));
+}
+@source(IRC_S1_G, relation = formalizes, coverage = exact, quote = "(I) the amount determined under this section after the application of clause (i), plus")
+rule RequestParentIncomeAfterInclusion(parent: Individual, y: TaxableYear, income: Money) strict {
+    label en official "the tax at the increased income is requested";
+    when parent_taxable_income_with_child_inclusion(parent, y, income);
+    then hypothetical_income_request_1(parent, y, income);
+}
+@source(IRC_S1_G, relation = formalizes, coverage = exact, quote = "(I) the amount determined under this section after the application of clause (i), plus")
+rule ParentTaxAfterChildInclusionComputed(parent: Individual, y: TaxableYear, income: Money, tax: Money) strict {
+    label en official "section 1(g)(7)(B)(ii)(I): the tax imposed by section 1 on the parent's income after the inclusion (a second evaluation of the table at another income)";
+    when parent_taxable_income_with_child_inclusion(parent, y, income);
+    when hypothetical_tax_1(parent, y, income, tax);
+    then parent_tax_after_child_income_inclusion(parent, y, tax);
+}
+
+// ============================================================================
+// §15(a)(1)-(2): the two tentative taxes of a rate change, for the change that the pinned tables carry
+// ============================================================================
+// The only enacted change of the rates of section 1 that the pinned tables carry is the 2018 change (1993 base table to
+// the TCJA table): for a change whose effective date is 2018-01-01 the tentative tax before is the 1993 table at the
+// taxable income of the whole year and the tentative tax after is the TCJA table at the same income. Any other change
+// keeps the typed contracts `tentative_tax_before_change` / `tentative_tax_after_change` (no rate is invented).
+
+@source(IRC_S15_A, relation = formalizes, coverage = exact, quote = "(1) tentative taxes shall be computed by applying the rate for the period before the effective date of the change, and the rate for the period on and after such date, to the taxable income for the entire taxable year; and")
+rule RequestTaxableIncomeBeforeTcjaChange(p: Person, y: TaxableYear, chg: RateChange, eff: Date, ti: Money) strict {
+    label en official "section 15(a)(1): the whole-year taxable income is run through the rate before the change";
+    when rate_change_effective_date(chg, eff);
+    when eff == @2018-01-01;
+    when rate_change_prorates_year(y, chg);
+    when taxable_income(p, y, ti);
+    then requested_income_1993(p, y, ti);
+}
+@source(IRC_S15_A, relation = formalizes, coverage = exact, quote = "(1) tentative taxes shall be computed by applying the rate for the period before the effective date of the change, and the rate for the period on and after such date, to the taxable income for the entire taxable year; and")
+rule RequestTaxableIncomeAfterTcjaChange(p: Person, y: TaxableYear, chg: RateChange, eff: Date, ti: Money) strict {
+    label en official "section 15(a)(1): the whole-year taxable income is run through the rate after the change";
+    when rate_change_effective_date(chg, eff);
+    when eff == @2018-01-01;
+    when rate_change_prorates_year(y, chg);
+    when taxable_income(p, y, ti);
+    then requested_income_tcja(p, y, ti);
+}
+@source(IRC_S15_A, relation = formalizes, coverage = exact, quote = "(1) tentative taxes shall be computed by applying the rate for the period before the effective date of the change, and the rate for the period on and after such date, to the taxable income for the entire taxable year; and")
+rule TentativeTaxBeforeTcjaChange(p: Person, y: TaxableYear, chg: RateChange, eff: Date, ti: Money, tax: Money) strict {
+    label en official "section 15(a)(1): the tentative tax before the change";
+    when rate_change_effective_date(chg, eff);
+    when eff == @2018-01-01;
+    when rate_change_prorates_year(y, chg);
+    when taxable_income(p, y, ti);
+    when tax_at_income_1993_table(p, y, ti, tax);
+    then tentative_tax_before_change(p, y, chg, tax);
+}
+@source(IRC_S15_A, relation = formalizes, coverage = exact, quote = "(1) tentative taxes shall be computed by applying the rate for the period before the effective date of the change, and the rate for the period on and after such date, to the taxable income for the entire taxable year; and")
+rule TentativeTaxAfterTcjaChange(p: Person, y: TaxableYear, chg: RateChange, eff: Date, ti: Money, tax: Money) strict {
+    label en official "section 15(a)(1): the tentative tax after the change";
+    when rate_change_effective_date(chg, eff);
+    when eff == @2018-01-01;
+    when rate_change_prorates_year(y, chg);
+    when taxable_income(p, y, ti);
+    when tax_at_income_tcja_table(p, y, ti, tax);
+    then tentative_tax_after_change(p, y, chg, tax);
+}
+
+// ============================================================================
+// §56A(c)(3)(B): the negative adjustment carried from year to year (G5502), three chain years
+// ============================================================================
+// The case orders the years of the chain (`cfc_chain_year_56Ac3(c, k, y)`, k = 1 the earliest, three years). Step k is
+// its own predicate (a predicate cannot feed itself across years, LDC-E4102); the adjustment of the year then flows
+// into `cfc_adjustment_determined`, so the stage 3 negative-adjustment rules stay the consumers. A year outside the
+// chain keeps the asserted carry-in of stage 3. A fourth chain year is outside the bound (TECH-GAPS G6706).
+
+pub relation cfc_chain_year_56Ac3(c: Corporation, k: Integer, y: TaxableYear) kind empirical {
+    label en unofficial "the k-th taxable year (k = 1 the earliest, up to 3) of the chain of years in which a negative section 56A(c)(3) adjustment is carried forward";
+}
+relation has_cfc_chain_year_56Ac3(c: Corporation, y: TaxableYear) kind institutional {
+    label en unofficial "the year is a year of the asserted chain";
+}
+rule HasCfcChainYear56Ac3(c: Corporation, k: Integer, y: TaxableYear) strict {
+    when cfc_chain_year_56Ac3(c, k, y);
+    then has_cfc_chain_year_56Ac3(c, y);
+}
+relation cfc_shares_total_56Ac3(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "the sum of the pro rata shares of the items of the controlled foreign corporations for the year";
+}
+rule CfcSharesTotal56Ac3(c: Corporation, y: TaxableYear) strict {
+    when has_cfc_shareholding(c, y);
+    then cfc_shares_total_56Ac3(c, y, sum(collect all a: Money, cfc: Corporation where united_states_shareholder_of_cfc(c, y, cfc) and cfc_pro_rata_share_of_items(c, y, cfc, a), empty: 0.00 USD));
+}
+relation cfc_chain_determined_1(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "chain step 1: the adjustment before subparagraph (B)(i)";
+}
+relation cfc_chain_negative_1(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "chain step 1: the negative adjustment carried to step 2 (zero when the adjustment is not negative)";
+}
+relation cfc_chain_determined_2(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "chain step 2: the adjustment before subparagraph (B)(i), reduced by the negative adjustment of step 1";
+}
+relation cfc_chain_negative_2(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "chain step 2: the negative adjustment carried to step 3";
+}
+relation cfc_chain_determined_3(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "chain step 3: the adjustment before subparagraph (B)(i), reduced by the negative adjustment of step 2";
+}
+@source(IRC_S56A_C, relation = formalizes, coverage = exact, quote = "the adjusted financial statement income of such taxpayer with respect to such controlled foreign corporation (as determined under paragraph (2)(C)) shall be adjusted to also take into account such taxpayer's pro rata share")
+rule CfcChainStep1(c: Corporation, y: TaxableYear, shares: Money) strict {
+    label en official "section 56A(c)(3)(A): the first chain year has no carry-in";
+    when cfc_chain_year_56Ac3(c, 1, y);
+    when cfc_shares_total_56Ac3(c, y, shares);
+    then cfc_chain_determined_1(c, y, shares);
+}
+@source(IRC_S56A_C, relation = formalizes, coverage = exact, quote = "the adjusted financial statement income of such taxpayer with respect to such controlled foreign corporation (as determined under paragraph (2)(C)) shall be adjusted to also take into account such taxpayer's pro rata share")
+rule CfcChainNegative1(c: Corporation, y: TaxableYear, d: Money) strict {
+    label en official "section 56A(c)(3)(B)(i)-(ii): the negative amount of step 1 is carried to the succeeding year";
+    when cfc_chain_determined_1(c, y, d);
+    then cfc_chain_negative_1(c, y, max(0.00 USD, 0.00 USD - d));
+}
+@source(IRC_S56A_C, relation = formalizes, coverage = exact, quote = "the adjusted financial statement income of such taxpayer with respect to such controlled foreign corporation (as determined under paragraph (2)(C)) shall be adjusted to also take into account such taxpayer's pro rata share")
+rule CfcChainStep2(c: Corporation, y1: TaxableYear, y2: TaxableYear, shares: Money, neg: Money) strict {
+    label en official "section 56A(c)(3)(B)(ii): the second chain year is reduced by the negative adjustment of the first";
+    when cfc_chain_year_56Ac3(c, 1, y1);
+    when cfc_chain_year_56Ac3(c, 2, y2);
+    when cfc_chain_negative_1(c, y1, neg);
+    when cfc_shares_total_56Ac3(c, y2, shares);
+    then cfc_chain_determined_2(c, y2, shares - neg);
+}
+@source(IRC_S56A_C, relation = formalizes, coverage = exact, quote = "the adjusted financial statement income of such taxpayer with respect to such controlled foreign corporation (as determined under paragraph (2)(C)) shall be adjusted to also take into account such taxpayer's pro rata share")
+rule CfcChainNegative2(c: Corporation, y: TaxableYear, d: Money) strict {
+    label en official "section 56A(c)(3)(B)(i)-(ii): the negative amount of step 2 is carried to the succeeding year";
+    when cfc_chain_determined_2(c, y, d);
+    then cfc_chain_negative_2(c, y, max(0.00 USD, 0.00 USD - d));
+}
+@source(IRC_S56A_C, relation = formalizes, coverage = exact, quote = "the adjusted financial statement income of such taxpayer with respect to such controlled foreign corporation (as determined under paragraph (2)(C)) shall be adjusted to also take into account such taxpayer's pro rata share")
+rule CfcChainStep3(c: Corporation, y2: TaxableYear, y3: TaxableYear, shares: Money, neg: Money) strict {
+    label en official "section 56A(c)(3)(B)(ii): the third chain year is reduced by the negative adjustment of the second";
+    when cfc_chain_year_56Ac3(c, 2, y2);
+    when cfc_chain_year_56Ac3(c, 3, y3);
+    when cfc_chain_negative_2(c, y2, neg);
+    when cfc_shares_total_56Ac3(c, y3, shares);
+    then cfc_chain_determined_3(c, y3, shares - neg);
+}
+@source(IRC_S56A_C, relation = formalizes, coverage = exact, quote = "the adjusted financial statement income of such taxpayer with respect to such controlled foreign corporation (as determined under paragraph (2)(C)) shall be adjusted to also take into account such taxpayer's pro rata share")
+rule CfcChainDeterminedStep1(c: Corporation, y: TaxableYear, d: Money) strict {
+    when cfc_chain_determined_1(c, y, d);
+    then cfc_adjustment_determined(c, y, d);
+}
+@source(IRC_S56A_C, relation = formalizes, coverage = exact, quote = "the adjusted financial statement income of such taxpayer with respect to such controlled foreign corporation (as determined under paragraph (2)(C)) shall be adjusted to also take into account such taxpayer's pro rata share")
+rule CfcChainDeterminedStep2(c: Corporation, y: TaxableYear, d: Money) strict {
+    when cfc_chain_determined_2(c, y, d);
+    then cfc_adjustment_determined(c, y, d);
+}
+@source(IRC_S56A_C, relation = formalizes, coverage = exact, quote = "the adjusted financial statement income of such taxpayer with respect to such controlled foreign corporation (as determined under paragraph (2)(C)) shall be adjusted to also take into account such taxpayer's pro rata share")
+rule CfcChainDeterminedStep3(c: Corporation, y: TaxableYear, d: Money) strict {
+    when cfc_chain_determined_3(c, y, d);
+    then cfc_adjustment_determined(c, y, d);
+}
+
+// ============================================================================
+// Stage 4b (26.09.2026): year-to-year ledgers, unrolled and bounded (G6709, G6710, G6711) and the interest recomputation (G6708)
+// ============================================================================
+// A ledger of years cannot be one predicate reading itself (LDC-E4102). Each ledger below is UNROLLED: the case orders the
+// years of the chain (`..._chain_year(k, y)`, k = 1 the earliest), step k is its own predicate, and the derived answer
+// of the year flows into the pub relation that the stage 3 consumers already read. The stage 3 rules that read an asserted
+// carryover are guarded by `not_known(<year is in the chain>)`, so a year outside a chain keeps the stage 3 reading.
+// Bounds (each recorded in TECH-GAPS G6713): financial statement NOL 3 chain years, section 59(l)(2) 6 chain years (the
+// first 5 succeeding years of an excess of the FIRST chain year are all inside the chain, so no excess expires inside it),
+// alternative tax NOL 3 loss years by 4 deduction years, farm loss 3 chain years.
+
+// ---- §56A(d)(2): the financial statement net operating loss carryover (3 chain years) ------------------------
+
+pub relation fsnol_chain_year_56Ad(c: Corporation, k: Integer, y: TaxableYear) kind empirical {
+    label en unofficial "the k-th taxable year (k = 1 the earliest, up to 3) of the chain over which the financial statement net operating loss carryover is computed";
+}
+pub relation fsnol_arising_in_year_56Ad2(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the financial statement net operating loss arising in the taxable year (a positive amount)";
+}
+relation has_fsnol_chain_year_56Ad(c: Corporation, y: TaxableYear) kind institutional {
+    label en unofficial "the year is a year of the financial statement net operating loss chain";
+}
+rule HasFsnolChainYear56Ad(c: Corporation, k: Integer, y: TaxableYear) strict {
+    when fsnol_chain_year_56Ad(c, k, y);
+    then has_fsnol_chain_year_56Ad(c, y);
+}
+relation fsnol_opening_1(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "chain step 1: the financial statement net operating loss carryover to the year, before the deduction";
+}
+relation fsnol_applied_1(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "chain step 1: the carryover applied in the year (the lesser of the carryover and 80 percent of the adjusted financial statement income before the deduction, never below zero)";
+}
+@source(IRC_S56A_D, relation = formalizes, coverage = exact, quote = "A financial statement net operating loss for any taxable year shall be a financial statement net operating loss carryover to each taxable year following the taxable year of the loss.")
+rule FsnolApplied1(c: Corporation, y: TaxableYear, opening: Money, before: Money) strict {
+    label en official "section 56A(d)(1), (2): the carryover applied in chain step 1";
+    effective [@2023-01-01, infinity);
+    when fsnol_opening_1(c, y, opening);
+    when afsi_before_nol_deduction(c, y, before);
+    then fsnol_applied_1(c, y, min(opening, max(0.00 USD, before * 0.8)));
+}
+@source(IRC_S56A_D, relation = formalizes, coverage = exact, quote = "A financial statement net operating loss for any taxable year shall be a financial statement net operating loss carryover to each taxable year following the taxable year of the loss.")
+rule FsnolAfsi1(c: Corporation, y: TaxableYear, applied: Money, before: Money) strict {
+    label en official "section 56A(d)(1): adjusted financial statement income after the deduction of chain step 1";
+    effective [@2023-01-01, infinity);
+    when fsnol_applied_1(c, y, applied);
+    when afsi_before_nol_deduction(c, y, before);
+    then adjusted_financial_statement_income(c, y, before - applied);
+}
+relation fsnol_opening_2(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "chain step 2: the financial statement net operating loss carryover to the year, before the deduction";
+}
+relation fsnol_applied_2(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "chain step 2: the carryover applied in the year (the lesser of the carryover and 80 percent of the adjusted financial statement income before the deduction, never below zero)";
+}
+@source(IRC_S56A_D, relation = formalizes, coverage = exact, quote = "A financial statement net operating loss for any taxable year shall be a financial statement net operating loss carryover to each taxable year following the taxable year of the loss.")
+rule FsnolApplied2(c: Corporation, y: TaxableYear, opening: Money, before: Money) strict {
+    label en official "section 56A(d)(1), (2): the carryover applied in chain step 2";
+    effective [@2023-01-01, infinity);
+    when fsnol_opening_2(c, y, opening);
+    when afsi_before_nol_deduction(c, y, before);
+    then fsnol_applied_2(c, y, min(opening, max(0.00 USD, before * 0.8)));
+}
+@source(IRC_S56A_D, relation = formalizes, coverage = exact, quote = "A financial statement net operating loss for any taxable year shall be a financial statement net operating loss carryover to each taxable year following the taxable year of the loss.")
+rule FsnolAfsi2(c: Corporation, y: TaxableYear, applied: Money, before: Money) strict {
+    label en official "section 56A(d)(1): adjusted financial statement income after the deduction of chain step 2";
+    effective [@2023-01-01, infinity);
+    when fsnol_applied_2(c, y, applied);
+    when afsi_before_nol_deduction(c, y, before);
+    then adjusted_financial_statement_income(c, y, before - applied);
+}
+relation fsnol_opening_3(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "chain step 3: the financial statement net operating loss carryover to the year, before the deduction";
+}
+relation fsnol_applied_3(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "chain step 3: the carryover applied in the year (the lesser of the carryover and 80 percent of the adjusted financial statement income before the deduction, never below zero)";
+}
+@source(IRC_S56A_D, relation = formalizes, coverage = exact, quote = "A financial statement net operating loss for any taxable year shall be a financial statement net operating loss carryover to each taxable year following the taxable year of the loss.")
+rule FsnolApplied3(c: Corporation, y: TaxableYear, opening: Money, before: Money) strict {
+    label en official "section 56A(d)(1), (2): the carryover applied in chain step 3";
+    effective [@2023-01-01, infinity);
+    when fsnol_opening_3(c, y, opening);
+    when afsi_before_nol_deduction(c, y, before);
+    then fsnol_applied_3(c, y, min(opening, max(0.00 USD, before * 0.8)));
+}
+@source(IRC_S56A_D, relation = formalizes, coverage = exact, quote = "A financial statement net operating loss for any taxable year shall be a financial statement net operating loss carryover to each taxable year following the taxable year of the loss.")
+rule FsnolAfsi3(c: Corporation, y: TaxableYear, applied: Money, before: Money) strict {
+    label en official "section 56A(d)(1): adjusted financial statement income after the deduction of chain step 3";
+    effective [@2023-01-01, infinity);
+    when fsnol_applied_3(c, y, applied);
+    when afsi_before_nol_deduction(c, y, before);
+    then adjusted_financial_statement_income(c, y, before - applied);
+}
+@source(IRC_S56A_D, relation = formalizes, coverage = exact, quote = "A financial statement net operating loss for any taxable year shall be a financial statement net operating loss carryover to each taxable year following the taxable year of the loss.")
+rule FsnolOpening1(c: Corporation, y: TaxableYear) strict {
+    label en official "section 56A(d)(2): the carryover into the first chain year is the asserted carryover (zero when none)";
+    effective [@2023-01-01, infinity);
+    when fsnol_chain_year_56Ad(c, 1, y);
+    then fsnol_opening_1(c, y, sum(collect all a: Money where financial_statement_nol_carryovers(c, y, a), empty: 0.00 USD));
+}
+@source(IRC_S56A_D, relation = formalizes, coverage = exact, quote = "A financial statement net operating loss for any taxable year shall be a financial statement net operating loss carryover to each taxable year following the taxable year of the loss.")
+rule FsnolOpening2(c: Corporation, y1: TaxableYear, y2: TaxableYear, opening: Money, applied: Money) strict {
+    label en official "section 56A(d)(2): the portion carried to the succeeding year is the loss remaining after paragraph (1), plus the loss arising in the year";
+    effective [@2023-01-01, infinity);
+    when fsnol_chain_year_56Ad(c, 1, y1);
+    when fsnol_chain_year_56Ad(c, 2, y2);
+    when fsnol_opening_1(c, y1, opening);
+    when fsnol_applied_1(c, y1, applied);
+    then fsnol_opening_2(c, y2, opening - applied + sum(collect all a: Money where fsnol_arising_in_year_56Ad2(c, y1, a), empty: 0.00 USD));
+}
+@source(IRC_S56A_D, relation = formalizes, coverage = exact, quote = "A financial statement net operating loss for any taxable year shall be a financial statement net operating loss carryover to each taxable year following the taxable year of the loss.")
+rule FsnolOpening3(c: Corporation, y1: TaxableYear, y2: TaxableYear, opening: Money, applied: Money) strict {
+    label en official "section 56A(d)(2): the portion carried to the succeeding year is the loss remaining after paragraph (1), plus the loss arising in the year";
+    effective [@2023-01-01, infinity);
+    when fsnol_chain_year_56Ad(c, 2, y1);
+    when fsnol_chain_year_56Ad(c, 3, y2);
+    when fsnol_opening_2(c, y1, opening);
+    when fsnol_applied_2(c, y1, applied);
+    then fsnol_opening_3(c, y2, opening - applied + sum(collect all a: Money where fsnol_arising_in_year_56Ad2(c, y1, a), empty: 0.00 USD));
+}
+
+// ---- §59(l)(2): the excess of the pro rata foreign taxes carried to the first 5 succeeding years (6 chain years) ----
+
+pub relation camt_ftc_chain_year_59l2(c: Corporation, k: Integer, y: TaxableYear) kind empirical {
+    label en unofficial "the k-th taxable year (k = 1 the earliest, up to 6) of the chain over which the section 59(l)(2) excess is carried";
+}
+pub relation camt_ftc_excess_carried_in_59l2(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the excess of the amount of paragraph (1)(A)(i) over (1)(A)(ii) carried into the first chain year from a year before the chain (zero when none)";
+}
+relation has_camt_ftc_chain_year_59l2(c: Corporation, y: TaxableYear) kind institutional {
+    label en unofficial "the year is a year of the section 59(l)(2) chain";
+}
+rule HasCamtFtcChainYear59l2(c: Corporation, k: Integer, y: TaxableYear) strict {
+    when camt_ftc_chain_year_59l2(c, k, y);
+    then has_camt_ftc_chain_year_59l2(c, y);
+}
+relation camt_ftc_opening_1(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "chain step 1: the excess carried into the year and not taken into account in a prior year";
+}
+relation camt_ftc_excess_1(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "chain step 1: the excess of the CFC taxes (increased by the carried excess) over 15 percent of the section 56A(c)(3) adjustment, carried to the succeeding year";
+}
+@source(IRC_S59_L, relation = formalizes, coverage = partial, quote = "For any taxable year for which an applicable corporation chooses to have the benefits of subpart A of part III of subchapter N")
+rule CamtFtcChainStep1(c: Corporation, y: TaxableYear, opening: Money, cfc: Money, adjustment: Money, own: Money) strict {
+    label en official "section 59(l)(1), (2): the credit of chain step 1: the lesser of the CFC taxes increased by the carried excess or 15 percent of the adjustment, plus the own taxes";
+    effective [@2023-01-01, infinity);
+    when camt_ftc_opening_1(c, y, opening);
+    when corporation_chooses_foreign_tax_credit_benefits(c, y);
+    when applicable_corporation(c, y);
+    when cfc_foreign_taxes_pro_rata_share(c, y, cfc);
+    when section_56a_c3_adjustment(c, y, adjustment);
+    when own_foreign_taxes_on_financial_statement(c, y, own);
+    then corporate_amt_foreign_tax_credit(c, y, min(cfc + opening, adjustment * 0.15) + own);
+}
+@source(IRC_S59_L, relation = formalizes, coverage = partial, quote = "For any taxable year for which an applicable corporation chooses to have the benefits of subpart A of part III of subchapter N")
+rule CamtFtcExcess1(c: Corporation, y: TaxableYear, opening: Money, cfc: Money, adjustment: Money) strict {
+    label en official "section 59(l)(2): the excess of the amount of (1)(A)(i) over the amount of (1)(A)(ii) in chain step 1";
+    effective [@2023-01-01, infinity);
+    when camt_ftc_opening_1(c, y, opening);
+    when corporation_chooses_foreign_tax_credit_benefits(c, y);
+    when applicable_corporation(c, y);
+    when cfc_foreign_taxes_pro_rata_share(c, y, cfc);
+    when section_56a_c3_adjustment(c, y, adjustment);
+    then camt_ftc_excess_1(c, y, max(0.00 USD, cfc + opening - adjustment * 0.15));
+}
+relation camt_ftc_opening_2(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "chain step 2: the excess carried into the year and not taken into account in a prior year";
+}
+relation camt_ftc_excess_2(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "chain step 2: the excess of the CFC taxes (increased by the carried excess) over 15 percent of the section 56A(c)(3) adjustment, carried to the succeeding year";
+}
+@source(IRC_S59_L, relation = formalizes, coverage = partial, quote = "For any taxable year for which an applicable corporation chooses to have the benefits of subpart A of part III of subchapter N")
+rule CamtFtcChainStep2(c: Corporation, y: TaxableYear, opening: Money, cfc: Money, adjustment: Money, own: Money) strict {
+    label en official "section 59(l)(1), (2): the credit of chain step 2: the lesser of the CFC taxes increased by the carried excess or 15 percent of the adjustment, plus the own taxes";
+    effective [@2023-01-01, infinity);
+    when camt_ftc_opening_2(c, y, opening);
+    when corporation_chooses_foreign_tax_credit_benefits(c, y);
+    when applicable_corporation(c, y);
+    when cfc_foreign_taxes_pro_rata_share(c, y, cfc);
+    when section_56a_c3_adjustment(c, y, adjustment);
+    when own_foreign_taxes_on_financial_statement(c, y, own);
+    then corporate_amt_foreign_tax_credit(c, y, min(cfc + opening, adjustment * 0.15) + own);
+}
+@source(IRC_S59_L, relation = formalizes, coverage = partial, quote = "For any taxable year for which an applicable corporation chooses to have the benefits of subpart A of part III of subchapter N")
+rule CamtFtcExcess2(c: Corporation, y: TaxableYear, opening: Money, cfc: Money, adjustment: Money) strict {
+    label en official "section 59(l)(2): the excess of the amount of (1)(A)(i) over the amount of (1)(A)(ii) in chain step 2";
+    effective [@2023-01-01, infinity);
+    when camt_ftc_opening_2(c, y, opening);
+    when corporation_chooses_foreign_tax_credit_benefits(c, y);
+    when applicable_corporation(c, y);
+    when cfc_foreign_taxes_pro_rata_share(c, y, cfc);
+    when section_56a_c3_adjustment(c, y, adjustment);
+    then camt_ftc_excess_2(c, y, max(0.00 USD, cfc + opening - adjustment * 0.15));
+}
+relation camt_ftc_opening_3(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "chain step 3: the excess carried into the year and not taken into account in a prior year";
+}
+relation camt_ftc_excess_3(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "chain step 3: the excess of the CFC taxes (increased by the carried excess) over 15 percent of the section 56A(c)(3) adjustment, carried to the succeeding year";
+}
+@source(IRC_S59_L, relation = formalizes, coverage = partial, quote = "For any taxable year for which an applicable corporation chooses to have the benefits of subpart A of part III of subchapter N")
+rule CamtFtcChainStep3(c: Corporation, y: TaxableYear, opening: Money, cfc: Money, adjustment: Money, own: Money) strict {
+    label en official "section 59(l)(1), (2): the credit of chain step 3: the lesser of the CFC taxes increased by the carried excess or 15 percent of the adjustment, plus the own taxes";
+    effective [@2023-01-01, infinity);
+    when camt_ftc_opening_3(c, y, opening);
+    when corporation_chooses_foreign_tax_credit_benefits(c, y);
+    when applicable_corporation(c, y);
+    when cfc_foreign_taxes_pro_rata_share(c, y, cfc);
+    when section_56a_c3_adjustment(c, y, adjustment);
+    when own_foreign_taxes_on_financial_statement(c, y, own);
+    then corporate_amt_foreign_tax_credit(c, y, min(cfc + opening, adjustment * 0.15) + own);
+}
+@source(IRC_S59_L, relation = formalizes, coverage = partial, quote = "For any taxable year for which an applicable corporation chooses to have the benefits of subpart A of part III of subchapter N")
+rule CamtFtcExcess3(c: Corporation, y: TaxableYear, opening: Money, cfc: Money, adjustment: Money) strict {
+    label en official "section 59(l)(2): the excess of the amount of (1)(A)(i) over the amount of (1)(A)(ii) in chain step 3";
+    effective [@2023-01-01, infinity);
+    when camt_ftc_opening_3(c, y, opening);
+    when corporation_chooses_foreign_tax_credit_benefits(c, y);
+    when applicable_corporation(c, y);
+    when cfc_foreign_taxes_pro_rata_share(c, y, cfc);
+    when section_56a_c3_adjustment(c, y, adjustment);
+    then camt_ftc_excess_3(c, y, max(0.00 USD, cfc + opening - adjustment * 0.15));
+}
+relation camt_ftc_opening_4(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "chain step 4: the excess carried into the year and not taken into account in a prior year";
+}
+relation camt_ftc_excess_4(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "chain step 4: the excess of the CFC taxes (increased by the carried excess) over 15 percent of the section 56A(c)(3) adjustment, carried to the succeeding year";
+}
+@source(IRC_S59_L, relation = formalizes, coverage = partial, quote = "For any taxable year for which an applicable corporation chooses to have the benefits of subpart A of part III of subchapter N")
+rule CamtFtcChainStep4(c: Corporation, y: TaxableYear, opening: Money, cfc: Money, adjustment: Money, own: Money) strict {
+    label en official "section 59(l)(1), (2): the credit of chain step 4: the lesser of the CFC taxes increased by the carried excess or 15 percent of the adjustment, plus the own taxes";
+    effective [@2023-01-01, infinity);
+    when camt_ftc_opening_4(c, y, opening);
+    when corporation_chooses_foreign_tax_credit_benefits(c, y);
+    when applicable_corporation(c, y);
+    when cfc_foreign_taxes_pro_rata_share(c, y, cfc);
+    when section_56a_c3_adjustment(c, y, adjustment);
+    when own_foreign_taxes_on_financial_statement(c, y, own);
+    then corporate_amt_foreign_tax_credit(c, y, min(cfc + opening, adjustment * 0.15) + own);
+}
+@source(IRC_S59_L, relation = formalizes, coverage = partial, quote = "For any taxable year for which an applicable corporation chooses to have the benefits of subpart A of part III of subchapter N")
+rule CamtFtcExcess4(c: Corporation, y: TaxableYear, opening: Money, cfc: Money, adjustment: Money) strict {
+    label en official "section 59(l)(2): the excess of the amount of (1)(A)(i) over the amount of (1)(A)(ii) in chain step 4";
+    effective [@2023-01-01, infinity);
+    when camt_ftc_opening_4(c, y, opening);
+    when corporation_chooses_foreign_tax_credit_benefits(c, y);
+    when applicable_corporation(c, y);
+    when cfc_foreign_taxes_pro_rata_share(c, y, cfc);
+    when section_56a_c3_adjustment(c, y, adjustment);
+    then camt_ftc_excess_4(c, y, max(0.00 USD, cfc + opening - adjustment * 0.15));
+}
+relation camt_ftc_opening_5(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "chain step 5: the excess carried into the year and not taken into account in a prior year";
+}
+relation camt_ftc_excess_5(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "chain step 5: the excess of the CFC taxes (increased by the carried excess) over 15 percent of the section 56A(c)(3) adjustment, carried to the succeeding year";
+}
+@source(IRC_S59_L, relation = formalizes, coverage = partial, quote = "For any taxable year for which an applicable corporation chooses to have the benefits of subpart A of part III of subchapter N")
+rule CamtFtcChainStep5(c: Corporation, y: TaxableYear, opening: Money, cfc: Money, adjustment: Money, own: Money) strict {
+    label en official "section 59(l)(1), (2): the credit of chain step 5: the lesser of the CFC taxes increased by the carried excess or 15 percent of the adjustment, plus the own taxes";
+    effective [@2023-01-01, infinity);
+    when camt_ftc_opening_5(c, y, opening);
+    when corporation_chooses_foreign_tax_credit_benefits(c, y);
+    when applicable_corporation(c, y);
+    when cfc_foreign_taxes_pro_rata_share(c, y, cfc);
+    when section_56a_c3_adjustment(c, y, adjustment);
+    when own_foreign_taxes_on_financial_statement(c, y, own);
+    then corporate_amt_foreign_tax_credit(c, y, min(cfc + opening, adjustment * 0.15) + own);
+}
+@source(IRC_S59_L, relation = formalizes, coverage = partial, quote = "For any taxable year for which an applicable corporation chooses to have the benefits of subpart A of part III of subchapter N")
+rule CamtFtcExcess5(c: Corporation, y: TaxableYear, opening: Money, cfc: Money, adjustment: Money) strict {
+    label en official "section 59(l)(2): the excess of the amount of (1)(A)(i) over the amount of (1)(A)(ii) in chain step 5";
+    effective [@2023-01-01, infinity);
+    when camt_ftc_opening_5(c, y, opening);
+    when corporation_chooses_foreign_tax_credit_benefits(c, y);
+    when applicable_corporation(c, y);
+    when cfc_foreign_taxes_pro_rata_share(c, y, cfc);
+    when section_56a_c3_adjustment(c, y, adjustment);
+    then camt_ftc_excess_5(c, y, max(0.00 USD, cfc + opening - adjustment * 0.15));
+}
+relation camt_ftc_opening_6(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "chain step 6: the excess carried into the year and not taken into account in a prior year";
+}
+relation camt_ftc_excess_6(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "chain step 6: the excess of the CFC taxes (increased by the carried excess) over 15 percent of the section 56A(c)(3) adjustment, carried to the succeeding year";
+}
+@source(IRC_S59_L, relation = formalizes, coverage = partial, quote = "For any taxable year for which an applicable corporation chooses to have the benefits of subpart A of part III of subchapter N")
+rule CamtFtcChainStep6(c: Corporation, y: TaxableYear, opening: Money, cfc: Money, adjustment: Money, own: Money) strict {
+    label en official "section 59(l)(1), (2): the credit of chain step 6: the lesser of the CFC taxes increased by the carried excess or 15 percent of the adjustment, plus the own taxes";
+    effective [@2023-01-01, infinity);
+    when camt_ftc_opening_6(c, y, opening);
+    when corporation_chooses_foreign_tax_credit_benefits(c, y);
+    when applicable_corporation(c, y);
+    when cfc_foreign_taxes_pro_rata_share(c, y, cfc);
+    when section_56a_c3_adjustment(c, y, adjustment);
+    when own_foreign_taxes_on_financial_statement(c, y, own);
+    then corporate_amt_foreign_tax_credit(c, y, min(cfc + opening, adjustment * 0.15) + own);
+}
+@source(IRC_S59_L, relation = formalizes, coverage = partial, quote = "For any taxable year for which an applicable corporation chooses to have the benefits of subpart A of part III of subchapter N")
+rule CamtFtcExcess6(c: Corporation, y: TaxableYear, opening: Money, cfc: Money, adjustment: Money) strict {
+    label en official "section 59(l)(2): the excess of the amount of (1)(A)(i) over the amount of (1)(A)(ii) in chain step 6";
+    effective [@2023-01-01, infinity);
+    when camt_ftc_opening_6(c, y, opening);
+    when corporation_chooses_foreign_tax_credit_benefits(c, y);
+    when applicable_corporation(c, y);
+    when cfc_foreign_taxes_pro_rata_share(c, y, cfc);
+    when section_56a_c3_adjustment(c, y, adjustment);
+    then camt_ftc_excess_6(c, y, max(0.00 USD, cfc + opening - adjustment * 0.15));
+}
+@source(IRC_S59_L, relation = formalizes, coverage = partial, quote = "For any taxable year for which an applicable corporation chooses to have the benefits of subpart A of part III of subchapter N")
+rule CamtFtcOpening1(c: Corporation, y: TaxableYear) strict {
+    label en official "section 59(l)(2): the excess carried into the first chain year (zero when none)";
+    effective [@2023-01-01, infinity);
+    when camt_ftc_chain_year_59l2(c, 1, y);
+    then camt_ftc_opening_1(c, y, sum(collect all a: Money where camt_ftc_excess_carried_in_59l2(c, y, a), empty: 0.00 USD));
+}
+@source(IRC_S59_L, relation = formalizes, coverage = partial, quote = "For any taxable year for which an applicable corporation chooses to have the benefits of subpart A of part III of subchapter N")
+rule CamtFtcOpening2(c: Corporation, y1: TaxableYear, y2: TaxableYear, excess: Money) strict {
+    label en official "section 59(l)(2): the excess of chain step 1 increases the amount of (1)(A)(i) of the succeeding year";
+    effective [@2023-01-01, infinity);
+    when camt_ftc_chain_year_59l2(c, 1, y1);
+    when camt_ftc_chain_year_59l2(c, 2, y2);
+    when camt_ftc_excess_1(c, y1, excess);
+    then camt_ftc_opening_2(c, y2, excess);
+}
+@source(IRC_S59_L, relation = formalizes, coverage = partial, quote = "For any taxable year for which an applicable corporation chooses to have the benefits of subpart A of part III of subchapter N")
+rule CamtFtcOpening3(c: Corporation, y1: TaxableYear, y2: TaxableYear, excess: Money) strict {
+    label en official "section 59(l)(2): the excess of chain step 2 increases the amount of (1)(A)(i) of the succeeding year";
+    effective [@2023-01-01, infinity);
+    when camt_ftc_chain_year_59l2(c, 2, y1);
+    when camt_ftc_chain_year_59l2(c, 3, y2);
+    when camt_ftc_excess_2(c, y1, excess);
+    then camt_ftc_opening_3(c, y2, excess);
+}
+@source(IRC_S59_L, relation = formalizes, coverage = partial, quote = "For any taxable year for which an applicable corporation chooses to have the benefits of subpart A of part III of subchapter N")
+rule CamtFtcOpening4(c: Corporation, y1: TaxableYear, y2: TaxableYear, excess: Money) strict {
+    label en official "section 59(l)(2): the excess of chain step 3 increases the amount of (1)(A)(i) of the succeeding year";
+    effective [@2023-01-01, infinity);
+    when camt_ftc_chain_year_59l2(c, 3, y1);
+    when camt_ftc_chain_year_59l2(c, 4, y2);
+    when camt_ftc_excess_3(c, y1, excess);
+    then camt_ftc_opening_4(c, y2, excess);
+}
+@source(IRC_S59_L, relation = formalizes, coverage = partial, quote = "For any taxable year for which an applicable corporation chooses to have the benefits of subpart A of part III of subchapter N")
+rule CamtFtcOpening5(c: Corporation, y1: TaxableYear, y2: TaxableYear, excess: Money) strict {
+    label en official "section 59(l)(2): the excess of chain step 4 increases the amount of (1)(A)(i) of the succeeding year";
+    effective [@2023-01-01, infinity);
+    when camt_ftc_chain_year_59l2(c, 4, y1);
+    when camt_ftc_chain_year_59l2(c, 5, y2);
+    when camt_ftc_excess_4(c, y1, excess);
+    then camt_ftc_opening_5(c, y2, excess);
+}
+@source(IRC_S59_L, relation = formalizes, coverage = partial, quote = "For any taxable year for which an applicable corporation chooses to have the benefits of subpart A of part III of subchapter N")
+rule CamtFtcOpening6(c: Corporation, y1: TaxableYear, y2: TaxableYear, excess: Money) strict {
+    label en official "section 59(l)(2): the excess of chain step 5 increases the amount of (1)(A)(i) of the succeeding year";
+    effective [@2023-01-01, infinity);
+    when camt_ftc_chain_year_59l2(c, 5, y1);
+    when camt_ftc_chain_year_59l2(c, 6, y2);
+    when camt_ftc_excess_5(c, y1, excess);
+    then camt_ftc_opening_6(c, y2, excess);
+}
+
+// ---- §56(d)(1)(A)(ii): the alternative tax net operating loss carryovers absorbed year by year (3 loss years x 4 deduction years) ----
+// Oldest loss first (section 172(b)(2)): in each deduction year the ordinary-loss deduction is at most 90 percent of the
+// alternative minimum taxable income before it (never below zero); the loss years are consumed in the order the case names
+// them (k = 1 the oldest). A loss year contributes to a deduction year only if it begins before it. The elected applicable
+// losses of section 172(b)(1)(H) keep their asserted amount (the remainder of the income limit is applied to them, as in
+// `AtnolDeductionCapped`).
+
+pub relation atnol_chain_loss_year(p: Person, i: Integer, ly: TaxableYear) kind empirical {
+    label en unofficial "the i-th loss year (i = 1 the oldest, up to 3) whose alternative tax net operating loss is carried";
+}
+pub relation atnol_chain_deduction_year(p: Person, j: Integer, dy: TaxableYear) kind empirical {
+    label en unofficial "the j-th deduction year (j = 1 the earliest, up to 4) in which carryovers are absorbed";
+}
+pub relation atnol_carryover_of_loss_year(p: Person, ly: TaxableYear, amount: Money) kind empirical {
+    label en official "the alternative tax net operating loss of the loss year available as a carryover (the figure of `atnol_of_loss_year`, supplied because the loss-year adjustments read the same adjustment predicate that the deduction feeds: a cycle at the level of predicates, LDC-E4102, although the years differ)";
+}
+relation has_atnol_chain_deduction_year(p: Person, y: TaxableYear) kind institutional {
+    label en unofficial "the year is a deduction year of the alternative tax net operating loss chain";
+}
+rule HasAtnolChainDeductionYear(p: Person, j: Integer, y: TaxableYear) strict {
+    when atnol_chain_deduction_year(p, j, y);
+    then has_atnol_chain_deduction_year(p, y);
+}
+relation atnol_cap_1(p: Person, amount: Money) kind institutional {
+    label en unofficial "deduction year 1: 90 percent of the alternative minimum taxable income before the deduction and section 199, never below zero";
+}
+relation atnol_used_1(p: Person, amount: Money) kind institutional {
+    label en unofficial "deduction year 1: the ordinary alternative tax net operating loss absorbed (oldest loss first)";
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolCap1(p: Person, dy: TaxableYear, amti: Money) strict {
+    label en official "section 56(d)(1)(A)(i): the income limit of deduction year 1";
+    when atnol_chain_deduction_year(p, 1, dy);
+    when amti_before_atnol_and_section_199(p, dy, amti);
+    then atnol_cap_1(p, max(0.00 USD, amti * 0.9));
+}
+relation atnol_rem_1_1(p: Person, amount: Money) kind institutional {
+    label en unofficial "loss year 1: the carryover remaining at the start of deduction year 1";
+}
+relation atnol_alloc_1_1(p: Person, amount: Money) kind institutional {
+    label en unofficial "loss year 1: the part absorbed in deduction year 1";
+}
+relation atnol_prior_1_1(p: Person, amount: Money) kind institutional {
+    label en unofficial "deduction year 1: the amount absorbed by the older loss years before loss year 1";
+}
+relation atnol_rem_2_1(p: Person, amount: Money) kind institutional {
+    label en unofficial "loss year 2: the carryover remaining at the start of deduction year 1";
+}
+relation atnol_alloc_2_1(p: Person, amount: Money) kind institutional {
+    label en unofficial "loss year 2: the part absorbed in deduction year 1";
+}
+relation atnol_prior_2_1(p: Person, amount: Money) kind institutional {
+    label en unofficial "deduction year 1: the amount absorbed by the older loss years before loss year 2";
+}
+relation atnol_rem_3_1(p: Person, amount: Money) kind institutional {
+    label en unofficial "loss year 3: the carryover remaining at the start of deduction year 1";
+}
+relation atnol_alloc_3_1(p: Person, amount: Money) kind institutional {
+    label en unofficial "loss year 3: the part absorbed in deduction year 1";
+}
+relation atnol_prior_3_1(p: Person, amount: Money) kind institutional {
+    label en unofficial "deduction year 1: the amount absorbed by the older loss years before loss year 3";
+}
+relation atnol_cap_2(p: Person, amount: Money) kind institutional {
+    label en unofficial "deduction year 2: 90 percent of the alternative minimum taxable income before the deduction and section 199, never below zero";
+}
+relation atnol_used_2(p: Person, amount: Money) kind institutional {
+    label en unofficial "deduction year 2: the ordinary alternative tax net operating loss absorbed (oldest loss first)";
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolCap2(p: Person, dy: TaxableYear, amti: Money) strict {
+    label en official "section 56(d)(1)(A)(i): the income limit of deduction year 2";
+    when atnol_chain_deduction_year(p, 2, dy);
+    when amti_before_atnol_and_section_199(p, dy, amti);
+    then atnol_cap_2(p, max(0.00 USD, amti * 0.9));
+}
+relation atnol_rem_1_2(p: Person, amount: Money) kind institutional {
+    label en unofficial "loss year 1: the carryover remaining at the start of deduction year 2";
+}
+relation atnol_alloc_1_2(p: Person, amount: Money) kind institutional {
+    label en unofficial "loss year 1: the part absorbed in deduction year 2";
+}
+relation atnol_prior_1_2(p: Person, amount: Money) kind institutional {
+    label en unofficial "deduction year 2: the amount absorbed by the older loss years before loss year 1";
+}
+relation atnol_rem_2_2(p: Person, amount: Money) kind institutional {
+    label en unofficial "loss year 2: the carryover remaining at the start of deduction year 2";
+}
+relation atnol_alloc_2_2(p: Person, amount: Money) kind institutional {
+    label en unofficial "loss year 2: the part absorbed in deduction year 2";
+}
+relation atnol_prior_2_2(p: Person, amount: Money) kind institutional {
+    label en unofficial "deduction year 2: the amount absorbed by the older loss years before loss year 2";
+}
+relation atnol_rem_3_2(p: Person, amount: Money) kind institutional {
+    label en unofficial "loss year 3: the carryover remaining at the start of deduction year 2";
+}
+relation atnol_alloc_3_2(p: Person, amount: Money) kind institutional {
+    label en unofficial "loss year 3: the part absorbed in deduction year 2";
+}
+relation atnol_prior_3_2(p: Person, amount: Money) kind institutional {
+    label en unofficial "deduction year 2: the amount absorbed by the older loss years before loss year 3";
+}
+relation atnol_cap_3(p: Person, amount: Money) kind institutional {
+    label en unofficial "deduction year 3: 90 percent of the alternative minimum taxable income before the deduction and section 199, never below zero";
+}
+relation atnol_used_3(p: Person, amount: Money) kind institutional {
+    label en unofficial "deduction year 3: the ordinary alternative tax net operating loss absorbed (oldest loss first)";
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolCap3(p: Person, dy: TaxableYear, amti: Money) strict {
+    label en official "section 56(d)(1)(A)(i): the income limit of deduction year 3";
+    when atnol_chain_deduction_year(p, 3, dy);
+    when amti_before_atnol_and_section_199(p, dy, amti);
+    then atnol_cap_3(p, max(0.00 USD, amti * 0.9));
+}
+relation atnol_rem_1_3(p: Person, amount: Money) kind institutional {
+    label en unofficial "loss year 1: the carryover remaining at the start of deduction year 3";
+}
+relation atnol_alloc_1_3(p: Person, amount: Money) kind institutional {
+    label en unofficial "loss year 1: the part absorbed in deduction year 3";
+}
+relation atnol_prior_1_3(p: Person, amount: Money) kind institutional {
+    label en unofficial "deduction year 3: the amount absorbed by the older loss years before loss year 1";
+}
+relation atnol_rem_2_3(p: Person, amount: Money) kind institutional {
+    label en unofficial "loss year 2: the carryover remaining at the start of deduction year 3";
+}
+relation atnol_alloc_2_3(p: Person, amount: Money) kind institutional {
+    label en unofficial "loss year 2: the part absorbed in deduction year 3";
+}
+relation atnol_prior_2_3(p: Person, amount: Money) kind institutional {
+    label en unofficial "deduction year 3: the amount absorbed by the older loss years before loss year 2";
+}
+relation atnol_rem_3_3(p: Person, amount: Money) kind institutional {
+    label en unofficial "loss year 3: the carryover remaining at the start of deduction year 3";
+}
+relation atnol_alloc_3_3(p: Person, amount: Money) kind institutional {
+    label en unofficial "loss year 3: the part absorbed in deduction year 3";
+}
+relation atnol_prior_3_3(p: Person, amount: Money) kind institutional {
+    label en unofficial "deduction year 3: the amount absorbed by the older loss years before loss year 3";
+}
+relation atnol_cap_4(p: Person, amount: Money) kind institutional {
+    label en unofficial "deduction year 4: 90 percent of the alternative minimum taxable income before the deduction and section 199, never below zero";
+}
+relation atnol_used_4(p: Person, amount: Money) kind institutional {
+    label en unofficial "deduction year 4: the ordinary alternative tax net operating loss absorbed (oldest loss first)";
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolCap4(p: Person, dy: TaxableYear, amti: Money) strict {
+    label en official "section 56(d)(1)(A)(i): the income limit of deduction year 4";
+    when atnol_chain_deduction_year(p, 4, dy);
+    when amti_before_atnol_and_section_199(p, dy, amti);
+    then atnol_cap_4(p, max(0.00 USD, amti * 0.9));
+}
+relation atnol_rem_1_4(p: Person, amount: Money) kind institutional {
+    label en unofficial "loss year 1: the carryover remaining at the start of deduction year 4";
+}
+relation atnol_alloc_1_4(p: Person, amount: Money) kind institutional {
+    label en unofficial "loss year 1: the part absorbed in deduction year 4";
+}
+relation atnol_prior_1_4(p: Person, amount: Money) kind institutional {
+    label en unofficial "deduction year 4: the amount absorbed by the older loss years before loss year 1";
+}
+relation atnol_rem_2_4(p: Person, amount: Money) kind institutional {
+    label en unofficial "loss year 2: the carryover remaining at the start of deduction year 4";
+}
+relation atnol_alloc_2_4(p: Person, amount: Money) kind institutional {
+    label en unofficial "loss year 2: the part absorbed in deduction year 4";
+}
+relation atnol_prior_2_4(p: Person, amount: Money) kind institutional {
+    label en unofficial "deduction year 4: the amount absorbed by the older loss years before loss year 2";
+}
+relation atnol_rem_3_4(p: Person, amount: Money) kind institutional {
+    label en unofficial "loss year 3: the carryover remaining at the start of deduction year 4";
+}
+relation atnol_alloc_3_4(p: Person, amount: Money) kind institutional {
+    label en unofficial "loss year 3: the part absorbed in deduction year 4";
+}
+relation atnol_prior_3_4(p: Person, amount: Money) kind institutional {
+    label en unofficial "deduction year 4: the amount absorbed by the older loss years before loss year 3";
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolRem1_1(p: Person, ly: TaxableYear, amount: Money) strict {
+    label en official "section 172(b)(2) as applied by section 56(d)(1)(A)(ii): the carryover of loss year 1 at the start of the first deduction year";
+    when atnol_chain_loss_year(p, 1, ly);
+    when atnol_carryover_of_loss_year(p, ly, amount);
+    then atnol_rem_1_1(p, amount);
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolRem2_1(p: Person, ly: TaxableYear, amount: Money) strict {
+    label en official "section 172(b)(2) as applied by section 56(d)(1)(A)(ii): the carryover of loss year 2 at the start of the first deduction year";
+    when atnol_chain_loss_year(p, 2, ly);
+    when atnol_carryover_of_loss_year(p, ly, amount);
+    then atnol_rem_2_1(p, amount);
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolRem3_1(p: Person, ly: TaxableYear, amount: Money) strict {
+    label en official "section 172(b)(2) as applied by section 56(d)(1)(A)(ii): the carryover of loss year 3 at the start of the first deduction year";
+    when atnol_chain_loss_year(p, 3, ly);
+    when atnol_carryover_of_loss_year(p, ly, amount);
+    then atnol_rem_3_1(p, amount);
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolPrior1_1(p: Person, cap: Money) strict {
+    when atnol_cap_1(p, cap);
+    then atnol_prior_1_1(p, 0.00 USD);
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolPrior2_1(p: Person, a1: Money) strict {
+    when atnol_alloc_1_1(p, a1);
+    then atnol_prior_2_1(p, a1);
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolPrior3_1(p: Person, a1: Money, a2: Money) strict {
+    when atnol_alloc_1_1(p, a1);
+    when atnol_alloc_2_1(p, a2);
+    then atnol_prior_3_1(p, a1 + a2);
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolUsed1(p: Person, a1: Money, a2: Money, a3: Money) strict {
+    when atnol_alloc_1_1(p, a1);
+    when atnol_alloc_2_1(p, a2);
+    when atnol_alloc_3_1(p, a3);
+    then atnol_used_1(p, a1 + a2 + a3);
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolAlloc1_1Eligible(p: Person, ly: TaxableYear, dy: TaxableYear, s: Date, d: Date, rem: Money, cap: Money, prior: Money) strict {
+    label en official "section 172(b)(2) as applied by section 56(d)(1)(A)(ii): loss year 1 is absorbed in deduction year 1 up to the income limit left by the older loss years";
+    when atnol_chain_loss_year(p, 1, ly);
+    when atnol_chain_deduction_year(p, 1, dy);
+    when loss_year_begins_on(ly, s);
+    when us.irc.core::begins(dy, d);
+    when s < d;
+    when atnol_rem_1_1(p, rem);
+    when atnol_cap_1(p, cap);
+    when atnol_prior_1_1(p, prior);
+    then atnol_alloc_1_1(p, min(rem, max(0.00 USD, cap - prior)));
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolAlloc1_1NotYetCarryable(p: Person, ly: TaxableYear, dy: TaxableYear, s: Date, d: Date) strict {
+    label en official "a loss year that does not begin before the deduction year contributes nothing to it";
+    when atnol_chain_loss_year(p, 1, ly);
+    when atnol_chain_deduction_year(p, 1, dy);
+    when loss_year_begins_on(ly, s);
+    when us.irc.core::begins(dy, d);
+    when s >= d;
+    then atnol_alloc_1_1(p, 0.00 USD);
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolRem1_2(p: Person, rem: Money, alloc: Money) strict {
+    label en official "section 172(b)(2): the carryover remaining after the absorption of deduction year 1";
+    when atnol_rem_1_1(p, rem);
+    when atnol_alloc_1_1(p, alloc);
+    then atnol_rem_1_2(p, rem - alloc);
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolAlloc2_1Eligible(p: Person, ly: TaxableYear, dy: TaxableYear, s: Date, d: Date, rem: Money, cap: Money, prior: Money) strict {
+    label en official "section 172(b)(2) as applied by section 56(d)(1)(A)(ii): loss year 2 is absorbed in deduction year 1 up to the income limit left by the older loss years";
+    when atnol_chain_loss_year(p, 2, ly);
+    when atnol_chain_deduction_year(p, 1, dy);
+    when loss_year_begins_on(ly, s);
+    when us.irc.core::begins(dy, d);
+    when s < d;
+    when atnol_rem_2_1(p, rem);
+    when atnol_cap_1(p, cap);
+    when atnol_prior_2_1(p, prior);
+    then atnol_alloc_2_1(p, min(rem, max(0.00 USD, cap - prior)));
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolAlloc2_1NotYetCarryable(p: Person, ly: TaxableYear, dy: TaxableYear, s: Date, d: Date) strict {
+    label en official "a loss year that does not begin before the deduction year contributes nothing to it";
+    when atnol_chain_loss_year(p, 2, ly);
+    when atnol_chain_deduction_year(p, 1, dy);
+    when loss_year_begins_on(ly, s);
+    when us.irc.core::begins(dy, d);
+    when s >= d;
+    then atnol_alloc_2_1(p, 0.00 USD);
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolRem2_2(p: Person, rem: Money, alloc: Money) strict {
+    label en official "section 172(b)(2): the carryover remaining after the absorption of deduction year 1";
+    when atnol_rem_2_1(p, rem);
+    when atnol_alloc_2_1(p, alloc);
+    then atnol_rem_2_2(p, rem - alloc);
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolAlloc3_1Eligible(p: Person, ly: TaxableYear, dy: TaxableYear, s: Date, d: Date, rem: Money, cap: Money, prior: Money) strict {
+    label en official "section 172(b)(2) as applied by section 56(d)(1)(A)(ii): loss year 3 is absorbed in deduction year 1 up to the income limit left by the older loss years";
+    when atnol_chain_loss_year(p, 3, ly);
+    when atnol_chain_deduction_year(p, 1, dy);
+    when loss_year_begins_on(ly, s);
+    when us.irc.core::begins(dy, d);
+    when s < d;
+    when atnol_rem_3_1(p, rem);
+    when atnol_cap_1(p, cap);
+    when atnol_prior_3_1(p, prior);
+    then atnol_alloc_3_1(p, min(rem, max(0.00 USD, cap - prior)));
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolAlloc3_1NotYetCarryable(p: Person, ly: TaxableYear, dy: TaxableYear, s: Date, d: Date) strict {
+    label en official "a loss year that does not begin before the deduction year contributes nothing to it";
+    when atnol_chain_loss_year(p, 3, ly);
+    when atnol_chain_deduction_year(p, 1, dy);
+    when loss_year_begins_on(ly, s);
+    when us.irc.core::begins(dy, d);
+    when s >= d;
+    then atnol_alloc_3_1(p, 0.00 USD);
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolRem3_2(p: Person, rem: Money, alloc: Money) strict {
+    label en official "section 172(b)(2): the carryover remaining after the absorption of deduction year 1";
+    when atnol_rem_3_1(p, rem);
+    when atnol_alloc_3_1(p, alloc);
+    then atnol_rem_3_2(p, rem - alloc);
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolDeductionChain1(p: Person, dy: TaxableYear, used: Money, amti: Money) strict {
+    label en official "section 56(d)(1)(A): the deduction of deduction year 1: the ordinary losses absorbed plus the lesser of the elected applicable losses or the remainder of the income";
+    when noncorporate_taxpayer_for_year(p, dy);
+    when atnol_chain_deduction_year(p, 1, dy);
+    when atnol_used_1(p, used);
+    when amti_before_atnol_and_section_199(p, dy, amti);
+    then atnol_deduction(p, dy, used + min(sum(collect all a: Money where atnol_attributable_to_elected_applicable_loss(p, dy, a), empty: 0.00 USD), max(0.00 USD, amti - used)));
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolPrior1_2(p: Person, cap: Money) strict {
+    when atnol_cap_2(p, cap);
+    then atnol_prior_1_2(p, 0.00 USD);
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolPrior2_2(p: Person, a1: Money) strict {
+    when atnol_alloc_1_2(p, a1);
+    then atnol_prior_2_2(p, a1);
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolPrior3_2(p: Person, a1: Money, a2: Money) strict {
+    when atnol_alloc_1_2(p, a1);
+    when atnol_alloc_2_2(p, a2);
+    then atnol_prior_3_2(p, a1 + a2);
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolUsed2(p: Person, a1: Money, a2: Money, a3: Money) strict {
+    when atnol_alloc_1_2(p, a1);
+    when atnol_alloc_2_2(p, a2);
+    when atnol_alloc_3_2(p, a3);
+    then atnol_used_2(p, a1 + a2 + a3);
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolAlloc1_2Eligible(p: Person, ly: TaxableYear, dy: TaxableYear, s: Date, d: Date, rem: Money, cap: Money, prior: Money) strict {
+    label en official "section 172(b)(2) as applied by section 56(d)(1)(A)(ii): loss year 1 is absorbed in deduction year 2 up to the income limit left by the older loss years";
+    when atnol_chain_loss_year(p, 1, ly);
+    when atnol_chain_deduction_year(p, 2, dy);
+    when loss_year_begins_on(ly, s);
+    when us.irc.core::begins(dy, d);
+    when s < d;
+    when atnol_rem_1_2(p, rem);
+    when atnol_cap_2(p, cap);
+    when atnol_prior_1_2(p, prior);
+    then atnol_alloc_1_2(p, min(rem, max(0.00 USD, cap - prior)));
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolAlloc1_2NotYetCarryable(p: Person, ly: TaxableYear, dy: TaxableYear, s: Date, d: Date) strict {
+    label en official "a loss year that does not begin before the deduction year contributes nothing to it";
+    when atnol_chain_loss_year(p, 1, ly);
+    when atnol_chain_deduction_year(p, 2, dy);
+    when loss_year_begins_on(ly, s);
+    when us.irc.core::begins(dy, d);
+    when s >= d;
+    then atnol_alloc_1_2(p, 0.00 USD);
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolRem1_3(p: Person, rem: Money, alloc: Money) strict {
+    label en official "section 172(b)(2): the carryover remaining after the absorption of deduction year 2";
+    when atnol_rem_1_2(p, rem);
+    when atnol_alloc_1_2(p, alloc);
+    then atnol_rem_1_3(p, rem - alloc);
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolAlloc2_2Eligible(p: Person, ly: TaxableYear, dy: TaxableYear, s: Date, d: Date, rem: Money, cap: Money, prior: Money) strict {
+    label en official "section 172(b)(2) as applied by section 56(d)(1)(A)(ii): loss year 2 is absorbed in deduction year 2 up to the income limit left by the older loss years";
+    when atnol_chain_loss_year(p, 2, ly);
+    when atnol_chain_deduction_year(p, 2, dy);
+    when loss_year_begins_on(ly, s);
+    when us.irc.core::begins(dy, d);
+    when s < d;
+    when atnol_rem_2_2(p, rem);
+    when atnol_cap_2(p, cap);
+    when atnol_prior_2_2(p, prior);
+    then atnol_alloc_2_2(p, min(rem, max(0.00 USD, cap - prior)));
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolAlloc2_2NotYetCarryable(p: Person, ly: TaxableYear, dy: TaxableYear, s: Date, d: Date) strict {
+    label en official "a loss year that does not begin before the deduction year contributes nothing to it";
+    when atnol_chain_loss_year(p, 2, ly);
+    when atnol_chain_deduction_year(p, 2, dy);
+    when loss_year_begins_on(ly, s);
+    when us.irc.core::begins(dy, d);
+    when s >= d;
+    then atnol_alloc_2_2(p, 0.00 USD);
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolRem2_3(p: Person, rem: Money, alloc: Money) strict {
+    label en official "section 172(b)(2): the carryover remaining after the absorption of deduction year 2";
+    when atnol_rem_2_2(p, rem);
+    when atnol_alloc_2_2(p, alloc);
+    then atnol_rem_2_3(p, rem - alloc);
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolAlloc3_2Eligible(p: Person, ly: TaxableYear, dy: TaxableYear, s: Date, d: Date, rem: Money, cap: Money, prior: Money) strict {
+    label en official "section 172(b)(2) as applied by section 56(d)(1)(A)(ii): loss year 3 is absorbed in deduction year 2 up to the income limit left by the older loss years";
+    when atnol_chain_loss_year(p, 3, ly);
+    when atnol_chain_deduction_year(p, 2, dy);
+    when loss_year_begins_on(ly, s);
+    when us.irc.core::begins(dy, d);
+    when s < d;
+    when atnol_rem_3_2(p, rem);
+    when atnol_cap_2(p, cap);
+    when atnol_prior_3_2(p, prior);
+    then atnol_alloc_3_2(p, min(rem, max(0.00 USD, cap - prior)));
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolAlloc3_2NotYetCarryable(p: Person, ly: TaxableYear, dy: TaxableYear, s: Date, d: Date) strict {
+    label en official "a loss year that does not begin before the deduction year contributes nothing to it";
+    when atnol_chain_loss_year(p, 3, ly);
+    when atnol_chain_deduction_year(p, 2, dy);
+    when loss_year_begins_on(ly, s);
+    when us.irc.core::begins(dy, d);
+    when s >= d;
+    then atnol_alloc_3_2(p, 0.00 USD);
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolRem3_3(p: Person, rem: Money, alloc: Money) strict {
+    label en official "section 172(b)(2): the carryover remaining after the absorption of deduction year 2";
+    when atnol_rem_3_2(p, rem);
+    when atnol_alloc_3_2(p, alloc);
+    then atnol_rem_3_3(p, rem - alloc);
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolDeductionChain2(p: Person, dy: TaxableYear, used: Money, amti: Money) strict {
+    label en official "section 56(d)(1)(A): the deduction of deduction year 2: the ordinary losses absorbed plus the lesser of the elected applicable losses or the remainder of the income";
+    when noncorporate_taxpayer_for_year(p, dy);
+    when atnol_chain_deduction_year(p, 2, dy);
+    when atnol_used_2(p, used);
+    when amti_before_atnol_and_section_199(p, dy, amti);
+    then atnol_deduction(p, dy, used + min(sum(collect all a: Money where atnol_attributable_to_elected_applicable_loss(p, dy, a), empty: 0.00 USD), max(0.00 USD, amti - used)));
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolPrior1_3(p: Person, cap: Money) strict {
+    when atnol_cap_3(p, cap);
+    then atnol_prior_1_3(p, 0.00 USD);
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolPrior2_3(p: Person, a1: Money) strict {
+    when atnol_alloc_1_3(p, a1);
+    then atnol_prior_2_3(p, a1);
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolPrior3_3(p: Person, a1: Money, a2: Money) strict {
+    when atnol_alloc_1_3(p, a1);
+    when atnol_alloc_2_3(p, a2);
+    then atnol_prior_3_3(p, a1 + a2);
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolUsed3(p: Person, a1: Money, a2: Money, a3: Money) strict {
+    when atnol_alloc_1_3(p, a1);
+    when atnol_alloc_2_3(p, a2);
+    when atnol_alloc_3_3(p, a3);
+    then atnol_used_3(p, a1 + a2 + a3);
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolAlloc1_3Eligible(p: Person, ly: TaxableYear, dy: TaxableYear, s: Date, d: Date, rem: Money, cap: Money, prior: Money) strict {
+    label en official "section 172(b)(2) as applied by section 56(d)(1)(A)(ii): loss year 1 is absorbed in deduction year 3 up to the income limit left by the older loss years";
+    when atnol_chain_loss_year(p, 1, ly);
+    when atnol_chain_deduction_year(p, 3, dy);
+    when loss_year_begins_on(ly, s);
+    when us.irc.core::begins(dy, d);
+    when s < d;
+    when atnol_rem_1_3(p, rem);
+    when atnol_cap_3(p, cap);
+    when atnol_prior_1_3(p, prior);
+    then atnol_alloc_1_3(p, min(rem, max(0.00 USD, cap - prior)));
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolAlloc1_3NotYetCarryable(p: Person, ly: TaxableYear, dy: TaxableYear, s: Date, d: Date) strict {
+    label en official "a loss year that does not begin before the deduction year contributes nothing to it";
+    when atnol_chain_loss_year(p, 1, ly);
+    when atnol_chain_deduction_year(p, 3, dy);
+    when loss_year_begins_on(ly, s);
+    when us.irc.core::begins(dy, d);
+    when s >= d;
+    then atnol_alloc_1_3(p, 0.00 USD);
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolRem1_4(p: Person, rem: Money, alloc: Money) strict {
+    label en official "section 172(b)(2): the carryover remaining after the absorption of deduction year 3";
+    when atnol_rem_1_3(p, rem);
+    when atnol_alloc_1_3(p, alloc);
+    then atnol_rem_1_4(p, rem - alloc);
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolAlloc2_3Eligible(p: Person, ly: TaxableYear, dy: TaxableYear, s: Date, d: Date, rem: Money, cap: Money, prior: Money) strict {
+    label en official "section 172(b)(2) as applied by section 56(d)(1)(A)(ii): loss year 2 is absorbed in deduction year 3 up to the income limit left by the older loss years";
+    when atnol_chain_loss_year(p, 2, ly);
+    when atnol_chain_deduction_year(p, 3, dy);
+    when loss_year_begins_on(ly, s);
+    when us.irc.core::begins(dy, d);
+    when s < d;
+    when atnol_rem_2_3(p, rem);
+    when atnol_cap_3(p, cap);
+    when atnol_prior_2_3(p, prior);
+    then atnol_alloc_2_3(p, min(rem, max(0.00 USD, cap - prior)));
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolAlloc2_3NotYetCarryable(p: Person, ly: TaxableYear, dy: TaxableYear, s: Date, d: Date) strict {
+    label en official "a loss year that does not begin before the deduction year contributes nothing to it";
+    when atnol_chain_loss_year(p, 2, ly);
+    when atnol_chain_deduction_year(p, 3, dy);
+    when loss_year_begins_on(ly, s);
+    when us.irc.core::begins(dy, d);
+    when s >= d;
+    then atnol_alloc_2_3(p, 0.00 USD);
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolRem2_4(p: Person, rem: Money, alloc: Money) strict {
+    label en official "section 172(b)(2): the carryover remaining after the absorption of deduction year 3";
+    when atnol_rem_2_3(p, rem);
+    when atnol_alloc_2_3(p, alloc);
+    then atnol_rem_2_4(p, rem - alloc);
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolAlloc3_3Eligible(p: Person, ly: TaxableYear, dy: TaxableYear, s: Date, d: Date, rem: Money, cap: Money, prior: Money) strict {
+    label en official "section 172(b)(2) as applied by section 56(d)(1)(A)(ii): loss year 3 is absorbed in deduction year 3 up to the income limit left by the older loss years";
+    when atnol_chain_loss_year(p, 3, ly);
+    when atnol_chain_deduction_year(p, 3, dy);
+    when loss_year_begins_on(ly, s);
+    when us.irc.core::begins(dy, d);
+    when s < d;
+    when atnol_rem_3_3(p, rem);
+    when atnol_cap_3(p, cap);
+    when atnol_prior_3_3(p, prior);
+    then atnol_alloc_3_3(p, min(rem, max(0.00 USD, cap - prior)));
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolAlloc3_3NotYetCarryable(p: Person, ly: TaxableYear, dy: TaxableYear, s: Date, d: Date) strict {
+    label en official "a loss year that does not begin before the deduction year contributes nothing to it";
+    when atnol_chain_loss_year(p, 3, ly);
+    when atnol_chain_deduction_year(p, 3, dy);
+    when loss_year_begins_on(ly, s);
+    when us.irc.core::begins(dy, d);
+    when s >= d;
+    then atnol_alloc_3_3(p, 0.00 USD);
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolRem3_4(p: Person, rem: Money, alloc: Money) strict {
+    label en official "section 172(b)(2): the carryover remaining after the absorption of deduction year 3";
+    when atnol_rem_3_3(p, rem);
+    when atnol_alloc_3_3(p, alloc);
+    then atnol_rem_3_4(p, rem - alloc);
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolDeductionChain3(p: Person, dy: TaxableYear, used: Money, amti: Money) strict {
+    label en official "section 56(d)(1)(A): the deduction of deduction year 3: the ordinary losses absorbed plus the lesser of the elected applicable losses or the remainder of the income";
+    when noncorporate_taxpayer_for_year(p, dy);
+    when atnol_chain_deduction_year(p, 3, dy);
+    when atnol_used_3(p, used);
+    when amti_before_atnol_and_section_199(p, dy, amti);
+    then atnol_deduction(p, dy, used + min(sum(collect all a: Money where atnol_attributable_to_elected_applicable_loss(p, dy, a), empty: 0.00 USD), max(0.00 USD, amti - used)));
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolPrior1_4(p: Person, cap: Money) strict {
+    when atnol_cap_4(p, cap);
+    then atnol_prior_1_4(p, 0.00 USD);
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolPrior2_4(p: Person, a1: Money) strict {
+    when atnol_alloc_1_4(p, a1);
+    then atnol_prior_2_4(p, a1);
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolPrior3_4(p: Person, a1: Money, a2: Money) strict {
+    when atnol_alloc_1_4(p, a1);
+    when atnol_alloc_2_4(p, a2);
+    then atnol_prior_3_4(p, a1 + a2);
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolUsed4(p: Person, a1: Money, a2: Money, a3: Money) strict {
+    when atnol_alloc_1_4(p, a1);
+    when atnol_alloc_2_4(p, a2);
+    when atnol_alloc_3_4(p, a3);
+    then atnol_used_4(p, a1 + a2 + a3);
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolAlloc1_4Eligible(p: Person, ly: TaxableYear, dy: TaxableYear, s: Date, d: Date, rem: Money, cap: Money, prior: Money) strict {
+    label en official "section 172(b)(2) as applied by section 56(d)(1)(A)(ii): loss year 1 is absorbed in deduction year 4 up to the income limit left by the older loss years";
+    when atnol_chain_loss_year(p, 1, ly);
+    when atnol_chain_deduction_year(p, 4, dy);
+    when loss_year_begins_on(ly, s);
+    when us.irc.core::begins(dy, d);
+    when s < d;
+    when atnol_rem_1_4(p, rem);
+    when atnol_cap_4(p, cap);
+    when atnol_prior_1_4(p, prior);
+    then atnol_alloc_1_4(p, min(rem, max(0.00 USD, cap - prior)));
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolAlloc1_4NotYetCarryable(p: Person, ly: TaxableYear, dy: TaxableYear, s: Date, d: Date) strict {
+    label en official "a loss year that does not begin before the deduction year contributes nothing to it";
+    when atnol_chain_loss_year(p, 1, ly);
+    when atnol_chain_deduction_year(p, 4, dy);
+    when loss_year_begins_on(ly, s);
+    when us.irc.core::begins(dy, d);
+    when s >= d;
+    then atnol_alloc_1_4(p, 0.00 USD);
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolAlloc2_4Eligible(p: Person, ly: TaxableYear, dy: TaxableYear, s: Date, d: Date, rem: Money, cap: Money, prior: Money) strict {
+    label en official "section 172(b)(2) as applied by section 56(d)(1)(A)(ii): loss year 2 is absorbed in deduction year 4 up to the income limit left by the older loss years";
+    when atnol_chain_loss_year(p, 2, ly);
+    when atnol_chain_deduction_year(p, 4, dy);
+    when loss_year_begins_on(ly, s);
+    when us.irc.core::begins(dy, d);
+    when s < d;
+    when atnol_rem_2_4(p, rem);
+    when atnol_cap_4(p, cap);
+    when atnol_prior_2_4(p, prior);
+    then atnol_alloc_2_4(p, min(rem, max(0.00 USD, cap - prior)));
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolAlloc2_4NotYetCarryable(p: Person, ly: TaxableYear, dy: TaxableYear, s: Date, d: Date) strict {
+    label en official "a loss year that does not begin before the deduction year contributes nothing to it";
+    when atnol_chain_loss_year(p, 2, ly);
+    when atnol_chain_deduction_year(p, 4, dy);
+    when loss_year_begins_on(ly, s);
+    when us.irc.core::begins(dy, d);
+    when s >= d;
+    then atnol_alloc_2_4(p, 0.00 USD);
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolAlloc3_4Eligible(p: Person, ly: TaxableYear, dy: TaxableYear, s: Date, d: Date, rem: Money, cap: Money, prior: Money) strict {
+    label en official "section 172(b)(2) as applied by section 56(d)(1)(A)(ii): loss year 3 is absorbed in deduction year 4 up to the income limit left by the older loss years";
+    when atnol_chain_loss_year(p, 3, ly);
+    when atnol_chain_deduction_year(p, 4, dy);
+    when loss_year_begins_on(ly, s);
+    when us.irc.core::begins(dy, d);
+    when s < d;
+    when atnol_rem_3_4(p, rem);
+    when atnol_cap_4(p, cap);
+    when atnol_prior_3_4(p, prior);
+    then atnol_alloc_3_4(p, min(rem, max(0.00 USD, cap - prior)));
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolAlloc3_4NotYetCarryable(p: Person, ly: TaxableYear, dy: TaxableYear, s: Date, d: Date) strict {
+    label en official "a loss year that does not begin before the deduction year contributes nothing to it";
+    when atnol_chain_loss_year(p, 3, ly);
+    when atnol_chain_deduction_year(p, 4, dy);
+    when loss_year_begins_on(ly, s);
+    when us.irc.core::begins(dy, d);
+    when s >= d;
+    then atnol_alloc_3_4(p, 0.00 USD);
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolDeductionChain4(p: Person, dy: TaxableYear, used: Money, amti: Money) strict {
+    label en official "section 56(d)(1)(A): the deduction of deduction year 4: the ordinary losses absorbed plus the lesser of the elected applicable losses or the remainder of the income";
+    when noncorporate_taxpayer_for_year(p, dy);
+    when atnol_chain_deduction_year(p, 4, dy);
+    when atnol_used_4(p, used);
+    when amti_before_atnol_and_section_199(p, dy, amti);
+    then atnol_deduction(p, dy, used + min(sum(collect all a: Money where atnol_attributable_to_elected_applicable_loss(p, dy, a), empty: 0.00 USD), max(0.00 USD, amti - used)));
+}
+
+// ---- §58(a)(1)(B): the disallowed farm loss is a deduction of the first succeeding year (3 chain years) -------------
+
+pub relation farm_chain_year_58a1B(p: Person, k: Integer, y: TaxableYear) kind empirical {
+    label en unofficial "the k-th taxable year (k = 1 the earliest, up to 3) of the chain over which the disallowed tax shelter farm loss is carried";
+}
+relation has_farm_chain_carry_year_58a1B(p: Person, y: TaxableYear) kind institutional {
+    label en unofficial "the year is the second or third year of the farm loss chain (its carry-in is derived from the chain)";
+}
+rule HasFarmChainCarryYear2(p: Person, y: TaxableYear) strict {
+    when farm_chain_year_58a1B(p, 2, y);
+    then has_farm_chain_carry_year_58a1B(p, y);
+}
+rule HasFarmChainCarryYear3(p: Person, y: TaxableYear) strict {
+    when farm_chain_year_58a1B(p, 3, y);
+    then has_farm_chain_carry_year_58a1B(p, y);
+}
+relation farm_chain_disallowed_1(p: Person, amount: Money) kind institutional {
+    label en unofficial "chain step 1: the loss disallowed in the first chain year (the loss subject to denial less the insolvency reduction)";
+}
+relation farm_chain_disallowed_2(p: Person, amount: Money) kind institutional {
+    label en unofficial "chain step 2: the loss disallowed in the second chain year, including the deduction carried from the first";
+}
+@source(IRC_S58_A, relation = formalizes, coverage = exact, quote = "Any loss from a tax shelter farm activity disallowed under subparagraph (A) shall be treated as a deduction allocable to such activity in the 1st succeeding taxable year.")
+rule FarmChainDisallowed1(p: Person, y: TaxableYear, cur: Money, car: Money, ins: Money) strict {
+    label en official "section 58(a)(1)(A), (c)(1): the loss disallowed in the first chain year";
+    when farm_chain_year_58a1B(p, 1, y);
+    when farm_loss_current_total(p, y, cur);
+    when farm_loss_carried_in_total(p, y, car);
+    when insolvency_amount(p, y, ins);
+    then farm_chain_disallowed_1(p, (cur + car) - min(cur + car, ins));
+}
+@source(IRC_S58_A, relation = formalizes, coverage = exact, quote = "Any loss from a tax shelter farm activity disallowed under subparagraph (A) shall be treated as a deduction allocable to such activity in the 1st succeeding taxable year.")
+rule FarmChainDisallowed2(p: Person, y1: TaxableYear, y2: TaxableYear, d1: Money, cur: Money, car: Money, ins: Money) strict {
+    label en official "section 58(a)(1)(B): the loss disallowed in the first chain year is a deduction of the second, which is itself subject to the denial";
+    when farm_chain_year_58a1B(p, 1, y1);
+    when farm_chain_year_58a1B(p, 2, y2);
+    when farm_chain_disallowed_1(p, d1);
+    when farm_loss_current_total(p, y2, cur);
+    when farm_loss_carried_in_total(p, y2, car);
+    when insolvency_amount(p, y2, ins);
+    then farm_chain_disallowed_2(p, (cur + car + d1) - min(cur + car + d1, ins));
+}
+@source(IRC_S58_A, relation = formalizes, coverage = exact, quote = "Any loss from a tax shelter farm activity disallowed under subparagraph (A) shall be treated as a deduction allocable to such activity in the 1st succeeding taxable year.")
+rule FarmLossSubjectToDenialSecondChainYear(p: Person, y1: TaxableYear, y2: TaxableYear, d1: Money, cur: Money, car: Money) strict {
+    label en official "section 58(a)(1)(B): the second chain year's losses subject to the denial include the deduction carried from the first";
+    when farm_chain_year_58a1B(p, 1, y1);
+    when farm_chain_year_58a1B(p, 2, y2);
+    when farm_chain_disallowed_1(p, d1);
+    when farm_loss_current_total(p, y2, cur);
+    when farm_loss_carried_in_total(p, y2, car);
+    then farm_loss_subject_to_denial(p, y2, cur + car + d1);
+}
+@source(IRC_S58_A, relation = formalizes, coverage = exact, quote = "Any loss from a tax shelter farm activity disallowed under subparagraph (A) shall be treated as a deduction allocable to such activity in the 1st succeeding taxable year.")
+rule FarmLossSubjectToDenialThirdChainYear(p: Person, y2: TaxableYear, y3: TaxableYear, d2: Money, cur: Money, car: Money) strict {
+    label en official "section 58(a)(1)(B): the third chain year's losses subject to the denial include the deduction carried from the second";
+    when farm_chain_year_58a1B(p, 2, y2);
+    when farm_chain_year_58a1B(p, 3, y3);
+    when farm_chain_disallowed_2(p, d2);
+    when farm_loss_current_total(p, y3, cur);
+    when farm_loss_carried_in_total(p, y3, car);
+    then farm_loss_subject_to_denial(p, y3, cur + car + d2);
+}
+
+// ---- §56(b)(1)(B): the deduction for interest recomputed under sections 163(d) and 163(h) (G6708) ---------------
+// The regular deduction is a case input (`regular_investment_interest_deduction`, `regular_qualified_residence_interest_deduction`);
+// the alternative minimum tax deduction is recomputed here on adjusted net investment income and qualified housing interest,
+// and the difference enters the sum of adjustments as `Interest56b1B`. JUDGMENT CALL: the adjustments of sections 56, 57 and 58 to
+// net investment income are a signed case input (`net_investment_income_amt_adjustments`): computing them from the sum of
+// the adjustments would make the interest adjustment depend on itself.
+
+pub relation net_investment_income_regular(p: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "net investment income for section 163(d) computed for the regular tax";
+}
+pub relation net_investment_income_amt_adjustments(p: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the signed net effect of the adjustments of sections 56, 57 and 58 on net investment income (section 56(b)(1)(B)(iv))";
+}
+pub relation investment_interest_paid_for_amt(d: Indebtedness, taxpayer: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the interest of the year on an indebtedness (used for the investment interest and the qualified housing interest sums)";
+}
+pub relation regular_investment_interest_deduction(p: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the investment interest deduction allowed under section 163(d) for the regular tax";
+}
+pub relation regular_qualified_residence_interest_deduction(p: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the qualified residence interest deducted under section 163(h)(2)(D) for the regular tax";
+}
+pub relation adjusted_net_investment_income_for_amt(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "net investment income for the alternative minimum tax: the regular figure with the adjustments of sections 56, 57 and 58 and the specified private activity bond interest and deduction of section 56(b)(1)(B)(ii)";
+}
+pub relation investment_interest_allowed_for_amt(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the investment interest allowed for the alternative minimum tax: at most the investment interest (without qualified housing interest) and at most adjusted net investment income";
+}
+pub relation qualified_housing_interest_allowed_for_amt(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the qualified housing interest allowed for the alternative minimum tax (in lieu of the exception for qualified residence interest)";
+}
+relation has_amt_interest_recomputation(p: Person, y: TaxableYear) kind institutional {
+    label en unofficial "the regular interest deductions are asserted for the year, so the alternative minimum tax deduction for interest is recomputed";
+}
+rule HasAmtInterestRecomputation(p: Person, y: TaxableYear) strict {
+    when regular_investment_interest_deduction(p, y, _);
+    then has_amt_interest_recomputation(p, y);
+}
+@source(IRC_S56_B, relation = formalizes, coverage = exact, quote = "(iv) the adjustments of this section and sections 57 and 58 shall apply in determining net investment income under section 163(d).")
+rule AdjustedNetInvestmentIncomeForAmt(p: Person, y: TaxableYear, regular: Money, adj: Money, pab: Money, ded: Money) strict {
+    label en official "section 56(b)(1)(B)(ii), (iv): net investment income with the adjustments and the private activity bond interest and deduction";
+    when noncorporate_taxpayer_for_year(p, y);
+    when net_investment_income_regular(p, y, regular);
+    when net_investment_income_amt_adjustments(p, y, adj);
+    when pab_interest_includible_for_163d(p, y, pab);
+    when pab_related_deduction_for_163d(p, y, ded);
+    then adjusted_net_investment_income_for_amt(p, y, regular + adj + pab - ded);
+}
+@source(IRC_S56_B, relation = formalizes, coverage = exact, quote = "In determining the amount allowable as a deduction for interest, subsections (d) and (h) of section 163 shall apply, except that—")
+rule InvestmentInterestAllowedForAmt(p: Person, y: TaxableYear, nii: Money) strict {
+    label en official "section 56(b)(1)(B), section 163(d): investment interest is allowed up to adjusted net investment income";
+    when adjusted_net_investment_income_for_amt(p, y, nii);
+    then investment_interest_allowed_for_amt(p, y, min(sum(collect all a: Money, d: Indebtedness where investment_interest_for_amt(d, p, y) and investment_interest_paid_for_amt(d, p, y, a), empty: 0.00 USD), max(0.00 USD, nii)));
+}
+@source(IRC_S56_B, relation = formalizes, coverage = exact, quote = "In determining the amount allowable as a deduction for interest, subsections (d) and (h) of section 163 shall apply, except that—")
+rule QualifiedHousingInterestAllowedForAmt(p: Person, y: TaxableYear) strict {
+    label en official "section 56(b)(1)(B), section 163(h): qualified housing interest is not personal interest";
+    when noncorporate_taxpayer_for_year(p, y);
+    then qualified_housing_interest_allowed_for_amt(p, y, sum(collect all a: Money, d: Indebtedness where qualified_housing_interest_on(d, p, y) and investment_interest_paid_for_amt(d, p, y, a), empty: 0.00 USD));
+}
+@source(IRC_S56_B, relation = formalizes, coverage = exact, quote = "In determining the amount allowable as a deduction for interest, subsections (d) and (h) of section 163 shall apply, except that—")
+rule InterestAdjustmentRecomputed(p: Person, y: TaxableYear, reg_inv: Money, reg_res: Money, allowed: Money, housing: Money) strict {
+    label en official "section 56(b)(1)(B): the adjustment is the regular deductions less the recomputed ones";
+    when has_amt_interest_recomputation(p, y);
+    when regular_investment_interest_deduction(p, y, reg_inv);
+    when regular_qualified_residence_interest_deduction(p, y, reg_res);
+    when investment_interest_allowed_for_amt(p, y, allowed);
+    when qualified_housing_interest_allowed_for_amt(p, y, housing);
+    then amt_adjustment(p, y, Interest56b1B, (reg_inv + reg_res) - (allowed + housing));
+}
+
+// A chain with fewer than three loss years: the missing loss years absorb nothing.
+relation atnol_chain_loss_present_1(p: Person) kind institutional {
+    label en unofficial "the chain names an i-th loss year (i = 1)";
+}
+rule AtnolChainLossPresent1(p: Person) strict {
+    when atnol_chain_loss_year(p, 1, _);
+    then atnol_chain_loss_present_1(p);
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolAlloc1_1NoLossYear(p: Person, dy: TaxableYear) strict {
+    label en official "a chain without a loss year 1 absorbs nothing of it in deduction year 1";
+    when atnol_chain_deduction_year(p, 1, dy);
+    when not_known(atnol_chain_loss_present_1(p));
+    then atnol_alloc_1_1(p, 0.00 USD);
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolAlloc1_2NoLossYear(p: Person, dy: TaxableYear) strict {
+    label en official "a chain without a loss year 1 absorbs nothing of it in deduction year 2";
+    when atnol_chain_deduction_year(p, 2, dy);
+    when not_known(atnol_chain_loss_present_1(p));
+    then atnol_alloc_1_2(p, 0.00 USD);
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolAlloc1_3NoLossYear(p: Person, dy: TaxableYear) strict {
+    label en official "a chain without a loss year 1 absorbs nothing of it in deduction year 3";
+    when atnol_chain_deduction_year(p, 3, dy);
+    when not_known(atnol_chain_loss_present_1(p));
+    then atnol_alloc_1_3(p, 0.00 USD);
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolAlloc1_4NoLossYear(p: Person, dy: TaxableYear) strict {
+    label en official "a chain without a loss year 1 absorbs nothing of it in deduction year 4";
+    when atnol_chain_deduction_year(p, 4, dy);
+    when not_known(atnol_chain_loss_present_1(p));
+    then atnol_alloc_1_4(p, 0.00 USD);
+}
+relation atnol_chain_loss_present_2(p: Person) kind institutional {
+    label en unofficial "the chain names an i-th loss year (i = 2)";
+}
+rule AtnolChainLossPresent2(p: Person) strict {
+    when atnol_chain_loss_year(p, 2, _);
+    then atnol_chain_loss_present_2(p);
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolAlloc2_1NoLossYear(p: Person, dy: TaxableYear) strict {
+    label en official "a chain without a loss year 2 absorbs nothing of it in deduction year 1";
+    when atnol_chain_deduction_year(p, 1, dy);
+    when not_known(atnol_chain_loss_present_2(p));
+    then atnol_alloc_2_1(p, 0.00 USD);
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolAlloc2_2NoLossYear(p: Person, dy: TaxableYear) strict {
+    label en official "a chain without a loss year 2 absorbs nothing of it in deduction year 2";
+    when atnol_chain_deduction_year(p, 2, dy);
+    when not_known(atnol_chain_loss_present_2(p));
+    then atnol_alloc_2_2(p, 0.00 USD);
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolAlloc2_3NoLossYear(p: Person, dy: TaxableYear) strict {
+    label en official "a chain without a loss year 2 absorbs nothing of it in deduction year 3";
+    when atnol_chain_deduction_year(p, 3, dy);
+    when not_known(atnol_chain_loss_present_2(p));
+    then atnol_alloc_2_3(p, 0.00 USD);
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolAlloc2_4NoLossYear(p: Person, dy: TaxableYear) strict {
+    label en official "a chain without a loss year 2 absorbs nothing of it in deduction year 4";
+    when atnol_chain_deduction_year(p, 4, dy);
+    when not_known(atnol_chain_loss_present_2(p));
+    then atnol_alloc_2_4(p, 0.00 USD);
+}
+relation atnol_chain_loss_present_3(p: Person) kind institutional {
+    label en unofficial "the chain names an i-th loss year (i = 3)";
+}
+rule AtnolChainLossPresent3(p: Person) strict {
+    when atnol_chain_loss_year(p, 3, _);
+    then atnol_chain_loss_present_3(p);
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolAlloc3_1NoLossYear(p: Person, dy: TaxableYear) strict {
+    label en official "a chain without a loss year 3 absorbs nothing of it in deduction year 1";
+    when atnol_chain_deduction_year(p, 1, dy);
+    when not_known(atnol_chain_loss_present_3(p));
+    then atnol_alloc_3_1(p, 0.00 USD);
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolAlloc3_2NoLossYear(p: Person, dy: TaxableYear) strict {
+    label en official "a chain without a loss year 3 absorbs nothing of it in deduction year 2";
+    when atnol_chain_deduction_year(p, 2, dy);
+    when not_known(atnol_chain_loss_present_3(p));
+    then atnol_alloc_3_2(p, 0.00 USD);
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolAlloc3_3NoLossYear(p: Person, dy: TaxableYear) strict {
+    label en official "a chain without a loss year 3 absorbs nothing of it in deduction year 3";
+    when atnol_chain_deduction_year(p, 3, dy);
+    when not_known(atnol_chain_loss_present_3(p));
+    then atnol_alloc_3_3(p, 0.00 USD);
+}
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(ii) appropriate adjustments in the application of section 172(b)(2) shall be made to take into account the limitation of subparagraph (A).")
+rule AtnolAlloc3_4NoLossYear(p: Person, dy: TaxableYear) strict {
+    label en official "a chain without a loss year 3 absorbs nothing of it in deduction year 4";
+    when atnol_chain_deduction_year(p, 4, dy);
+    when not_known(atnol_chain_loss_present_3(p));
+    then atnol_alloc_3_4(p, 0.00 USD);
+}

@@ -1,0 +1,327 @@
+// 26 U.S.C. §661 (deduction for estates and complex trusts), §662 (inclusion
+// by their beneficiaries, tiers 1-2 with pro rata allocation), §663
+// (specific bequests excluded, the 65-day election, separate shares).
+//
+// JUDGMENT CALLS:
+//  - §661 applies to "an estate or trust (other than a trust to which
+//    subpart B applies for the taxable year)" — modeled as applying to
+//    every Estate, and to a Trust only when NOT a section 651 simple trust
+//    for the year (defeasible default defeated by `is_section_651_simple_trust`).
+//  - §662(a)(2)'s own internal cap ("if the sum of (A)+(B) for ALL
+//    beneficiaries exceeds DNI, include a proportionate share instead") is
+//    modeled as tier 2's own pro-rata step, run only after tier 1 amounts
+//    are subtracted from DNI (section 662(a)(2) reads DNI as reduced by the
+//    tier-1 amounts, per the statute's own cross-reference structure and
+//    Treas. reg. 1.662(a)-2).
+//  - §663(a)(1)'s "paid or credited all at once or in not more than 3
+//    installments" is modeled as a case-asserted classification
+//    (`specific_bequest_installment_count`), not a re-derived count of
+//    actual payment events (this package does not track a payment ledger).
+//  - §663(b) 65-day election: exact date arithmetic via `add_calendar_period`
+//    (65 calendar days) compared against the actual payment/credit date.
+//  - §663(c) separate shares: modeled as a classification enabling a case to
+//    assert DNI PER SHARE directly (each share becomes its own
+//    `distributable_net_income`-like computation externally) — this package
+//    does not itself partition a single trust's asset pool into shares (a
+//    trust-accounting exercise outside chapter 1); TECH_GAP for the
+//    automatic partition, EXECUTABLE for the "treated as separate trusts"
+//    classification a case can then apply DNI/deduction/inclusion rules to.
+
+language "law.core" version "0.2";
+package us.irc.trusts_estates version "0.1.1";
+namespace "urn:us:irc:trusts_estates:clir";
+
+use self::{
+    Election,
+    Estate,
+    IRC_S661_A,
+    IRC_S661_B,
+    IRC_S661_C,
+    IRC_S662_A,
+    IRC_S662_B,
+    IRC_S662_C,
+    IRC_S663_A,
+    IRC_S663_B,
+    IRC_S663_C,
+    IncomeCharacterClass,
+    Person,
+    TaxableYear,
+    Trust,
+    distributable_net_income,
+    is_section_651_simple_trust,
+    taxable_income_before_distribution_and_exemption,
+    trust_income_by_character,
+};
+
+// ============================================================================
+// §661(a): the deduction for estates and complex trusts
+// ============================================================================
+
+@source(IRC_S661_A, relation = formalizes, coverage = exact, quote = "In any taxable year there shall be allowed as a deduction in computing the taxable income of an estate or trust (other than a trust to which subpart B applies)")
+pub relation section_661_applies(et: Person, y: TaxableYear) kind institutional {
+    label en official "section 661's deduction applies to an estate or trust for the year, except a trust to which subpart B (section 651, simple trusts) applies for that year (section 661(a) chapeau)";
+}
+rule S661AppliesToEstate(e: Estate, y: TaxableYear) defeasible {
+    when taxable_income_before_distribution_and_exemption(e, y, _);
+    then section_661_applies(e, y);
+}
+rule S661AppliesToComplexTrust(t: Trust, y: TaxableYear) defeasible {
+    when taxable_income_before_distribution_and_exemption(t, y, _);
+    unless is_section_651_simple_trust(t, y) and taxable_income_before_distribution_and_exemption(t, y, _);
+    then section_661_applies(t, y);
+}
+
+pub relation tier1_amount_required_currently(et: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "any amount of income for the year required to be distributed currently, including an annuity out of income or corpus to the extent it can be paid out of income for the year (case-asserted total; section 661(a)(1))";
+}
+pub relation tier2_amount_other_properly_paid(et: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "any other amount properly paid, credited, or required to be distributed for the year (case-asserted total; section 661(a)(2))";
+}
+@source(IRC_S661_A, relation = formalizes, coverage = exact, quote = "but such deduction shall not exceed the distributable net income of the estate or trust")
+pub relation section_661_distribution_deduction(et: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the section 661 deduction equals tier 1 plus tier 2 amounts, but not exceeding distributable net income (section 661(a))";
+}
+rule S661DeductionWithinDni(et: Person, y: TaxableYear, t1: Money, t2: Money, dni: Money) defeasible {
+    when section_661_applies(et, y);
+    when tier1_amount_required_currently(et, y, t1);
+    when tier2_amount_other_properly_paid(et, y, t2);
+    when distributable_net_income(et, y, dni);
+    when (t1 + t2) <= dni;
+    then section_661_distribution_deduction(et, y, t1 + t2);
+}
+rule S661DeductionCappedAtDni(et: Person, y: TaxableYear, t1: Money, t2: Money, dni: Money) defeasible {
+    when section_661_applies(et, y);
+    when tier1_amount_required_currently(et, y, t1);
+    when tier2_amount_other_properly_paid(et, y, t2);
+    when distributable_net_income(et, y, dni);
+    when (t1 + t2) > dni;
+    then section_661_distribution_deduction(et, y, dni);
+}
+
+@source(IRC_S661_B, relation = formalizes, coverage = exact, quote = "The amount determined under subsection (a) shall be treated as consisting of the same proportion of each class of items entering into the computation of distributable net income")
+pub relation section_661_deduction_by_character(et: Person, y: TaxableYear, cls: IncomeCharacterClass, amount: Money) kind institutional {
+    label en official "the section 661(a) deduction is treated as consisting of the same proportion of each class of item entering into the computation of DNI as the total of each class bears to total DNI (section 661(b))";
+}
+rule S661DeductionByCharacter(et: Person, y: TaxableYear, cls: IncomeCharacterClass, class_amount: Money, deduction: Money, dni: Money) defeasible {
+    when trust_income_by_character(et, y, cls, class_amount);
+    when section_661_distribution_deduction(et, y, deduction);
+    when distributable_net_income(et, y, dni);
+    when dni > 0 USD;
+    then section_661_deduction_by_character(et, y, cls, deduction * (class_amount / dni));
+}
+
+@source(IRC_S661_C, relation = formalizes, coverage = exact, quote = "No deduction shall be allowed under subsection (a) in respect of any portion of the amount allowed as a deduction under that subsection (without regard to this subsection) which is treated under subsection (b) as consisting of any item of distributable net income which is not included in the gross income of the estate or trust")
+pub relation section_661c_no_deduction_for_excluded_dni_item(et: Person, y: TaxableYear, cls: IncomeCharacterClass) kind institutional {
+    label en official "no section 661 deduction is allowed for the portion of the deduction treated under subsection (b) as consisting of a DNI item that is not included in the estate's or trust's own gross income (section 661(c))";
+}
+pub relation dni_character_class_not_in_gross_income(et: Person, y: TaxableYear, cls: IncomeCharacterClass) kind empirical {
+    label en unofficial "the stated DNI character class (e.g. tax-exempt interest) is not itself included in the estate's or trust's gross income (case-asserted; section 661(c))";
+}
+rule S661cNoDeductionForExcludedItem(et: Person, y: TaxableYear, cls: IncomeCharacterClass) defeasible {
+    when dni_character_class_not_in_gross_income(et, y, cls);
+    then section_661c_no_deduction_for_excluded_dni_item(et, y, cls);
+}
+
+// ============================================================================
+// §662(a): inclusion by beneficiaries of estates and complex trusts
+// ============================================================================
+
+pub relation beneficiary_tier1_share(b: Person, et: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the beneficiary's share of the section 661(a)(1) tier-1 amount (income required to be distributed currently to this beneficiary), whether or not distributed (case-asserted; section 662(a)(1))";
+}
+pub relation total_tier1_all_beneficiaries(et: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "intermediate value: the sum, over all beneficiaries, of tier-1 shares (section 662(a)(1) total)";
+}
+rule S662TotalTier1(et: Person, y: TaxableYear) defeasible {
+    when section_661_applies(et, y);
+    then total_tier1_all_beneficiaries(et, y,
+        sum all a: Money for b: Person where beneficiary_tier1_share(b, et, y, a));
+}
+@source(IRC_S662_A, relation = formalizes, coverage = exact, quote = "The amount of income for the taxable year required to be distributed currently to such beneficiary, whether distributed or not.")
+pub relation section_662a1_beneficiary_inclusion(b: Person, et: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "tier 1: a beneficiary includes in gross income the amount of income for the year required to be distributed currently to that beneficiary, whether or not distributed, subject to proration when the section 662(a)(1) total for all beneficiaries exceeds DNI (section 662(a)(1))";
+}
+rule S662Tier1WithinDni(b: Person, et: Person, y: TaxableYear, share: Money, total: Money, dni: Money) defeasible {
+    when beneficiary_tier1_share(b, et, y, share);
+    when total_tier1_all_beneficiaries(et, y, total);
+    when distributable_net_income(et, y, dni);
+    when total <= dni;
+    then section_662a1_beneficiary_inclusion(b, et, y, share);
+}
+rule S662Tier1ProratedOverDni(b: Person, et: Person, y: TaxableYear, share: Money, total: Money, dni: Money) defeasible {
+    when beneficiary_tier1_share(b, et, y, share);
+    when total_tier1_all_beneficiaries(et, y, total);
+    when distributable_net_income(et, y, dni);
+    when total > dni;
+    when total > 0 USD;
+    then section_662a1_beneficiary_inclusion(b, et, y, dni * (share / total));
+}
+
+// Tier 2, over DNI as reduced by the tier-1 total (Treas. reg. 1.662(a)-2's
+// reading of the statute's own DNI cross-reference).
+pub relation dni_remaining_after_tier1(et: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "intermediate value: distributable net income reduced (not below zero) by the total tier-1 amount for the year — the DNI base tier 2 draws against (section 662(a)(2))";
+}
+rule S662DniRemainingAfterTier1Positive(et: Person, y: TaxableYear, dni: Money, tier1: Money) defeasible {
+    when distributable_net_income(et, y, dni);
+    when total_tier1_all_beneficiaries(et, y, tier1);
+    when dni > tier1;
+    then dni_remaining_after_tier1(et, y, dni - tier1);
+}
+rule S662DniRemainingAfterTier1Zero(et: Person, y: TaxableYear, dni: Money, tier1: Money) defeasible {
+    when distributable_net_income(et, y, dni);
+    when total_tier1_all_beneficiaries(et, y, tier1);
+    when dni <= tier1;
+    then dni_remaining_after_tier1(et, y, 0 USD);
+}
+
+pub relation beneficiary_tier2_share(b: Person, et: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the beneficiary's share of all other amounts properly paid, credited, or required to be distributed for the year (case-asserted; section 662(a)(2)(B))";
+}
+pub relation total_tier2_all_beneficiaries(et: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "intermediate value: the sum, over all beneficiaries, of tier-2 shares (section 662(a)(2)(B) total)";
+}
+rule S662TotalTier2(et: Person, y: TaxableYear) defeasible {
+    when section_661_applies(et, y);
+    then total_tier2_all_beneficiaries(et, y,
+        sum all a: Money for b: Person where beneficiary_tier2_share(b, et, y, a));
+}
+@source(IRC_S662_A, relation = formalizes, coverage = exact, quote = "All other amounts properly paid, credited, or required to be distributed to such beneficiary for the taxable year.")
+pub relation section_662a2_beneficiary_inclusion(b: Person, et: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "tier 2: a beneficiary includes in gross income all other amounts properly paid, credited, or required to be distributed to that beneficiary for the year, subject to proration over the DNI remaining after tier 1 when the section 662(a)(2) total for all beneficiaries exceeds it (section 662(a)(2))";
+}
+rule S662Tier2WithinRemainingDni(b: Person, et: Person, y: TaxableYear, share: Money, total: Money, remaining: Money) defeasible {
+    when beneficiary_tier2_share(b, et, y, share);
+    when total_tier2_all_beneficiaries(et, y, total);
+    when dni_remaining_after_tier1(et, y, remaining);
+    when total <= remaining;
+    then section_662a2_beneficiary_inclusion(b, et, y, share);
+}
+@source(IRC_S662_A, relation = formalizes, coverage = exact, quote = "exceeds the distributable net income of the estate or trust, then, in lieu of the amount provided in the preceding sentence, there shall be included in the gross income of the beneficiary an amount which bears the same ratio to distributable net income")
+rule S662Tier2ProratedOverRemainingDni(b: Person, et: Person, y: TaxableYear, share: Money, total: Money, remaining: Money) defeasible {
+    label en official "when the section 662(a)(2) total for all beneficiaries exceeds the DNI remaining after tier 1, each beneficiary includes a proportionate share of that remaining DNI instead (section 662(a)(2), sentence 2)";
+    when beneficiary_tier2_share(b, et, y, share);
+    when total_tier2_all_beneficiaries(et, y, total);
+    when dni_remaining_after_tier1(et, y, remaining);
+    when total > remaining;
+    when total > 0 USD;
+    then section_662a2_beneficiary_inclusion(b, et, y, remaining * (share / total));
+}
+
+@source(IRC_S662_B, relation = formalizes, coverage = exact, quote = "The amounts determined under subsection (a) shall have the same character in the hands of the beneficiary as in the hands of the estate or trust.")
+pub relation beneficiary_inclusion_same_character_662(b: Person, et: Person, y: TaxableYear, cls: IncomeCharacterClass, amount: Money) kind institutional {
+    label en official "the section 662(a) amounts have the same character in the hands of the beneficiary as in the hands of the estate or trust (section 662(b))";
+}
+rule S662SameCharacter(b: Person, et: Person, y: TaxableYear, cls: IncomeCharacterClass, class_amount: Money, tier1: Money, tier2: Money, dni: Money) defeasible {
+    when trust_income_by_character(et, y, cls, class_amount);
+    when section_662a1_beneficiary_inclusion(b, et, y, tier1);
+    when section_662a2_beneficiary_inclusion(b, et, y, tier2);
+    when distributable_net_income(et, y, dni);
+    when dni > 0 USD;
+    then beneficiary_inclusion_same_character_662(b, et, y, cls, (tier1 + tier2) * (class_amount / dni));
+}
+
+pub relation beneficiary_taxable_year_662(b: Person, y: TaxableYear) kind empirical {
+    label en unofficial "the beneficiary's own taxable year (case-asserted; section 662(c))";
+}
+pub relation estate_or_trust_year_ends_within_beneficiary_year(et: Person, et_y: TaxableYear, b: Person, ben_y: TaxableYear) kind empirical {
+    label en unofficial "the estate's or trust's taxable year et_y ends within the beneficiary's taxable year ben_y (case-asserted; section 662(c))";
+}
+@source(IRC_S662_C, relation = formalizes, coverage = exact, quote = "If the taxable year of a beneficiary is different from that of the estate or trust")
+pub relation beneficiary_inclusion_year_662(b: Person, et: Person, ben_y: TaxableYear) kind institutional {
+    label en official "when the beneficiary's taxable year differs from the estate's or trust's, the beneficiary's section 662 inclusion is based on the estate's or trust's taxable year or years ending within or with the beneficiary's taxable year (section 662(c))";
+}
+rule S662DifferentYearInclusion(b: Person, et: Person, et_y: TaxableYear, ben_y: TaxableYear) defeasible {
+    when estate_or_trust_year_ends_within_beneficiary_year(et, et_y, b, ben_y);
+    when section_662a1_beneficiary_inclusion(b, et, et_y, _);
+    then beneficiary_inclusion_year_662(b, et, ben_y);
+}
+
+// ============================================================================
+// §663(a): amounts not falling within §661(a)/§662(a)
+// ============================================================================
+
+pub relation specific_bequest_paid_or_credited(et: Person, b: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "an amount properly paid or credited as a gift or bequest of a specific sum of money or of specific property under the governing instrument (case-asserted; section 663(a)(1))";
+}
+pub relation specific_bequest_installment_count_within_limit(et: Person, b: Person, y: TaxableYear) kind empirical {
+    label en unofficial "the amount is paid or credited all at once or in not more than 3 installments (case-asserted classification; section 663(a)(1))";
+}
+pub relation specific_bequest_payable_only_from_income(et: Person, b: Person, y: TaxableYear) kind empirical {
+    label en unofficial "the amount can be paid or credited only from the income of the estate or trust — such an amount is NOT considered a gift or bequest of a specific sum of money (case-asserted; section 663(a)(1), sentence 2)";
+}
+@source(IRC_S663_A, relation = formalizes, coverage = exact, quote = "There shall not be included as amounts falling within section 661(a) or 662(a)")
+pub relation section_663a1_specific_bequest_excluded(et: Person, b: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "a properly paid or credited gift or bequest of a specific sum of money or specific property, paid or credited all at once or in not more than 3 installments, and not payable only from income, is EXCLUDED from section 661(a)/662(a) amounts (section 663(a)(1))";
+}
+rule S663a1SpecificBequestExcluded(et: Person, b: Person, y: TaxableYear, amount: Money) defeasible {
+    when specific_bequest_paid_or_credited(et, b, y, amount);
+    when specific_bequest_installment_count_within_limit(et, b, y);
+    unless specific_bequest_payable_only_from_income(et, b, y) and specific_bequest_paid_or_credited(et, b, y, amount);
+    then section_663a1_specific_bequest_excluded(et, b, y, amount);
+}
+
+// ============================================================================
+// §663(b): the 65-day election
+// ============================================================================
+
+pub relation amount_paid_or_credited_within_65_days(et: Person, y: TaxableYear, amount: Money, paid_on: Date, year_start: Date) kind empirical {
+    label en unofficial "an amount properly paid or credited within the first 65 days of the taxable year y (case-asserted, with the actual payment/credit date and the year's start date; section 663(b)(1))";
+}
+pub relation section_663b_election_made(et: Person, y: TaxableYear, e: Election) kind empirical {
+    label en unofficial "the executor of the estate or the fiduciary of the trust elects, in the manner and at the time the Secretary prescribes, to have section 663(b)(1) apply for the taxable year (case-asserted; section 663(b)(2))";
+}
+pub relation section_663b_election_timely_and_proper(et: Person, y: TaxableYear, e: Election) kind institutional {
+    label en unofficial "the section 663(b)(2) election is made in the manner and at the time the Secretary prescribes by regulations (folded into one atom for valid_when — the regulatory manner/time is EXTERNAL_DEPENDENCY, asserted here as a case fact)";
+}
+@source(IRC_S663_B, relation = formalizes, coverage = exact, quote = "If within the first 65 days of any taxable year of an estate or a trust, an amount is properly paid or credited, such amount shall be considered paid or credited on the last day of the preceding taxable year.")
+rule S663bElectionPowerRule(et: Person, y: TaxableYear, e: Election, amount: Money, paid_on: Date, year_start: Date) strict {
+    label en official "if, within the first 65 days of a taxable year, an amount is properly paid or credited, the executor or fiduciary may elect to have that amount considered paid or credited on the LAST DAY OF THE PRECEDING taxable year, instead of the year it was actually paid (section 663(b)(1)-(2))";
+    when amount_paid_or_credited_within_65_days(et, y, amount, paid_on, year_start);
+    when paid_on < add_calendar_period(year_start, 65 calendar_day);
+    when section_663b_election_made(et, y, e);
+    then power S663bElectionPower {
+        holder et;
+        over e;
+        exercise section_663b_election_made(et, y, e);
+        valid_when section_663b_election_timely_and_proper(et, y, e);
+        effect create(section_663b_amount_treated_as_prior_year(et, y, amount));
+        subject Election;
+        window [-infinity, infinity);
+    };
+}
+pub relation section_663b_amount_treated_as_prior_year(et: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "with a valid section 663(b) election, the amount paid or credited within the first 65 days of taxable year y is treated as paid or credited on the last day of the PRECEDING taxable year (section 663(b)(1))";
+}
+// Day 65 itself is WITHIN the window (`< start + 65 days`, i.e. days 1-65
+// inclusive since add_calendar_period(year_start, 65 calendar_day) is the
+// 65th day after the start boundary — day 66 fails the `paid_on <` test.
+
+// ============================================================================
+// §663(c): separate shares
+// ============================================================================
+
+pub relation trust_has_substantially_separate_independent_shares(et: Person, y: TaxableYear) kind empirical {
+    label en unofficial "the trust is a single trust having more than one beneficiary with substantially separate and independent shares (case-asserted governing-instrument/administration fact; section 663(c))";
+}
+@source(IRC_S663_C, relation = formalizes, coverage = exact, quote = "substantially separate and independent shares of different beneficiaries in the trust shall be treated as separate trusts")
+pub relation separate_share_treated_as_separate_trust(t: Trust, y: TaxableYear, share_id: Text) kind institutional {
+    label en official "for the sole purpose of computing distributable net income under sections 661 and 662, a substantially separate and independent share of a beneficiary in a single trust with more than one beneficiary is treated as a separate trust (section 663(c)) — the automatic partition of a trust's asset pool into shares is a TECH_GAP (see header note); a case asserts each share's own DNI/deduction/inclusion facts directly once this classification applies";
+}
+rule S663cSeparateShareClassification(t: Trust, y: TaxableYear, share_id: Text) defeasible {
+    when trust_has_substantially_separate_independent_shares(t, y);
+    when trust_share_identified(t, y, share_id);
+    then separate_share_treated_as_separate_trust(t, y, share_id);
+}
+pub relation trust_share_identified(et: Person, y: TaxableYear, share_id: Text) kind empirical {
+    label en unofficial "a case-asserted identifier for one substantially separate and independent share of the trust (section 663(c))";
+}
+@source(IRC_S663_C, relation = formalizes, coverage = exact, quote = "Rules similar to the rules of the preceding provisions of this subsection shall apply to treat substantially separate and independent shares of different beneficiaries in an estate having more t")
+pub relation estate_separate_share_treated_as_separate_estate(e: Estate, y: TaxableYear, share_id: Text) kind institutional {
+    label en official "rules similar to the trust separate-share rule apply to treat substantially separate and independent shares of different beneficiaries in an estate having more than one beneficiary as separate estates, for DNI purposes under sections 661/662 (section 663(c), last sentence)";
+}
+rule S663cSeparateShareClassificationEstate(e: Estate, y: TaxableYear, share_id: Text) defeasible {
+    when trust_has_substantially_separate_independent_shares(e, y);
+    when trust_share_identified(e, y, share_id);
+    then estate_separate_share_treated_as_separate_estate(e, y, share_id);
+}

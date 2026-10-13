@@ -1,0 +1,373 @@
+// Sections 803 (life insurance gross income), 804 (life insurance
+// deductions, a pure cross-reference to section 805), 805(a)-(b) (general
+// deductions), and 807(a)-(d),(f) (rules for certain reserves: the
+// increase/decrease-in-reserves items that feed 803(a)(2)/805(a)(2), the
+// per-contract 92.81-percent/net-surrender-value reserve amount, and the
+// change-in-computation-basis adjustment). Stage 2b (IRC-09 stage 2b, A12).
+//
+// METHOD, section 807(a)-(c): the statute compares an OPENING BALANCE to a
+// CLOSING BALANCE (both reduced by the policyholders'-share carve-out) of
+// the six "items described in subsection (c)" taken TOGETHER as one
+// portfolio-level aggregate — not contract by contract. This package models
+// that aggregate-level comparison directly (`reserve_items_opening_balance`/
+// `reserve_items_closing_balance` as portfolio totals the case asserts),
+// rather than deriving the totals by summing every contract's own section
+// 807(d) reserve: doing the latter would need an aggregate-over-derived-
+// predicates sum (AGENT-BRIEF §111 class of runtime-subset limitation,
+// TECH-GAPS.md's existing "Агрегаты над выведенным" class), and the
+// six sub-items of (c)(1)-(6) themselves are not separately itemized here
+// (filed as a TECH_GAP below, not silently folded into the aggregate).
+// Section 807(d)(1)(A)/(C) (the per-contract 92.81 percent/net-surrender-
+// value amount and the statutory-reserves cap) IS modeled per contract,
+// because the statute states it per contract and per-contract test data is
+// exactly what a case can assert — but that per-contract amount is NOT
+// wired into the portfolio-level (a)/(b) aggregate above (same aggregation
+// gap, opposite direction).
+//
+// METHOD, section 805(a)(4) (dividends received by the company): the (A)(i)-
+// (ii) two components (100 percent dividends; the company's share of other
+// dividends) are modeled as case facts summed into the base deduction; the
+// (D) proration REDUCTION (100 percent dividends paid by one life insurance
+// company to another, reduced by the excess of the paying company's section
+// 812 share over the receiving company's) is modeled using this package's
+// own section 812 computation (module 08). (B) (the section 246(b)
+// aggregate limitation) and (C)/(E)/(F) (100-percent-dividend definition,
+// foreign-corporation special rule, "increase in policy cash value"
+// definition) are NOT modeled — narrow definitional/limitation machinery
+// outside this pass's core arithmetic, filed as TECH_GAP.
+//
+// Section 805(b)'s modifications to the cross-referenced deductions
+// (interest under section 163, charitable contributions under section 170,
+// amortizable bond premium under section 171, dividends received under
+// sections 243/245) are NOT separately computed: those sections are owned
+// by `us.irc.deductions`, and section 805(a)(8)'s "all other deductions...
+// subject to the modifications provided by subsection (b)" is modeled as a
+// single case-asserted amount (`other_deductions_805a8`) that already
+// reflects whatever modification the case wants tested, consistent with
+// this package's stage-1 convention for cross-references to a sibling
+// package's own sections not otherwise imported.
+
+// Stage 3 (26.09.2026): the rules of sections 807(a), (b) and (d) below are
+// `defeasible`, and net_surrender_value_807, tax_reserve_method_amount_807d2
+// and statutory_reserves_807d4 are institutional (a case may still assert
+// them directly): module 29 derives the same relations from the (c) items,
+// the tax reserve method selection and the (e) refinements, and some of
+// those producers read `not_known` (a strict reader would be LDC-E4103).
+
+// ---- Section 807(a)-(c): the decrease/increase-in-reserves items ----
+
+use self::{
+    Contract,
+    IRC_S803_A,
+    IRC_S804,
+    IRC_S805_A,
+    IRC_S807_A,
+    IRC_S807_B,
+    IRC_S807_C,
+    IRC_S807_D,
+    IRC_S807_F,
+    Person,
+    TaxableYear,
+    life_insurance_deductions,
+    life_insurance_gross_income,
+};
+
+@source(IRC_S807_C, quote = "The items referred to in subsections (a) and (b) are as follows:\n(1) The life insurance reserves (as defined in section 816(b)).\n(2) The unearned premiums and unpaid losses included in total reserves under section 816(c)(2).\n(3) The amounts (discounted at the appropriate rate of interest) necessary to satisfy the obligations under insurance and annuity contracts, but only if such obligations do not involve (at the time with respect to which the computation is made under this paragraph) life, accident, or health contingencies.\n(4) Dividend accumulations, and other amounts, held at interest in connection with insurance and annuity contracts.\n(5) Premiums received in advance, and liabilities for premium deposit funds.\n(6) Reasonable special contingency reserves under contracts of group term life insurance or group accident and health insurance which are established and maintained for the provision of insurance on retired lives, for premium stabilization, or for a combination thereof.")
+pub relation reserve_items_opening_balance(c: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the opening balance (for the taxable year) of the aggregate section 807(c) items, per section 807(a)(1)/(b)(2) (the six sub-items of (c)(1)-(6) are not separately itemized here — TECH_GAP)";
+}
+pub relation reserve_items_closing_balance(c: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the closing balance (for the taxable year) of the aggregate section 807(c) items, before the policyholders'-share reduction, per section 807(a)(2)(A)/(b)(1)(A)";
+}
+@source(IRC_S807_A, quote = "the amount of the policyholders' share of tax-exempt interest and the amount of the policyholder's share of the increase for the taxable year in policy cash values (within the meaning of section 805(a)(4)(F)) of life insurance policies and annuity and endowment contracts to which section 264(f) applies")
+pub relation policyholders_share_reduction_807(c: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the policyholders' share of tax-exempt interest plus the policyholders' share of the increase in policy cash values, per section 807(a)(2)(B)/(b)(1)(B)";
+}
+@source(IRC_S807_A, quote = "the closing balance for such items, reduced by\n(B) the amount of the policyholders' share of tax-exempt interest and the amount of the policyholder's share of the increase for the taxable year in policy cash values")
+pub relation reserve_items_closing_balance_net(c: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the section 807(c) items' closing balance, reduced by the policyholders'-share amount, per section 807(a)(2)/(b)(1)";
+}
+rule Section807ClosingBalanceNetOfPolicyholdersShare(c: Person, y: TaxableYear, closing: Money, reduction: Money) defeasible {
+    label en official "section 807(a)(2)/(b)(1): closing balance net of the policyholders'-share reduction";
+    when reserve_items_closing_balance(c, y, closing);
+    when policyholders_share_reduction_807(c, y, reduction);
+    then reserve_items_closing_balance_net(c, y, closing - reduction);
+}
+@source(IRC_S807_A, quote = "If for any taxable year—\n(1) the opening balance for the items described in subsection (c), exceeds\n(2)(A) the closing balance for such items, reduced by\n(B) the amount of the policyholders' share of tax-exempt interest and the amount of the policyholder's share of the increase for the taxable year in policy cash values (within the meaning of section 805(a)(4)(F)) of life insurance policies and annuity and endowment contracts to which section 264(f) applies,\nsuch excess shall be included in gross income under section 803(a)(2).")
+pub relation net_decrease_in_reserves_807a(c: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 807(a): the excess of the opening balance over the net closing balance, included in gross income under section 803(a)(2)";
+}
+rule Section807aNetDecreaseInReserves(c: Person, y: TaxableYear, opening: Money, closing_net: Money) defeasible {
+    label en official "section 807(a): opening balance exceeding the net closing balance is a net decrease, included under section 803(a)(2)";
+    when reserve_items_opening_balance(c, y, opening);
+    when reserve_items_closing_balance_net(c, y, closing_net);
+    when opening > closing_net;
+    then net_decrease_in_reserves_807a(c, y, opening - closing_net);
+}
+@source(IRC_S807_B, quote = "If for any taxable year—\n(1)(A) the closing balance for the items described in subsection (c), reduced by\n(B) the amount of the policyholders' share of tax-exempt interest and the amount of the policyholder's share of the increase for the taxable year in policy cash values (within the meaning of section 805(a)(4)(F)) of life insurance policies and annuity and endowment contracts to which section 264(f) applies, exceeds\n(2) the opening balance for such items,\nsuch excess shall be taken into account as a deduction under section 805(a)(2).")
+pub relation net_increase_in_reserves_807b(c: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 807(b): the excess of the net closing balance over the opening balance, deducted under section 805(a)(2)";
+}
+rule Section807bNetIncreaseInReserves(c: Person, y: TaxableYear, opening: Money, closing_net: Money) defeasible {
+    label en official "section 807(b): the net closing balance exceeding the opening balance is a net increase, deducted under section 805(a)(2)";
+    when reserve_items_opening_balance(c, y, opening);
+    when reserve_items_closing_balance_net(c, y, closing_net);
+    when closing_net > opening;
+    then net_increase_in_reserves_807b(c, y, closing_net - opening);
+}
+
+// ---- Section 807(d)(1)(A),(C): the per-contract 92.81%/net-surrender-value
+// reserve amount and the statutory-reserves cap (variable contracts, (d)(1)
+// (B), are section 817's own subject and are not modeled here) ----
+
+@source(IRC_S807_D, quote = "the net surrender value of such contract")
+pub relation net_surrender_value_807(c: Person, contract: Contract, amount: Money) kind institutional {
+    label en unofficial "the net surrender value of the contract, per section 807(d)(1)(A)(i)/(e)(1)";
+}
+@source(IRC_S807_D, quote = "amount of the reserve determined under this paragraph with respect to any contract shall be determined by using the tax reserve method applicable to such contract")
+pub relation tax_reserve_method_amount_807d2(c: Person, contract: Contract, amount: Money) kind institutional {
+    label en unofficial "the amount of the reserve determined under section 807(d)(2) using the tax reserve method (CRVM/CARVM/NAIC-prescribed method) applicable to the contract — the method-selection machinery of (d)(3) is not separately modeled";
+}
+@source(IRC_S807_D, quote = "92.81 percent of the reserve determined under paragraph (2)")
+pub relation scaled_reserve_807d1Aii(c: Person, contract: Contract, amount: Money) kind institutional {
+    label en official "92.81 percent of the section 807(d)(2) tax-reserve-method amount, per section 807(d)(1)(A)(ii)";
+}
+rule Section807d1AiiScaledReserve(c: Person, contract: Contract, amount: Money) defeasible {
+    label en official "section 807(d)(1)(A)(ii): 92.81 percent of the tax-reserve-method amount";
+    when tax_reserve_method_amount_807d2(c, contract, amount);
+    then scaled_reserve_807d1Aii(c, contract, round(amount * 0.9281, 2, "HALF_UP"));
+}
+@source(IRC_S807_D, quote = "For purposes of this part (other than section 816), the amount of the life insurance reserves for any contract (other than a contract to which subparagraph (B) applies) shall be the greater of—\n(i) the net surrender value of such contract, or\n(ii) 92.81 percent of the reserve determined under paragraph (2).")
+pub relation life_insurance_reserve_807d1A(c: Person, contract: Contract, amount: Money) kind institutional {
+    label en official "section 807(d)(1)(A): the greater of the net surrender value or 92.81 percent of the tax-reserve-method amount, before the statutory-reserves cap (non-variable contracts only)";
+}
+rule Section807d1AGreaterOfSurrenderOrScaledReserve(c: Person, contract: Contract, surrender: Money, scaled: Money) defeasible {
+    label en official "section 807(d)(1)(A): the greater of net surrender value or the 92.81 percent scaled reserve";
+    when net_surrender_value_807(c, contract, surrender);
+    when scaled_reserve_807d1Aii(c, contract, scaled);
+    then life_insurance_reserve_807d1A(c, contract, max(surrender, scaled));
+}
+@source(IRC_S807_D, quote = "term \"statutory reserves\" means the aggregate amount set forth in the annual statement with respect to items described in section 807(c)")
+pub relation statutory_reserves_807d4(c: Person, contract: Contract, amount: Money) kind institutional {
+    label en unofficial "the statutory reserves for the contract, per section 807(d)(4) (the annual-statement aggregate; the deferred-and-uncollected-premium carve-out of the final sentence is not separately modeled)";
+}
+@source(IRC_S807_D, quote = "In no event shall the reserves determined under subparagraphs (A) or (B) for any contract as of any time exceed the amount which would be taken into account with respect to such contract as of such time in determining statutory reserves (as defined in paragraph (4)).")
+pub relation life_insurance_reserve_807d(c: Person, contract: Contract, amount: Money) kind institutional {
+    label en official "the section 807(d)(1) life insurance reserve for the contract, capped at statutory reserves per section 807(d)(1)(C)";
+}
+rule Section807d1CCapAtStatutoryReserves(c: Person, contract: Contract, uncapped: Money, cap: Money) defeasible {
+    label en official "section 807(d)(1)(C): the (A) amount, capped at statutory reserves, when the cap is known and binds";
+    when life_insurance_reserve_807d1A(c, contract, uncapped);
+    when statutory_reserves_807d4(c, contract, cap);
+    when uncapped > cap;
+    then life_insurance_reserve_807d(c, contract, cap);
+}
+rule Section807d1UncappedWhenNotAboveStatutoryReserves(c: Person, contract: Contract, uncapped: Money, cap: Money) defeasible {
+    label en official "section 807(d)(1)(C): the (A) amount stands when it does not exceed statutory reserves";
+    when life_insurance_reserve_807d1A(c, contract, uncapped);
+    when statutory_reserves_807d4(c, contract, cap);
+    when uncapped <= cap;
+    then life_insurance_reserve_807d(c, contract, uncapped);
+}
+rule Section807d1UncappedWhenNoStatutoryReservesFigure(c: Person, contract: Contract, uncapped: Money) defeasible {
+    label en official "section 807(d)(1): when no statutory-reserves figure is supplied for the contract, the (A) amount stands uncapped (the (C) cap is not thereby treated as zero — it is simply not tested)";
+    when life_insurance_reserve_807d1A(c, contract, uncapped);
+    when not_known(statutory_reserves_807d4(c, contract, uncapped));
+    then life_insurance_reserve_807d(c, contract, uncapped);
+}
+// NOTE (honest limitation, not hidden): `life_insurance_reserve_807d` above
+// is a PER-CONTRACT amount; it is not summed into `reserve_items_opening_
+// balance`/`reserve_items_closing_balance` above (that summation is the
+// aggregate-over-derived-predicates gap noted in the module header). A case
+// exercising section 807(a)/(b) supplies the portfolio totals directly;
+// a case exercising section 807(d) supplies a single contract's inputs.
+
+// ---- Section 807(f): adjustment for change in computing reserves ----
+
+@source(IRC_S807_F, quote = "the amount of the item at the close of the taxable year, computed on the new basis")
+pub relation reserve_item_close_of_year_new_basis(c: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the amount of a section 807(c) item at the close of the taxable year, computed on the new basis, per section 807(f)(1)(A)";
+}
+@source(IRC_S807_F, quote = "the amount of the item at the close of the taxable year, computed on the old basis")
+pub relation reserve_item_close_of_year_old_basis(c: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the amount of the same item at the close of the taxable year, computed on the old basis, per section 807(f)(1)(B)";
+}
+@source(IRC_S807_F, quote = "If the basis for determining any item referred to in subsection (c) as of the close of any taxable year differs from the basis for such determination as of the close of the preceding taxable year, then so much of the difference between—\n(A) the amount of the item at the close of the taxable year, computed on the new basis, and\n(B) the amount of the item at the close of the taxable year, computed on the old basis,\nas is attributable to contracts issued before the taxable year shall be taken into account under section 481 as adjustments attributable to a change in method of accounting initiated by the taxpayer and made with the consent of the Secretary.")
+pub relation section_807f_reserve_basis_change_amount(c: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 807(f)(1): the difference (new basis minus old basis) in a section 807(c) item's close-of-year amount, attributable to contracts issued before the taxable year — the amount to be taken into account under section 481 (that step itself is EXTERNAL_DEPENDENCY: see the module header and coverage/special-entities.deps.json; the pinned 2024 text of section 807(f) does not itself state a fixed multi-year spread, unlike an earlier version of this provision — none is invented here)";
+}
+rule Section807f1BasisChangeAmount(c: Person, y: TaxableYear, new_basis: Money, old_basis: Money) strict {
+    label en official "section 807(f)(1): the difference between the new-basis and old-basis amounts of a changed section 807(c) item (the 'attributable to contracts issued before the taxable year' allocation is not separately modeled — the full difference is taken as the amount, per the method's convention of not inventing an allocation the text itself does not formularize)";
+    when reserve_item_close_of_year_new_basis(c, y, new_basis);
+    when reserve_item_close_of_year_old_basis(c, y, old_basis);
+    then section_807f_reserve_basis_change_amount(c, y, new_basis - old_basis);
+}
+@source(IRC_S807_F, quote = "Except as provided in section 381(c)(22) (relating to carryovers in certain corporate readjustments), if for any taxable year the taxpayer is not a life insurance company, the balance of any adjustments under this subsection shall be taken into account for the preceding taxable year.")
+pub relation section_807f2_ceases_to_be_life_insurance_company(c: Person, y: TaxableYear) kind empirical {
+    label en unofficial "the taxpayer is not a life insurance company for the taxable year, per section 807(f)(2) (the section 381(c)(22) carryover exception is not separately modeled)";
+}
+@source(IRC_S807_F, quote = "the balance of any adjustments under this subsection shall be taken into account for the preceding taxable year")
+pub relation section_807f2_adjustment_accelerated_to_preceding_year(c: Person, y: TaxableYear) kind institutional {
+    label en official "section 807(f)(2): the balance of section 807(f) adjustments is taken into account for the PRECEDING taxable year, because the taxpayer is not a life insurance company for this taxable year";
+}
+rule Section807f2TerminationAccelerates(c: Person, y: TaxableYear) strict {
+    label en official "section 807(f)(2): ceasing to be a life insurance company accelerates the balance of section 807(f) adjustments to the preceding year";
+    when section_807f2_ceases_to_be_life_insurance_company(c, y);
+    then section_807f2_adjustment_accelerated_to_preceding_year(c, y);
+}
+
+// ---- Section 803(a)-(b): life insurance gross income ----
+
+@source(IRC_S803_A, quote = "(1) Premiums\n(A) The gross amount of premiums and other consideration on insurance and annuity contracts, less\n(B) return premiums, and premiums and other consideration arising out of indemnity reinsurance.")
+pub relation gross_premiums_and_other_consideration_803a1A(c: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the gross amount of premiums and other consideration on insurance and annuity contracts, per section 803(a)(1)(A) (including the section 803(b)(1) items: advance premiums, deposits, fees, assessments, assumption consideration, reimbursable policyholder dividends)";
+}
+@source(IRC_S803_A, quote = "return premiums, and premiums and other consideration arising out of indemnity reinsurance")
+pub relation return_premiums_803a1B(c: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "return premiums and premiums/consideration arising out of indemnity reinsurance, per section 803(a)(1)(B) (excluding policyholder dividends per section 803(b)(2)(A), except for indemnity reinsurance per (b)(2)(B))";
+}
+@source(IRC_S803_A, quote = "(A) The gross amount of premiums and other consideration on insurance and annuity contracts, less\n(B) return premiums, and premiums and other consideration arising out of indemnity reinsurance.")
+pub relation net_premiums_803a1(c: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 803(a)(1): gross premiums and other consideration, less return premiums (net premiums item)";
+}
+rule Section803a1NetPremiums(c: Person, y: TaxableYear, gross: Money, returned: Money) strict {
+    label en official "section 803(a)(1): net premiums = gross premiums and other consideration minus return premiums";
+    when gross_premiums_and_other_consideration_803a1A(c, y, gross);
+    when return_premiums_803a1B(c, y, returned);
+    then net_premiums_803a1(c, y, gross - returned);
+}
+@source(IRC_S803_A, quote = "All amounts not includible under paragraph (1) or (2) which under this subtitle are includible in gross income.")
+pub relation other_amounts_includible_803a3(c: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "all amounts not includible under section 803(a)(1) or (2) which are includible in gross income under Subtitle A, per section 803(a)(3)";
+}
+// Stage 3 (26.09.2026): `defeasible` because net premiums can now also come
+// from itemised premiums, of which the section 808(e) deemed premium is a
+// defeasible producer (module 28); a strict reader would be LDC-E4103.
+rule Section803aLifeInsuranceGrossIncome(c: Person, y: TaxableYear, premiums: Money, decrease: Money, other: Money) defeasible {
+    label en official "section 803(a): life insurance gross income = net premiums (a)(1) + net decrease in reserves (a)(2), from section 807(a)) + other includible amounts (a)(3)";
+    when net_premiums_803a1(c, y, premiums);
+    when net_decrease_in_reserves_807a(c, y, decrease);
+    when other_amounts_includible_803a3(c, y, other);
+    then life_insurance_gross_income(c, y, (premiums + decrease) + other);
+}
+// Helper: whether ANY section 807(a) net decrease amount has been derived
+// for the (company, year) pair (same not_known-over-existential pattern as
+// `has_base_year_585b2` in 01-banks.law).
+pub relation has_net_decrease_in_reserves_807a(c: Person, y: TaxableYear) kind institutional {
+    label en official "a section 807(a) net decrease in reserves has been derived for this company and taxable year (helper)";
+}
+rule HasNetDecreaseInReserves807a(c: Person, y: TaxableYear, amount: Money) defeasible {
+    label en official "helper: holds whenever any net decrease amount is derived";
+    when net_decrease_in_reserves_807a(c, y, amount);
+    then has_net_decrease_in_reserves_807a(c, y);
+}
+rule Section803aLifeInsuranceGrossIncomeNoDecrease(c: Person, y: TaxableYear, premiums: Money, other: Money) defeasible {
+    label en official "section 803(a): when no section 807(a) net decrease is derived for the year (none occurred, or the aggregate reserve facts were not supplied), gross income is net premiums plus other includible amounts alone";
+    when net_premiums_803a1(c, y, premiums);
+    when other_amounts_includible_803a3(c, y, other);
+    when not_known(has_net_decrease_in_reserves_807a(c, y));
+    then life_insurance_gross_income(c, y, premiums + other);
+}
+
+// ---- Section 804: life insurance deductions (pure cross-reference) ----
+
+@source(IRC_S804, quote = "For purposes of this part, the term \"life insurance deductions\" means the general deductions provided in section 805.")
+pub relation general_deductions_805(c: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the general deductions allowed under section 805, for the taxable year";
+}
+rule Section804LifeInsuranceDeductionsIsSection805(c: Person, y: TaxableYear, amount: Money) defeasible {
+    label en official "section 804: life insurance deductions equal the general deductions provided in section 805";
+    when general_deductions_805(c, y, amount);
+    then life_insurance_deductions(c, y, amount);
+}
+
+// ---- Section 805(a): general deductions ----
+
+@source(IRC_S805_A, quote = "(1) Death benefits, etc\nAll claims and benefits accrued, and all losses incurred (whether or not ascertained), during the taxable year on insurance and annuity contracts.")
+pub relation death_benefits_and_losses_805a1(c: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "all claims and benefits accrued, and losses incurred, during the taxable year on insurance and annuity contracts, per section 805(a)(1)";
+}
+@source(IRC_S805_A, quote = "The deduction for policyholder dividends (determined under section 808(c)).")
+pub relation policyholder_dividends_deduction_805a3(c: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "the deduction for policyholder dividends determined under section 808(c), per section 805(a)(3) (derived in 11-policyholder-dividends-808.law, STAGE 2b)";
+}
+@source(IRC_S805_A, quote = "(i) for 100 percent dividends received, and\n(ii) for the life insurance company's share of the dividends (other than 100 percent dividends) received.")
+pub relation dividends_received_805a4_before_proration(c: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "the sum of (i) 100 percent dividends received and (ii) the life insurance company's share of other dividends received, before the section 805(a)(4)(D) proration reduction (the (B) section 246(b) aggregate limitation and the (C)/(E)/(F) definitional machinery are not separately modeled)";
+}
+@source(IRC_S805_A, quote = "(D) Special rules for certain dividends from insurance companies")
+pub relation dividends_received_805a4(c: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 805(a)(4): the dividends-received deduction, after the (D) proration reduction where applicable";
+}
+pub relation has_805a4_proration_reduction(c: Person, y: TaxableYear) kind institutional {
+    label en official "a section 805(a)(4)(D) proration reduction has been derived for this company and taxable year (helper)";
+}
+rule Has805a4ProrationReduction(c: Person, y: TaxableYear, amount: Money) strict {
+    label en official "helper: holds whenever any proration reduction is derived";
+    when dividends_received_805a4_proration_reduction(c, y, amount);
+    then has_805a4_proration_reduction(c, y);
+}
+rule Section805a4NoProration(c: Person, y: TaxableYear, base: Money) defeasible {
+    label en official "section 805(a)(4): the base amount stands when no section 805(a)(4)(D) proration reduction is computed for the year";
+    when dividends_received_805a4_before_proration(c, y, base);
+    when not_known(has_805a4_proration_reduction(c, y));
+    then dividends_received_805a4(c, y, base);
+}
+rule Section805a4WithProration(c: Person, y: TaxableYear, base: Money, reduction: Money) defeasible {
+    label en official "section 805(a)(4)(D): the base amount reduced by the proration reduction computed in module 08 (section 812)";
+    when dividends_received_805a4_before_proration(c, y, base);
+    when dividends_received_805a4_proration_reduction(c, y, reduction);
+    then dividends_received_805a4(c, y, base - reduction);
+}
+@source(IRC_S805_A, quote = "The consideration (other than consideration arising out of indemnity reinsurance) in respect of the assumption by another person of liabilities under insurance and annuity contracts.")
+pub relation assumption_of_liabilities_consideration_805a6(c: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "consideration (other than for indemnity reinsurance) for another person's assumption of liabilities under insurance/annuity contracts, per section 805(a)(6)";
+}
+@source(IRC_S805_A, quote = "The amount of policyholder dividends which—\n(A) are paid or accrued by another insurance company in respect of policies the taxpayer has reinsured, and\n(B) are reimbursable by the taxpayer under the terms of the reinsurance contract.")
+pub relation reimbursable_dividends_805a7(c: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "policyholder dividends paid by another insurer on reinsured policies, reimbursable by the taxpayer, per section 805(a)(7)";
+}
+@source(IRC_S805_A, quote = "Subject to the modifications provided by subsection (b), all other deductions allowed under this subtitle for purposes of computing taxable income.")
+pub relation other_deductions_805a8(c: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "all other Subtitle A deductions, subject to the section 805(b) modifications, per section 805(a)(8) (the (b) modifications themselves — interest under section 163, charitable contributions under section 170, amortizable bond premium under section 171, dividends received under sections 243/245 — are owned by us.irc.deductions and are not separately recomputed here; the case-asserted amount here already reflects them)";
+}
+rule Section805aGeneralDeductions(c: Person, y: TaxableYear, benefits: Money, increase: Money, dividends: Money, drd: Money, assumption: Money, reimbursable: Money, other: Money) defeasible {
+    label en official "section 805(a): general deductions = (1) death benefits/losses + (2) net increase in reserves (section 807(b)) + (3) policyholder dividends deduction + (4) dividends received deduction + (6) assumption-of-liabilities consideration + (7) reimbursable dividends + (8) other deductions";
+    when death_benefits_and_losses_805a1(c, y, benefits);
+    when net_increase_in_reserves_807b(c, y, increase);
+    when policyholder_dividends_deduction_805a3(c, y, dividends);
+    when dividends_received_805a4(c, y, drd);
+    when assumption_of_liabilities_consideration_805a6(c, y, assumption);
+    when reimbursable_dividends_805a7(c, y, reimbursable);
+    when other_deductions_805a8(c, y, other);
+    then general_deductions_805(c, y, ((((benefits + increase) + dividends) + drd) + assumption + reimbursable) + other);
+}
+pub relation has_net_increase_in_reserves_807b(c: Person, y: TaxableYear) kind institutional {
+    label en official "a section 807(b) net increase in reserves has been derived for this company and taxable year (helper)";
+}
+rule HasNetIncreaseInReserves807b(c: Person, y: TaxableYear, amount: Money) defeasible {
+    label en official "helper: holds whenever any net increase amount is derived";
+    when net_increase_in_reserves_807b(c, y, amount);
+    then has_net_increase_in_reserves_807b(c, y);
+}
+rule Section805aGeneralDeductionsNoIncrease(c: Person, y: TaxableYear, benefits: Money, dividends: Money, drd: Money, assumption: Money, reimbursable: Money, other: Money) defeasible {
+    label en official "section 805(a): when no section 807(b) net increase is derived for the year, general deductions omit item (2) rather than treating it as unknown/blocked";
+    when death_benefits_and_losses_805a1(c, y, benefits);
+    when policyholder_dividends_deduction_805a3(c, y, dividends);
+    when dividends_received_805a4(c, y, drd);
+    when assumption_of_liabilities_consideration_805a6(c, y, assumption);
+    when reimbursable_dividends_805a7(c, y, reimbursable);
+    when other_deductions_805a8(c, y, other);
+    when not_known(has_net_increase_in_reserves_807b(c, y));
+    then general_deductions_805(c, y, (((benefits + dividends) + drd) + assumption + reimbursable) + other);
+}
+
+// Section 805(a)(4)(D)'s proration REDUCTION relation is declared here
+// (institutional, no producing rule in this module) and derived in module
+// 08 (section 812) from the paying/receiving companies' section 812 shares;
+// declaring it here keeps this module's own rules range-restricted without
+// a forward reference to module 08's file.
+@source(IRC_S805_A, quote = "The reduction under this clause for a dividend is an amount equal to—\n(I) the portion of such dividend attributable to prorated amounts, multiplied by\n(II) the percentage obtained by subtracting the share described in subclause (II) of clause (i) from the share described in subclause (I) of such clause.")
+pub relation dividends_received_805a4_proration_reduction(c: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 805(a)(4)(D)(ii): the proration reduction to the dividends-received deduction (derived in module 08 from the section 812 shares of the paying and receiving companies)";
+}

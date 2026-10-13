@@ -1,0 +1,714 @@
+// 26 U.S.C. §6166(e)-(k) — Stage 3 (26.09.2026): proration of a deficiency to
+// installments, time for payment of interest, acceleration of payment, the
+// election in case of certain deficiencies, direct skips, regulations and cross
+// references. Reads the estate-level model of 16-closely-held-business-estate-tax.law
+// (`DecedentEstate`, `closely_held_business_amount_6166`, `installments_elected`,
+// `installment_due_date`, `first_installment_due_date`, `installment_extension_in_effect`).
+//
+// JUDGMENT CALLS
+//  - (e), (h)(3): the limitation of (a)(2) is read as headroom: the maximum
+//    amount payable in installments (computed by 16- from the estate tax the
+//    case asserts, which then includes the deficiency) less the tax already
+//    elected for installments; the deficiency prorated is the lesser of the
+//    deficiency and the headroom, split into `n` equal parts (cents, HALF_UP).
+//  - "the date for payment of which has not arrived" (e): the installment due
+//    date is later than the date of the assessment; a due date on or before the
+//    assessment date has arrived. (h)(3) uses the date of the election in the
+//    same way.
+//  - (g)(1): "such interest" is read as the qualifying interests of the estate
+//    taken together (the value of each qualifying interest, without the
+//    passive-asset reduction of (b)(9), which does not apply for (g)); the
+//    dispositions counted are the asserted events, minus the section 303
+//    redemption (when the tax-payment condition is met), the reorganization and
+//    section 355 exchanges, and the transfers by reason of death to heirs.
+//  - (g)(3)(B)(iii)(II): "the number of months (or fractions thereof) after such
+//    date and before payment is made" is the smallest whole number of calendar
+//    months m with payment date <= due date + m months (m = 1..6).
+//  - The "negligence, intentional disregard of rules and regulations, or fraud
+//    with intent to evade tax" gate of (e) and (h)(1) is an evaluative element
+//    (DECISION-0194): an external judgment relation, authority Secretary.
+//  - (g)(1)(A) fixes the extension as ceasing to apply: `installment_extension_ceased`;
+//    16-closely-held-business-estate-tax.law reads it, so the duty to pay the
+//    next installment is not active after acceleration.
+
+language "law.core" version "0.2";
+package us.irc.payment_refunds_interest version "0.1.1";
+namespace "urn:us:irc:payment_refunds_interest:clir";
+
+use self::{
+    BusinessInterest6166,
+    DecedentEstate,
+    IRC_S6166_B,
+    IRC_S6166_E,
+    IRC_S6166_F,
+    IRC_S6166_G,
+    IRC_S6166_H,
+    IRC_S6166_I,
+    Notice,
+    Person,
+    Secretary,
+    TaxableYear,
+    business_interest_value,
+    election_valid_6166,
+    estate_qualifies_for_6166,
+    estate_tax_2001_net_of_credits,
+    estate_tax_payment_date_6151a,
+    executor_elects_b8,
+    executor_of_estate,
+    first_installment_due_date,
+    installment_due_date,
+    installment_extension_in_effect,
+    installments_elected,
+    interest_included_in_gross_estate_of,
+    maximum_tax_payable_in_installments,
+    qualifies_as_interest_in_closely_held_business,
+    tax_elected_for_installments,
+};
+
+// ============================================================================
+// (e) Proration of deficiency to installments
+// ============================================================================
+
+relation estate_tax_deficiency_assessed(e: DecedentEstate, amount: Money, assessed_on: Date) kind empirical { label en official "a deficiency in the tax imposed by section 2001 has been assessed on the date"; }
+pub external judgment relation s6166_deficiency_due_to_negligence_or_fraud(e: DecedentEstate) {
+    authority Secretary;
+    label en official "the deficiency is due to negligence, to intentional disregard of rules and regulations, or to fraud with intent to evade tax (section 6166(e), (h)(1))";
+}
+relation s6166e_proration_applies(e: DecedentEstate) kind institutional { label en official "an election is made under subsection (a) to pay tax in installments and a deficiency has been assessed, not due to negligence, disregard or fraud: the deficiency is prorated to the installments"; }
+@source(IRC_S6166_E, relation = formalizes, coverage = partial, quote = "This subsection shall not apply if the deficiency is due to negligence, to intentional disregard of rules and regulations, or to fraud with intent to evade tax.")
+rule S6166EProrationApplies defeasible {
+    for e: DecedentEstate;
+    for amount: Money;
+    for assessed: Date;
+    when election_valid_6166(e) and installment_extension_in_effect(e) and estate_tax_deficiency_assessed(e, amount, assessed);
+    unless s6166_deficiency_due_to_negligence_or_fraud(e);
+    then s6166e_proration_applies(e);
+}
+relation deficiency_prorated_amount(e: DecedentEstate, amount: Money) kind institutional { label en official "the deficiency, subject to the limitation provided by subsection (a)(2), that is prorated to the installments"; }
+@source(IRC_S6166_E, relation = formalizes, coverage = partial, quote = "the deficiency shall (subject to the limitation provided by subsection (a)(2)) be prorated to the installments payable under subsection (a)")
+rule S6166EProratedAmount defeasible {
+    for e: DecedentEstate;
+    for deficiency: Money;
+    for assessed: Date;
+    for maximum: Money;
+    for elected: Money;
+    when s6166e_proration_applies(e) and estate_tax_deficiency_assessed(e, deficiency, assessed) and maximum_tax_payable_in_installments(e, maximum) and tax_elected_for_installments(e, elected);
+    then deficiency_prorated_amount(e, min(deficiency, max(0 USD, maximum - elected)));
+}
+relation deficiency_share_per_installment(e: DecedentEstate, k: Integer, amount: Money) kind institutional { label en official "the part of the deficiency prorated to the k-th installment: an equal part of each of the n installments"; }
+rule S6166EShareOfInstallment defeasible {
+    for e: DecedentEstate;
+    for total: Money;
+    for n: Integer;
+    for k: Integer;
+    for due: Date;
+    when deficiency_prorated_amount(e, total) and installments_elected(e, n) and installment_due_date(e, k, due) and k <= n;
+    then deficiency_share_per_installment(e, k, div_round(total, n * 1.0, 2, "HALF_UP"));
+}
+relation deficiency_share_collected_with_installment(e: DecedentEstate, k: Integer, amount: Money, due: Date) kind institutional { label en official "the part prorated to an installment whose date for payment has not arrived is collected at the same time as, and as a part of, that installment"; }
+@source(IRC_S6166_E, relation = formalizes, coverage = partial, quote = "The part of the deficiency so prorated to any installment the date for payment of which has not arrived shall be collected at the same time as, and as a part of, such installment.")
+rule S6166EShareCollectedWithInstallment defeasible {
+    for e: DecedentEstate;
+    for k: Integer;
+    for amount: Money;
+    for due: Date;
+    for total: Money;
+    for assessed: Date;
+    when deficiency_share_per_installment(e, k, amount) and installment_due_date(e, k, due) and estate_tax_deficiency_assessed(e, total, assessed) and due > assessed;
+    then deficiency_share_collected_with_installment(e, k, amount, due);
+}
+relation deficiency_share_payable_on_notice_and_demand(e: DecedentEstate, k: Integer, amount: Money) kind institutional { label en official "the part prorated to an installment whose date for payment has arrived is paid upon notice and demand from the Secretary"; }
+@source(IRC_S6166_E, relation = formalizes, coverage = partial, quote = "The part of the deficiency so prorated to any installment the date for payment of which has arrived shall be paid upon notice and demand from the Secretary.")
+rule S6166EShareOnNoticeAndDemand defeasible {
+    for e: DecedentEstate;
+    for k: Integer;
+    for amount: Money;
+    for due: Date;
+    for total: Money;
+    for assessed: Date;
+    when deficiency_share_per_installment(e, k, amount) and installment_due_date(e, k, due) and estate_tax_deficiency_assessed(e, total, assessed) and due <= assessed;
+    then deficiency_share_payable_on_notice_and_demand(e, k, amount);
+}
+relation deficiency_notice_and_demand_for_share(n: Notice, e: DecedentEstate, k: Integer) kind empirical { label en official "the Secretary's notice and demand for the deficiency part prorated to the k-th installment"; }
+relation deficiency_share_paid(e: DecedentEstate, k: Integer) kind empirical { label en official "the deficiency part prorated to the k-th installment has been paid"; }
+@source(IRC_S6166_E, relation = formalizes, coverage = partial, quote = "shall be paid upon notice and demand from the Secretary")
+rule S6166EDutyPayShareOnNoticeAndDemand defeasible {
+    for e: DecedentEstate;
+    for x: Person;
+    for k: Integer;
+    for amount: Money;
+    for n: Notice;
+    for mailed: Date;
+    when deficiency_share_payable_on_notice_and_demand(e, k, amount) and executor_of_estate(e, x) and deficiency_notice_and_demand_for_share(n, e, k) and us.irc.core::mailed_on(n, mailed);
+    then duty PayDeficiencyShareOnNoticeAndDemand {
+        bearer x;
+        beneficiary Secretary;
+        goal achievement {
+            condition deficiency_share_paid(e, k);
+            window [mailed, infinity];
+        }
+    };
+}
+
+// ============================================================================
+// (f) Time for payment of interest
+// ============================================================================
+
+relation interest_deferral_period_end(e: DecedentEstate, d: Date) kind institutional { label en official "the end of the period in paragraphs (1)-(3): 5 years after the section 6151(a) date, or the shorter period the executor selected under (a)(3), that is, the first installment due date"; }
+@source(IRC_S6166_F, relation = formalizes, coverage = partial, quote = "If the executor has selected a period shorter than 5 years under subsection (a)(3), such shorter period shall be substituted for 5 years in paragraphs (1), (2), and (3) of this subsection.")
+rule S6166FPeriodEnd defeasible {
+    for e: DecedentEstate;
+    for d: Date;
+    when installment_extension_in_effect(e) and first_installment_due_date(e, d);
+    then interest_deferral_period_end(e, d);
+}
+relation annual_interest_payment_date(e: DecedentEstate, j: Integer, d: Date) kind institutional { label en official "interest attributable to the first period is paid annually: the j-th anniversary of the section 6151(a) date, while it does not fall after the end of the period"; }
+@source(IRC_S6166_F, relation = formalizes, coverage = partial, quote = "Interest payable under section 6601 of any unpaid portion of such amount attributable to the first 5 years after the date prescribed by section 6151(a) for payment of the tax shall be paid annually.")
+rule S6166FAnnualDate1 defeasible { for e: DecedentEstate; for pay: Date; for end: Date; when estate_tax_payment_date_6151a(e, pay) and interest_deferral_period_end(e, end) and add_calendar_period(pay, 12 calendar_month) <= end; then annual_interest_payment_date(e, 1, add_calendar_period(pay, 12 calendar_month)); }
+rule S6166FAnnualDate2 defeasible { for e: DecedentEstate; for pay: Date; for end: Date; when estate_tax_payment_date_6151a(e, pay) and interest_deferral_period_end(e, end) and add_calendar_period(pay, 24 calendar_month) <= end; then annual_interest_payment_date(e, 2, add_calendar_period(pay, 24 calendar_month)); }
+rule S6166FAnnualDate3 defeasible { for e: DecedentEstate; for pay: Date; for end: Date; when estate_tax_payment_date_6151a(e, pay) and interest_deferral_period_end(e, end) and add_calendar_period(pay, 36 calendar_month) <= end; then annual_interest_payment_date(e, 3, add_calendar_period(pay, 36 calendar_month)); }
+rule S6166FAnnualDate4 defeasible { for e: DecedentEstate; for pay: Date; for end: Date; when estate_tax_payment_date_6151a(e, pay) and interest_deferral_period_end(e, end) and add_calendar_period(pay, 48 calendar_month) <= end; then annual_interest_payment_date(e, 4, add_calendar_period(pay, 48 calendar_month)); }
+rule S6166FAnnualDate5 defeasible { for e: DecedentEstate; for pay: Date; for end: Date; when estate_tax_payment_date_6151a(e, pay) and interest_deferral_period_end(e, end) and add_calendar_period(pay, 60 calendar_month) <= end; then annual_interest_payment_date(e, 5, add_calendar_period(pay, 60 calendar_month)); }
+relation annual_deferral_interest_paid(e: DecedentEstate, j: Integer) kind empirical { label en official "the interest attributable to the j-th year of the first period has been paid"; }
+@source(IRC_S6166_F, relation = formalizes, coverage = partial, quote = "shall be paid annually")
+rule S6166FDutyPayAnnualInterest defeasible {
+    for e: DecedentEstate;
+    for x: Person;
+    for j: Integer;
+    for d: Date;
+    when annual_interest_payment_date(e, j, d) and executor_of_estate(e, x);
+    then duty PayEstateExtensionInterestAnnually {
+        bearer x;
+        beneficiary Secretary;
+        goal achievement {
+            condition annual_deferral_interest_paid(e, j);
+            window [-infinity, d];
+        }
+    };
+}
+relation interest_payable_with_installment(e: DecedentEstate, k: Integer, due: Date) kind institutional { label en official "interest attributable to a period after the first period is paid annually at the same time as, and as a part of, each installment payment of the tax"; }
+@source(IRC_S6166_F, relation = formalizes, coverage = partial, quote = "shall be paid annually at the same time as, and as a part of, each installment payment of the tax")
+rule S6166FInterestWithInstallment defeasible {
+    for e: DecedentEstate;
+    for k: Integer;
+    for due: Date;
+    for end: Date;
+    when installment_due_date(e, k, due) and interest_deferral_period_end(e, end) and due > end;
+    then interest_payable_with_installment(e, k, due);
+}
+relation installment_interest_paid(e: DecedentEstate, k: Integer) kind empirical { label en official "the interest that falls due with the k-th installment has been paid"; }
+rule S6166FDutyPayInterestWithInstallment defeasible {
+    for e: DecedentEstate;
+    for x: Person;
+    for k: Integer;
+    for d: Date;
+    when interest_payable_with_installment(e, k, d) and executor_of_estate(e, x);
+    then duty PayEstateExtensionInterestWithInstallment {
+        bearer x;
+        beneficiary Secretary;
+        goal achievement {
+            condition installment_interest_paid(e, k);
+            window [-infinity, d];
+        }
+    };
+}
+relation deficiency_interest_payable_on_notice_and_demand(e: DecedentEstate) kind institutional { label en official "a deficiency to which subsection (e) applies assessed after the close of the first period: the interest attributable to that period, and the interest assigned to installments due on or before the assessment, is paid upon notice and demand"; }
+@source(IRC_S6166_F, relation = formalizes, coverage = partial, quote = "shall be paid upon notice and demand from the Secretary")
+rule S6166FDeficiencyInterestOnNoticeAndDemand defeasible {
+    for e: DecedentEstate;
+    for amount: Money;
+    for assessed: Date;
+    for end: Date;
+    when s6166e_proration_applies(e) and estate_tax_deficiency_assessed(e, amount, assessed) and interest_deferral_period_end(e, end) and assessed > end;
+    then deficiency_interest_payable_on_notice_and_demand(e);
+}
+
+// ============================================================================
+// (g)(1) Acceleration: disposition of interest, withdrawal of funds
+// ============================================================================
+
+entity Disposition6166 { label en unofficial "a distribution, sale, exchange or other disposition of a portion of a qualifying interest, or a withdrawal of money and other property attributable to it"; }
+enum DispositionKind6166 {
+    DistributedInterest;
+    SoldInterest;
+    ExchangedInterest;
+    OtherDispositionOfInterest;
+    WithdrawalFromBusiness;
+    label en official "§6166(g)(1)(A)(i)(I)-(II): distributed, sold, exchanged or otherwise disposed of; money and other property withdrawn from the trade or business";
+}
+relation disposition_of_interest(ev: Disposition6166, e: DecedentEstate) kind empirical { label en official "the event concerns a qualifying interest of the estate"; }
+relation disposition_kind(ev: Disposition6166, k: DispositionKind6166) kind empirical;
+relation disposition_value(ev: Disposition6166, v: Money) kind empirical { label en official "the value of the portion of the interest distributed, sold, exchanged or otherwise disposed of, or of the money and other property withdrawn"; }
+relation disposition_date(ev: Disposition6166, d: Date) kind empirical;
+relation disposition_is_303_redemption(ev: Disposition6166) kind empirical { label en official "a distribution in redemption of stock to which section 303 (or so much of section 304 as relates to section 303) applies"; }
+relation section_2001_tax_paid_for_303(ev: Disposition6166, amount: Money, paid_on: Date) kind empirical { label en official "an amount of the tax imposed by section 2001 paid on account of the redemption"; }
+relation disposition_is_reorganization_or_355_exchange(ev: Disposition6166) kind empirical { label en official "an exchange of stock pursuant to a plan of reorganization described in subparagraph (D), (E), or (F) of section 368(a)(1), or an exchange to which section 355 (or so much of section 356 as relates to section 355) applies"; }
+relation transfer_to_heir_by_reason_of_death(ev: Disposition6166) kind empirical { label en official "a transfer of property of the decedent to a person entitled by reason of the decedent's death to receive it under the will, the law of descent and distribution, or a trust created by the decedent"; }
+relation subsequent_transfer_by_reason_of_death_to_family(ev: Disposition6166) kind empirical { label en official "a subsequent transfer of the property by reason of death, each transfer in the series being to a member of the family (section 267(c)(4)) of the transferor"; }
+
+// The section 303 condition: tax paid on or before the earlier of the first
+// installment due date after the distribution and one year after it.
+relation s303_installment_candidate(ev: Disposition6166, due: Date) kind institutional { label en unofficial "an installment due date after the date of the distribution (candidates, TECH-GAPS G136 idiom)"; }
+rule S303InstallmentCandidate strict {
+    for ev: Disposition6166;
+    for e: DecedentEstate;
+    for k: Integer;
+    for due: Date;
+    for d: Date;
+    when disposition_is_303_redemption(ev) and disposition_of_interest(ev, e) and disposition_date(ev, d) and installment_due_date(e, k, due) and due > d;
+    then s303_installment_candidate(ev, due);
+}
+relation s303_earlier_candidate_exists(ev: Disposition6166, due: Date) kind institutional { label en unofficial "helper: a strictly earlier installment date after the distribution exists"; }
+rule S303EarlierCandidateExists strict {
+    for ev: Disposition6166;
+    for due: Date;
+    for other: Date;
+    when s303_installment_candidate(ev, due) and s303_installment_candidate(ev, other) and other < due;
+    then s303_earlier_candidate_exists(ev, due);
+}
+relation s303_first_installment_after(ev: Disposition6166, due: Date) kind institutional { label en official "the date prescribed by subsection (a)(3) for the payment of the first installment which becomes due after the date of the distribution"; }
+rule S303FirstInstallmentAfter strict {
+    for ev: Disposition6166;
+    for due: Date;
+    when s303_installment_candidate(ev, due) and not_known(s303_earlier_candidate_exists(ev, due));
+    then s303_first_installment_after(ev, due);
+}
+relation s303_has_installment_after(ev: Disposition6166) kind institutional { label en unofficial "helper: some installment falls due after the distribution"; }
+rule S303HasInstallmentAfter strict { for ev: Disposition6166; for due: Date; when s303_installment_candidate(ev, due); then s303_has_installment_after(ev); }
+relation s303_payment_deadline(ev: Disposition6166, deadline: Date) kind institutional { label en official "the date by which the tax must be paid: the first installment date after the distribution or, if earlier, the day 1 year after the date of the distribution"; }
+@source(IRC_S6166_G, relation = formalizes, coverage = partial, quote = "on or before the date prescribed by subsection (a)(3) for the payment of the first installment which becomes due after the date of the distribution (or, if earlier, on or before the day which is 1 year after the date of the distribution)")
+rule S303DeadlineInstallmentEarlier strict {
+    for ev: Disposition6166;
+    for due: Date;
+    for d: Date;
+    when s303_first_installment_after(ev, due) and disposition_date(ev, d) and due <= add_calendar_period(d, 12 calendar_month);
+    then s303_payment_deadline(ev, due);
+}
+rule S303DeadlineOneYearEarlier strict {
+    for ev: Disposition6166;
+    for due: Date;
+    for d: Date;
+    when s303_first_installment_after(ev, due) and disposition_date(ev, d) and due > add_calendar_period(d, 12 calendar_month);
+    then s303_payment_deadline(ev, add_calendar_period(d, 12 calendar_month));
+}
+rule S303DeadlineNoInstallment strict {
+    for ev: Disposition6166;
+    for d: Date;
+    when disposition_is_303_redemption(ev) and disposition_date(ev, d) and not_known(s303_has_installment_after(ev));
+    then s303_payment_deadline(ev, add_calendar_period(d, 12 calendar_month));
+}
+relation s303_condition_met(ev: Disposition6166) kind institutional { label en official "an amount of the tax imposed by section 2001 not less than the amount of money and other property distributed is paid by the deadline"; }
+@source(IRC_S6166_G, relation = formalizes, coverage = partial, quote = "there is paid an amount of the tax imposed by section 2001 not less than the amount of money and other property distributed")
+rule S303ConditionMet strict {
+    for ev: Disposition6166;
+    for paid: Money;
+    for paid_on: Date;
+    for v: Money;
+    for deadline: Date;
+    when section_2001_tax_paid_for_303(ev, paid, paid_on) and disposition_value(ev, v) and s303_payment_deadline(ev, deadline) and paid >= v and paid_on <= deadline;
+    then s303_condition_met(ev);
+}
+relation redemption_excluded_from_dispositions(ev: Disposition6166) kind institutional { label en official "the redemption, and the withdrawal of money and other property distributed in it, is not treated as a distribution or withdrawal for subparagraph (A)"; }
+@source(IRC_S6166_G, relation = formalizes, coverage = partial, quote = "the redemption of such stock, and the withdrawal of money and other property distributed in such redemption, shall not be treated as a distribution or withdrawal for purposes of subparagraph (A)")
+rule S6166GRedemptionExcluded strict {
+    for ev: Disposition6166;
+    when disposition_is_303_redemption(ev) and s303_condition_met(ev);
+    then redemption_excluded_from_dispositions(ev);
+}
+relation stock_received_in_exchange_treated_as_qualifying(ev: Disposition6166) kind institutional { label en official "any stock received in the reorganization or section 355 exchange is treated as an interest qualifying under subsection (a)(1)"; }
+@source(IRC_S6166_G, relation = formalizes, coverage = partial, quote = "but any stock received in such an exchange shall be treated for purposes of subparagraph (A)(i) as an interest qualifying under subsection (a)(1)")
+rule S6166GStockReceivedQualifies strict { for ev: Disposition6166; when disposition_is_reorganization_or_355_exchange(ev); then stock_received_in_exchange_treated_as_qualifying(ev); }
+relation death_transfer_excluded(ev: Disposition6166) kind institutional { label en official "subparagraph (A)(i) does not apply to a transfer to an heir by reason of death or to a series of subsequent family transfers"; }
+@source(IRC_S6166_G, relation = formalizes, coverage = partial, quote = "Subparagraph (A)(i) does not apply to a transfer of property of the decedent to a person entitled by reason of the decedent's death to receive such property")
+rule S6166GDeathTransferToHeir strict { for ev: Disposition6166; when transfer_to_heir_by_reason_of_death(ev); then death_transfer_excluded(ev); }
+@source(IRC_S6166_G, relation = formalizes, coverage = partial, quote = "A similar rule shall apply in the case of a series of subsequent transfers of the property by reason of death so long as each transfer is to a member of the family")
+rule S6166GDeathTransferSeries strict { for ev: Disposition6166; when subsequent_transfer_by_reason_of_death_to_family(ev); then death_transfer_excluded(ev); }
+
+relation disposition_counts_toward_50_percent(ev: Disposition6166, e: DecedentEstate) kind institutional { label en official "a disposition or withdrawal that counts in the aggregate of subparagraph (A)(ii)"; }
+@source(IRC_S6166_G, relation = formalizes, coverage = partial, quote = "any portion of an interest in a closely held business which qualifies under subsection (a)(1) is distributed, sold, exchanged, or otherwise disposed of")
+rule S6166GCountedDisposition strict {
+    for ev: Disposition6166;
+    for e: DecedentEstate;
+    for k: DispositionKind6166;
+    when disposition_of_interest(ev, e) and disposition_kind(ev, k) and not_known(redemption_excluded_from_dispositions(ev)) and not_known(disposition_is_reorganization_or_355_exchange(ev)) and not_known(death_transfer_excluded(ev));
+    then disposition_counts_toward_50_percent(ev, e);
+}
+// (E), (F): changes in a holding company or business company are dispositions
+// of (or withdrawals with respect to) the stock qualifying under (a)(1).
+relation holding_company_stock_disposition(ev: Disposition6166, e: DecedentEstate) kind empirical { label en official "a disposition of any interest in holding company stock included in determining the gross estate, or a withdrawal from the holding company attributable to such an interest (subparagraph (E))"; }
+relation business_company_change_by_holding_company(ev: Disposition6166, e: DecedentEstate) kind empirical { label en official "a disposition by the holding company of any interest in stock in the business company, or a withdrawal from the business company attributable to that stock (subparagraph (F))"; }
+@source(IRC_S6166_G, relation = formalizes, coverage = partial, quote = "shall be treated for purposes of subparagraph (A) as a disposition of (or a withdrawal with respect to) the stock qualifying under subsection (a)(1)")
+rule S6166GHoldingCompanyDisposition strict {
+    for ev: Disposition6166;
+    for e: DecedentEstate;
+    when executor_elects_b8(e) and holding_company_stock_disposition(ev, e);
+    then disposition_counts_toward_50_percent(ev, e);
+}
+rule S6166GBusinessCompanyChange strict {
+    for ev: Disposition6166;
+    for e: DecedentEstate;
+    when executor_elects_b8(e) and business_company_change_by_holding_company(ev, e);
+    then disposition_counts_toward_50_percent(ev, e);
+}
+relation has_counted_disposition(e: DecedentEstate) kind institutional { label en unofficial "helper: at least one disposition counts"; }
+rule S6166GHasCountedDisposition strict { for e: DecedentEstate; for ev: Disposition6166; when disposition_counts_toward_50_percent(ev, e); then has_counted_disposition(e); }
+relation aggregate_dispositions_6166(e: DecedentEstate, total: Money) kind institutional { label en official "the aggregate of such distributions, sales, exchanges, or other dispositions and withdrawals"; }
+rule S6166GAggregateDispositions strict {
+    for e: DecedentEstate;
+    when has_counted_disposition(e);
+    then aggregate_dispositions_6166(e, sum all v: Money for ev: Disposition6166 where disposition_counts_toward_50_percent(ev, e) and disposition_value(ev, v));
+}
+relation qualifying_interest_total_value_for_g(e: DecedentEstate, v: Money) kind institutional { label en official "the value of the interests in a closely held business which qualify under (a)(1), without the passive-asset reduction of (b)(9) (which does not apply for subsection (g))"; }
+@source(IRC_S6166_B, relation = formalizes, coverage = partial, quote = "(but not for purposes of subsection (g))")
+rule S6166GQualifyingInterestValue strict {
+    for e: DecedentEstate;
+    for i0: BusinessInterest6166;
+    when interest_included_in_gross_estate_of(i0, e) and qualifies_as_interest_in_closely_held_business(i0);
+    then qualifying_interest_total_value_for_g(e, sum all v: Money for i: BusinessInterest6166 where interest_included_in_gross_estate_of(i, e) and qualifies_as_interest_in_closely_held_business(i) and business_interest_value(i, v));
+}
+relation has_excluded_redemption(e: DecedentEstate) kind institutional { label en unofficial "helper: a section 303 redemption is excluded"; }
+rule S6166GHasExcludedRedemption strict { for e: DecedentEstate; for ev: Disposition6166; when disposition_of_interest(ev, e) and redemption_excluded_from_dispositions(ev); then has_excluded_redemption(e); }
+relation interest_value_for_50_percent_test(e: DecedentEstate, v: Money) kind institutional { label en official "the value of the interest in the closely held business for subparagraph (A)(ii), reduced by the value of the stock redeemed in an excluded section 303 redemption"; }
+@source(IRC_S6166_G, relation = formalizes, coverage = partial, quote = "the value of the interest in the closely held business shall be considered to be such value reduced by the value of the stock redeemed")
+rule S6166GValueReducedByRedemption strict {
+    for e: DecedentEstate;
+    for total: Money;
+    when qualifying_interest_total_value_for_g(e, total) and has_excluded_redemption(e);
+    then interest_value_for_50_percent_test(e, total - (sum all v: Money for ev: Disposition6166 where disposition_of_interest(ev, e) and redemption_excluded_from_dispositions(ev) and disposition_value(ev, v)));
+}
+rule S6166GValueNoRedemption strict {
+    for e: DecedentEstate;
+    for total: Money;
+    when qualifying_interest_total_value_for_g(e, total) and not_known(has_excluded_redemption(e));
+    then interest_value_for_50_percent_test(e, total);
+}
+relation acceleration_by_disposition(e: DecedentEstate) kind institutional { label en official "the aggregate equals or exceeds 50 percent of the value of the interest: the extension ceases and the unpaid tax is payable on notice and demand"; }
+@source(IRC_S6166_G, relation = formalizes, coverage = partial, quote = "equals or exceeds 50 percent of the value of such interest")
+rule S6166GFiftyPercentAcceleration strict {
+    for e: DecedentEstate;
+    for total: Money;
+    for value: Money;
+    when aggregate_dispositions_6166(e, total) and interest_value_for_50_percent_test(e, value) and total >= value * 0.5;
+    then acceleration_by_disposition(e);
+}
+
+// ============================================================================
+// (g)(2) Undistributed income of the estate
+// ============================================================================
+
+relation estate_distributable_net_income(e: DecedentEstate, y: TaxableYear, amount: Money) kind institutional { label en official "the distributable net income of the estate for the taxable year (section 643)"; }
+relation estate_661a_distribution_deductions(e: DecedentEstate, y: TaxableYear, amount: Money) kind empirical { label en official "the amounts for the taxable year specified in paragraphs (1) and (2) of section 661(a)"; }
+relation estate_chapter_1_tax(e: DecedentEstate, y: TaxableYear, amount: Money) kind empirical { label en official "the amount of tax imposed for the taxable year on the estate under chapter 1"; }
+relation estate_2001_tax_and_interest_paid(e: DecedentEstate, y: TaxableYear, amount: Money) kind empirical { label en official "the amount of the tax imposed by section 2001 (including interest) paid by the executor during the taxable year, other than any amount paid pursuant to paragraph (2)"; }
+relation estate_taxable_year_end(e: DecedentEstate, y: TaxableYear, d: Date) kind empirical { label en official "the last day of the taxable year of the estate"; }
+relation estate_income_tax_return_due_date(e: DecedentEstate, y: TaxableYear, d: Date) kind empirical { label en official "the date prescribed by law for filing the income tax return for the taxable year, including extensions"; }
+relation business_company_dividend_to_holding_company(e: DecedentEstate, y: TaxableYear, amount: Money) kind empirical { label en official "dividends paid by the business company to the holding company, to the extent attributable to the stock qualifying under (a)(1) (subparagraph (C))"; }
+relation deemed_dividend_to_estate(e: DecedentEstate, y: TaxableYear, amount: Money) kind institutional { label en official "where stock in a corporation is treated as stock in another corporation under (b)(8)(A), the dividends paid by that other corporation to the corporation are treated as paid to the estate to the extent attributable to the qualifying stock"; }
+@source(IRC_S6166_G, relation = formalizes, coverage = partial, quote = "any dividends paid by such other corporation to the corporation shall be treated as paid to the estate of the decedent to the extent attributable to the stock qualifying under subsection (a)(1)")
+rule S6166GDeemedDividend strict {
+    for e: DecedentEstate;
+    for y: TaxableYear;
+    for amount: Money;
+    when executor_elects_b8(e) and business_company_dividend_to_holding_company(e, y, amount);
+    then deemed_dividend_to_estate(e, y, amount);
+}
+relation deemed_dividend_stated(e: DecedentEstate, y: TaxableYear) kind institutional { label en unofficial "helper: a deemed dividend is stated for the year"; }
+rule S6166GDeemedDividendStated strict { for e: DecedentEstate; for y: TaxableYear; for a: Money; when deemed_dividend_to_estate(e, y, a); then deemed_dividend_stated(e, y); }
+relation estate_dni_with_deemed_dividends(e: DecedentEstate, y: TaxableYear, amount: Money) kind institutional { label en official "the distributable net income of the estate, including the dividends treated as paid to it under (g)(2)(C)"; }
+rule S6166GDniWithDeemed strict {
+    for e: DecedentEstate;
+    for y: TaxableYear;
+    for dni: Money;
+    for deemed: Money;
+    when estate_distributable_net_income(e, y, dni) and deemed_dividend_to_estate(e, y, deemed);
+    then estate_dni_with_deemed_dividends(e, y, dni + deemed);
+}
+rule S6166GDniWithoutDeemed strict {
+    for e: DecedentEstate;
+    for y: TaxableYear;
+    for dni: Money;
+    when estate_distributable_net_income(e, y, dni) and not_known(deemed_dividend_stated(e, y));
+    then estate_dni_with_deemed_dividends(e, y, dni);
+}
+relation undistributed_net_income_6166(e: DecedentEstate, y: TaxableYear, amount: Money) kind institutional { label en official "the amount by which the distributable net income exceeds the sum of the section 661(a)(1)-(2) amounts, the chapter 1 tax and the section 2001 tax and interest paid"; }
+@source(IRC_S6166_G, relation = formalizes, coverage = partial, quote = "the undistributed net income of the estate for any taxable year is the amount by which the distributable net income of the estate for such taxable year (as defined in section 643) exceeds the sum of")
+rule S6166GUndistributedNetIncome strict {
+    for e: DecedentEstate;
+    for y: TaxableYear;
+    for dni: Money;
+    for d661: Money;
+    for tax1: Money;
+    for paid: Money;
+    when estate_dni_with_deemed_dividends(e, y, dni) and estate_661a_distribution_deductions(e, y, d661) and estate_chapter_1_tax(e, y, tax1) and estate_2001_tax_and_interest_paid(e, y, paid) and dni > d661 + tax1 + paid;
+    then undistributed_net_income_6166(e, y, dni - (d661 + tax1 + paid));
+}
+relation undistributed_income_payment_required(e: DecedentEstate, y: TaxableYear, amount: Money, due: Date) kind institutional { label en official "the executor pays an amount equal to the undistributed net income in liquidation of the unpaid installment tax, by the income tax return due date"; }
+@source(IRC_S6166_G, relation = formalizes, coverage = partial, quote = "the executor shall, on or before the date prescribed by law for filing the income tax return for such taxable year (including extensions thereof), pay an amount equal to such undistributed net income in liquidation of the unpaid portion of the tax payable in installments")
+rule S6166GUndistributedIncomePayment defeasible {
+    for e: DecedentEstate;
+    for y: TaxableYear;
+    for amount: Money;
+    for year_end: Date;
+    for first: Date;
+    for due: Date;
+    when installment_extension_in_effect(e) and undistributed_net_income_6166(e, y, amount) and estate_taxable_year_end(e, y, year_end) and first_installment_due_date(e, first) and year_end >= first and estate_income_tax_return_due_date(e, y, due);
+    then undistributed_income_payment_required(e, y, amount, due);
+}
+relation undistributed_income_paid(e: DecedentEstate, y: TaxableYear) kind empirical { label en official "the undistributed net income has been paid in liquidation of the unpaid installment tax"; }
+rule S6166GDutyPayUndistributedIncome defeasible {
+    for e: DecedentEstate;
+    for x: Person;
+    for y: TaxableYear;
+    for amount: Money;
+    for due: Date;
+    when undistributed_income_payment_required(e, y, amount, due) and executor_of_estate(e, x);
+    then duty PayUndistributedNetIncomeOfEstate {
+        bearer x;
+        beneficiary Secretary;
+        goal achievement {
+            condition undistributed_income_paid(e, y);
+            window [-infinity, due];
+        }
+    };
+}
+
+// ============================================================================
+// (g)(3) Failure to make payment of principal or interest
+// ============================================================================
+
+entity EstateExtensionPayment { label en unofficial "a payment of principal or interest under section 6166 with its date fixed by that section"; }
+relation extension_payment_of(pmt: EstateExtensionPayment, e: DecedentEstate) kind empirical;
+relation extension_payment_due(pmt: EstateExtensionPayment, due: Date) kind empirical { label en official "the date fixed for payment by section 6166 (including any extension of time)"; }
+relation extension_payment_amount(pmt: EstateExtensionPayment, amount: Money) kind empirical;
+relation extension_payment_paid_on(pmt: EstateExtensionPayment, paid: Date) kind empirical;
+relation extension_payment_late(pmt: EstateExtensionPayment) kind institutional { label en official "the payment is not paid on or before the date fixed for its payment"; }
+rule S6166GPaymentLate strict {
+    for pmt: EstateExtensionPayment;
+    for due: Date;
+    for paid: Date;
+    when extension_payment_due(pmt, due) and extension_payment_paid_on(pmt, paid) and paid > due;
+    then extension_payment_late(pmt);
+}
+relation extension_payment_paid_within_six_months(pmt: EstateExtensionPayment) kind institutional { label en official "a late payment is paid within 6 months of the date fixed"; }
+rule S6166GPaidWithinSixMonths strict {
+    for pmt: EstateExtensionPayment;
+    for due: Date;
+    for paid: Date;
+    when extension_payment_late(pmt) and extension_payment_due(pmt, due) and extension_payment_paid_on(pmt, paid) and paid <= add_calendar_period(due, 6 calendar_month);
+    then extension_payment_paid_within_six_months(pmt);
+}
+relation extension_payment_has_paid_date(pmt: EstateExtensionPayment) kind institutional { label en unofficial "helper: the payment has been made"; }
+rule S6166GHasPaidDate strict { for pmt: EstateExtensionPayment; for paid: Date; when extension_payment_paid_on(pmt, paid); then extension_payment_has_paid_date(pmt); }
+relation extension_payment_default_after_grace(pmt: EstateExtensionPayment, e: DecedentEstate) kind institutional { label en official "a payment not made on or before the date fixed and not made within 6 months of it: the unpaid tax is payable on notice and demand (subparagraph (A))"; }
+@source(IRC_S6166_G, relation = formalizes, coverage = partial, quote = "the unpaid portion of the tax payable in installments shall be paid upon notice and demand from the Secretary")
+rule S6166GDefaultPaidAfterGrace strict {
+    for pmt: EstateExtensionPayment;
+    for e: DecedentEstate;
+    for due: Date;
+    for paid: Date;
+    when extension_payment_of(pmt, e) and extension_payment_due(pmt, due) and extension_payment_paid_on(pmt, paid) and paid > add_calendar_period(due, 6 calendar_month);
+    then extension_payment_default_after_grace(pmt, e);
+}
+rule S6166GDefaultNotPaid strict {
+    for pmt: EstateExtensionPayment;
+    for e: DecedentEstate;
+    for due: Date;
+    for today: Date;
+    when extension_payment_of(pmt, e) and extension_payment_due(pmt, due) and not_known(extension_payment_has_paid_date(pmt)) and extension_payment_evaluated_on(pmt, today) and today > add_calendar_period(due, 6 calendar_month);
+    then extension_payment_default_after_grace(pmt, e);
+}
+relation extension_payment_evaluated_on(pmt: EstateExtensionPayment, today: Date) kind empirical { label en official "the date as of which an unpaid payment is assessed (the payment has not been made on that date)"; }
+relation installment_extension_ceased(e: DecedentEstate) kind institutional { label en official "the extension of time for payment provided in subsection (a) ceases to apply"; }
+@source(IRC_S6166_G, relation = formalizes, coverage = partial, quote = "then the extension of time for payment of tax provided in subsection (a) shall cease to apply")
+rule S6166GCeasesOnAcceleration strict { for e: DecedentEstate; when acceleration_by_disposition(e); then installment_extension_ceased(e); }
+rule S6166GCeasesOnDefault strict { for pmt: EstateExtensionPayment; for e: DecedentEstate; when extension_payment_default_after_grace(pmt, e); then installment_extension_ceased(e); }
+relation estate_tax_installment_paid_total(e: DecedentEstate, amount: Money) kind empirical { label en official "the tax paid so far in installments"; }
+relation accelerated_unpaid_tax(e: DecedentEstate, amount: Money) kind institutional { label en official "the unpaid portion of the tax payable in installments: the tax elected less the tax paid, payable on notice and demand after the extension ceases"; }
+rule S6166GUnpaidPortion strict {
+    for e: DecedentEstate;
+    for elected: Money;
+    for paid: Money;
+    when installment_extension_ceased(e) and tax_elected_for_installments(e, elected) and estate_tax_installment_paid_total(e, paid);
+    then accelerated_unpaid_tax(e, max(0 USD, elected - paid));
+}
+relation acceleration_notice_and_demand(n: Notice, e: DecedentEstate) kind empirical { label en official "the Secretary's notice and demand for the unpaid portion of the tax payable in installments"; }
+relation accelerated_tax_paid(e: DecedentEstate) kind empirical { label en official "the unpaid portion has been paid"; }
+rule S6166GDutyPayAcceleratedTax defeasible {
+    for e: DecedentEstate;
+    for x: Person;
+    for amount: Money;
+    for n: Notice;
+    for mailed: Date;
+    when accelerated_unpaid_tax(e, amount) and executor_of_estate(e, x) and acceleration_notice_and_demand(n, e) and us.irc.core::mailed_on(n, mailed);
+    then duty PayAcceleratedEstateTaxOnNoticeAndDemand {
+        bearer x;
+        beneficiary Secretary;
+        goal achievement {
+            condition accelerated_tax_paid(e);
+            window [mailed, infinity];
+        }
+    };
+}
+// (B): payment within 6 months of the date: no acceleration, the section
+// 6601(j) rate does not apply to it, and a 5-percent-a-month penalty.
+relation section_6601j_disapplied_for_payment(pmt: EstateExtensionPayment) kind institutional { label en official "the provisions of section 6601(j) do not apply with respect to the determination of interest on this payment"; }
+@source(IRC_S6166_G, relation = formalizes, coverage = partial, quote = "the provisions of section 6601(j) shall not apply with respect to the determination of interest on such payment")
+rule S6166GB2Section6601jNotApply strict { for pmt: EstateExtensionPayment; when extension_payment_paid_within_six_months(pmt); then section_6601j_disapplied_for_payment(pmt); }
+relation grace_payment_not_accelerated(pmt: EstateExtensionPayment) kind institutional { label en official "the provisions of subparagraph (A) do not apply with respect to a payment made within 6 months of the date"; }
+@source(IRC_S6166_G, relation = formalizes, coverage = partial, quote = "the provisions of subparagraph (A) shall not apply with respect to such payment")
+rule S6166GB1NoAcceleration strict { for pmt: EstateExtensionPayment; when extension_payment_paid_within_six_months(pmt); then grace_payment_not_accelerated(pmt); }
+relation late_payment_months(pmt: EstateExtensionPayment, m: Integer) kind institutional { label en official "the number of months (or fractions thereof) after the date fixed and before payment is made: the least m with payment on or before the date plus m months"; }
+rule S6166GMonths1 strict { for pmt: EstateExtensionPayment; for due: Date; for paid: Date; when extension_payment_paid_within_six_months(pmt) and extension_payment_due(pmt, due) and extension_payment_paid_on(pmt, paid) and paid <= add_calendar_period(due, 1 calendar_month); then late_payment_months(pmt, 1); }
+rule S6166GMonths2 strict { for pmt: EstateExtensionPayment; for due: Date; for paid: Date; when extension_payment_paid_within_six_months(pmt) and extension_payment_due(pmt, due) and extension_payment_paid_on(pmt, paid) and paid > add_calendar_period(due, 1 calendar_month) and paid <= add_calendar_period(due, 2 calendar_month); then late_payment_months(pmt, 2); }
+rule S6166GMonths3 strict { for pmt: EstateExtensionPayment; for due: Date; for paid: Date; when extension_payment_paid_within_six_months(pmt) and extension_payment_due(pmt, due) and extension_payment_paid_on(pmt, paid) and paid > add_calendar_period(due, 2 calendar_month) and paid <= add_calendar_period(due, 3 calendar_month); then late_payment_months(pmt, 3); }
+rule S6166GMonths4 strict { for pmt: EstateExtensionPayment; for due: Date; for paid: Date; when extension_payment_paid_within_six_months(pmt) and extension_payment_due(pmt, due) and extension_payment_paid_on(pmt, paid) and paid > add_calendar_period(due, 3 calendar_month) and paid <= add_calendar_period(due, 4 calendar_month); then late_payment_months(pmt, 4); }
+rule S6166GMonths5 strict { for pmt: EstateExtensionPayment; for due: Date; for paid: Date; when extension_payment_paid_within_six_months(pmt) and extension_payment_due(pmt, due) and extension_payment_paid_on(pmt, paid) and paid > add_calendar_period(due, 4 calendar_month) and paid <= add_calendar_period(due, 5 calendar_month); then late_payment_months(pmt, 5); }
+rule S6166GMonths6 strict { for pmt: EstateExtensionPayment; for due: Date; for paid: Date; when extension_payment_paid_within_six_months(pmt) and extension_payment_due(pmt, due) and extension_payment_paid_on(pmt, paid) and paid > add_calendar_period(due, 5 calendar_month) and paid <= add_calendar_period(due, 6 calendar_month); then late_payment_months(pmt, 6); }
+relation estate_extension_late_payment_penalty(pmt: EstateExtensionPayment, amount: Money) kind institutional { label en official "the penalty: 5 percent of the amount of the payment multiplied by the number of months (or fractions thereof)"; }
+@source(IRC_S6166_G, relation = formalizes, coverage = partial, quote = "(I) 5 percent of the amount of such payment, multiplied by")
+rule S6166GB3PenaltyAmount strict {
+    for pmt: EstateExtensionPayment;
+    for amount: Money;
+    for m: Integer;
+    when extension_payment_amount(pmt, amount) and late_payment_months(pmt, m);
+    then estate_extension_late_payment_penalty(pmt, round(amount * 0.05 * m, 2, "HALF_UP"));
+}
+relation penalty_treated_as_chapter_68_subchapter_b(pmt: EstateExtensionPayment) kind institutional { label en official "the penalty is treated in the same manner as a penalty imposed under subchapter B of chapter 68 (assessable penalties)"; }
+@source(IRC_S6166_G, relation = formalizes, coverage = partial, quote = "The penalty imposed under clause (iii) shall be treated in the same manner as a penalty imposed under subchapter B of chapter 68.")
+rule S6166GPenaltyChapter68 strict { for pmt: EstateExtensionPayment; for a: Money; when estate_extension_late_payment_penalty(pmt, a); then penalty_treated_as_chapter_68_subchapter_b(pmt); }
+
+// ============================================================================
+// (h) Election in case of certain deficiencies
+// ============================================================================
+
+relation executor_elects_deficiency_installments(e: DecedentEstate, made_on: Date) kind empirical { label en official "the executor elects to pay the deficiency in installments (subsection (h))"; }
+relation deficiency_notice_and_demand_issued_on(e: DecedentEstate, d: Date) kind empirical { label en official "the Secretary issues notice and demand for payment of the deficiency"; }
+relation h_election_conditions_met(e: DecedentEstate) kind institutional { label en official "a deficiency in the tax imposed by section 2001 is assessed, the estate qualifies under (a)(1), and the executor has not made an election under (a); not due to negligence, disregard or fraud"; }
+@source(IRC_S6166_H, relation = formalizes, coverage = partial, quote = "the executor may elect to pay the deficiency in installments")
+rule S6166HConditions defeasible {
+    for e: DecedentEstate;
+    for amount: Money;
+    for assessed: Date;
+    when estate_tax_deficiency_assessed(e, amount, assessed) and estate_qualifies_for_6166(e) and not_known(election_valid_6166(e));
+    unless s6166_deficiency_due_to_negligence_or_fraud(e);
+    then h_election_conditions_met(e);
+}
+relation h_election_timely(e: DecedentEstate) kind institutional { label en official "made not later than 60 days after issuance of notice and demand by the Secretary for the payment of the deficiency"; }
+@source(IRC_S6166_H, relation = formalizes, coverage = partial, quote = "An election under this subsection shall be made not later than 60 days after issuance of notice and demand by the Secretary for the payment of the deficiency")
+rule S6166HTimely strict {
+    for e: DecedentEstate;
+    for made: Date;
+    for issued: Date;
+    when executor_elects_deficiency_installments(e, made) and deficiency_notice_and_demand_issued_on(e, issued) and made <= add_calendar_period(issued, 60 calendar_day);
+    then h_election_timely(e);
+}
+relation h_election_valid(e: DecedentEstate) kind institutional { label en official "the conditions of (h)(1) are met and the election is timely"; }
+rule S6166HValid defeasible { for e: DecedentEstate; when h_election_conditions_met(e) and h_election_timely(e); then h_election_valid(e); }
+relation deficiency_installment_election_in_effect(e: DecedentEstate) kind institutional { label en official "the deficiency may be paid in installments as if an election had been timely made under subsection (a)"; }
+@source(IRC_S6166_H, relation = formalizes, coverage = partial, quote = "the executor may elect to pay the deficiency in installments")
+rule S6166HElectionPower defeasible {
+    label en official "an executor of a qualifying estate that made no (a) election may elect to pay a deficiency in installments, within 60 days of the notice and demand (section 6166(h))";
+    for e: DecedentEstate;
+    for x: Person;
+    for made: Date;
+    when executor_elects_deficiency_installments(e, made) and executor_of_estate(e, x);
+    then power S6166HDeficiencyElectionPower {
+        holder x;
+        over Secretary;
+        exercise executor_elects_deficiency_installments(e, made);
+        valid_when h_election_valid(e);
+        effect create(deficiency_installment_election_in_effect(e));
+    };
+}
+relation h_deficiency_share_per_installment(e: DecedentEstate, k: Integer, amount: Money) kind institutional { label en official "the deficiency is prorated, subject to (a)(2), to the installments which would have been due had an election been timely made at the time the return was filed"; }
+@source(IRC_S6166_H, relation = formalizes, coverage = partial, quote = "the deficiency shall (subject to the limitation provided by subsection (a)(2)) be prorated to the installments which would have been due if an election had been timely made under subsection (a) at the time the estate tax return was filed")
+rule S6166HShareOfInstallment defeasible {
+    for e: DecedentEstate;
+    for deficiency: Money;
+    for assessed: Date;
+    for maximum: Money;
+    for elected: Money;
+    for n: Integer;
+    for k: Integer;
+    for due: Date;
+    when deficiency_installment_election_in_effect(e) and estate_tax_deficiency_assessed(e, deficiency, assessed) and maximum_tax_payable_in_installments(e, maximum) and tax_elected_for_installments(e, elected) and installments_elected(e, n) and installment_due_date(e, k, due) and k <= n;
+    then h_deficiency_share_per_installment(e, k, div_round(min(deficiency, max(0 USD, maximum - elected)), n * 1.0, 2, "HALF_UP"));
+}
+relation h_share_paid_at_election(e: DecedentEstate, k: Integer, amount: Money) kind institutional { label en official "the part prorated to an installment whose date would have arrived is paid at the time of the making of the election"; }
+@source(IRC_S6166_H, relation = formalizes, coverage = partial, quote = "The part of the deficiency so prorated to any installment the date for payment of which would have arrived shall be paid at the time of the making of the election under this subsection.")
+rule S6166HShareAtElection defeasible {
+    for e: DecedentEstate;
+    for k: Integer;
+    for amount: Money;
+    for due: Date;
+    for made: Date;
+    when h_deficiency_share_per_installment(e, k, amount) and installment_due_date(e, k, due) and executor_elects_deficiency_installments(e, made) and due <= made;
+    then h_share_paid_at_election(e, k, amount);
+}
+relation h_share_paid_when_installment_due(e: DecedentEstate, k: Integer, amount: Money, due: Date) kind institutional { label en official "the part prorated to an installment whose date would not have arrived is paid when that installment would have been due"; }
+@source(IRC_S6166_H, relation = formalizes, coverage = partial, quote = "The portion of the deficiency so prorated to installments the date for payment of which would not have so arrived shall be paid at the time such installments would have been due if such an election had been made.")
+rule S6166HShareWhenDue defeasible {
+    for e: DecedentEstate;
+    for k: Integer;
+    for amount: Money;
+    for due: Date;
+    for made: Date;
+    when h_deficiency_share_per_installment(e, k, amount) and installment_due_date(e, k, due) and executor_elects_deficiency_installments(e, made) and due > made;
+    then h_share_paid_when_installment_due(e, k, amount, due);
+}
+relation h_share_paid(e: DecedentEstate, k: Integer) kind empirical { label en official "the deficiency part for the k-th installment has been paid"; }
+rule S6166HDutyPayShareAtElection defeasible {
+    for e: DecedentEstate;
+    for x: Person;
+    for k: Integer;
+    for amount: Money;
+    for made: Date;
+    when h_share_paid_at_election(e, k, amount) and executor_of_estate(e, x) and executor_elects_deficiency_installments(e, made);
+    then duty PayDeficiencyShareAtElection {
+        bearer x;
+        beneficiary Secretary;
+        goal achievement {
+            condition h_share_paid(e, k);
+            window [made, made];
+        }
+    };
+}
+rule S6166HDutyPayShareWhenDue defeasible {
+    for e: DecedentEstate;
+    for x: Person;
+    for k: Integer;
+    for amount: Money;
+    for due: Date;
+    when h_share_paid_when_installment_due(e, k, amount, due) and executor_of_estate(e, x);
+    then duty PayDeficiencyShareWhenInstallmentDue {
+        bearer x;
+        beneficiary Secretary;
+        goal achievement {
+            condition h_share_paid(e, k);
+            window [-infinity, due];
+        }
+    };
+}
+
+// ============================================================================
+// (i) direct skips; (j), (k) — see coverage rows
+// ============================================================================
+
+relation gst_tax_2601_on_direct_skip_of_interest(e: DecedentEstate, amount: Money) kind empirical { label en official "the tax imposed by section 2601 on the transfer of an interest in a closely held business that is the subject of a direct skip (section 2612(c)) at the same time as and as a result of the decedent's death"; }
+relation direct_skip_tax_stated(e: DecedentEstate) kind institutional { label en unofficial "helper: a section 2601 tax on a direct skip of the interest is stated"; }
+rule S6166IDirectSkipStated strict { for e: DecedentEstate; for a: Money; when gst_tax_2601_on_direct_skip_of_interest(e, a); then direct_skip_tax_stated(e); }
+relation estate_tax_for_6166(e: DecedentEstate, tax: Money) kind institutional { label en official "the tax imposed by section 2001 (reduced by credits), plus the section 2601 tax on a direct skip of the interest, treated as additional tax imposed by section 2001"; }
+@source(IRC_S6166_I, relation = formalizes, coverage = partial, quote = "any tax imposed by section 2601 on the transfer of such interest shall be treated as if it were additional tax imposed by section 2001")
+rule S6166IDirectSkipTaxIsEstateTax strict {
+    for e: DecedentEstate;
+    for tax: Money;
+    for gst: Money;
+    when estate_tax_2001_net_of_credits(e, tax) and gst_tax_2601_on_direct_skip_of_interest(e, gst);
+    then estate_tax_for_6166(e, tax + gst);
+}
+rule S6166INoDirectSkip strict {
+    for e: DecedentEstate;
+    for tax: Money;
+    when estate_tax_2001_net_of_credits(e, tax) and not_known(direct_skip_tax_stated(e));
+    then estate_tax_for_6166(e, tax);
+}

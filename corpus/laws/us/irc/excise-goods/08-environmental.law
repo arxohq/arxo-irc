@@ -1,0 +1,124 @@
+// Chapter 38: sections 4611(a)-(c) (crude oil and petroleum products,
+// Hazardous Substance Superfund and Oil Spill Liability Trust Fund
+// financing rates) and 4661 (taxable chemicals). Priority list, IRC-13
+// stage 1.
+
+// =====================================================================
+// Section 4611 — crude oil and petroleum products
+// =====================================================================
+
+use self::{
+    ExciseEvent,
+    IRC_S4611_A,
+    IRC_S4611_B,
+    IRC_S4611_C,
+    IRC_S4661_A,
+    IRC_S4661_C,
+    Person,
+    excise_tax_due,
+    liable_for_excise,
+    tax_free_sale,
+};
+
+pub enum CrudeOilEventKind {
+    CrudeOilReceivedAtRefinery;
+    PetroleumProductEnteredForConsumptionUseOrWarehousing;
+    DomesticCrudeOilUsedOrExportedWithoutPriorTax;
+}
+
+pub entity CrudeOilEvent : ExciseEvent;
+
+pub relation crude_oil_event(e: CrudeOilEvent, kind: CrudeOilEventKind, barrels: Decimal, on: Date, responsible: Person) kind empirical {
+    label en unofficial "section 4611(a)/(b): crude oil received at a U.S. refinery, a petroleum product entered into the U.S., or domestic crude oil used/exported without prior tax, with its barrel quantity";
+}
+pub relation crude_oil_used_on_premises_of_production(e: CrudeOilEvent) kind empirical {
+    label en unofficial "section 4611(b)(2): the crude oil is used for extracting oil or natural gas on the premises where it was produced (exception to the (b)(1) use/export tax)";
+}
+
+@source(IRC_S4611_B, relation = formalizes, coverage = exact, quote = "Paragraph (1) shall not apply to any use of crude oil for extracting oil or natural gas on the premises where such crude oil was produced.")
+rule CrudeOilOnPremisesUseExempt(e: CrudeOilEvent) strict {
+    when crude_oil_event(e, DomesticCrudeOilUsedOrExportedWithoutPriorTax, _, _, _) and crude_oil_used_on_premises_of_production(e);
+    then tax_free_sale(e);
+}
+
+pub relation crude_oil_hazardous_substance_rate_applies(e: CrudeOilEvent) kind institutional {
+    label en official "section 4611(c)(2)(A): the Hazardous Substance Superfund financing rate component";
+}
+@source(IRC_S4611_C, relation = formalizes, coverage = exact, quote = "The rate of the taxes imposed by this section is the sum of—")
+rule CrudeOilTax(e: CrudeOilEvent, barrels: Decimal, on: Date) strict {
+    when crude_oil_event(e, _, barrels, on, _) and not_known(crude_oil_used_on_premises_of_production(e)) and on < @2017-01-01;
+    then excise_tax_due(e, round((S4611HazardousSubstanceSuperfundRatePerBarrel + S4611OilSpillLiabilityRatePerBarrel) * barrels, 2, "HALF_UP"));
+}
+@source(IRC_S4611_C, relation = formalizes, coverage = exact, quote = "in the case of crude oil received or petroleum products entered after December 31, 2016, 9 cents a barrel")
+rule CrudeOilTaxAfter2016(e: CrudeOilEvent, barrels: Decimal, on: Date) strict {
+    when crude_oil_event(e, _, barrels, on, _) and not_known(crude_oil_used_on_premises_of_production(e)) and on >= @2017-01-01 and on < @2024-01-01;
+    then excise_tax_due(e, round((S4611HazardousSubstanceSuperfundRatePerBarrel + S4611OilSpillLiabilityRatePerBarrel) * barrels, 2, "HALF_UP"));
+}
+// NOTE (judgment call): both rules above read the SAME `.lawparam.json`
+// (`s4611-oil-spill-rate`), which is itself windowed at 2017-01-01 (see that
+// file); the date guard here is retained anyway so a `check`/`lower`
+// consumer sees the boundary stated in the RULE text as well as the
+// parameter data, matching this package's general convention of naming the
+// statutory boundary explicitly rather than relying solely on the parameter
+// window. SOURCE_GAP: section 4611(c)(3)'s post-2023 inflation adjustment to
+// the Hazardous Substance Superfund rate (indexed via section 1(f)(3), a
+// cost-of-living factor NOT itself pinned in this package's owned text) is
+// not computed; `S4611HazardousSubstanceSuperfundRatePerBarrel` stays at the
+// STATUTORY base of 16.4 cents. See coverage note on section 4611(c)(3).
+
+// STAGE 2: section 4611(c)(3) indexes the 16.4-cent Hazardous Substance Superfund rate for years
+// beginning after 2023. The published indexed total rate of the tax under section 4611(a)
+// (Superfund plus Oil Spill components) is pinned only for calendar years 2025 ($0.26 a barrel,
+// Rev. Proc. 2024-40 section 2.46) and 2026 ($0.27, Rev. Proc. 2025-32 section 4.45); 2024 and
+// 2027 onward are MISSING_PARAMETER_VALUE (no rule fires). INTERPRETATION (coverage row): the
+// 2026 total of $0.27 cannot be split into the two components, and section 4611(f)(2) says the
+// Oil Spill rate does not apply after December 31, 2025, which the Revenue Procedure figure does
+// not reflect; the package uses the published total as printed and records the tension.
+pub relation crude_oil_indexed_total_rate(e: CrudeOilEvent, rate: Money) kind institutional {
+    label en official "section 4611(c)(3): the published indexed rate a barrel of the tax under section 4611(a), for calendar years 2025 and 2026 (Rev. Proc. 2024-40 section 2.46, Rev. Proc. 2025-32 section 4.45)";
+}
+@source(IRC_S4611_C, relation = formalizes, coverage = partial, quote = "In the case of a year beginning after 2023, the amount in paragraph (2)(A) shall be increased by an amount equal to—")
+rule CrudeOilTaxIndexedYears(e: CrudeOilEvent, barrels: Decimal, on: Date) strict {
+    when crude_oil_event(e, _, barrels, on, _) and not_known(crude_oil_used_on_premises_of_production(e)) and on >= @2025-01-01 and on < @2027-01-01;
+    then excise_tax_due(e, round(S4611IndexedTotalRatePerBarrel * barrels, 2, "HALF_UP"));
+}
+
+@source(IRC_S4611_A, relation = formalizes, coverage = exact, quote = "There is hereby imposed a tax at the rate specified in subsection (c) on—")
+rule CrudeOilLiability(e: CrudeOilEvent, responsible: Person, amount: Money) defeasible {
+    when crude_oil_event(e, _, _, _, responsible) and excise_tax_due(e, amount) and not_known(tax_free_sale(e));
+    then liable_for_excise(responsible, e, amount);
+}
+
+// =====================================================================
+// Section 4661 — taxable chemicals
+// =====================================================================
+
+pub entity ChemicalSaleEvent : ExciseEvent;
+
+pub relation chemical_sale(e: ChemicalSaleEvent, substance: Text, tons: Decimal, on: Date, seller: Person) kind empirical {
+    label en unofficial "section 4661(a): a taxable chemical sold by the manufacturer, producer, or importer, with the substance name matching a section 4661(b) table row (see `chemical-tax-by-substance.lawtable.json` — a REPRESENTATIVE SUBSET of the full table is entered; remaining rows are a mechanical TECH_GAP, not a design gap, see coverage note) and its ton quantity";
+}
+
+// `chemical_tax_by_substance` is populated by
+// chemical-tax-by-substance.lawtable.json.
+pub relation chemical_tax_by_substance(substance: Text, tax_per_ton: Money) kind institutional {
+    label en official "section 4661(b): the per-ton tax amount for this taxable chemical";
+}
+
+@source(IRC_S4661_A, relation = formalizes, coverage = exact, quote = "There is hereby imposed a tax on any taxable chemical sold by the manufacturer, producer, or importer thereof.")
+rule ChemicalTax(e: ChemicalSaleEvent, substance: Text, tons: Decimal, rate: Money, on: Date) strict {
+    when chemical_sale(e, substance, tons, on, _) and chemical_tax_by_substance(substance, rate) and on <= @2031-12-31;
+    then excise_tax_due(e, round(rate * tons, 2, "HALF_UP"));
+}
+
+@source(IRC_S4661_C, relation = formalizes, coverage = exact, quote = "No tax shall be imposed by this section after December 31, 2031.")
+rule ChemicalTaxTerminated(e: ChemicalSaleEvent, on: Date) strict {
+    when chemical_sale(e, _, _, on, _) and on > @2031-12-31;
+    then tax_free_sale(e);
+}
+
+@source(IRC_S4661_A, relation = formalizes, coverage = exact, quote = "There is hereby imposed a tax on any taxable chemical sold by the manufacturer, producer, or importer thereof.")
+rule ChemicalLiability(e: ChemicalSaleEvent, seller: Person, amount: Money) defeasible {
+    when chemical_sale(e, _, _, _, seller) and excise_tax_due(e, amount) and not_known(tax_free_sale(e));
+    then liable_for_excise(seller, e, amount);
+}

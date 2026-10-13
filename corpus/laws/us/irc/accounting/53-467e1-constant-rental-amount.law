@@ -1,0 +1,502 @@
+// Section 467(e)(1): the constant rental amount (stage 4, DECISION-0379 with
+// deontics). Closes G4805.
+//
+// The constant rental amount A is the level amount which, if paid at the close
+// of each of m lease periods, has the same present value as all payments
+// required under the agreement, at the section 467(e)(4) rate compounded
+// semiannually. Closed form: with g the growth factor of one lease period and
+// G that of all m periods (both by module 49, binary exponentiation),
+//   sum of the present values of the level payments = A (G - 1) / (G (g - 1)),
+// so A = (present value of the payments) x G (g - 1) / (G - 1), one exact
+// division rounded to cents HALF_UP (JUDGMENT CALL).
+// The present value of the payments is the sum over the required payments;
+// the language cannot sum a derived relation, so payments are numbered by an
+// ORDINAL SLOT (1 to 24, bounded unrolling; more payments give no amount) and
+// each one is discounted with the semiannual factor of module 49 (whole
+// six-month periods by (1 + r/2)^n, a stub by simple interest).
+// BOUNDS (stated): every lease period is a whole number s of six-month
+// periods (a quarterly or monthly lease period would need a fractional
+// exponent: not derived, NEITHER); s x m at most 16383 (module 49);
+// all payments fall on or after the first day of the first lease period;
+// a zero rate (factor 1) gives no amount.
+
+use self::{
+    IRC_S467_E,
+    Person,
+    TaxableYear,
+    constant_rental_accrual_required_467,
+    growth_factor,
+    growth_request,
+    lease_period_coincides_with_taxable_year_467,
+    rate_for_section_467_467e4,
+    rent_accrued_for_year_467,
+    semiannual_factor,
+    semiannual_factor_request,
+};
+
+pub relation lease_first_period_start_467e1(agreement: Integer, d: Date) kind empirical {
+    label en official "the first day of the first lease period, the date from which payments are discounted (section 467(e)(1))";
+}
+pub relation lease_period_in_half_years_467e1(agreement: Integer, s: Integer) kind empirical {
+    label en official "the length of each lease period as a whole number of six-month periods (1: semiannual, 2: annual); other lengths are outside the derivation (bounded)";
+}
+pub relation lease_period_count_467e1(agreement: Integer, m: Integer) kind empirical {
+    label en official "the number of lease periods under the agreement (section 467(e)(1))";
+}
+pub relation payment_required_slot_467e1(agreement: Integer, slot: Integer, due_on: Date, amount: Money) kind empirical {
+    label en official "a payment required under the agreement, its date and its ordinal slot (1 to 24) (section 467(e)(1))";
+}
+rule RequiredPaymentAsksFactor(agreement: Integer, slot: Integer, due_on: Date, amount: Money, start: Date, r: Decimal) defeasible {
+    label en official "ask for the discount factor of a required payment";
+    when payment_required_slot_467e1(agreement, slot, due_on, amount);
+    when lease_first_period_start_467e1(agreement, start);
+    when rate_for_section_467_467e4(agreement, r);
+    when due_on >= start;
+    then semiannual_factor_request(r, start, due_on);
+}
+relation required_payment_present_value_467e1(agreement: Integer, slot: Integer, pv: Money) kind institutional {
+    label en official "the present value of a required payment at the section 467(e)(4) rate compounded semiannually: amount divided by the factor, one rounding to cents HALF_UP (JUDGMENT CALL)";
+}
+rule RequiredPaymentPresentValue(agreement: Integer, slot: Integer, due_on: Date, amount: Money, start: Date, r: Decimal, f: Decimal) defeasible {
+    label en official "amount / factor (section 467(e)(1), (e)(4))";
+    when payment_required_slot_467e1(agreement, slot, due_on, amount);
+    when lease_first_period_start_467e1(agreement, start);
+    when rate_for_section_467_467e4(agreement, r);
+    when due_on >= start;
+    when semiannual_factor(r, start, due_on, f);
+    then required_payment_present_value_467e1(agreement, slot, div_round(amount, f, 2, "HALF_UP"));
+}
+rule RequiredPaymentsRequestSum(agreement: Integer, slot: Integer, due_on: Date, amount: Money) defeasible {
+    label en official "ask for the sum of the present values";
+    when payment_required_slot_467e1(agreement, slot, due_on, amount);
+    then required_payment_pv_sum_sum_request(agreement);
+}
+
+relation required_payment_pv_sum_sum_request(agreement: Integer) kind institutional {
+    label en official "helper: the ordinal-slot sum of the present values of the payments required under a section 467 agreement is requested";
+}
+relation required_payment_pv_sum_slot_present(agreement: Integer, slot: Integer) kind institutional {
+    label en official "helper: slot number has a the present values of the payments required under a section 467 agreement value";
+}
+rule RequiredPaymentPvSumSlotPresent(agreement: Integer, slot: Integer, v: Money) defeasible {
+    label en official "a slot with a value is present";
+    when required_payment_present_value_467e1(agreement, slot, v);
+    then required_payment_pv_sum_slot_present(agreement, slot);
+}
+pub relation required_payment_pv_sum_total(agreement: Integer, total: Money) kind institutional {
+    label en official "the sum of the present values of the payments required under a section 467 agreement over the ordinal slots 1 to 24 (bounded unrolling: the language cannot sum a derived relation; more than 24 slots are not summed and give no total)";
+}
+relation required_payment_pv_sum_sum_0(agreement: Integer, acc: Money) kind institutional {
+    label en official "running sum before the first slot";
+}
+rule RequiredPaymentPvSumSum0(agreement: Integer) defeasible {
+    label en official "the sum starts at zero";
+    when required_payment_pv_sum_sum_request(agreement);
+    then required_payment_pv_sum_sum_0(agreement, 0.00 USD);
+}
+relation required_payment_pv_sum_sum_1(agreement: Integer, acc: Money) kind institutional {
+    label en official "running sum through slot 1";
+}
+rule RequiredPaymentPvSumSum1Add(agreement: Integer, acc: Money, v: Money) defeasible {
+    label en official "slot 1 has a value: add it";
+    when required_payment_pv_sum_sum_0(agreement, acc);
+    when required_payment_present_value_467e1(agreement, 1, v);
+    then required_payment_pv_sum_sum_1(agreement, acc + v);
+}
+rule RequiredPaymentPvSumSum1Skip(agreement: Integer, acc: Money) defeasible {
+    label en official "slot 1 is empty: keep the sum";
+    when required_payment_pv_sum_sum_0(agreement, acc);
+    when not_known(required_payment_pv_sum_slot_present(agreement, 1));
+    then required_payment_pv_sum_sum_1(agreement, acc);
+}
+relation required_payment_pv_sum_sum_2(agreement: Integer, acc: Money) kind institutional {
+    label en official "running sum through slot 2";
+}
+rule RequiredPaymentPvSumSum2Add(agreement: Integer, acc: Money, v: Money) defeasible {
+    label en official "slot 2 has a value: add it";
+    when required_payment_pv_sum_sum_1(agreement, acc);
+    when required_payment_present_value_467e1(agreement, 2, v);
+    then required_payment_pv_sum_sum_2(agreement, acc + v);
+}
+rule RequiredPaymentPvSumSum2Skip(agreement: Integer, acc: Money) defeasible {
+    label en official "slot 2 is empty: keep the sum";
+    when required_payment_pv_sum_sum_1(agreement, acc);
+    when not_known(required_payment_pv_sum_slot_present(agreement, 2));
+    then required_payment_pv_sum_sum_2(agreement, acc);
+}
+relation required_payment_pv_sum_sum_3(agreement: Integer, acc: Money) kind institutional {
+    label en official "running sum through slot 3";
+}
+rule RequiredPaymentPvSumSum3Add(agreement: Integer, acc: Money, v: Money) defeasible {
+    label en official "slot 3 has a value: add it";
+    when required_payment_pv_sum_sum_2(agreement, acc);
+    when required_payment_present_value_467e1(agreement, 3, v);
+    then required_payment_pv_sum_sum_3(agreement, acc + v);
+}
+rule RequiredPaymentPvSumSum3Skip(agreement: Integer, acc: Money) defeasible {
+    label en official "slot 3 is empty: keep the sum";
+    when required_payment_pv_sum_sum_2(agreement, acc);
+    when not_known(required_payment_pv_sum_slot_present(agreement, 3));
+    then required_payment_pv_sum_sum_3(agreement, acc);
+}
+relation required_payment_pv_sum_sum_4(agreement: Integer, acc: Money) kind institutional {
+    label en official "running sum through slot 4";
+}
+rule RequiredPaymentPvSumSum4Add(agreement: Integer, acc: Money, v: Money) defeasible {
+    label en official "slot 4 has a value: add it";
+    when required_payment_pv_sum_sum_3(agreement, acc);
+    when required_payment_present_value_467e1(agreement, 4, v);
+    then required_payment_pv_sum_sum_4(agreement, acc + v);
+}
+rule RequiredPaymentPvSumSum4Skip(agreement: Integer, acc: Money) defeasible {
+    label en official "slot 4 is empty: keep the sum";
+    when required_payment_pv_sum_sum_3(agreement, acc);
+    when not_known(required_payment_pv_sum_slot_present(agreement, 4));
+    then required_payment_pv_sum_sum_4(agreement, acc);
+}
+relation required_payment_pv_sum_sum_5(agreement: Integer, acc: Money) kind institutional {
+    label en official "running sum through slot 5";
+}
+rule RequiredPaymentPvSumSum5Add(agreement: Integer, acc: Money, v: Money) defeasible {
+    label en official "slot 5 has a value: add it";
+    when required_payment_pv_sum_sum_4(agreement, acc);
+    when required_payment_present_value_467e1(agreement, 5, v);
+    then required_payment_pv_sum_sum_5(agreement, acc + v);
+}
+rule RequiredPaymentPvSumSum5Skip(agreement: Integer, acc: Money) defeasible {
+    label en official "slot 5 is empty: keep the sum";
+    when required_payment_pv_sum_sum_4(agreement, acc);
+    when not_known(required_payment_pv_sum_slot_present(agreement, 5));
+    then required_payment_pv_sum_sum_5(agreement, acc);
+}
+relation required_payment_pv_sum_sum_6(agreement: Integer, acc: Money) kind institutional {
+    label en official "running sum through slot 6";
+}
+rule RequiredPaymentPvSumSum6Add(agreement: Integer, acc: Money, v: Money) defeasible {
+    label en official "slot 6 has a value: add it";
+    when required_payment_pv_sum_sum_5(agreement, acc);
+    when required_payment_present_value_467e1(agreement, 6, v);
+    then required_payment_pv_sum_sum_6(agreement, acc + v);
+}
+rule RequiredPaymentPvSumSum6Skip(agreement: Integer, acc: Money) defeasible {
+    label en official "slot 6 is empty: keep the sum";
+    when required_payment_pv_sum_sum_5(agreement, acc);
+    when not_known(required_payment_pv_sum_slot_present(agreement, 6));
+    then required_payment_pv_sum_sum_6(agreement, acc);
+}
+relation required_payment_pv_sum_sum_7(agreement: Integer, acc: Money) kind institutional {
+    label en official "running sum through slot 7";
+}
+rule RequiredPaymentPvSumSum7Add(agreement: Integer, acc: Money, v: Money) defeasible {
+    label en official "slot 7 has a value: add it";
+    when required_payment_pv_sum_sum_6(agreement, acc);
+    when required_payment_present_value_467e1(agreement, 7, v);
+    then required_payment_pv_sum_sum_7(agreement, acc + v);
+}
+rule RequiredPaymentPvSumSum7Skip(agreement: Integer, acc: Money) defeasible {
+    label en official "slot 7 is empty: keep the sum";
+    when required_payment_pv_sum_sum_6(agreement, acc);
+    when not_known(required_payment_pv_sum_slot_present(agreement, 7));
+    then required_payment_pv_sum_sum_7(agreement, acc);
+}
+relation required_payment_pv_sum_sum_8(agreement: Integer, acc: Money) kind institutional {
+    label en official "running sum through slot 8";
+}
+rule RequiredPaymentPvSumSum8Add(agreement: Integer, acc: Money, v: Money) defeasible {
+    label en official "slot 8 has a value: add it";
+    when required_payment_pv_sum_sum_7(agreement, acc);
+    when required_payment_present_value_467e1(agreement, 8, v);
+    then required_payment_pv_sum_sum_8(agreement, acc + v);
+}
+rule RequiredPaymentPvSumSum8Skip(agreement: Integer, acc: Money) defeasible {
+    label en official "slot 8 is empty: keep the sum";
+    when required_payment_pv_sum_sum_7(agreement, acc);
+    when not_known(required_payment_pv_sum_slot_present(agreement, 8));
+    then required_payment_pv_sum_sum_8(agreement, acc);
+}
+relation required_payment_pv_sum_sum_9(agreement: Integer, acc: Money) kind institutional {
+    label en official "running sum through slot 9";
+}
+rule RequiredPaymentPvSumSum9Add(agreement: Integer, acc: Money, v: Money) defeasible {
+    label en official "slot 9 has a value: add it";
+    when required_payment_pv_sum_sum_8(agreement, acc);
+    when required_payment_present_value_467e1(agreement, 9, v);
+    then required_payment_pv_sum_sum_9(agreement, acc + v);
+}
+rule RequiredPaymentPvSumSum9Skip(agreement: Integer, acc: Money) defeasible {
+    label en official "slot 9 is empty: keep the sum";
+    when required_payment_pv_sum_sum_8(agreement, acc);
+    when not_known(required_payment_pv_sum_slot_present(agreement, 9));
+    then required_payment_pv_sum_sum_9(agreement, acc);
+}
+relation required_payment_pv_sum_sum_10(agreement: Integer, acc: Money) kind institutional {
+    label en official "running sum through slot 10";
+}
+rule RequiredPaymentPvSumSum10Add(agreement: Integer, acc: Money, v: Money) defeasible {
+    label en official "slot 10 has a value: add it";
+    when required_payment_pv_sum_sum_9(agreement, acc);
+    when required_payment_present_value_467e1(agreement, 10, v);
+    then required_payment_pv_sum_sum_10(agreement, acc + v);
+}
+rule RequiredPaymentPvSumSum10Skip(agreement: Integer, acc: Money) defeasible {
+    label en official "slot 10 is empty: keep the sum";
+    when required_payment_pv_sum_sum_9(agreement, acc);
+    when not_known(required_payment_pv_sum_slot_present(agreement, 10));
+    then required_payment_pv_sum_sum_10(agreement, acc);
+}
+relation required_payment_pv_sum_sum_11(agreement: Integer, acc: Money) kind institutional {
+    label en official "running sum through slot 11";
+}
+rule RequiredPaymentPvSumSum11Add(agreement: Integer, acc: Money, v: Money) defeasible {
+    label en official "slot 11 has a value: add it";
+    when required_payment_pv_sum_sum_10(agreement, acc);
+    when required_payment_present_value_467e1(agreement, 11, v);
+    then required_payment_pv_sum_sum_11(agreement, acc + v);
+}
+rule RequiredPaymentPvSumSum11Skip(agreement: Integer, acc: Money) defeasible {
+    label en official "slot 11 is empty: keep the sum";
+    when required_payment_pv_sum_sum_10(agreement, acc);
+    when not_known(required_payment_pv_sum_slot_present(agreement, 11));
+    then required_payment_pv_sum_sum_11(agreement, acc);
+}
+relation required_payment_pv_sum_sum_12(agreement: Integer, acc: Money) kind institutional {
+    label en official "running sum through slot 12";
+}
+rule RequiredPaymentPvSumSum12Add(agreement: Integer, acc: Money, v: Money) defeasible {
+    label en official "slot 12 has a value: add it";
+    when required_payment_pv_sum_sum_11(agreement, acc);
+    when required_payment_present_value_467e1(agreement, 12, v);
+    then required_payment_pv_sum_sum_12(agreement, acc + v);
+}
+rule RequiredPaymentPvSumSum12Skip(agreement: Integer, acc: Money) defeasible {
+    label en official "slot 12 is empty: keep the sum";
+    when required_payment_pv_sum_sum_11(agreement, acc);
+    when not_known(required_payment_pv_sum_slot_present(agreement, 12));
+    then required_payment_pv_sum_sum_12(agreement, acc);
+}
+relation required_payment_pv_sum_sum_13(agreement: Integer, acc: Money) kind institutional {
+    label en official "running sum through slot 13";
+}
+rule RequiredPaymentPvSumSum13Add(agreement: Integer, acc: Money, v: Money) defeasible {
+    label en official "slot 13 has a value: add it";
+    when required_payment_pv_sum_sum_12(agreement, acc);
+    when required_payment_present_value_467e1(agreement, 13, v);
+    then required_payment_pv_sum_sum_13(agreement, acc + v);
+}
+rule RequiredPaymentPvSumSum13Skip(agreement: Integer, acc: Money) defeasible {
+    label en official "slot 13 is empty: keep the sum";
+    when required_payment_pv_sum_sum_12(agreement, acc);
+    when not_known(required_payment_pv_sum_slot_present(agreement, 13));
+    then required_payment_pv_sum_sum_13(agreement, acc);
+}
+relation required_payment_pv_sum_sum_14(agreement: Integer, acc: Money) kind institutional {
+    label en official "running sum through slot 14";
+}
+rule RequiredPaymentPvSumSum14Add(agreement: Integer, acc: Money, v: Money) defeasible {
+    label en official "slot 14 has a value: add it";
+    when required_payment_pv_sum_sum_13(agreement, acc);
+    when required_payment_present_value_467e1(agreement, 14, v);
+    then required_payment_pv_sum_sum_14(agreement, acc + v);
+}
+rule RequiredPaymentPvSumSum14Skip(agreement: Integer, acc: Money) defeasible {
+    label en official "slot 14 is empty: keep the sum";
+    when required_payment_pv_sum_sum_13(agreement, acc);
+    when not_known(required_payment_pv_sum_slot_present(agreement, 14));
+    then required_payment_pv_sum_sum_14(agreement, acc);
+}
+relation required_payment_pv_sum_sum_15(agreement: Integer, acc: Money) kind institutional {
+    label en official "running sum through slot 15";
+}
+rule RequiredPaymentPvSumSum15Add(agreement: Integer, acc: Money, v: Money) defeasible {
+    label en official "slot 15 has a value: add it";
+    when required_payment_pv_sum_sum_14(agreement, acc);
+    when required_payment_present_value_467e1(agreement, 15, v);
+    then required_payment_pv_sum_sum_15(agreement, acc + v);
+}
+rule RequiredPaymentPvSumSum15Skip(agreement: Integer, acc: Money) defeasible {
+    label en official "slot 15 is empty: keep the sum";
+    when required_payment_pv_sum_sum_14(agreement, acc);
+    when not_known(required_payment_pv_sum_slot_present(agreement, 15));
+    then required_payment_pv_sum_sum_15(agreement, acc);
+}
+relation required_payment_pv_sum_sum_16(agreement: Integer, acc: Money) kind institutional {
+    label en official "running sum through slot 16";
+}
+rule RequiredPaymentPvSumSum16Add(agreement: Integer, acc: Money, v: Money) defeasible {
+    label en official "slot 16 has a value: add it";
+    when required_payment_pv_sum_sum_15(agreement, acc);
+    when required_payment_present_value_467e1(agreement, 16, v);
+    then required_payment_pv_sum_sum_16(agreement, acc + v);
+}
+rule RequiredPaymentPvSumSum16Skip(agreement: Integer, acc: Money) defeasible {
+    label en official "slot 16 is empty: keep the sum";
+    when required_payment_pv_sum_sum_15(agreement, acc);
+    when not_known(required_payment_pv_sum_slot_present(agreement, 16));
+    then required_payment_pv_sum_sum_16(agreement, acc);
+}
+relation required_payment_pv_sum_sum_17(agreement: Integer, acc: Money) kind institutional {
+    label en official "running sum through slot 17";
+}
+rule RequiredPaymentPvSumSum17Add(agreement: Integer, acc: Money, v: Money) defeasible {
+    label en official "slot 17 has a value: add it";
+    when required_payment_pv_sum_sum_16(agreement, acc);
+    when required_payment_present_value_467e1(agreement, 17, v);
+    then required_payment_pv_sum_sum_17(agreement, acc + v);
+}
+rule RequiredPaymentPvSumSum17Skip(agreement: Integer, acc: Money) defeasible {
+    label en official "slot 17 is empty: keep the sum";
+    when required_payment_pv_sum_sum_16(agreement, acc);
+    when not_known(required_payment_pv_sum_slot_present(agreement, 17));
+    then required_payment_pv_sum_sum_17(agreement, acc);
+}
+relation required_payment_pv_sum_sum_18(agreement: Integer, acc: Money) kind institutional {
+    label en official "running sum through slot 18";
+}
+rule RequiredPaymentPvSumSum18Add(agreement: Integer, acc: Money, v: Money) defeasible {
+    label en official "slot 18 has a value: add it";
+    when required_payment_pv_sum_sum_17(agreement, acc);
+    when required_payment_present_value_467e1(agreement, 18, v);
+    then required_payment_pv_sum_sum_18(agreement, acc + v);
+}
+rule RequiredPaymentPvSumSum18Skip(agreement: Integer, acc: Money) defeasible {
+    label en official "slot 18 is empty: keep the sum";
+    when required_payment_pv_sum_sum_17(agreement, acc);
+    when not_known(required_payment_pv_sum_slot_present(agreement, 18));
+    then required_payment_pv_sum_sum_18(agreement, acc);
+}
+relation required_payment_pv_sum_sum_19(agreement: Integer, acc: Money) kind institutional {
+    label en official "running sum through slot 19";
+}
+rule RequiredPaymentPvSumSum19Add(agreement: Integer, acc: Money, v: Money) defeasible {
+    label en official "slot 19 has a value: add it";
+    when required_payment_pv_sum_sum_18(agreement, acc);
+    when required_payment_present_value_467e1(agreement, 19, v);
+    then required_payment_pv_sum_sum_19(agreement, acc + v);
+}
+rule RequiredPaymentPvSumSum19Skip(agreement: Integer, acc: Money) defeasible {
+    label en official "slot 19 is empty: keep the sum";
+    when required_payment_pv_sum_sum_18(agreement, acc);
+    when not_known(required_payment_pv_sum_slot_present(agreement, 19));
+    then required_payment_pv_sum_sum_19(agreement, acc);
+}
+relation required_payment_pv_sum_sum_20(agreement: Integer, acc: Money) kind institutional {
+    label en official "running sum through slot 20";
+}
+rule RequiredPaymentPvSumSum20Add(agreement: Integer, acc: Money, v: Money) defeasible {
+    label en official "slot 20 has a value: add it";
+    when required_payment_pv_sum_sum_19(agreement, acc);
+    when required_payment_present_value_467e1(agreement, 20, v);
+    then required_payment_pv_sum_sum_20(agreement, acc + v);
+}
+rule RequiredPaymentPvSumSum20Skip(agreement: Integer, acc: Money) defeasible {
+    label en official "slot 20 is empty: keep the sum";
+    when required_payment_pv_sum_sum_19(agreement, acc);
+    when not_known(required_payment_pv_sum_slot_present(agreement, 20));
+    then required_payment_pv_sum_sum_20(agreement, acc);
+}
+relation required_payment_pv_sum_sum_21(agreement: Integer, acc: Money) kind institutional {
+    label en official "running sum through slot 21";
+}
+rule RequiredPaymentPvSumSum21Add(agreement: Integer, acc: Money, v: Money) defeasible {
+    label en official "slot 21 has a value: add it";
+    when required_payment_pv_sum_sum_20(agreement, acc);
+    when required_payment_present_value_467e1(agreement, 21, v);
+    then required_payment_pv_sum_sum_21(agreement, acc + v);
+}
+rule RequiredPaymentPvSumSum21Skip(agreement: Integer, acc: Money) defeasible {
+    label en official "slot 21 is empty: keep the sum";
+    when required_payment_pv_sum_sum_20(agreement, acc);
+    when not_known(required_payment_pv_sum_slot_present(agreement, 21));
+    then required_payment_pv_sum_sum_21(agreement, acc);
+}
+relation required_payment_pv_sum_sum_22(agreement: Integer, acc: Money) kind institutional {
+    label en official "running sum through slot 22";
+}
+rule RequiredPaymentPvSumSum22Add(agreement: Integer, acc: Money, v: Money) defeasible {
+    label en official "slot 22 has a value: add it";
+    when required_payment_pv_sum_sum_21(agreement, acc);
+    when required_payment_present_value_467e1(agreement, 22, v);
+    then required_payment_pv_sum_sum_22(agreement, acc + v);
+}
+rule RequiredPaymentPvSumSum22Skip(agreement: Integer, acc: Money) defeasible {
+    label en official "slot 22 is empty: keep the sum";
+    when required_payment_pv_sum_sum_21(agreement, acc);
+    when not_known(required_payment_pv_sum_slot_present(agreement, 22));
+    then required_payment_pv_sum_sum_22(agreement, acc);
+}
+relation required_payment_pv_sum_sum_23(agreement: Integer, acc: Money) kind institutional {
+    label en official "running sum through slot 23";
+}
+rule RequiredPaymentPvSumSum23Add(agreement: Integer, acc: Money, v: Money) defeasible {
+    label en official "slot 23 has a value: add it";
+    when required_payment_pv_sum_sum_22(agreement, acc);
+    when required_payment_present_value_467e1(agreement, 23, v);
+    then required_payment_pv_sum_sum_23(agreement, acc + v);
+}
+rule RequiredPaymentPvSumSum23Skip(agreement: Integer, acc: Money) defeasible {
+    label en official "slot 23 is empty: keep the sum";
+    when required_payment_pv_sum_sum_22(agreement, acc);
+    when not_known(required_payment_pv_sum_slot_present(agreement, 23));
+    then required_payment_pv_sum_sum_23(agreement, acc);
+}
+relation required_payment_pv_sum_sum_24(agreement: Integer, acc: Money) kind institutional {
+    label en official "running sum through slot 24";
+}
+rule RequiredPaymentPvSumSum24Add(agreement: Integer, acc: Money, v: Money) defeasible {
+    label en official "slot 24 has a value: add it";
+    when required_payment_pv_sum_sum_23(agreement, acc);
+    when required_payment_present_value_467e1(agreement, 24, v);
+    then required_payment_pv_sum_sum_24(agreement, acc + v);
+}
+rule RequiredPaymentPvSumSum24Skip(agreement: Integer, acc: Money) defeasible {
+    label en official "slot 24 is empty: keep the sum";
+    when required_payment_pv_sum_sum_23(agreement, acc);
+    when not_known(required_payment_pv_sum_slot_present(agreement, 24));
+    then required_payment_pv_sum_sum_24(agreement, acc);
+}
+rule RequiredPaymentPvSumTotalFromLastSlot(agreement: Integer, acc: Money) defeasible {
+    label en official "the total is the running sum after the last slot";
+    when required_payment_pv_sum_sum_24(agreement, acc);
+    then required_payment_pv_sum_total(agreement, acc);
+}
+
+relation lease_period_growth_request_467e1(agreement: Integer, step: Decimal, s: Integer, n: Integer) kind institutional {
+    label en official "helper: the growth of one lease period (s six-month periods) and of all m periods (n = s x m)";
+}
+rule LeasePeriodGrowthRequest(agreement: Integer, r: Decimal, s: Integer, m: Integer) defeasible {
+    label en official "the per-half-year step and the two exponents";
+    when rate_for_section_467_467e4(agreement, r);
+    when lease_period_in_half_years_467e1(agreement, s);
+    when lease_period_count_467e1(agreement, m);
+    then lease_period_growth_request_467e1(agreement, div_round(r, 2.0, 12, "HALF_UP"), s, s * m);
+}
+rule LeasePeriodGrowthAsksOnePeriod(agreement: Integer, step: Decimal, s: Integer, n: Integer) defeasible {
+    label en official "ask for the growth of one lease period";
+    when lease_period_growth_request_467e1(agreement, step, s, n);
+    then growth_request(step, s);
+}
+rule LeasePeriodGrowthAsksAllPeriods(agreement: Integer, step: Decimal, s: Integer, n: Integer) defeasible {
+    label en official "ask for the growth of all lease periods";
+    when lease_period_growth_request_467e1(agreement, step, s, n);
+    then growth_request(step, n);
+}
+pub relation constant_rental_amount_derived_467e1(agreement: Integer, amount: Money) kind institutional {
+    label en official "the constant rental amount: the level amount which, paid at the close of each lease period, has the same present value as all payments required under the agreement, at the (e)(4) rate compounded semiannually (section 467(e)(1)); alternative to the asserted `constant_rental_amount_467` (never both)";
+}
+@source(IRC_S467_E, quote = "the amount which, if paid as of the close of each lease period under the agreement, would result in an aggregate present value equal to the present value of the aggregate payments required under the agreement.")
+rule ConstantRentalAmountFromPresentValues(agreement: Integer, step: Decimal, s: Integer, n: Integer, pv: Money, g: Decimal, big_g: Decimal) defeasible {
+    label en official "A = PV x G (g - 1) / (G - 1) (section 467(e)(1))";
+    when lease_period_growth_request_467e1(agreement, step, s, n);
+    when required_payment_pv_sum_total(agreement, pv);
+    when growth_factor(step, s, g);
+    when growth_factor(step, n, big_g);
+    when big_g > 1.0;
+    then constant_rental_amount_derived_467e1(agreement, div_round(pv * (big_g * (g - 1.0)), big_g - 1.0, 2, "HALF_UP"));
+}
+rule RentAccruedForYearFromDerivedConstantRental(lessor: Person, lessee: Person, agreement: Integer, y: TaxableYear, amount: Money) defeasible {
+    label en official "for a single-period agreement the rent accrued for the year is the derived constant rental amount (section 467(a)(1), (b)(2), (e)(1)); alternative channel to the asserted amount";
+    when constant_rental_accrual_required_467(lessor, lessee, agreement);
+    when lease_period_coincides_with_taxable_year_467(agreement, y);
+    when constant_rental_amount_derived_467e1(agreement, amount);
+    then rent_accrued_for_year_467(lessor, lessee, agreement, y, amount);
+}

@@ -1,0 +1,651 @@
+// Section 807(a)-(f) (rules for certain reserves): the itemised (c) items
+// with the (e)(5) 80 percent rule, the tax reserve method selection of
+// (d)(3), the variable-contract reserve of (d)(1)(B), the statutory
+// reserves of (d)(4), the (e) refinements (net surrender value, qualified
+// supplemental benefits, qualified foreign contracts, pre-1989 contracts)
+// and the no-double-counting constraint of (d)(1)(D).
+// Stage 3 (IRC-09 stage 3, TECH_GAP reduction), 26.09.2026. Status
+// implemented_unverified; nothing here was executed.
+//
+// METHOD. Module 07 keeps the portfolio-level comparison of sections 807(a)
+// and (b) over an opening balance and a closing balance; this module builds
+// those two balances from itemised (c) items (an empirical item row per
+// contract or fund, kind and boundary) and feeds the same relations, so the
+// aggregate case facts of module 07 stay a valid second path. The amounts
+// under the NAIC methods (CRVM, CARVM and the others) are actuarial results
+// the case supplies per method; this package selects the applicable method
+// but does not compute the reserve (TECH-GAPS G4906). Sums over derived
+// items are the section 111 runtime subset (TECH-GAPS G4903).
+
+// ---- Section 807(c): the six items, opening and closing ----
+
+use self::{
+    Contract,
+    IRC_S807_A,
+    IRC_S807_B,
+    IRC_S807_C,
+    IRC_S807_D,
+    IRC_S807_E,
+    Person,
+    TaxableYear,
+    life_insurance_reserve_807d,
+    modified_guaranteed_contract_817Ad,
+    net_decrease_in_reserves_807a,
+    net_increase_in_reserves_807b,
+    net_surrender_value_807,
+    policyholders_share_reduction_807,
+    reserve_items_closing_balance_net,
+    statutory_reserves_807d4,
+    tax_reserve_method_amount_807d2,
+};
+
+pub enum ReserveBoundary807 {
+    OpeningBalance;
+    ClosingBalance;
+    label en unofficial "the opening or the closing balance of the section 807(c) items for the taxable year";
+}
+pub enum ReserveItemKind807c {
+    ItemLifeInsuranceReserves;
+    ItemUnearnedPremiums;
+    ItemUnpaidLosses;
+    ItemDiscountedObligations;
+    ItemDividendAccumulations;
+    ItemAdvancePremiums;
+    ItemPremiumDepositFunds;
+    ItemSpecialContingencyReserve;
+    label en unofficial "the kind of a section 807(c) item: (1) life insurance reserves, (2) unearned premiums and unpaid losses, (3) discounted obligations, (4) dividend accumulations and other amounts held at interest, (5) premiums received in advance and premium deposit funds, (6) special contingency reserves";
+}
+@source(IRC_S807_C, quote = "The items referred to in subsections (a) and (b) are as follows:")
+pub relation reserve_item_807c(c: Person, y: TaxableYear, item: Contract, kind: ReserveItemKind807c, boundary: ReserveBoundary807, amount: Money) kind empirical {
+    label en unofficial "a section 807(c) item of the company at the opening or closing balance of the taxable year, with its amount before the (e)(5) 80 percent rule (the amount of a life insurance reserve item is the reserve of section 807(d); of a discounted-obligation item, see 807(c)(3))";
+}
+pub relation reserve_item_under_816b1B_contract_807e5B(item: Contract) kind empirical {
+    label en unofficial "the item is under an insurance contract described in section 816(b)(1)(B) (life insurance, annuity or noncancellable accident and health)";
+}
+pub relation reserve_item_not_under_816b1B_contract_807e5B(item: Contract) kind empirical {
+    label en unofficial "the item is under an insurance contract NOT described in section 816(b)(1)(B)";
+}
+@source(IRC_S807_C, quote = "(6) Reasonable special contingency reserves under contracts of group term life insurance or group accident and health insurance which are established and maintained for the provision of insurance on retired lives, for premium stabilization, or for a combination thereof.")
+pub relation contingency_reserve_group_term_or_group_health_807c6(item: Contract) kind empirical {
+    label en unofficial "the reserve is under a contract of group term life insurance or group accident and health insurance";
+}
+pub relation contingency_reserve_for_retired_lives_or_stabilization_807c6(item: Contract) kind empirical {
+    label en unofficial "the reserve is established and maintained for the provision of insurance on retired lives, for premium stabilization, or for a combination thereof";
+}
+pub relation contingency_reserve_reasonable_807c6(item: Contract) kind empirical {
+    label en unofficial "the special contingency reserve is reasonable (an evaluative element, DECISION-0194 channel 2 when adjudicated)";
+}
+@source(IRC_S807_C, quote = "but only if such obligations do not involve (at the time with respect to which the computation is made under this paragraph) life, accident, or health contingencies")
+pub relation obligation_involves_life_accident_health_contingency_807c3(item: Contract, boundary: ReserveBoundary807) kind empirical {
+    label en unofficial "at the time of the computation the obligation involves life, accident or health contingencies";
+}
+@source(IRC_S807_C, quote = "the appropriate rate of interest is the highest rate or rates permitted to be used to discount the obligations by the National Association of Insurance Commissioners as of the date the reserve is determined")
+pub relation naic_highest_discount_rate_807c(c: Person, y: TaxableYear, boundary: ReserveBoundary807, rate: Decimal) kind empirical {
+    label en unofficial "the highest rate permitted by the National Association of Insurance Commissioners to discount the obligations as of the date the reserve is determined (the boundary date; NAIC data the case supplies)";
+}
+pub relation discounted_obligation_807c3(c: Person, y: TaxableYear, item: Contract, boundary: ReserveBoundary807, discounted: Money, rate_used: Decimal) kind empirical {
+    label en unofficial "the amount necessary to satisfy the obligations under the contract, discounted at this rate (the present-value computation itself is the case's)";
+}
+pub relation obligation_net_surrender_value_807c3(item: Contract, boundary: ReserveBoundary807, nsv: Money) kind empirical {
+    label en unofficial "the net surrender value of the contract at the boundary";
+}
+pub relation counted_reserve_item_807c(c: Person, y: TaxableYear, item: Contract, kind: ReserveItemKind807c, boundary: ReserveBoundary807, amount: Money) kind institutional {
+    label en official "a section 807(c) item as taken into account in the balance: after the section 807(e)(5) 80 percent rule, the appropriate discount rate and net surrender value floor of (c)(3), and the reasonableness limits of (c)(6)";
+}
+@source(IRC_S807_C, quote = "(1) The life insurance reserves (as defined in section 816(b)).")
+rule Section807c1LifeReserves(c: Person, y: TaxableYear, item: Contract, boundary: ReserveBoundary807, amount: Money) defeasible {
+    label en official "section 807(c)(1): life insurance reserves";
+    when reserve_item_807c(c, y, item, ItemLifeInsuranceReserves, boundary, amount);
+    then counted_reserve_item_807c(c, y, item, ItemLifeInsuranceReserves, boundary, amount);
+}
+@source(IRC_S807_C, quote = "(2) The unearned premiums and unpaid losses included in total reserves under section 816(c)(2).")
+rule Section807c2UnearnedPremiumsFullWeight(c: Person, y: TaxableYear, item: Contract, boundary: ReserveBoundary807, amount: Money) defeasible {
+    label en official "section 807(c)(2): unearned premiums under a section 816(b)(1)(B) contract count in full";
+    when reserve_item_807c(c, y, item, ItemUnearnedPremiums, boundary, amount);
+    when reserve_item_under_816b1B_contract_807e5B(item);
+    then counted_reserve_item_807c(c, y, item, ItemUnearnedPremiums, boundary, amount);
+}
+@source(IRC_S807_E, quote = "shall be 80 percent of the amount which (without regard to this subparagraph) would have been taken into account as such opening or closing balance, as the case may be.")
+rule Section807e5UnearnedPremiumsNonLife(c: Person, y: TaxableYear, item: Contract, boundary: ReserveBoundary807, amount: Money) defeasible {
+    label en official "section 807(e)(5): unearned premiums under a contract not described in section 816(b)(1)(B) count at 80 percent (cents HALF_UP is a JUDGMENT CALL)";
+    when reserve_item_807c(c, y, item, ItemUnearnedPremiums, boundary, amount);
+    when reserve_item_not_under_816b1B_contract_807e5B(item);
+    then counted_reserve_item_807c(c, y, item, ItemUnearnedPremiums, boundary, round(amount * 80 percent, 2, "HALF_UP"));
+}
+@source(IRC_S807_C, quote = "(2) The unearned premiums and unpaid losses included in total reserves under section 816(c)(2).")
+rule Section807c2UnpaidLosses(c: Person, y: TaxableYear, item: Contract, boundary: ReserveBoundary807, amount: Money) defeasible {
+    label en official "section 807(c)(2): unpaid losses, at the discounted unpaid losses of section 846 for losses other than on life insurance contracts (the amount is that figure, asserted or from module 09)";
+    when reserve_item_807c(c, y, item, ItemUnpaidLosses, boundary, amount);
+    then counted_reserve_item_807c(c, y, item, ItemUnpaidLosses, boundary, amount);
+}
+@source(IRC_S807_C, quote = "(4) Dividend accumulations, and other amounts, held at interest in connection with insurance and annuity contracts.")
+rule Section807c4DividendAccumulations(c: Person, y: TaxableYear, item: Contract, boundary: ReserveBoundary807, amount: Money) defeasible {
+    label en official "section 807(c)(4): dividend accumulations and other amounts held at interest";
+    when reserve_item_807c(c, y, item, ItemDividendAccumulations, boundary, amount);
+    then counted_reserve_item_807c(c, y, item, ItemDividendAccumulations, boundary, amount);
+}
+@source(IRC_S807_C, quote = "(5) Premiums received in advance, and liabilities for premium deposit funds.")
+rule Section807c5AdvancePremiumsFullWeight(c: Person, y: TaxableYear, item: Contract, boundary: ReserveBoundary807, amount: Money) defeasible {
+    label en official "section 807(c)(5): premiums received in advance under a section 816(b)(1)(B) contract count in full";
+    when reserve_item_807c(c, y, item, ItemAdvancePremiums, boundary, amount);
+    when reserve_item_under_816b1B_contract_807e5B(item);
+    then counted_reserve_item_807c(c, y, item, ItemAdvancePremiums, boundary, amount);
+}
+@source(IRC_S807_E, quote = "the items described in subsection (c) which consist of unearned premiums and premiums received in advance under insurance contracts not described in section 816(b)(1)(B).")
+rule Section807e5AdvancePremiumsNonLife(c: Person, y: TaxableYear, item: Contract, boundary: ReserveBoundary807, amount: Money) defeasible {
+    label en official "section 807(e)(5): premiums received in advance under a contract not described in section 816(b)(1)(B) count at 80 percent";
+    when reserve_item_807c(c, y, item, ItemAdvancePremiums, boundary, amount);
+    when reserve_item_not_under_816b1B_contract_807e5B(item);
+    then counted_reserve_item_807c(c, y, item, ItemAdvancePremiums, boundary, round(amount * 80 percent, 2, "HALF_UP"));
+}
+rule Section807c5PremiumDepositFunds(c: Person, y: TaxableYear, item: Contract, boundary: ReserveBoundary807, amount: Money) defeasible {
+    label en official "section 807(c)(5): liabilities for premium deposit funds";
+    when reserve_item_807c(c, y, item, ItemPremiumDepositFunds, boundary, amount);
+    then counted_reserve_item_807c(c, y, item, ItemPremiumDepositFunds, boundary, amount);
+}
+@source(IRC_S807_C, quote = "(6) Reasonable special contingency reserves under contracts of group term life insurance or group accident and health insurance which are established and maintained for the provision of insurance on retired lives, for premium stabilization, or for a combination thereof.")
+rule Section807c6SpecialContingencyReserve(c: Person, y: TaxableYear, item: Contract, boundary: ReserveBoundary807, amount: Money) defeasible {
+    label en official "section 807(c)(6): a reasonable special contingency reserve of a group term life or group accident and health contract, for retired lives or premium stabilization";
+    when reserve_item_807c(c, y, item, ItemSpecialContingencyReserve, boundary, amount);
+    when contingency_reserve_group_term_or_group_health_807c6(item);
+    when contingency_reserve_for_retired_lives_or_stabilization_807c6(item);
+    when contingency_reserve_reasonable_807c6(item);
+    then counted_reserve_item_807c(c, y, item, ItemSpecialContingencyReserve, boundary, amount);
+}
+pub relation obligation_amount_floored_807c3(c: Person, y: TaxableYear, item: Contract, boundary: ReserveBoundary807, amount: Money) kind institutional {
+    label en official "the section 807(c)(3) amount at the appropriate discount rate, floored at the net surrender value";
+}
+@source(IRC_S807_C, quote = "In no case shall the amount determined under paragraph (3) for any contract be less than the net surrender value of such contract.")
+rule Section807c3AmountAtLeastSurrenderValue(c: Person, y: TaxableYear, item: Contract, boundary: ReserveBoundary807, discounted: Money, rate: Decimal, nsv: Money) defeasible {
+    label en official "section 807(c)(3), last sentences: the discounted amount at the NAIC highest rate, and not less than the net surrender value";
+    when reserve_item_807c(c, y, item, ItemDiscountedObligations, boundary, _);
+    when discounted_obligation_807c3(c, y, item, boundary, discounted, rate);
+    when naic_highest_discount_rate_807c(c, y, boundary, rate);
+    when not_known(obligation_involves_life_accident_health_contingency_807c3(item, boundary));
+    when obligation_net_surrender_value_807c3(item, boundary, nsv);
+    when discounted >= nsv;
+    then obligation_amount_floored_807c3(c, y, item, boundary, discounted);
+}
+rule Section807c3AmountRaisedToSurrenderValue(c: Person, y: TaxableYear, item: Contract, boundary: ReserveBoundary807, discounted: Money, rate: Decimal, nsv: Money) defeasible {
+    label en official "section 807(c)(3): the amount is raised to the net surrender value when it would be less";
+    when reserve_item_807c(c, y, item, ItemDiscountedObligations, boundary, _);
+    when discounted_obligation_807c3(c, y, item, boundary, discounted, rate);
+    when naic_highest_discount_rate_807c(c, y, boundary, rate);
+    when not_known(obligation_involves_life_accident_health_contingency_807c3(item, boundary));
+    when obligation_net_surrender_value_807c3(item, boundary, nsv);
+    when discounted < nsv;
+    then obligation_amount_floored_807c3(c, y, item, boundary, nsv);
+}
+pub relation obligation_net_surrender_value_stated_807c3(item: Contract, boundary: ReserveBoundary807) kind institutional {
+    label en official "a net surrender value is stated for the obligation at the boundary (helper)";
+}
+rule Section807c3NsvStated(item: Contract, boundary: ReserveBoundary807, nsv: Money) strict {
+    label en official "helper";
+    when obligation_net_surrender_value_807c3(item, boundary, nsv);
+    then obligation_net_surrender_value_stated_807c3(item, boundary);
+}
+rule Section807c3AmountWithoutSurrenderValue(c: Person, y: TaxableYear, item: Contract, boundary: ReserveBoundary807, discounted: Money, rate: Decimal) defeasible {
+    label en official "section 807(c)(3): with no stated net surrender value the discounted amount stands";
+    when reserve_item_807c(c, y, item, ItemDiscountedObligations, boundary, _);
+    when discounted_obligation_807c3(c, y, item, boundary, discounted, rate);
+    when naic_highest_discount_rate_807c(c, y, boundary, rate);
+    when not_known(obligation_involves_life_accident_health_contingency_807c3(item, boundary));
+    when not_known(obligation_net_surrender_value_stated_807c3(item, boundary));
+    then obligation_amount_floored_807c3(c, y, item, boundary, discounted);
+}
+@source(IRC_S807_C, quote = "(3) The amounts (discounted at the appropriate rate of interest) necessary to satisfy the obligations under insurance and annuity contracts")
+rule Section807c3DiscountedObligations(c: Person, y: TaxableYear, item: Contract, boundary: ReserveBoundary807, amount: Money) defeasible {
+    label en official "section 807(c)(3): the discounted obligations amount";
+    when obligation_amount_floored_807c3(c, y, item, boundary, amount);
+    then counted_reserve_item_807c(c, y, item, ItemDiscountedObligations, boundary, amount);
+}
+// (d)(1)(D): no amount or item more than once
+@source(IRC_S807_D, quote = "In no event shall any amount or item be taken into account more than once in determining any reserve under this subchapter.")
+constraint ReserveItemCountedOnce(c: Person, y: TaxableYear, item: Contract, boundary: ReserveBoundary807) {
+    label en official "section 807(d)(1)(D): an item is taken into account once at a boundary: one item row must not carry two kinds";
+    when reserve_item_807c(c, y, item, _, boundary, _);
+    require (count distinct k: ReserveItemKind807c where reserve_item_807c(c, y, item, k, boundary, _)) <= 1;
+    severity error;
+    message "section 807(d)(1)(D): the same item is taken into account under more than one kind at one boundary";
+}
+// balances
+pub relation counted_balance_807(c: Person, y: TaxableYear, boundary: ReserveBoundary807, total: Money) kind institutional {
+    label en official "the sum of the counted section 807(c) items at the boundary (a sum over derived items, TECH-GAPS G4903)";
+}
+rule Section807BalanceOpening(c: Person, y: TaxableYear, anchor: Contract, anchor_kind: ReserveItemKind807c, anchor_amount: Money) defeasible {
+    label en official "section 807(a)(1), (b)(2): the opening balance of the items";
+    when counted_reserve_item_807c(c, y, anchor, anchor_kind, OpeningBalance, anchor_amount);
+    then counted_balance_807(c, y, OpeningBalance, sum all amount: Money for item: Contract where counted_reserve_item_807c(c, y, item, _, OpeningBalance, amount));
+}
+rule Section807BalanceClosing(c: Person, y: TaxableYear, anchor: Contract, anchor_kind: ReserveItemKind807c, anchor_amount: Money) defeasible {
+    label en official "section 807(a)(2)(A), (b)(1)(A): the closing balance of the items";
+    when counted_reserve_item_807c(c, y, anchor, anchor_kind, ClosingBalance, anchor_amount);
+    then counted_balance_807(c, y, ClosingBalance, sum all amount: Money for item: Contract where counted_reserve_item_807c(c, y, item, _, ClosingBalance, amount));
+}
+pub relation has_policyholders_share_reduction_807(c: Person, y: TaxableYear) kind institutional {
+    label en official "a policyholders'-share reduction is stated for the company and year (helper)";
+}
+rule Section807HasReduction(c: Person, y: TaxableYear, amount: Money) strict {
+    label en official "helper";
+    when policyholders_share_reduction_807(c, y, amount);
+    then has_policyholders_share_reduction_807(c, y);
+}
+@source(IRC_S807_A, quote = "the closing balance for such items, reduced by")
+rule Section807ClosingNetFromItems(c: Person, y: TaxableYear, closing: Money, reduction: Money) defeasible {
+    label en official "sections 807(a)(2), (b)(1): the itemised closing balance reduced by the policyholders' share";
+    when counted_balance_807(c, y, ClosingBalance, closing);
+    when policyholders_share_reduction_807(c, y, reduction);
+    then reserve_items_closing_balance_net(c, y, closing - reduction);
+}
+rule Section807ClosingNetFromItemsNoReduction(c: Person, y: TaxableYear, closing: Money) defeasible {
+    label en official "sections 807(a)(2), (b)(1): with no policyholders'-share reduction stated the itemised closing balance stands";
+    when counted_balance_807(c, y, ClosingBalance, closing);
+    when not_known(has_policyholders_share_reduction_807(c, y));
+    then reserve_items_closing_balance_net(c, y, closing);
+}
+@source(IRC_S807_A, quote = "such excess shall be included in gross income under section 803(a)(2).")
+rule Section807aNetDecreaseFromItems(c: Person, y: TaxableYear, opening: Money, closing_net: Money) defeasible {
+    label en official "section 807(a): the itemised opening balance exceeds the net closing balance";
+    when counted_balance_807(c, y, OpeningBalance, opening);
+    when reserve_items_closing_balance_net(c, y, closing_net);
+    when opening > closing_net;
+    then net_decrease_in_reserves_807a(c, y, opening - closing_net);
+}
+@source(IRC_S807_B, quote = "such excess shall be taken into account as a deduction under section 805(a)(2).")
+rule Section807bNetIncreaseFromItems(c: Person, y: TaxableYear, opening: Money, closing_net: Money) defeasible {
+    label en official "section 807(b): the net closing balance exceeds the itemised opening balance";
+    when counted_balance_807(c, y, OpeningBalance, opening);
+    when reserve_items_closing_balance_net(c, y, closing_net);
+    when closing_net > opening;
+    then net_increase_in_reserves_807b(c, y, closing_net - opening);
+}
+
+pub relation contract_of_company_807(c: Person, contract: Contract) kind empirical {
+    label en unofficial "the contract is a contract of the company (binds the company to a contract's reserve inputs)";
+}
+
+// ---- Section 807(e)(1): net surrender value ----
+
+@source(IRC_S807_E, quote = "The net surrender value of any contract shall be determined—")
+pub relation surrender_value_before_penalty_and_market_adjustment_807e1(contract: Contract, amount: Money) kind empirical {
+    label en unofficial "the amount payable on surrender before any penalty or charge, and without regard to any market value adjustment";
+}
+pub relation penalty_or_charge_on_surrender_807e1Ai(contract: Contract, amount: Money) kind empirical {
+    label en unofficial "the penalty or charge that would be imposed on surrender";
+}
+pub relation pension_plan_contract_807e1B(contract: Contract) kind empirical {
+    label en unofficial "the contract is a pension plan contract";
+}
+pub relation policyholder_fund_balance_807e1B(contract: Contract, amount: Money) kind empirical {
+    label en unofficial "the balance in the policyholder's fund, without regard to any market value adjustment";
+}
+pub relation penalty_or_forfeiture_on_surrender_807e1B(contract: Contract, amount: Money) kind empirical {
+    label en unofficial "the penalty or forfeiture that would be imposed on surrender";
+}
+@source(IRC_S807_E, quote = "(i) with regard to any penalty or charge which would be imposed on surrender, but")
+rule Section807e1ANetSurrenderValue(c: Person, contract: Contract, gross: Money, penalty: Money) defeasible {
+    label en official "section 807(e)(1)(A): the surrender value less the penalty or charge, without regard to any market value adjustment";
+    when contract_of_company_807(c, contract);
+    when surrender_value_before_penalty_and_market_adjustment_807e1(contract, gross);
+    when penalty_or_charge_on_surrender_807e1Ai(contract, penalty);
+    when not_known(pension_plan_contract_807e1B(contract));
+    when not_known(modified_guaranteed_contract_817Ad(contract));
+    then net_surrender_value_807(c, contract, gross - penalty);
+}
+rule Section807e1ANetSurrenderValueNoPenalty(c: Person, contract: Contract, gross: Money) defeasible {
+    label en official "section 807(e)(1)(A): with no penalty or charge stated the net surrender value is the surrender value before market value adjustment";
+    when contract_of_company_807(c, contract);
+    when surrender_value_before_penalty_and_market_adjustment_807e1(contract, gross);
+    when not_known(pension_plan_contract_807e1B(contract));
+    when not_known(penalty_or_charge_stated_807e1(contract));
+    when not_known(modified_guaranteed_contract_817Ad(contract));
+    then net_surrender_value_807(c, contract, gross);
+}
+pub relation penalty_or_charge_stated_807e1(contract: Contract) kind institutional {
+    label en official "a penalty or charge on surrender is stated for the contract (helper)";
+}
+rule Section807e1PenaltyStated(contract: Contract, amount: Money) strict {
+    label en official "helper";
+    when penalty_or_charge_on_surrender_807e1Ai(contract, amount);
+    then penalty_or_charge_stated_807e1(contract);
+}
+@source(IRC_S807_E, quote = "In the case of a pension plan contract, the balance in the policyholder's fund shall be treated as the net surrender value of such contract.")
+rule Section807e1BPensionPlanContract(c: Person, contract: Contract, balance: Money, penalty: Money) defeasible {
+    label en official "section 807(e)(1)(B): a pension plan contract's net surrender value is the policyholder's fund balance, with regard to any surrender penalty or forfeiture and without regard to any market value adjustment";
+    when contract_of_company_807(c, contract);
+    when pension_plan_contract_807e1B(contract);
+    when policyholder_fund_balance_807e1B(contract, balance);
+    when penalty_or_forfeiture_on_surrender_807e1B(contract, penalty);
+    then net_surrender_value_807(c, contract, balance - penalty);
+}
+
+// ---- Section 807(d)(2)-(3): the tax reserve method ----
+
+pub enum TaxReserveMethod807d3 {
+    MethodCrvm;
+    MethodCarvm;
+    MethodNaicNoncancellableHealth;
+    MethodNaicPrescribed;
+    MethodConsistentWithRequired;
+    label en unofficial "the tax reserve method of section 807(d)(3)(A): CRVM, CARVM, the NAIC method for a noncancellable accident and health contract, the NAIC method for another contract, or a consistent method where the NAIC has prescribed none";
+}
+pub relation contract_covered_by_crvm_807d3(contract: Contract) kind empirical {
+    label en unofficial "the contract is covered by the CRVM";
+}
+pub relation contract_covered_by_carvm_807d3(contract: Contract) kind empirical {
+    label en unofficial "the contract is covered by the CARVM";
+}
+pub relation contract_noncancellable_health_807d3(contract: Contract) kind empirical {
+    label en unofficial "the contract is a noncancellable accident and health insurance contract";
+}
+pub relation naic_method_covers_contract_807d3(contract: Contract) kind empirical {
+    label en unofficial "the NAIC has prescribed a reserve method that covers the contract as of the date the reserve is determined";
+}
+pub relation method_consistent_with_required_methods_807d3iv(contract: Contract) kind empirical {
+    label en unofficial "a reserve method is consistent with the CRVM, CARVM or NAIC method required for other contracts and is the most appropriate (an evaluative element, DECISION-0194 channel 2 when adjudicated)";
+}
+pub relation applicable_tax_reserve_method_807d3(contract: Contract, method: TaxReserveMethod807d3) kind institutional {
+    label en official "the tax reserve method applicable to the contract";
+}
+@source(IRC_S807_D, quote = "The CRVM in the case of a contract covered by the CRVM.")
+rule Section807d3AiCrvm(contract: Contract) strict {
+    label en official "section 807(d)(3)(A)(i): the CRVM for a contract covered by it";
+    when contract_covered_by_crvm_807d3(contract);
+    then applicable_tax_reserve_method_807d3(contract, MethodCrvm);
+}
+@source(IRC_S807_D, quote = "The CARVM in the case of a contract covered by the CARVM.")
+rule Section807d3AiiCarvm(contract: Contract) strict {
+    label en official "section 807(d)(3)(A)(ii): the CARVM for a contract covered by it";
+    when contract_covered_by_carvm_807d3(contract);
+    then applicable_tax_reserve_method_807d3(contract, MethodCarvm);
+}
+@source(IRC_S807_D, quote = "In the case of any noncancellable accident and health insurance contract, the reserve method prescribed by the National Association of Insurance Commissioners which covers such contract as of the date the reserve is determined.")
+rule Section807d3AiiiNoncancellableHealth(contract: Contract) strict {
+    label en official "section 807(d)(3)(A)(iii): the NAIC method for a noncancellable accident and health contract";
+    when contract_noncancellable_health_807d3(contract);
+    then applicable_tax_reserve_method_807d3(contract, MethodNaicNoncancellableHealth);
+}
+@source(IRC_S807_D, quote = "the reserve method prescribed by the National Association of Insurance Commissioners which covers such contract (as of the date the reserve is determined), or")
+rule Section807d3AivINaicMethod(contract: Contract) defeasible {
+    label en official "section 807(d)(3)(A)(iv)(I): for a contract not described in clauses (i)-(iii), the NAIC method that covers it";
+    when naic_method_covers_contract_807d3(contract);
+    when not_known(contract_covered_by_crvm_807d3(contract));
+    when not_known(contract_covered_by_carvm_807d3(contract));
+    when not_known(contract_noncancellable_health_807d3(contract));
+    then applicable_tax_reserve_method_807d3(contract, MethodNaicPrescribed);
+}
+@source(IRC_S807_D, quote = "if no reserve method has been prescribed by the National Association of Insurance Commissioners which covers such contract, a reserve method which is consistent with the reserve method required under clause (i), (ii), or (iii) or under subclause (I) of this clause")
+rule Section807d3AivIIConsistentMethod(contract: Contract) defeasible {
+    label en official "section 807(d)(3)(A)(iv)(II): for a contract not described in clauses (i)-(iii) that the NAIC has not covered, the most appropriate consistent method";
+    when method_consistent_with_required_methods_807d3iv(contract);
+    when not_known(naic_method_covers_contract_807d3(contract));
+    when not_known(contract_covered_by_crvm_807d3(contract));
+    when not_known(contract_covered_by_carvm_807d3(contract));
+    when not_known(contract_noncancellable_health_807d3(contract));
+    then applicable_tax_reserve_method_807d3(contract, MethodConsistentWithRequired);
+}
+@source(IRC_S807_D, quote = "The amount of the reserve determined under this paragraph with respect to any contract shall be determined by using the tax reserve method applicable to such contract.")
+pub relation reserve_amount_under_method_807d2(contract: Contract, method: TaxReserveMethod807d3, amount: Money) kind empirical {
+    label en unofficial "the reserve amount the method yields for the contract (an actuarial result the case supplies: the NAIC valuation methods are not computed here, TECH-GAPS G4906)";
+}
+pub relation deficiency_reserve_in_method_amount_807d3C(contract: Contract, amount: Money) kind empirical {
+    label en unofficial "the part of the method amount that arises because the net premium exceeds the actual premium charged (a deficiency reserve)";
+}
+pub relation deficiency_reserve_stated_807d3C(contract: Contract) kind institutional {
+    label en official "a deficiency reserve is stated for the contract (helper)";
+}
+rule Section807d3CDeficiencyStated(contract: Contract, amount: Money) strict {
+    label en official "helper";
+    when deficiency_reserve_in_method_amount_807d3C(contract, amount);
+    then deficiency_reserve_stated_807d3C(contract);
+}
+@source(IRC_S807_D, quote = "Nothing in any reserve method described under this paragraph shall permit any increase in the reserve because the net premium (computed on the basis of assumptions required under this subsection) exceeds the actual premiums or other consideration charged for the benefit.")
+rule Section807d3CNoDeficiencyReserve(c: Person, contract: Contract, method: TaxReserveMethod807d3, amount: Money, deficiency: Money) defeasible {
+    label en official "section 807(d)(3)(C): the deficiency reserve is not part of the reserve amount";
+    when contract_of_company_807(c, contract);
+    when applicable_tax_reserve_method_807d3(contract, method);
+    when reserve_amount_under_method_807d2(contract, method, amount);
+    when deficiency_reserve_in_method_amount_807d3C(contract, deficiency);
+    then tax_reserve_method_amount_807d2(c, contract, amount - deficiency);
+}
+@source(IRC_S807_D, quote = "The amount of the reserve determined under this paragraph with respect to any contract shall be determined by using the tax reserve method applicable to such contract.")
+rule Section807d2AmountByMethod(c: Person, contract: Contract, method: TaxReserveMethod807d3, amount: Money) defeasible {
+    label en official "section 807(d)(2): the reserve is the amount under the applicable tax reserve method (no deficiency reserve stated)";
+    when contract_of_company_807(c, contract);
+    when applicable_tax_reserve_method_807d3(contract, method);
+    when reserve_amount_under_method_807d2(contract, method, amount);
+    when not_known(deficiency_reserve_stated_807d3C(contract));
+    then tax_reserve_method_amount_807d2(c, contract, amount);
+}
+@source(IRC_S807_D, quote = "the Commissioners' Reserve Valuation Method prescribed by the National Association of Insurance Commissioners which is applicable to the contract and in effect as of the date the reserve is determined")
+pub relation crvm_prescribed_by_naic_807d3Bi(contract: Contract) kind institutional {
+    label en official "the CRVM, the method prescribed by the NAIC that is applicable to the contract and in effect on the reserve date";
+}
+rule Section807d3BiCrvmDefinition(contract: Contract) strict {
+    label en official "section 807(d)(3)(B)(i): a contract covered by the CRVM is valued by the NAIC-prescribed method in effect on the reserve date (the method's content is the NAIC's: an external dependency)";
+    when contract_covered_by_crvm_807d3(contract);
+    then crvm_prescribed_by_naic_807d3Bi(contract);
+}
+@source(IRC_S807_D, quote = "the Commissioners' Annuities Reserve Valuation Method prescribed by the National Association of Insurance Commissioners which is applicable to the contract and in effect as of the date the reserve is determined")
+pub relation carvm_prescribed_by_naic_807d3Bii(contract: Contract) kind institutional {
+    label en official "the CARVM, the method prescribed by the NAIC that is applicable to the contract and in effect on the reserve date";
+}
+rule Section807d3BiiCarvmDefinition(contract: Contract) strict {
+    label en official "section 807(d)(3)(B)(ii): a contract covered by the CARVM is valued by the NAIC-prescribed method in effect on the reserve date";
+    when contract_covered_by_carvm_807d3(contract);
+    then carvm_prescribed_by_naic_807d3Bii(contract);
+}
+
+// ---- Section 807(d)(1)(B): variable contracts ----
+
+pub relation variable_contract_807d1B(contract: Contract) kind empirical {
+    label en unofficial "the contract is a variable contract (section 817(d))";
+}
+pub relation separately_accounted_reserve_portion_817_807d1B(contract: Contract, amount: Money) kind empirical {
+    label en unofficial "the portion of the reserve that is separately accounted for under section 817";
+}
+pub relation life_insurance_reserve_807d1B(c: Person, contract: Contract, amount: Money) kind institutional {
+    label en official "section 807(d)(1)(B): the reserve of a variable contract before the statutory cap: the greater of the net surrender value or the separately accounted portion, plus 92.81 percent of the excess of the (d)(2) reserve over that";
+}
+@source(IRC_S807_D, quote = "92.81 percent of the excess (if any) of the reserve determined under paragraph (2) over the amount in clause (i).")
+rule Section807d1BWithExcess(c: Person, contract: Contract, nsv: Money, separate: Money, reserve: Money) defeasible {
+    label en official "section 807(d)(1)(B): the (d)(2) reserve exceeds the amount of clause (i): 92.81 percent of the excess is added (cents HALF_UP is a JUDGMENT CALL)";
+    when variable_contract_807d1B(contract);
+    when net_surrender_value_807(c, contract, nsv);
+    when separately_accounted_reserve_portion_817_807d1B(contract, separate);
+    when tax_reserve_method_amount_807d2(c, contract, reserve);
+    when reserve > max(nsv, separate);
+    then life_insurance_reserve_807d1B(c, contract, max(nsv, separate) + round((reserve - max(nsv, separate)) * 0.9281, 2, "HALF_UP"));
+}
+@source(IRC_S807_D, quote = "the portion of the reserve that is separately accounted for under section 817")
+rule Section807d1BNoExcess(c: Person, contract: Contract, nsv: Money, separate: Money, reserve: Money) defeasible {
+    label en official "section 807(d)(1)(B): no excess of the (d)(2) reserve over clause (i): the reserve is the amount of clause (i)";
+    when variable_contract_807d1B(contract);
+    when net_surrender_value_807(c, contract, nsv);
+    when separately_accounted_reserve_portion_817_807d1B(contract, separate);
+    when tax_reserve_method_amount_807d2(c, contract, reserve);
+    when reserve <= max(nsv, separate);
+    then life_insurance_reserve_807d1B(c, contract, max(nsv, separate));
+}
+@source(IRC_S807_D, quote = "In no event shall the reserves determined under subparagraphs (A) or (B) for any contract as of any time exceed the amount which would be taken into account with respect to such contract as of such time in determining statutory reserves")
+rule Section807d1CCapVariableContract(c: Person, contract: Contract, uncapped: Money, cap: Money) defeasible {
+    label en official "section 807(d)(1)(C): the variable-contract reserve is capped at statutory reserves when the cap binds";
+    when life_insurance_reserve_807d1B(c, contract, uncapped);
+    when statutory_reserves_807d4(c, contract, cap);
+    when uncapped > cap;
+    then life_insurance_reserve_807d(c, contract, cap);
+}
+rule Section807d1CVariableContractWithinCap(c: Person, contract: Contract, uncapped: Money, cap: Money) defeasible {
+    label en official "section 807(d)(1)(C): the variable-contract reserve stands when it does not exceed statutory reserves";
+    when life_insurance_reserve_807d1B(c, contract, uncapped);
+    when statutory_reserves_807d4(c, contract, cap);
+    when uncapped <= cap;
+    then life_insurance_reserve_807d(c, contract, uncapped);
+}
+rule Section807d1CVariableContractNoCapFigure(c: Person, contract: Contract, uncapped: Money) defeasible {
+    label en official "section 807(d)(1)(C): with no statutory-reserves figure the variable-contract reserve stands uncapped";
+    when life_insurance_reserve_807d1B(c, contract, uncapped);
+    when not_known(statutory_reserves_807d4(c, contract, uncapped));
+    then life_insurance_reserve_807d(c, contract, uncapped);
+}
+
+// ---- Section 807(d)(4): statutory reserves ----
+
+pub relation statutory_reserve_item_807d4(c: Person, contract: Contract, item: Contract, amount: Money) kind empirical {
+    label en unofficial "an amount set forth in the annual statement with respect to an item described in section 807(c) for the contract";
+}
+pub relation item_reserve_attributable_to_deferred_uncollected_premium_807d4(item: Contract) kind empirical {
+    label en unofficial "the reserve is attributable to a deferred and uncollected premium";
+}
+pub relation deferred_premium_reserve_not_permitted_811c_807d4(item: Contract) kind empirical {
+    label en unofficial "the establishment of the reserve for the deferred and uncollected premium is not permitted under section 811(c)";
+}
+pub relation statutory_reserve_item_counted_807d4(c: Person, contract: Contract, item: Contract, amount: Money) kind institutional {
+    label en official "an annual-statement item counted in the statutory reserves (the reserve attributable to a deferred and uncollected premium is excluded when section 811(c) does not permit it)";
+}
+rule Section807d4ItemCounted(c: Person, contract: Contract, item: Contract, amount: Money) defeasible {
+    label en official "section 807(d)(4): an annual-statement item is counted unless it is a reserve on a deferred and uncollected premium that section 811(c) does not permit";
+    when statutory_reserve_item_807d4(c, contract, item, amount);
+    when not_known(deferred_premium_reserve_not_permitted_811c_807d4(item));
+    then statutory_reserve_item_counted_807d4(c, contract, item, amount);
+}
+@source(IRC_S807_D, quote = "Such term shall not include any reserve attributable to a deferred and uncollected premium if the establishment of such reserve is not permitted under section 811(c).")
+rule Section807d4ItemCountedWhenPermitted(c: Person, contract: Contract, item: Contract, amount: Money) defeasible {
+    label en official "section 807(d)(4): a deferred-premium reserve is counted when it is permitted";
+    when statutory_reserve_item_807d4(c, contract, item, amount);
+    when item_reserve_attributable_to_deferred_uncollected_premium_807d4(item);
+    when not_known(deferred_premium_reserve_not_permitted_811c_807d4(item));
+    then statutory_reserve_item_counted_807d4(c, contract, item, amount);
+}
+@source(IRC_S807_D, quote = "The term \"statutory reserves\" means the aggregate amount set forth in the annual statement with respect to items described in section 807(c).")
+rule Section807d4StatutoryReserves(c: Person, contract: Contract, anchor: Contract, anchor_amount: Money) defeasible {
+    label en official "section 807(d)(4): the sum of the counted annual-statement items (a sum over derived items, TECH-GAPS G4903)";
+    when statutory_reserve_item_counted_807d4(c, contract, anchor, anchor_amount);
+    then statutory_reserves_807d4(c, contract, sum all amount: Money for item: Contract where statutory_reserve_item_counted_807d4(c, contract, item, amount));
+}
+
+// ---- Section 807(e)(2): qualified supplemental benefits ----
+
+pub enum SupplementalBenefitKind807e2C {
+    BenefitGuaranteedInsurability;
+    BenefitAccidentalDeathOrDisability;
+    BenefitConvertibility;
+    BenefitDisabilityWaiver;
+    BenefitPrescribedByRegulations;
+    label en unofficial "the supplemental benefits of section 807(e)(2)(C)";
+}
+pub relation supplemental_benefit_kind_807e2C(benefit: Contract, kind: SupplementalBenefitKind807e2C) kind empirical {
+    label en unofficial "the benefit is of this kind (another benefit prescribed by regulations is asserted: the regulation is not in the snapshot)";
+}
+pub relation supplemental_to_contract_with_807c_reserve_807e2C(benefit: Contract, base: Contract) kind empirical {
+    label en unofficial "the benefit is supplemental to a contract for which there is a reserve described in subsection (c)";
+}
+pub relation separately_identified_premium_or_charge_807e2Bi(benefit: Contract) kind empirical {
+    label en unofficial "there is a separately identified premium or charge for the benefit";
+}
+pub relation net_surrender_value_of_other_benefit_available_to_fund_807e2Bii(benefit: Contract) kind empirical {
+    label en unofficial "net surrender value under the contract attributable to any other benefit is available to fund the benefit";
+}
+pub relation qualified_supplemental_benefit_807e2(benefit: Contract) kind institutional {
+    label en official "the benefit is a qualified supplemental benefit";
+}
+@source(IRC_S807_E, quote = "the term \"qualified supplemental benefit\" means any supplemental benefit described in subparagraph (C) if")
+rule Section807e2BQualifiedSupplementalBenefit(benefit: Contract, kind: SupplementalBenefitKind807e2C, base: Contract) defeasible {
+    label en official "section 807(e)(2)(B), (C): a listed supplemental benefit with a separately identified premium, whose funding does not use another benefit's net surrender value";
+    when supplemental_benefit_kind_807e2C(benefit, kind);
+    when supplemental_to_contract_with_807c_reserve_807e2C(benefit, base);
+    when separately_identified_premium_or_charge_807e2Bi(benefit);
+    when not_known(net_surrender_value_of_other_benefit_available_to_fund_807e2Bii(benefit));
+    then qualified_supplemental_benefit_807e2(benefit);
+}
+pub relation reserve_computed_separately_807e2A(benefit: Contract) kind institutional {
+    label en official "the life insurance reserve for the qualified supplemental benefit is computed separately, as though the benefit were under a separate contract (its own section 807(d) inputs)";
+}
+@source(IRC_S807_E, quote = "the amount of the life insurance reserve for any qualified supplemental benefit shall be computed separately as though such benefit were under a separate contract")
+rule Section807e2AComputedSeparately(benefit: Contract) defeasible {
+    label en official "section 807(e)(2)(A): a qualified supplemental benefit's reserve is computed separately";
+    when qualified_supplemental_benefit_807e2(benefit);
+    then reserve_computed_separately_807e2A(benefit);
+}
+
+// ---- Section 807(e)(3): qualified foreign contracts ----
+
+pub relation contract_issued_by_foreign_life_branch_807e3B(contract: Contract) kind empirical {
+    label en unofficial "the contract was issued by a foreign life insurance branch (with its principal place of business in a foreign country) of a domestic life insurance company";
+}
+pub relation contract_on_life_or_health_of_resident_of_country_807e3Bi(contract: Contract) kind empirical {
+    label en unofficial "the contract is issued on the life or health of a resident of the foreign country";
+}
+pub relation company_required_by_country_to_operate_through_branch_807e3Bii(contract: Contract) kind empirical {
+    label en unofficial "the domestic company was required by the foreign country, as of the time it began operations there, to operate through a branch";
+}
+pub relation foreign_country_not_contiguous_to_us_807e3Biii(contract: Contract) kind empirical {
+    label en unofficial "the foreign country is not contiguous to the United States";
+}
+pub relation qualified_foreign_contract_807e3B(contract: Contract) kind institutional {
+    label en official "the contract is a qualified foreign contract";
+}
+@source(IRC_S807_E, quote = "the term \"qualified foreign contract\" means any contract issued by a foreign life insurance branch")
+rule Section807e3BQualifiedForeignContract(contract: Contract) strict {
+    label en official "section 807(e)(3)(B): issued by a foreign life branch on a resident, the branch required by the country, a non-contiguous country";
+    when contract_issued_by_foreign_life_branch_807e3B(contract);
+    when contract_on_life_or_health_of_resident_of_country_807e3Bi(contract);
+    when company_required_by_country_to_operate_through_branch_807e3Bii(contract);
+    when foreign_country_not_contiguous_to_us_807e3Biii(contract);
+    then qualified_foreign_contract_807e3B(contract);
+}
+pub relation minimum_reserve_required_by_foreign_authority_807e3A(contract: Contract, amount: Money) kind empirical {
+    label en unofficial "the minimum reserve required by the laws, regulations or administrative guidance of the regulatory authority of the foreign country";
+}
+pub relation net_level_reserve_807e3A(contract: Contract, amount: Money) kind empirical {
+    label en unofficial "the net level reserve for the contract";
+}
+pub relation reserve_for_qualified_foreign_contract_807e3A(c: Person, contract: Contract, amount: Money) kind institutional {
+    label en official "the reserve of a qualified foreign contract: not less than the foreign minimum, but not more than the net level reserve";
+}
+@source(IRC_S807_E, quote = "the amount of the reserve shall be not less than the minimum reserve required by the laws, regulations, or administrative guidance of the regulatory authority of the foreign country referred to in subparagraph (B) (but not to exceed the net level reserves for such contract)")
+rule Section807e3AForeignMinimumReserve(c: Person, contract: Contract, base: Money, minimum: Money, net_level: Money) defeasible {
+    label en official "section 807(e)(3)(A): the reserve raised to the foreign minimum, but not above the net level reserve";
+    when qualified_foreign_contract_807e3B(contract);
+    when life_insurance_reserve_807d(c, contract, base);
+    when minimum_reserve_required_by_foreign_authority_807e3A(contract, minimum);
+    when net_level_reserve_807e3A(contract, net_level);
+    then reserve_for_qualified_foreign_contract_807e3A(c, contract, min(max(base, minimum), net_level));
+}
+
+// ---- Section 807(e)(4): contracts issued before 1989 under existing plans ----
+
+pub relation plan_filed_in_states_before_1984_807e4C(contract: Contract) kind empirical {
+    label en unofficial "the plan of insurance was filed by the company using the contract in one or more States before January 1, 1984";
+}
+pub relation plan_on_file_in_appropriate_state_807e4C(contract: Contract) kind empirical {
+    label en unofficial "the plan is on file in the appropriate State for the contract";
+}
+pub relation existing_plan_of_insurance_807e4C(contract: Contract) kind institutional {
+    label en official "the contract's plan of insurance is an existing plan of insurance";
+}
+@source(IRC_S807_E, quote = "the term \"existing plan of insurance\" means, with respect to any contract, any plan of insurance which was filed by the company using such contract in one or more States before January 1, 1984, and is on file in the appropriate State for such contract")
+rule Section807e4CExistingPlan(contract: Contract) strict {
+    label en official "section 807(e)(4)(C): filed before 1984 and on file";
+    when plan_filed_in_states_before_1984_807e4C(contract);
+    when plan_on_file_in_appropriate_state_807e4C(contract);
+    then existing_plan_of_insurance_807e4C(contract);
+}
+pub relation contract_issued_on_807e4(contract: Contract, on: Date) kind empirical {
+    label en unofficial "the life insurance contract was issued on this date";
+}
+pub relation benefit_meets_paragraph_3C_requirements_807e4B(benefit: Contract) kind empirical {
+    label en unofficial "the term insurance or annuity benefit meets the requirements that section 807(e)(4)(B) takes from clauses (i) and (ii) of paragraph (3)(C) (that cross-reference has no target in the pinned text: paragraph (3) of subsection (e) has only (A) and (B); asserted, TECH-GAPS G4907)";
+}
+pub relation benefit_reserve_computed_separately_807e4A(benefit: Contract) kind institutional {
+    label en official "the reserve for the benefit is computed separately under subsection (d)(1) from any other reserve under the contract";
+}
+@source(IRC_S807_E, quote = "the life insurance reserve for any benefit to which this paragraph applies shall be computed separately under subsection (d)(1) from any other reserve under the contract")
+rule Section807e4AComputedSeparately(benefit: Contract, issued: Date) defeasible {
+    label en official "section 807(e)(4)(A): a benefit of a contract issued before 1989 under an existing plan has its own reserve";
+    when contract_issued_on_807e4(benefit, issued);
+    when issued < @1989-01-01;
+    when existing_plan_of_insurance_807e4C(benefit);
+    when benefit_meets_paragraph_3C_requirements_807e4B(benefit);
+    then benefit_reserve_computed_separately_807e4A(benefit);
+}

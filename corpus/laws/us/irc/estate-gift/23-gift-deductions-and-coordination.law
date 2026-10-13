@@ -1,0 +1,672 @@
+// 26 U.S.C. §2522(c)(3)-(5), (d), (e), §2523(c)-(h), §2524, §2001(b)(2), (d),
+// (e), (f), (g), §2010(b), §2505(b) — the gift-tax charitable and marital
+// deductions completed, their extent (§2524), and the coordination of chapters
+// 11 and 12. Stage 2 (DECISION-0379 with deontics) of `us.irc.estate_gift`.
+//
+// CORRECTION OF STAGE 1. `gift_tax_payable_at_current_rates` subtracted the
+// tentative tax on the gifts of the years BEFORE the year of death and did not
+// subtract the section 2505 credit those gifts used. For a decedent whose gifts
+// were wholly sheltered by the credit this subtracted a tax that was never
+// payable and, with the section 2010 credit, counted the credit twice. §2001(b)(2)
+// and (g)(1) ask for the tax "which would have been payable under chapter 12"
+// on all post-1976 gifts at the rates in effect at death, after the credit of
+// section 2505: `gift_tax_payable_at_current_rates` is now
+// max(0, tentative tax on all post-1976 taxable gifts - applicable credit amount).
+// The exact per-period credits at different basic exclusion amounts and the
+// anti-clawback regulations of §2001(g)(2) remain TECH-GAPS G3612.
+//
+// The section 2522(c)(4)(B) "rules similar to the rules of section 2055(e)(3)" are
+// analogical incorporation (TECH-GAPS G3613): the gift side reads the qualified
+// reformation as a fact asserted under the section 2055(e)(3)(B) test.
+
+language "law.core" version "0.2";
+package us.irc.estate_gift version "0.1.1";
+namespace "urn:us:irc:estate_gift:clir";
+
+use self::{
+    Asset,
+    CharitableRecipientKind,
+    Estate,
+    IRC_S2001_B,
+    IRC_S2001_D,
+    IRC_S2001_E,
+    IRC_S2001_F,
+    IRC_S2010_B,
+    IRC_S2522_C,
+    IRC_S2522_D,
+    IRC_S2522_E,
+    IRC_S2523_C,
+    IRC_S2523_D,
+    IRC_S2523_E,
+    IRC_S2523_F,
+    IRC_S2523_G,
+    IRC_S2523_H,
+    IRC_S2523_I,
+    IRC_S2524,
+    Individual,
+    NongiftKind,
+    Person,
+    PortionBasis,
+    Secretary,
+    TaxableYear,
+    applicable_credit_amount,
+    bracket_2001c,
+    charitable_deduction_2522,
+    charitable_deduction_2522_item,
+    charitable_gift,
+    decedent_individual,
+    gift_included_in_gross_estate,
+    gift_tax_payable_at_current_rates,
+    gift_to_spouse,
+    marital_deduction_2523,
+    marital_deduction_item_2523,
+    nongift_transfer_amount,
+    prior_gift_assessment_period_expired,
+    prior_gift_value_finally_determined,
+    qtip_gift_election_valid,
+    qtip_qualifying_income_interest_for_life,
+    section_2201_reduced_schedule_applies,
+    split_interest_qualifies_2522,
+    taxable_gifts,
+    taxable_gifts_before_deductions_2503a,
+};
+
+// =====================================================================
+// §2522: the charitable deduction, the rest
+// =====================================================================
+
+pub relation qualified_real_property_interest_gift(donor: Individual, y: Integer, item: Asset, value: Money) kind empirical {
+    label en unofficial "a gift of a qualified real property interest (section 170(h)(2)(C)) in year y at the stated value (section 2522(d))";
+}
+pub relation gift_meets_section_170h_without_4a(donor: Individual, item: Asset) kind empirical {
+    label en unofficial "the transfer meets the requirements of section 170(h) without regard to paragraph (4)(A) thereof";
+}
+pub relation charitable_gift_2522(donor: Individual, y: Integer, item: Asset, kind: CharitableRecipientKind, value: Money) kind institutional {
+    label en unofficial "a gift that counts as one to a recipient described in section 2522(a)-(b): asserted directly, or an easement transfer under subsection (d)";
+}
+rule CharitableGift2522FromGiftRule(donor: Individual, y: Integer, item: Asset, kind: CharitableRecipientKind, value: Money) defeasible {
+    when charitable_gift(donor, y, item, kind, value);
+    then charitable_gift_2522(donor, y, item, kind, value);
+}
+@source(IRC_S2522_D, relation = formalizes, coverage = exact, quote = "A deduction shall be allowed under subsection (a) in respect of any transfer of a qualified real property interest (as defined in section 170(h)(2)(C)) which meets the requirements of section 170(h) (without regard to paragraph (4)(A) thereof).")
+rule CharitableGift2522FromEasementRule(donor: Individual, y: Integer, item: Asset, value: Money) defeasible {
+    label en official "a deduction is allowed for an irrevocable transfer of a qualified real property interest meeting section 170(h) without regard to (4)(A) (section 2522(d))";
+    when qualified_real_property_interest_gift(donor, y, item, value);
+    when gift_meets_section_170h_without_4a(donor, item);
+    then charitable_gift_2522(donor, y, item, QualifiedRealPropertyInterestTransfer, value);
+}
+
+// (c)(3): a work of art and its copyright are separate properties
+pub relation gift_work_of_art_with_federal_copyright(donor: Individual, item: Asset) kind empirical {
+    label en unofficial "the item is tangible personal property with respect to which there is a copyright under Federal law (rules similar to section 2055(e)(4), section 2522(c)(3))";
+}
+pub relation gift_use_related_to_exemption_purpose(donor: Individual, item: Asset) kind empirical {
+    label en unofficial "the use of the property by the donee organization is related to the purpose or function constituting the basis for its exemption under section 501";
+}
+pub relation gift_donee_is_501c3_organization(donor: Individual, item: Asset) kind empirical {
+    label en unofficial "the donee is an organization described in section 501(c)(3)";
+}
+pub relation gift_donee_is_private_foundation(donor: Individual, item: Asset) kind empirical {
+    label en unofficial "the donee is a private foundation (section 509)";
+}
+pub relation gift_donee_is_private_operating_foundation(donor: Individual, item: Asset) kind empirical {
+    label en unofficial "the donee is a private operating foundation (section 4942(j)(3)), not treated as a private foundation";
+}
+relation gift_qualified_organization_2522c3(donor: Individual, item: Asset) kind institutional;
+rule GiftQualifiedOrganization2522c3NotPfRule(donor: Individual, item: Asset) defeasible {
+    when gift_donee_is_501c3_organization(donor, item);
+    when not_known(gift_donee_is_private_foundation(donor, item));
+    then gift_qualified_organization_2522c3(donor, item);
+}
+rule GiftQualifiedOrganization2522c3OperatingRule(donor: Individual, item: Asset) defeasible {
+    when gift_donee_is_501c3_organization(donor, item);
+    when gift_donee_is_private_operating_foundation(donor, item);
+    then gift_qualified_organization_2522c3(donor, item);
+}
+@source(IRC_S2522_C, relation = formalizes, coverage = exact, quote = "Rules similar to the rules of section 2055(e)(4) shall apply for purposes of paragraph (2).")
+pub relation separate_properties_art_and_copyright_2522(donor: Individual, item: Asset) kind institutional {
+    label en official "the work of art and its copyright are separate properties for the split-interest rule of paragraph (2) (section 2522(c)(3))";
+}
+rule SeparatePropertiesArtAndCopyright2522Rule(donor: Individual, item: Asset) defeasible {
+    when gift_work_of_art_with_federal_copyright(donor, item);
+    when gift_use_related_to_exemption_purpose(donor, item);
+    when gift_qualified_organization_2522c3(donor, item);
+    then separate_properties_art_and_copyright_2522(donor, item);
+}
+// (c)(4)(A): qualified reformation; (c)(5): donor advised funds
+pub relation gift_qualified_reformation_2055e3B(donor: Individual, item: Asset) kind empirical {
+    label en unofficial "the change of the governing instrument is a qualified reformation within the meaning of section 2055(e)(3)(B); asserted under that test (section 2522(c)(4)(B) incorporates rules similar to section 2055(e)(3), TECH-GAPS G3613)";
+}
+@source(IRC_S2522_C, relation = formalizes, coverage = exact, quote = "A deduction shall be allowed under subsection (a) in respect of any qualified reformation (within the meaning of section 2055(e)(3)(B)).")
+rule SplitInterestQualifies2522ByReformationRule(donor: Individual, item: Asset) defeasible {
+    label en official "a deduction is allowed for a qualified reformation (section 2522(c)(4)(A))";
+    when gift_qualified_reformation_2055e3B(donor, item);
+    then split_interest_qualifies_2522(item);
+}
+pub relation gift_to_donor_advised_fund(donor: Individual, item: Asset) kind empirical {
+    label en unofficial "the contribution is to a donor advised fund (section 4966(d)(2))";
+}
+pub relation gift_sponsor_described_in_2522a3_or_a4(donor: Individual, item: Asset) kind empirical {
+    label en unofficial "the sponsoring organization is described in paragraph (3) or (4) of section 2055(a)";
+}
+pub relation gift_sponsor_type_iii_not_functionally_integrated(donor: Individual, item: Asset) kind empirical {
+    label en unofficial "the sponsoring organization is a type III supporting organization that is not functionally integrated";
+}
+pub relation gift_written_acknowledgment_obtained(donor: Individual, item: Asset) kind empirical {
+    label en unofficial "the taxpayer obtains a contemporaneous written acknowledgment (rules similar to section 170(f)(8)(C)) that the sponsoring organization has exclusive legal control over the assets";
+}
+relation gift_daf_conditions_met_2522c5(donor: Individual, item: Asset) kind institutional;
+rule GiftDafConditionsMet2522c5Rule(donor: Individual, item: Asset) defeasible {
+    when gift_to_donor_advised_fund(donor, item);
+    when gift_written_acknowledgment_obtained(donor, item);
+    when not_known(gift_sponsor_described_in_2522a3_or_a4(donor, item));
+    when not_known(gift_sponsor_type_iii_not_functionally_integrated(donor, item));
+    then gift_daf_conditions_met_2522c5(donor, item);
+}
+@source(IRC_S2522_C, relation = formalizes, coverage = exact, quote = "A deduction otherwise allowed under subsection (a) for any contribution to a donor advised fund (as defined in section 4966(d)(2)) shall only be allowed if")
+pub relation charitable_gift_deduction_disallowed_daf_2522c5(donor: Individual, item: Asset) kind institutional {
+    label en official "a contribution to a donor advised fund is deductible only if the sponsor is not a (a)(3)/(a)(4) organization or a non-integrated type III supporting organization and the written acknowledgment is obtained (section 2522(c)(5))";
+}
+rule CharitableGiftDeductionDisallowedDaf2522c5Rule(donor: Individual, item: Asset) defeasible {
+    when gift_to_donor_advised_fund(donor, item);
+    when not_known(gift_daf_conditions_met_2522c5(donor, item));
+    then charitable_gift_deduction_disallowed_daf_2522c5(donor, item);
+}
+
+// (e): fractional gifts of tangible personal property
+pub relation fractional_gift_of_tangible_personal_property(donor: Individual, y: Integer, item: Asset, on: Date) kind empirical {
+    label en unofficial "a contribution, on the stated date, of an undivided portion of the taxpayer's entire interest in tangible personal property, for which a deduction is sought (section 2522(e)(1))";
+}
+pub relation all_interests_held_by_donor_or_donor_and_donee(donor: Individual, item: Asset) kind empirical {
+    label en unofficial "immediately before the contribution all interests in the property are held by the taxpayer, or by the taxpayer and the donee (section 2522(e)(1)(A))";
+}
+@source(IRC_S2522_E, relation = formalizes, coverage = exact, quote = "No deduction shall be allowed for a contribution of an undivided portion of a taxpayer's entire interest in tangible personal property unless all interests in the property are held immediately before such contribution by")
+pub relation charitable_gift_deduction_disallowed_fractional_2522e1(donor: Individual, item: Asset) kind institutional {
+    label en official "no deduction for a fractional gift of tangible personal property unless all interests are held by the donor, or the donor and the donee, immediately before (section 2522(e)(1)(A)); exceptions by regulation (e)(1)(B) are the Secretary's";
+}
+rule CharitableGiftDeductionDisallowedFractionalRule(donor: Individual, item: Asset) defeasible {
+    when fractional_gift_of_tangible_personal_property(donor, _, item, _);
+    when not_known(all_interests_held_by_donor_or_donor_and_donee(donor, item));
+    then charitable_gift_deduction_disallowed_fractional_2522e1(donor, item);
+}
+// (e)(2)(C): the initial fractional contribution; (A): the recapture
+relation earlier_fractional_gift_exists(donor: Individual, item: Asset, on: Date) kind institutional;
+rule EarlierFractionalGiftExistsRule(donor: Individual, item: Asset, on: Date, on2: Date) defeasible {
+    when fractional_gift_of_tangible_personal_property(donor, _, item, on);
+    when fractional_gift_of_tangible_personal_property(donor, _, item, on2) and on2 < on;
+    then earlier_fractional_gift_exists(donor, item, on);
+}
+@source(IRC_S2522_E, relation = formalizes, coverage = exact, quote = "the term \"initial fractional contribution\" means, with respect to any donor, the first gift of an undivided portion of the donor's entire interest in any tangible personal property for which a deduction is allowed under subsection (a) or (b)")
+pub relation initial_fractional_contribution_date_2522e2c(donor: Individual, item: Asset, on: Date) kind institutional {
+    label en official "the date of the first gift of an undivided portion of the donor's entire interest in the property for which a deduction is allowed (section 2522(e)(2)(C))";
+}
+rule InitialFractionalContributionDateRule(donor: Individual, item: Asset, on: Date) defeasible {
+    when fractional_gift_of_tangible_personal_property(donor, _, item, on);
+    unless earlier_fractional_gift_exists(donor, item, on);
+    then initial_fractional_contribution_date_2522e2c(donor, item, on);
+}
+pub relation donor_date_of_death_2522e2(donor: Individual, d: Date) kind empirical {
+    label en unofficial "the date of the death of the donor";
+}
+pub relation remaining_interests_contributed_on(donor: Individual, item: Asset, d: Date) kind empirical {
+    label en unofficial "the donor contributes all the remaining interests to the donee (or, if it is no longer in existence, to a section 170(c) person) on the stated date";
+}
+pub relation donee_had_substantial_physical_possession_in_period(donor: Individual, item: Asset) kind empirical {
+    label en unofficial "during the period beginning on the initial fractional contribution the donee had substantial physical possession of the property";
+}
+pub relation donee_used_property_in_related_use_in_period(donor: Individual, item: Asset) kind empirical {
+    label en unofficial "during the period the donee used the property in a use related to the purpose or function constituting the basis for its exemption under section 501";
+}
+relation recapture_deadline_candidate_2522e2(donor: Individual, item: Asset, d: Date) kind institutional;
+rule RecaptureDeadlineTenYearsRule(donor: Individual, item: Asset, initial: Date) defeasible {
+    when initial_fractional_contribution_date_2522e2c(donor, item, initial);
+    then recapture_deadline_candidate_2522e2(donor, item, add_calendar_period(initial, 10 calendar_year));
+}
+rule RecaptureDeadlineDonorDeathRule(donor: Individual, item: Asset, died: Date) defeasible {
+    when initial_fractional_contribution_date_2522e2c(donor, item, _);
+    when donor_date_of_death_2522e2(donor, died);
+    then recapture_deadline_candidate_2522e2(donor, item, died);
+}
+relation earlier_recapture_deadline_exists(donor: Individual, item: Asset, d: Date) kind institutional;
+rule EarlierRecaptureDeadlineExistsRule(donor: Individual, item: Asset, d: Date, d2: Date) defeasible {
+    when recapture_deadline_candidate_2522e2(donor, item, d);
+    when recapture_deadline_candidate_2522e2(donor, item, d2) and d2 < d;
+    then earlier_recapture_deadline_exists(donor, item, d);
+}
+pub relation recapture_deadline_2522e2(donor: Individual, item: Asset, d: Date) kind institutional {
+    label en official "the earlier of the date 10 years after the initial fractional contribution and the date of death of the donor (section 2522(e)(2)(A)(i))";
+}
+rule RecaptureDeadline2522e2Rule(donor: Individual, item: Asset, d: Date) defeasible {
+    when recapture_deadline_candidate_2522e2(donor, item, d);
+    unless earlier_recapture_deadline_exists(donor, item, d);
+    then recapture_deadline_2522e2(donor, item, d);
+}
+relation remaining_interests_contributed_in_time(donor: Individual, item: Asset) kind institutional;
+rule RemainingInterestsContributedInTimeRule(donor: Individual, item: Asset, done: Date, deadline: Date) defeasible {
+    when remaining_interests_contributed_on(donor, item, done);
+    when recapture_deadline_2522e2(donor, item, deadline) and done <= deadline;
+    then remaining_interests_contributed_in_time(donor, item);
+}
+relation possession_and_related_use_shown(donor: Individual, item: Asset) kind institutional;
+rule PossessionAndRelatedUseShownRule(donor: Individual, item: Asset) defeasible {
+    when donee_had_substantial_physical_possession_in_period(donor, item);
+    when donee_used_property_in_related_use_in_period(donor, item);
+    then possession_and_related_use_shown(donor, item);
+}
+relation fractional_gift_recapture_triggered(donor: Individual, item: Asset) kind institutional;
+rule FractionalGiftRecaptureNotContributedRule(donor: Individual, item: Asset, deadline: Date, asof: Date) defeasible {
+    label en official "the donor has not contributed all remaining interests by the earlier of 10 years and death (section 2522(e)(2)(A)(i)); the deadline must have passed";
+    when recapture_deadline_2522e2(donor, item, deadline);
+    when fractional_recapture_evaluation_date(donor, item, asof) and asof > deadline;
+    when not_known(remaining_interests_contributed_in_time(donor, item));
+    then fractional_gift_recapture_triggered(donor, item);
+}
+rule FractionalGiftRecaptureNoUseRule(donor: Individual, item: Asset, deadline: Date, asof: Date) defeasible {
+    label en official "the donee did not have substantial physical possession and use the property in a related use during the period (section 2522(e)(2)(A)(ii)); read as a second, separate case (INTERPRETATION)";
+    when recapture_deadline_2522e2(donor, item, deadline);
+    when fractional_recapture_evaluation_date(donor, item, asof) and asof > deadline;
+    when not_known(possession_and_related_use_shown(donor, item));
+    then fractional_gift_recapture_triggered(donor, item);
+}
+pub relation fractional_recapture_evaluation_date(donor: Individual, item: Asset, asof: Date) kind empirical {
+    label en unofficial "the date as of which the recapture conditions are evaluated (a case fact standing for the evaluation instant, since absence of the later events is only meaningful after the deadline)";
+}
+@source(IRC_S2522_E, relation = formalizes, coverage = partial, quote = "The Secretary shall provide for the recapture of an amount equal to any deduction allowed under this section (plus interest) with respect to any contribution of an undivided portion of a taxpayer's entire interest in tangible personal property")
+pub relation fractional_gift_deduction_recaptured_2522e2(donor: Individual, item: Asset, amount: Money) kind institutional {
+    label en official "the amount of the deduction allowed for the fractional gift is recaptured; interest is owned by payment-refunds-interest and the Secretary provides the mechanics";
+}
+rule FractionalGiftDeductionRecapturedRule(donor: Individual, item: Asset, y: Integer, amount: Money) defeasible {
+    when fractional_gift_recapture_triggered(donor, item);
+    when charitable_deduction_2522_item(donor, y, item, amount);
+    then fractional_gift_deduction_recaptured_2522e2(donor, item, amount);
+}
+@source(IRC_S2522_E, relation = formalizes, coverage = exact, quote = "The tax imposed under this chapter for any taxable year for which there is a recapture under subparagraph (A) shall be increased by 10 percent of the amount so recaptured.")
+pub relation fractional_gift_recapture_addition_to_tax_2522e2b(donor: Individual, item: Asset, amount: Money) kind institutional {
+    label en official "the tax is increased by 10 percent of the amount recaptured (section 2522(e)(2)(B))";
+}
+rule FractionalGiftRecaptureAdditionToTaxRule(donor: Individual, item: Asset, recaptured: Money) defeasible {
+    when fractional_gift_deduction_recaptured_2522e2(donor, item, recaptured);
+    then fractional_gift_recapture_addition_to_tax_2522e2b(donor, item, round(recaptured * 0.10, 2, "HALF_UP"));
+}
+
+// =====================================================================
+// §2523: the marital deduction for gifts, the rest
+// =====================================================================
+
+pub relation nondeductible_asset_in_unidentified_pool_gift(donor: Individual, donee: Individual, item: Asset, pool_asset: Asset, value: Money) kind empirical {
+    label en unofficial "a particular asset out of which (or out of whose proceeds) the interest transferred to the donee spouse may be satisfied and with respect to which no deduction would be allowed if it were transferred to the spouse (section 2523(c))";
+}
+@source(IRC_S2523_C, relation = formalizes, coverage = exact, quote = "then the value of the interest transferred to such spouse shall, for purposes of subsection (a), be reduced by the aggregate value of such particular assets")
+pub relation gift_to_spouse_net_value_2523c(donor: Individual, donee: Individual, item: Asset, y: Integer, amount: Money) kind institutional {
+    label en official "the value of the interest transferred to the donee spouse, reduced by the aggregate value of the particular non-deductible assets in the pool (section 2523(c))";
+}
+rule GiftToSpouseNetValue2523cRule(donor: Individual, donee: Individual, item: Asset, y: Integer, value: Money) defeasible {
+    when gift_to_spouse(donor, donee, item, y, value);
+    then gift_to_spouse_net_value_2523c(donor, donee, item, y, max(0.00 USD, value - sum(collect all v: Money, a: Asset where nondeductible_asset_in_unidentified_pool_gift(donor, donee, item, a, v), empty: 0.00 USD)));
+}
+// (d): joint interests
+pub relation interest_transferred_as_sole_joint_tenant_or_tenant_by_entirety(donor: Individual, donee: Individual, item: Asset) kind empirical {
+    label en unofficial "the interest is transferred to the donee spouse as sole joint tenant with the donor or as tenant by the entirety (section 2523(d))";
+}
+pub relation donor_interest_only_by_survivorship_or_severance(donor: Individual, donee: Individual, item: Asset) kind empirical {
+    label en unofficial "the interest of the donor in the property exists solely by reason of the possibility that the donor may survive the donee spouse, or that there may occur a severance of the tenancy";
+}
+@source(IRC_S2523_D, relation = formalizes, coverage = exact, quote = "shall not be considered for purposes of subsection (b) as an interest retained by the donor in himself")
+pub relation joint_interest_survivorship_not_retained_2523d(donor: Individual, donee: Individual, item: Asset) kind institutional {
+    label en official "the donor's interest arising solely from survivorship or severance is not an interest retained by the donor for subsection (b) (section 2523(d))";
+}
+rule JointInterestSurvivorshipNotRetainedRule(donor: Individual, donee: Individual, item: Asset) defeasible {
+    when interest_transferred_as_sole_joint_tenant_or_tenant_by_entirety(donor, donee, item);
+    when donor_interest_only_by_survivorship_or_severance(donor, donee, item);
+    then joint_interest_survivorship_not_retained_2523d(donor, donee, item);
+}
+// (e): life estate with power of appointment in the donee spouse
+pub relation gift_spouse_entitled_to_all_income_for_life_payable_annually(donor: Individual, donee: Individual, item: Asset) kind empirical {
+    label en unofficial "the donee spouse is entitled for life to all the income from the entire interest (or a specific portion), payable annually or more frequently (section 2523(e))";
+}
+pub relation gift_spouse_power_to_appoint_alone_and_in_all_events(donor: Individual, donee: Individual, item: Asset) kind empirical {
+    label en unofficial "the donee spouse has power to appoint the entire interest (or portion) in favor of the spouse or the spouse's estate, exercisable by will or during life, alone and in all events (section 2523(e))";
+}
+pub relation gift_other_person_power_to_appoint_to_non_spouse(donor: Individual, donee: Individual, item: Asset) kind empirical {
+    label en unofficial "some person other than the donee spouse has a power to appoint any part of the interest to a person other than the donee spouse";
+}
+pub relation gift_portion_basis(donor: Individual, portion: Asset, whole: Asset, basis: PortionBasis) kind empirical {
+    label en unofficial "the portion of the whole is determined on the stated basis; a specific portion is only one determined on a fractional or percentage basis (sections 2523(e), (f)(3), 2056(b)(10))";
+}
+relation gift_portion_not_specific(donor: Individual, item: Asset) kind institutional;
+rule GiftPortionNotSpecificRule(donor: Individual, item: Asset, whole: Asset) defeasible {
+    when gift_portion_basis(donor, item, whole, OtherBasis);
+    then gift_portion_not_specific(donor, item);
+}
+@source(IRC_S2523_E, relation = formalizes, coverage = exact, quote = "with power in the donee spouse to appoint the entire interest, or such specific portion")
+pub relation life_estate_power_gift_2523e(donor: Individual, donee: Individual, item: Asset) kind institutional {
+    label en official "subsection (e) applies: life income to the donee spouse with a power to appoint alone and in all events, and no power in another person to appoint to a non-spouse";
+}
+rule LifeEstatePowerGift2523eRule(donor: Individual, donee: Individual, item: Asset) defeasible {
+    when gift_to_spouse(donor, donee, item, _, _);
+    when gift_spouse_entitled_to_all_income_for_life_payable_annually(donor, donee, item);
+    when gift_spouse_power_to_appoint_alone_and_in_all_events(donor, donee, item);
+    when not_known(gift_other_person_power_to_appoint_to_non_spouse(donor, donee, item));
+    when not_known(gift_portion_not_specific(donor, item));
+    then life_estate_power_gift_2523e(donor, donee, item);
+}
+// (f)(3) and (f)(2)(B): the qualifying income interest by the components of 2056(b)(7)(B)(ii)
+pub relation gift_spouse_entitled_to_all_income_or_usufruct_for_life(donor: Individual, donee: Individual, item: Asset) kind empirical {
+    label en unofficial "the donee spouse is entitled to all the income from the property, payable annually or more frequently, or has a usufruct interest for life (section 2523(f)(3), rules similar to section 2056(b)(7)(B)(ii)(I))";
+}
+pub relation gift_any_person_power_to_appoint_part_to_non_spouse(donor: Individual, donee: Individual, item: Asset) kind empirical {
+    label en unofficial "some person has a power to appoint any part of the property to a person other than the donee spouse";
+}
+pub relation gift_appointment_power_only_at_or_after_spouse_death(donor: Individual, donee: Individual, item: Asset) kind empirical {
+    label en unofficial "the power to appoint to a non-spouse is exercisable only at or after the death of the donee spouse";
+}
+relation gift_disqualifying_power(donor: Individual, donee: Individual, item: Asset) kind institutional;
+rule GiftDisqualifyingPowerRule(donor: Individual, donee: Individual, item: Asset) defeasible {
+    when gift_any_person_power_to_appoint_part_to_non_spouse(donor, donee, item);
+    when not_known(gift_appointment_power_only_at_or_after_spouse_death(donor, donee, item));
+    then gift_disqualifying_power(donor, donee, item);
+}
+rule QtipQualifyingIncomeInterestFromComponentsRule(donor: Individual, donee: Individual, item: Asset) defeasible {
+    label en official "the donee spouse has a qualifying income interest for life: all the income or a usufruct for life, and no disqualifying power (section 2523(f)(2)(B), (3))";
+    when gift_to_spouse(donor, donee, item, _, _);
+    when gift_spouse_entitled_to_all_income_or_usufruct_for_life(donor, donee, item);
+    when not_known(gift_disqualifying_power(donor, donee, item));
+    then qtip_qualifying_income_interest_for_life(donor, donee, item);
+}
+// (f)(4)(B): irrevocable
+pub relation donor_revokes_qtip_gift_election(donor: Individual, donee: Individual, item: Asset) kind empirical {
+    label en unofficial "the donor purports to revoke the section 2523(f) election";
+}
+@source(IRC_S2523_F, relation = formalizes, coverage = exact, quote = "An election under this subsection, once made, shall be irrevocable.")
+rule QtipGiftElectionIrrevocableRule(donor: Individual, donee: Individual, item: Asset, y: Integer) defeasible {
+    label en official "a section 2523(f) election, once made, shall be irrevocable: the donor may not revoke it (section 2523(f)(4)(B))";
+    when qtip_gift_election_valid(donor, donee, item, y);
+    then prohibition QtipGiftElectionRevocationProhibition {
+        bearer donor;
+        beneficiary Secretary;
+        action donor_revokes_qtip_gift_election(donor, donee, item);
+        window [@1982-01-01, infinity);
+    };
+}
+// (f)(5): the donor's retained interest
+pub relation donee_spouse_2519_transfer_or_2044_inclusion_of_gift_qtip(donor: Individual, donee: Individual, item: Asset) kind empirical {
+    label en unofficial "the donee spouse is treated as having transferred the property under section 2519, or the property is includible in the donee spouse's gross estate under section 2044 (section 2523(f)(5)(B))";
+}
+@source(IRC_S2523_F, relation = formalizes, coverage = exact, quote = "such property shall not be includible in the gross estate of the donor spouse")
+pub relation qtip_gift_property_not_includible_in_donor_estate_2523f5(e: Estate, item: Asset) kind institutional {
+    label en official "qualified terminable interest property given by the decedent is not includible in the decedent's gross estate, until the donee spouse transfers it under section 2519 or it is includible under section 2044 (section 2523(f)(5))";
+}
+rule QtipGiftPropertyNotIncludibleRule(e: Estate, donor: Individual, donee: Individual, item: Asset, y: Integer) defeasible {
+    when decedent_individual(e, donor);
+    when qtip_gift_election_valid(donor, donee, item, y);
+    when not_known(donee_spouse_2519_transfer_or_2044_inclusion_of_gift_qtip(donor, donee, item));
+    then qtip_gift_property_not_includible_in_donor_estate_2523f5(e, item);
+}
+pub relation donor_transfer_of_interest_in_qtip_gift_property(donor: Individual, y: TaxableYear, donee: Person, item: Asset, amount: Money) kind empirical {
+    label en unofficial "the donor spouse makes a subsequent transfer of an interest in the qualified terminable interest property, to the donee, of the stated value";
+}
+@source(IRC_S2523_F, relation = formalizes, coverage = exact, quote = "any subsequent transfer by the donor spouse of an interest in such property shall not be treated as a transfer for purposes of this chapter")
+rule DonorSubsequentTransferOfQtipInterestNotGiftRule(donor: Individual, y: TaxableYear, donee: Person, item: Asset, amount: Money, spouse: Individual, n: Integer) defeasible {
+    label en official "a subsequent transfer by the donor spouse of an interest in QTIP property is not a transfer for chapter 12 (section 2523(f)(5)(A)(ii))";
+    when donor_transfer_of_interest_in_qtip_gift_property(donor, y, donee, item, amount);
+    when us.irc.core::calendar_year_of(y, n);
+    when qtip_gift_election_valid(donor, spouse, item, _);
+    when not_known(donee_spouse_2519_transfer_or_2044_inclusion_of_gift_qtip(donor, spouse, item));
+    then nongift_transfer_amount(donor, y, donee, QtipRetainedInterestTransfer, amount);
+}
+// (f)(6): joint and survivor annuities
+pub relation joint_and_survivor_annuity_only_spouses_receive_before_last_death(donor: Individual, donee: Individual, item: Asset) kind empirical {
+    label en unofficial "a joint and survivor annuity where only the donor spouse and the donee spouse have the right to receive payments before the death of the last spouse to die (section 2523(f)(6))";
+}
+pub relation donor_elects_out_of_annuity_qtip(donor: Individual, donee: Individual, item: Asset, w: Interval<Instant>) kind empirical {
+    label en unofficial "the donor otherwise elects on or before the section 6075(b) date, so that no election is deemed made for the annuity";
+}
+pub relation annuity_election_out_effective_2523f6(donor: Individual, donee: Individual, item: Asset) kind institutional {
+    label en official "the donor's election out of the deemed section 2523(f) election for the annuity is effective (irrevocable once made)";
+}
+rule JointSurvivorAnnuityQualifyingIncomeInterestRule(donor: Individual, donee: Individual, item: Asset) defeasible {
+    label en official "the donee spouse's interest in the annuity is treated as a qualifying income interest for life (section 2523(f)(6)(A))";
+    when joint_and_survivor_annuity_only_spouses_receive_before_last_death(donor, donee, item);
+    when gift_to_spouse(donor, donee, item, _, _);
+    then qtip_qualifying_income_interest_for_life(donor, donee, item);
+}
+@source(IRC_S2523_F, relation = formalizes, coverage = exact, quote = "the donor spouse shall be treated as having made an election under this subsection with respect to such annuity unless the donor spouse otherwise elects")
+rule JointSurvivorAnnuityElectOutPower(donor: Individual, donee: Individual, item: Asset, w: Interval<Instant>) strict {
+    label en official "the donor may otherwise elect on or before the section 6075(b) date so that no election is deemed made for the annuity (section 2523(f)(6)(B))";
+    when donor_elects_out_of_annuity_qtip(donor, donee, item, w);
+    then power JointSurvivorAnnuityElectOut {
+        holder donor;
+        over item;
+        exercise donor_elects_out_of_annuity_qtip(donor, donee, item, w);
+        valid_when joint_and_survivor_annuity_only_spouses_receive_before_last_death(donor, donee, item);
+        effect create(annuity_election_out_effective_2523f6(donor, donee, item));
+        window w;
+    };
+}
+rule JointSurvivorAnnuityDeemedElectionRule(donor: Individual, donee: Individual, item: Asset, y: Integer) defeasible {
+    label en official "the donor is treated as having made the section 2523(f) election for the annuity unless the donor otherwise elects (section 2523(f)(6)(B))";
+    when joint_and_survivor_annuity_only_spouses_receive_before_last_death(donor, donee, item);
+    when gift_to_spouse(donor, donee, item, y, _);
+    when not_known(annuity_election_out_effective_2523f6(donor, donee, item));
+    then qtip_gift_election_valid(donor, donee, item, y);
+}
+pub relation annuity_transfer_from_2523f6_rights(donor: Individual, donee: Individual) kind empirical {
+    label en unofficial "the transfer results from the acquisition of rights under a joint and survivor annuity described in subsection (f)(6) (section 2523(i), last sentence)";
+}
+// (g): charitable remainder trusts
+pub relation gift_trust_is_charitable_remainder_annuity_or_unitrust(donor: Individual, donee: Individual, item: Asset) kind empirical {
+    label en unofficial "the trust is a qualified charitable remainder trust: a charitable remainder annuity trust or unitrust described in section 664 (section 2523(g)(2), by section 2056(b)(8)(B))";
+}
+pub relation gift_other_noncharitable_non_esop_beneficiary_than_spouse(donor: Individual, donee: Individual, item: Asset) kind empirical {
+    label en unofficial "after the transfer the trust has a beneficiary other than the donee spouse and the donor who is neither a charitable beneficiary nor an ESOP beneficiary";
+}
+@source(IRC_S2523_G, relation = formalizes, coverage = exact, quote = "If, after the transfer, the donee spouse is the only beneficiary who is not a charitable beneficiary (other than the donor) of a qualified charitable remainder trust, subsection (b) shall not apply to the interest in such trust which is transferred to the donee spouse.")
+pub relation crt_special_rule_2523g(donor: Individual, donee: Individual, item: Asset) kind institutional {
+    label en official "subsection (b) does not apply: the donee spouse is the only non-charitable beneficiary, other than the donor, of a qualified charitable remainder trust (section 2523(g))";
+}
+rule CrtSpecialRule2523gRule(donor: Individual, donee: Individual, item: Asset) defeasible {
+    when gift_to_spouse(donor, donee, item, _, _);
+    when gift_trust_is_charitable_remainder_annuity_or_unitrust(donor, donee, item);
+    when not_known(gift_other_noncharitable_non_esop_beneficiary_than_spouse(donor, donee, item));
+    then crt_special_rule_2523g(donor, donee, item);
+}
+// The exceptions to the subsection (b) bar in one relation
+pub relation gift_terminable_interest_exception_2523(donor: Individual, donee: Individual, item: Asset) kind institutional {
+    label en official "an exception removes the terminable-interest bar of subsection (b): joint interest (d), life estate with power (e), QTIP election (f), charitable remainder trust (g)";
+}
+rule GiftTerminableExceptionJointRule(donor: Individual, donee: Individual, item: Asset) defeasible {
+    when joint_interest_survivorship_not_retained_2523d(donor, donee, item);
+    then gift_terminable_interest_exception_2523(donor, donee, item);
+}
+rule GiftTerminableExceptionLifeEstateRule(donor: Individual, donee: Individual, item: Asset) defeasible {
+    when life_estate_power_gift_2523e(donor, donee, item);
+    then gift_terminable_interest_exception_2523(donor, donee, item);
+}
+rule GiftTerminableExceptionQtipRule(donor: Individual, donee: Individual, item: Asset, y: Integer) defeasible {
+    when qtip_gift_election_valid(donor, donee, item, y);
+    then gift_terminable_interest_exception_2523(donor, donee, item);
+}
+rule GiftTerminableExceptionCrtRule(donor: Individual, donee: Individual, item: Asset) defeasible {
+    when crt_special_rule_2523g(donor, donee, item);
+    then gift_terminable_interest_exception_2523(donor, donee, item);
+}
+// (h): no double deduction
+@source(IRC_S2523_H, relation = formalizes, coverage = exact, quote = "Nothing in this section or any other provision of this chapter shall allow the value of any interest in property to be deducted under this chapter more than once with respect to the same donor.")
+pub relation double_deduction_2523h(donor: Individual, item: Asset) kind institutional {
+    label en official "the value of the same interest is claimed under both the charitable and marital deductions of this chapter (section 2523(h)); the statute names no order, so the conflict is reported and neither is silently preferred";
+}
+rule DoubleDeduction2523hRule(donor: Individual, donee: Individual, item: Asset, y: Integer, ny: Integer) defeasible {
+    when marital_deduction_item_2523(donor, donee, item, y, _);
+    when charitable_deduction_2522_item(donor, ny, item, _);
+    then double_deduction_2523h(donor, item);
+}
+@source(IRC_S2523_I, relation = formalizes, coverage = exact, quote = "This subsection shall not apply to any transfer resulting from the acquisition of rights under a joint and survivor annuity described in subsection (f)(6).")
+pub relation section_2523i_not_applicable_to_annuity_transfer(donor: Individual, donee: Individual) kind institutional {
+    label en official "subsection (i) does not apply to a transfer resulting from acquiring rights under a joint and survivor annuity of (f)(6)";
+}
+rule Section2523iNotApplicableToAnnuityRule(donor: Individual, donee: Individual) defeasible {
+    when annuity_transfer_from_2523f6_rights(donor, donee);
+    then section_2523i_not_applicable_to_annuity_transfer(donor, donee);
+}
+
+// =====================================================================
+// §2524 and the wiring of the deductions into the taxable gifts
+// =====================================================================
+
+pub relation gift_deductions_before_extent_limit(donor: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "the sum of the section 2522 charitable deduction and the section 2523 marital deduction for the calendar year";
+}
+rule GiftDeductionsBeforeExtentLimitRule(donor: Individual, y: TaxableYear, n: Integer) defeasible {
+    when taxable_gifts_before_deductions_2503a(donor, y, _);
+    when us.irc.core::calendar_year_of(y, n);
+    then gift_deductions_before_extent_limit(donor, y,
+        sum(collect all c: Money where charitable_deduction_2522(donor, n, c), empty: 0.00 USD)
+        + sum(collect all m: Money where marital_deduction_2523(donor, n, m), empty: 0.00 USD));
+}
+@source(IRC_S2524, relation = formalizes, coverage = exact, quote = "The deductions provided in sections 2522 and 2523 shall be allowed only to the extent that the gifts therein specified are included in the amount of gifts against which such deductions are applied.")
+pub relation gift_deductions_allowed_2524(donor: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the deductions of sections 2522 and 2523 allowed only to the extent of the gifts included: never more than the taxable gifts before deductions (section 2524); the link of each deduction to its own gift item is TECH-GAPS G3611";
+}
+rule GiftDeductionsAllowed2524Rule(donor: Individual, y: TaxableYear, before: Money, ded: Money) defeasible {
+    when taxable_gifts_before_deductions_2503a(donor, y, before);
+    when gift_deductions_before_extent_limit(donor, y, ded);
+    then gift_deductions_allowed_2524(donor, y, min(before, ded));
+}
+
+// =====================================================================
+// §2001(b)(2), (d), (e), (g)(1): the gift tax subtracted from the estate tax
+// =====================================================================
+
+pub relation post_1976_taxable_gifts_of_decedent(e: Estate, amount: Money) kind institutional {
+    label en official "the sum of the taxable gifts made by the decedent after December 31, 1976, including gifts includible in the gross estate (section 2001(b)(2))";
+}
+rule Post1976TaxableGiftsOfDecedentRule(e: Estate, donor: Individual) defeasible {
+    when decedent_individual(e, donor);
+    when taxable_gifts(donor, _, _);
+    then post_1976_taxable_gifts_of_decedent(e, sum(collect all g: Money, y: TaxableYear where taxable_gifts(donor, y, g) and gift_year_after_1976(y), empty: 0.00 USD));
+}
+relation gift_year_after_1976(y: TaxableYear) kind institutional;
+rule GiftYearAfter1976Rule(y: TaxableYear, n: Integer) defeasible {
+    when us.irc.core::calendar_year_of(y, n) and n >= 1977;
+    then gift_year_after_1976(y);
+}
+pub relation gift_tentative_tax_at_death_rates(e: Estate, amount: Money) kind institutional {
+    label en official "the tentative tax under section 2001(c) on the post-1976 taxable gifts, at the rates in effect at death (section 2001(g)(1))";
+}
+rule GiftTentativeTaxAtDeathRatesRule(e: Estate, base: Money, lower: Money, base_tax: Money, rate: Decimal) defeasible {
+    when post_1976_taxable_gifts_of_decedent(e, base);
+    when not_known(section_2201_reduced_schedule_applies(e));
+    when bracket_2001c(base, lower, base_tax, rate);
+    then gift_tentative_tax_at_death_rates(e, base_tax + rate * (base - lower));
+}
+pub relation tax_payable_by_spouse_on_split_gift_2012d(e: Estate, n: Integer, amount: Money) kind empirical {
+    label en unofficial "the tax payable by the decedent's spouse under chapter 12 on the spouse's half of a split gift, as determined under section 2012(d)";
+}
+pub relation split_gift_included_in_gross_estate_of_decedent(e: Estate, n: Integer) kind empirical {
+    label en unofficial "the decedent was the donor of a gift one-half of which was considered under section 2513 as made by the decedent's spouse, and the amount of the gift is includible in the decedent's gross estate (section 2001(d))";
+}
+@source(IRC_S2001_D, relation = formalizes, coverage = exact, quote = "any tax payable by the spouse under chapter 12 on such gift (as determined under section 2012(d)) shall be treated as a tax payable with respect to a gift made by the decedent")
+pub relation spouse_gift_tax_treated_as_decedent_gift_tax_2001d(e: Estate, n: Integer, amount: Money) kind institutional {
+    label en official "the tax payable by the spouse on such a gift is treated as a tax payable with respect to a gift made by the decedent (section 2001(d))";
+}
+rule SpouseGiftTaxTreatedAsDecedentGiftTaxRule(e: Estate, n: Integer, amount: Money) defeasible {
+    when split_gift_included_in_gross_estate_of_decedent(e, n);
+    when tax_payable_by_spouse_on_split_gift_2012d(e, n, amount);
+    then spouse_gift_tax_treated_as_decedent_gift_tax_2001d(e, n, amount);
+}
+pub relation split_gift_of_spouse_included_in_spouse_estate_by_2035(e: Estate, donor: Individual, y: TaxableYear) kind empirical {
+    label en unofficial "the decedent's spouse was the donor of a gift one-half of which was considered under section 2513 as made by the decedent, and the amount is includible in the spouse's gross estate by reason of section 2035 (section 2001(e))";
+}
+pub relation spouse_gift_tax_reduction_2001e(e: Estate, n: Integer, amount: Money) kind empirical {
+    label en unofficial "the amount, determined under subsection (d), that was treated as a tax payable by the decedent's spouse with respect to such a gift (section 2001(e))";
+}
+@source(IRC_S2001_E, relation = formalizes, coverage = exact, quote = "such gift shall not be included in the adjusted taxable gifts of the decedent for purposes of subsection (b)(1)(B)")
+rule GiftIncludedInSpouseEstateBy2035NotAdjustedTaxableGiftRule(e: Estate, donor: Individual, y: TaxableYear) defeasible {
+    label en official "a gift split with the decedent and includible in the spouse's gross estate by section 2035 is not included in the decedent's adjusted taxable gifts (section 2001(e))";
+    when split_gift_of_spouse_included_in_spouse_estate_by_2035(e, donor, y);
+    then gift_included_in_gross_estate(donor, y);
+}
+@source(IRC_S2001_B, relation = formalizes, coverage = exact, quote = "the aggregate amount of tax which would have been payable under chapter 12 with respect to gifts made by the decedent after December 31, 1976")
+rule GiftTaxPayableAtCurrentRatesRule(e: Estate, tentative: Money, credit: Money) defeasible {
+    label en official "the tax which would have been payable under chapter 12 on all post-1976 gifts at the rates in effect at death: the tentative tax less the section 2505 credit, never below zero, adjusted by subsections (d) and (e) of section 2001 (section 2001(b)(2), (d), (e), (g)(1))";
+    when gift_tentative_tax_at_death_rates(e, tentative);
+    when applicable_credit_amount(e, credit);
+    then gift_tax_payable_at_current_rates(e, max(0.00 USD, max(0.00 USD, tentative - credit)
+        + sum(collect all a: Money, n: Integer where spouse_gift_tax_treated_as_decedent_gift_tax_2001d(e, n, a), empty: 0.00 USD)
+        - sum(collect all r: Money, n: Integer where spouse_gift_tax_reduction_2001e(e, n, r), empty: 0.00 USD)));
+}
+
+// §2001(f), §2504(c): value finally determined
+pub relation gift_value_shown_on_return(donor: Individual, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the value of the gifts for the period is shown on a return under chapter 12; an item is shown if disclosed on the return, or in a statement attached, in a manner adequate to apprise the Secretary of its nature (section 2001(f)(2), last sentence)";
+}
+pub relation secretary_contested_value_before_period_expired(donor: Individual, y: TaxableYear) kind empirical {
+    label en unofficial "the Secretary contested the value before the period of section 6501 expired";
+}
+pub relation value_specified_by_secretary_not_timely_contested(donor: Individual, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "in a case not described in (A), the value is specified by the Secretary and is not timely contested by the taxpayer (section 2001(f)(2)(B))";
+}
+pub relation value_determined_by_court_or_settlement(donor: Individual, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the value is determined by a court or pursuant to a settlement agreement with the Secretary (section 2001(f)(2)(C))";
+}
+@source(IRC_S2001_F, relation = formalizes, coverage = exact, quote = "For purposes of paragraph (1), a value shall be treated as finally determined for purposes of chapter 12 if")
+pub relation gift_value_finally_determined_2001f2(donor: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the value is treated as finally determined for chapter 12: shown on a return and not contested, specified by the Secretary and not contested, or determined by a court or settlement (section 2001(f)(2))";
+}
+rule GiftValueFinallyDeterminedShownRule(donor: Individual, y: TaxableYear, amount: Money) defeasible {
+    when gift_value_shown_on_return(donor, y, amount);
+    when prior_gift_assessment_period_expired(donor, y);
+    when not_known(secretary_contested_value_before_period_expired(donor, y));
+    then gift_value_finally_determined_2001f2(donor, y, amount);
+}
+rule GiftValueFinallyDeterminedSpecifiedRule(donor: Individual, y: TaxableYear, amount: Money) defeasible {
+    when value_specified_by_secretary_not_timely_contested(donor, y, amount);
+    then gift_value_finally_determined_2001f2(donor, y, amount);
+}
+rule GiftValueFinallyDeterminedCourtRule(donor: Individual, y: TaxableYear, amount: Money) defeasible {
+    when value_determined_by_court_or_settlement(donor, y, amount);
+    then gift_value_finally_determined_2001f2(donor, y, amount);
+}
+rule PriorGiftValueFinallyDeterminedFrom2001fRule(donor: Individual, y: TaxableYear, amount: Money) defeasible {
+    label en official "a value finally determined under section 2001(f)(2) is the value for computing later tax (sections 2001(f)(1), 2504(c))";
+    when gift_value_finally_determined_2001f2(donor, y, amount);
+    when prior_gift_assessment_period_expired(donor, y);
+    then prior_gift_value_finally_determined(donor, y, amount);
+}
+
+// =====================================================================
+// §2010(b) and §2505(b): the offset for the pre-1977 specific exemption
+// =====================================================================
+
+pub relation specific_exemption_2521_allowed_on_gift(donor: Individual, n: Integer, gift_made_on: Date, amount: Money) kind empirical {
+    label en unofficial "the amount allowed as a specific exemption under section 2521 (as in effect before its repeal by the Tax Reform Act of 1976) with respect to a gift made on the stated date";
+}
+pub relation specific_exemption_offset(donor: Individual, amount: Money) kind institutional {
+    label en official "20 percent of the aggregate amount allowed as a specific exemption under section 2521 with respect to gifts made after September 8, 1976 (sections 2010(b), 2505(b))";
+}
+rule SpecificExemptionOffsetRule(donor: Individual) defeasible {
+    when specific_exemption_2521_allowed_on_gift(donor, _, _, _);
+    then specific_exemption_offset(donor, round(0.20 * sum(collect all a: Money, n: Integer, d: Date where specific_exemption_2521_allowed_on_gift(donor, n, d, a) and d > @1976-09-08, empty: 0.00 USD), 2, "HALF_UP"));
+}
+@source(IRC_S2010_B, relation = formalizes, coverage = exact, quote = "The amount of the credit allowable under subsection (a) shall be reduced by an amount equal to 20 percent of the aggregate amount allowed as a specific exemption")
+rule ApplicableCreditAmountLessExemptionOffsetRule(e: Estate, donor: Individual, base_credit: Money, offset: Money) defeasible {
+    label en official "the credit of section 2010(a) is reduced by 20 percent of the specific exemptions allowed for gifts made after September 8, 1976 (section 2010(b)); the reduced amount replaces the credit read by section 2010(d)";
+    when applicable_credit_amount_before_offset(e, base_credit);
+    when decedent_individual(e, donor);
+    when specific_exemption_offset(donor, offset);
+    then applicable_credit_amount(e, max(0.00 USD, base_credit - offset));
+}
+rule ApplicableCreditAmountNoOffsetRule(e: Estate, base_credit: Money) defeasible {
+    when applicable_credit_amount_before_offset(e, base_credit);
+    when not_known(decedent_has_specific_exemption_offset(e));
+    then applicable_credit_amount(e, base_credit);
+}
+relation decedent_has_specific_exemption_offset(e: Estate) kind institutional;
+rule DecedentHasSpecificExemptionOffsetRule(e: Estate, donor: Individual, offset: Money) defeasible {
+    when decedent_individual(e, donor);
+    when specific_exemption_offset(donor, offset);
+    then decedent_has_specific_exemption_offset(e);
+}
+pub relation applicable_credit_amount_before_offset(e: Estate, amount: Money) kind institutional {
+    label en unofficial "the applicable credit amount of section 2010(c)(1), before the section 2010(b) reduction";
+}

@@ -1,0 +1,743 @@
+// 26 U.S.C. §731(c)(3)-(6), §732(c)-(d),(f), §734(b),(d), §735, §755 — stage
+// 2b: marketable-securities exceptions/limitation/basis/character, the
+// two-property basis-allocation case (§732(c)), the transferee special-basis
+// election (§732(d)), the corporate-partner controlled-distributed-
+// corporation anti-abuse rule (§732(f)), the §754/substantial-basis-
+// reduction property-basis adjustment (§734(b),(d)), the character/holding-
+// period of distributed hot assets (§735), and the like-character allocation
+// of a §734(b)/§743(b) basis adjustment among partnership properties (§755).
+//
+// JUDGMENT CALLS AND GAPS (see report):
+//  - §731(c)(2) (the seven-paragraph "marketable securities" DEFINITION) and
+//    §731(c)(3)(C) (the "investment partnership"/"eligible partner"
+//    sub-definitions) remain case-asserted classifications, exactly as
+//    stage 1 left them (TECH_GAP rows already on file) — the reach of this
+//    pass is limited to what the coordinator asked: the (c)(3) EXCEPTIONS
+//    (as boolean gates on an already-asserted marketable security) and the
+//    (c)(3)(B) LIMITATION FORMULA (an intermediate-value computation, not a
+//    definitional derivation).
+//  - §731(c)(3)(A)(i)'s own carve-back ("except to the extent that the value
+//    of the distributed security is attributable to marketable securities
+//    or money contributed... to the entity") is NOT modeled — the exception
+//    is a blanket contributed-by-distributee flag, a disclosed
+//    simplification (narrower than the statute, which would sometimes deny
+//    the exception in part) — TECH-GAPS.md G362.
+//  - §732(c): implemented for EXACTLY TWO distributed properties, NEITHER of
+//    which is an unrealized receivable or inventory item (the (c)(1)(B)
+//    "other property" bucket with two members) — the increase (paragraph
+//    (2)) and decrease (paragraph (3)) allocation formulas both need at
+//    least two properties in the same bucket to be non-trivial, so this is
+//    the smallest faithful test of the actual apportionment math. The
+//    hot-asset bucket (paragraph (1)(A)), and any allocation among THREE OR
+//    MORE properties, are TECH_GAP (TECH-GAPS.md G364) — a general N-property
+//    allocation needs a fold/aggregate over an asserted FINITE property set
+//    this package's `sum all … where` idiom does not extend to a per-element
+//    proportional split without per-property arithmetic already computed by
+//    the case (which is exactly what this two-property version supplies).
+//  - §732(d): modeled as a `power` (the transferee's own election to use the
+//    section 743(b)-style basis), gated on the section 754-not-in-effect and
+//    within-2-years conditions from the statute's own text; the SECOND
+//    sentence (the Secretary's regulatory authority to REQUIRE this
+//    treatment above a 110%-of-basis threshold, whether or not elected) is
+//    EXTERNAL_DEPENDENCY (a delegated, non-self-executing standing rule).
+//  - §732(f): (1)-(4) are EXECUTABLE (trigger, the two paragraph-(3)
+//    limitations, and the paragraph-(4) gain-recognition/basis-increase
+//    coordination); (5) reuses `us.irc.corporations::meets_1504a2_ownership`
+//    (a REAL cross-package import, not a re-derivation); (2) (exception for
+//    distributions before control, "to the satisfaction of the Secretary")
+//    is EVALUATIVE (DECISION-0194) as to the Secretary's satisfaction, with
+//    the "control immediately after" leg EXECUTABLE; (6)-(8) (indirect
+//    distributions, reapplication down a chain of controlled subsidiaries,
+//    delegated anti-double-counting regulations) are TECH_GAP/EXTERNAL_
+//    DEPENDENCY — a chain of controlled corporations is a recursive
+//    structure this pass does not build (TECH-GAPS.md G365).
+//  - §734(b): the INCREASE and DECREASE amounts are computed in full
+//    (both (1)(A)/(B) and (2)(A)/(B) components), gated on EITHER the
+//    section 754 election OR a substantial basis reduction (two rules with
+//    the same head, the corpus's standard disjunction idiom). The flush
+//    "Paragraph (1)(B) shall not apply to any distributed property which is
+//    an interest in another partnership [without its own 754 election]" is
+//    modeled as an `unless` defeater on the (1)(B) component alone, not on
+//    the whole increase.
+//  - §734(d): the $250,000 substantial-basis-reduction test is EXECUTABLE,
+//    computed directly from the same (2)(A)/(B) component amounts §734(b)
+//    already computes (no duplicate input). §734(d)(2) is a pure cross-
+//    reference to section 743(d)(2)'s regulations — EXTERNAL_DEPENDENCY.
+//  - §735(a): ordinary character on unrealized receivables (no time limit)
+//    and inventory items (5-year window, exact `add_calendar_period`) is
+//    EXECUTABLE. §735(b) (tacked holding period, section 1223) is modeled
+//    as a plain relation reading the partnership's own holding-period start
+//    date (this package does not import `us.irc.property_transactions`'s
+//    own section 1223 holding-period MACHINERY, only its `long_term`/
+//    `capital_asset` result relations elsewhere in this package, so the
+//    tacking rule here produces its OWN `distributed_property_holding_period_start`
+//    result rather than writing into that package's relation — imports are
+//    consume-only, matching the section 707(b)/267(d) note in module 09).
+//    §735(c)(1) (the 1231(b) holding-period waiver INSIDE the 751(d)
+//    inventory-item test) is wired directly into this package's OWN
+//    751(d) implementation (module 11) rather than re-derived here.
+//    §735(c)(2) substituted-basis-property carryover mirrors §704(c)(3)(A)/
+//    §724(d)(3)(A)-(B)'s already-established pattern in module 08.
+//  - §755: (a) the "reduce the FMV/basis difference" allocation method is
+//    modeled for the SAME two-property case as §732(c) (increase/decrease
+//    proportional to appreciation/depreciation, then FMV/basis) — the
+//    "any other manner permitted by regulations" alternative of (a)(2) is
+//    EXTERNAL_DEPENDENCY, never invented. (b)'s like-character bucketing
+//    (capital-asset-and-1231(b) vs other) and the "not below zero" floor are
+//    EXECUTABLE; the "subsequently acquired property" spillover is TECH_GAP
+//    (needs a temporal sequence of acquisitions this package does not track
+//    generically). (c)'s no-allocation-to-corporate-partner's-stock rule and
+//    the resulting gain-recognition backstop are EXECUTABLE.
+
+language "law.core" version "0.2";
+package us.irc.partnerships version "0.1.1";
+namespace "urn:us:irc:partnerships:clir";
+
+use self::{
+    Asset,
+    IRC_S731_C,
+    IRC_S732_C,
+    IRC_S732_D,
+    IRC_S732_F,
+    IRC_S734_B,
+    IRC_S734_D,
+    IRC_S735_A,
+    IRC_S735_B,
+    IRC_S735_C,
+    IRC_S755_A,
+    IRC_S755_C,
+    Partnership,
+    Person,
+    TaxableYear,
+    Transaction,
+    distributed_property_basis,
+    distributed_property_pre_limitation_basis,
+    distributee_outside_basis_before_distribution,
+    distribution_gain_recognized,
+    distribution_is_liquidating,
+    distribution_loss_recognized,
+    marketable_security_distributed,
+    money_distributed,
+    s754_election_in_effect,
+    section_734e_securitization_exception,
+};
+
+// ============================================================================
+// §731(c)(3): exceptions to marketable-securities-as-money treatment
+// ============================================================================
+
+pub relation section_731c_security_contributed_by_distributee(t: Transaction, pship: Partnership, partner: Person, prop: Asset) kind empirical {
+    label en unofficial "the marketable security was contributed to the partnership by the distributee partner (section 731(c)(3)(A)(i) — the carve-back for value attributable to securities/money the ENTITY itself received is not modeled, see header note)";
+}
+relation section_731c_not_marketable_when_acquired_by_regulation(t: Transaction, prop: Asset) kind institutional {
+    label en unofficial "EXTERNAL_DEPENDENCY (26 CFR, section 731(c)(3)(A)(ii) 'to the extent provided in regulations' delegated exception) — case-asserted, not reproduced";
+}
+pub relation section_731c_investment_partnership(pship: Partnership) kind institutional {
+    label en unofficial "the partnership is an 'investment partnership' within section 731(c)(3)(C)(i) (never engaged in a trade or business, substantially all assets always the enumerated investment-asset classes) — a case-asserted classification, the full multi-clause definition is TECH_GAP";
+}
+pub relation section_731c_eligible_partner(partner: Person, pship: Partnership) kind institutional {
+    label en unofficial "the partner is an 'eligible partner' of the investment partnership within section 731(c)(3)(C)(iii) — case-asserted classification, the nonrecognition-transaction transferor/transferee carve-out of (iii)(II) is TECH_GAP";
+}
+pub relation marketable_security_distributed_property(t: Transaction, pship: Partnership, partner: Person, prop: Asset) kind empirical {
+    label en unofficial "identifies WHICH distributed asset is the marketable security whose FMV `marketable_security_distributed` names (that relation carries no asset identity, only the value) — a binding fact for the section 731(c)(3) exception/limitation rules below";
+}
+
+pub relation section_731c_exception_applies(t: Transaction, pship: Partnership, partner: Person, prop: Asset) kind institutional {
+    label en official "one of the section 731(c)(3)(A) exceptions applies, so the marketable security distributed is NOT treated as money under section 731(c)(1)";
+}
+@source(IRC_S731_C, relation = formalizes, coverage = exact, quote = "the security was contributed to the partnership by such partner, except to the extent that the value of the distributed security is attributable to marketable securities or money contributed (directly or indirectly) to the entity to which the distributed security relates")
+rule S731c3aContributedByDistributee(t: Transaction, pship: Partnership, partner: Person, prop: Asset) defeasible {
+    when section_731c_security_contributed_by_distributee(t, pship, partner, prop);
+    unless value_attributable_to_contributed_marketables_or_money(t, pship, partner, prop, _) and section_731c_security_contributed_by_distributee(t, pship, partner, prop);
+    then section_731c_exception_applies(t, pship, partner, prop);
+}
+// §731(c)(3)(A)(i), carve-back (stage 3, retires the G362 simplification): "except to the extent that
+// the value of the distributed security is attributable to marketable securities or money contributed
+// (directly or indirectly) to the entity to which the distributed security relates". When that value is
+// asserted the exception does NOT apply to it: that part is treated as money (after the (B) limitation).
+pub relation value_attributable_to_contributed_marketables_or_money(t: Transaction, pship: Partnership, partner: Person, prop: Asset, amount: Money) kind empirical {
+    label en unofficial "the part of the distributed security's value attributable to marketable securities or money contributed, directly or indirectly, to the entity to which the security relates (case-asserted; section 731(c)(3)(A)(i) carve-back)";
+}
+@source(IRC_S731_C, relation = formalizes, coverage = exact, quote = "except to the extent that the value of the distributed security is attributable to marketable securities or money contributed")
+rule S731c3aCarveBackMoneyTreatment(t: Transaction, pship: Partnership, partner: Person, prop: Asset, fmv: Money, attributable: Money, reduction: Money) defeasible {
+    label en official "for a security the distributee contributed, the part of the value attributable to contributed marketable securities or money is not excepted: it is treated as money, after the section 731(c)(3)(B) limitation (section 731(c)(3)(A)(i), (1))";
+    when section_731c_security_contributed_by_distributee(t, pship, partner, prop);
+    when marketable_security_distributed(t, pship, partner, fmv);
+    when value_attributable_to_contributed_marketables_or_money(t, pship, partner, prop, attributable);
+    when section_731c3B_reduction(t, pship, partner, reduction);
+    then section_731c_money_treated_amount(t, pship, partner, prop, max(0 USD, min(fmv, attributable) - reduction));
+}
+rule S731c3aNotMarketableWhenAcquired(t: Transaction, pship: Partnership, partner: Person, prop: Asset) defeasible {
+    when marketable_security_distributed_property(t, pship, partner, prop);
+    when section_731c_not_marketable_when_acquired_by_regulation(t, prop);
+    then section_731c_exception_applies(t, pship, partner, prop);
+}
+rule S731c3aInvestmentPartnership(t: Transaction, pship: Partnership, partner: Person, prop: Asset) defeasible {
+    label en official "the exception for a distribution by an investment partnership to an eligible partner (section 731(c)(3)(A)(iii))";
+    when marketable_security_distributed_property(t, pship, partner, prop);
+    when section_731c_investment_partnership(pship);
+    when section_731c_eligible_partner(partner, pship);
+    then section_731c_exception_applies(t, pship, partner, prop);
+}
+
+// --- §731(c)(3)(B): limitation on gain recognized (intermediate values) ----
+
+pub relation distributee_share_net_gain_if_all_sold_before(t: Transaction, pship: Partnership, partner: Person, amount: Money) kind empirical {
+    label en unofficial "the partner's distributive share of the net gain that would be recognized if all marketable securities of the same class/issuer as the distributed security, held by the partnership, were sold for fair market value immediately before the distribution transaction (section 731(c)(3)(B)(i) input)";
+}
+pub relation distributee_share_net_gain_attributable_after(t: Transaction, pship: Partnership, partner: Person, amount: Money) kind empirical {
+    label en unofficial "the partner's distributive share of the net gain attributable to marketable securities of the same class/issuer held by the partnership immediately AFTER the transaction, using the same fair market value (section 731(c)(3)(B)(ii) input)";
+}
+pub relation section_731c3B_reduction(t: Transaction, pship: Partnership, partner: Person, amount: Money) kind institutional {
+    label en official "the section 731(c)(3)(B) reduction: the excess (if any) of the partner's pre-distribution distributive share of net gain over the post-transaction share, not below zero";
+}
+@source(IRC_S731_C, relation = formalizes, coverage = exact, quote = "the amount taken into account under paragraph (1) shall be reduced (but not below zero) by the excess (if any) of")
+rule S731c3BReduction(t: Transaction, pship: Partnership, partner: Person, before: Money, after: Money) strict {
+    when distributee_share_net_gain_if_all_sold_before(t, pship, partner, before);
+    when distributee_share_net_gain_attributable_after(t, pship, partner, after);
+    then section_731c3B_reduction(t, pship, partner, max(0 USD, before - after));
+}
+
+pub relation section_731c_money_treated_amount(t: Transaction, pship: Partnership, partner: Person, prop: Asset, amount: Money) kind institutional {
+    label en official "the amount of a distributed marketable security's fair market value treated as money under section 731(a)(1)/section 737, after the section 731(c)(3)(B) limitation, for a security to which no section 731(c)(3)(A) exception applies (section 731(c)(1),(3))";
+}
+rule S731cMoneyTreatedAmount(t: Transaction, pship: Partnership, partner: Person, prop: Asset, fmv: Money, reduction: Money) defeasible {
+    when marketable_security_distributed(t, pship, partner, fmv);
+    when marketable_security_distributed_property(t, pship, partner, prop);
+    when section_731c3B_reduction(t, pship, partner, reduction);
+    unless section_731c_exception_applies(t, pship, partner, prop) and marketable_security_distributed(t, pship, partner, fmv) and marketable_security_distributed_property(t, pship, partner, prop) and section_731c3B_reduction(t, pship, partner, reduction);
+    unless value_attributable_to_contributed_marketables_or_money(t, pship, partner, prop, _) and marketable_security_distributed(t, pship, partner, fmv) and marketable_security_distributed_property(t, pship, partner, prop) and section_731c3B_reduction(t, pship, partner, reduction);
+    then section_731c_money_treated_amount(t, pship, partner, prop, max(0 USD, fmv - reduction));
+}
+
+// --- §731(c)(4): basis of securities distributed; §731(c)(6): character ---
+
+pub relation section_731c4_basis(t: Transaction, pship: Partnership, partner: Person, prop: Asset, amount: Money) kind institutional {
+    label en official "the basis of a marketable security with respect to which gain is recognized under section 731(c) is its section 732 basis increased by the amount of such gain (section 731(c)(4)(A))";
+}
+rule S731c4Basis(t: Transaction, pship: Partnership, partner: Person, prop: Asset, basis732: Money, gain: Money) defeasible {
+    when distributed_property_basis(t, pship, partner, prop, basis732);
+    when section_731c_money_treated_amount(t, pship, partner, prop, gain);
+    when gain > 0 USD;
+    then section_731c4_basis(t, pship, partner, prop, basis732 + gain);
+}
+
+pub relation security_is_receivable_or_inventory_751(t: Transaction, prop: Asset) kind empirical {
+    label en unofficial "the distributed marketable security is an unrealized receivable (section 751(c)) or inventory item (section 751(d)) — a case-asserted classification bridging to this package's own module 11 751(c)/(d) tests (section 731(c)(6) input)";
+}
+pub relation section_731c6_ordinary_character(t: Transaction, pship: Partnership, partner: Person, prop: Asset, amount: Money) kind institutional {
+    label en official "gain recognized under section 731(c) on a distributed marketable security which is an unrealized receivable or inventory item is ordinary income, to the extent of the section 731(c)(4)(A)(ii) basis-increase gain (section 731(c)(6))";
+}
+@source(IRC_S731_C, relation = formalizes, coverage = exact, quote = "any gain recognized under this subsection shall be treated as ordinary income to the extent of any increase in the basis of such security attributable to the gain described in paragraph (4)(A)(ii)")
+rule S731c6OrdinaryCharacter(t: Transaction, pship: Partnership, partner: Person, prop: Asset, gain: Money) defeasible {
+    when security_is_receivable_or_inventory_751(t, prop);
+    when section_731c_money_treated_amount(t, pship, partner, prop, gain);
+    when gain > 0 USD;
+    then section_731c6_ordinary_character(t, pship, partner, prop, gain);
+}
+
+// ============================================================================
+// §732(c): allocation of basis among TWO distributed "other" properties
+// ============================================================================
+
+pub relation distributed_other_properties_pair(t: Transaction, pship: Partnership, partner: Person, propA: Asset, propB: Asset) kind empirical {
+    label en unofficial "exactly two properties, NEITHER an unrealized receivable nor an inventory item, are distributed to the partner in a transaction to which section 732(a)(2) or (b) applies (section 732(c)(1)(B) two-property case; see header note on the N-property gap)";
+}
+pub relation property_fmv_at_distribution_732(t: Transaction, prop: Asset, amount: Money) kind empirical {
+    label en unofficial "the fair market value of the distributed property at the time of distribution (section 732(c)(2)-(3) allocation input)";
+}
+
+pub relation section_732c_basis_to_allocate(t: Transaction, pship: Partnership, partner: Person, amount: Money) kind institutional {
+    label en official "the total basis to be allocated among the distributed properties: outside basis reduced by money distributed in the same transaction (section 732(c)(1) chapeau input, no unrealized receivables/inventory in this two-property case so nothing is allocated under (1)(A))";
+}
+rule S732cBasisToAllocate(t: Transaction, pship: Partnership, partner: Person, outside_basis: Money, money: Money, propA: Asset, propB: Asset) defeasible {
+    when distributed_other_properties_pair(t, pship, partner, propA, propB);
+    when distributee_outside_basis_before_distribution(t, pship, partner, outside_basis);
+    when money_distributed(t, pship, partner, money);
+    then section_732c_basis_to_allocate(t, pship, partner, max(0 USD, outside_basis - money));
+}
+
+pub relation section_732c_sum_of_partnership_bases(t: Transaction, pship: Partnership, amount: Money) kind institutional {
+    label en unofficial "the sum of the two properties' adjusted bases to the partnership immediately before the distribution (section 732(c)(1)(B)(i) intermediate value)";
+}
+rule S732cSumOfBases(t: Transaction, pship: Partnership, partner: Person, propA: Asset, propB: Asset, basisA: Money, basisB: Money) strict {
+    when distributed_other_properties_pair(t, pship, partner, propA, propB);
+    when distributed_property_pre_limitation_basis(t, pship, propA, basisA);
+    when distributed_property_pre_limitation_basis(t, pship, propB, basisB);
+    then section_732c_sum_of_partnership_bases(t, pship, basisA + basisB);
+}
+
+pub relation section_732c_unrealized_appreciation(t: Transaction, prop: Asset, amount: Money) kind institutional {
+    label en unofficial "unrealized appreciation of the property (FMV minus partnership basis, floored at zero) — section 732(c)(2)(A) intermediate value";
+}
+rule S732cAppreciation(t: Transaction, prop: Asset, basis: Money, fmv: Money) strict {
+    when distributed_property_pre_limitation_basis(t, _, prop, basis);
+    when property_fmv_at_distribution_732(t, prop, fmv);
+    then section_732c_unrealized_appreciation(t, prop, max(0 USD, fmv - basis));
+}
+pub relation section_732c_unrealized_depreciation(t: Transaction, prop: Asset, amount: Money) kind institutional {
+    label en unofficial "unrealized depreciation of the property (partnership basis minus FMV, floored at zero) — section 732(c)(3)(A) intermediate value";
+}
+rule S732cDepreciation(t: Transaction, prop: Asset, basis: Money, fmv: Money) strict {
+    when distributed_property_pre_limitation_basis(t, _, prop, basis);
+    when property_fmv_at_distribution_732(t, prop, fmv);
+    then section_732c_unrealized_depreciation(t, prop, max(0 USD, basis - fmv));
+}
+
+pub relation distributed_properties_basis(t: Transaction, pship: Partnership, partner: Person, prop: Asset, amount: Money) kind institutional {
+    label en official "the section 732(c) basis of one of two distributed 'other' properties, after allocating the total basis-to-allocate among them per the (c)(1)(B) rules: unchanged if the total equals the sum of partnership bases, increased proportionally to unrealized appreciation then FMV under (c)(2) if the total exceeds that sum, or decreased proportionally to unrealized depreciation then adjusted basis under (c)(3) if the total is less";
+}
+@source(IRC_S732_C, relation = formalizes, coverage = exact, quote = "to the extent of any basis remaining after the allocation under subparagraph (A), to other distributed properties—")
+rule S732cEqualNoAdjustment(t: Transaction, pship: Partnership, partner: Person, propA: Asset, propB: Asset, basisA: Money, basisB: Money, to_allocate: Money, sum_basis: Money) defeasible {
+    label en official "if the basis to allocate equals the sum of the properties' partnership bases, each property's section 732 basis is simply its own partnership basis (section 732(c)(1)(B)(i), no increase or decrease needed)";
+    when distributed_other_properties_pair(t, pship, partner, propA, propB);
+    when distributed_property_pre_limitation_basis(t, pship, propA, basisA);
+    when distributed_property_pre_limitation_basis(t, pship, propB, basisB);
+    when section_732c_basis_to_allocate(t, pship, partner, to_allocate);
+    when section_732c_sum_of_partnership_bases(t, pship, sum_basis);
+    when to_allocate == sum_basis;
+    then distributed_properties_basis(t, pship, partner, propA, basisA);
+}
+
+@source(IRC_S732_C, relation = formalizes, coverage = exact, quote = "first to properties with unrealized appreciation in proportion to their respective amounts of unrealized appreciation before such increase (but only to the extent of each property's unrealized appreciation), and")
+rule S732cIncreaseAllocationA(t: Transaction, pship: Partnership, partner: Person, propA: Asset, propB: Asset, basisA: Money, basisB: Money, to_allocate: Money, sum_basis: Money, appA: Money, appB: Money, fmvA: Money, fmvB: Money) defeasible {
+    label en official "an increase in basis under section 732(c)(1)(B) is allocated first to properties with unrealized appreciation, in proportion to their appreciation (capped at each property's own appreciation), then by fair market value (section 732(c)(2)) — computed here for propA of the two-property pair";
+    when distributed_other_properties_pair(t, pship, partner, propA, propB);
+    when distributed_property_pre_limitation_basis(t, pship, propA, basisA);
+    when distributed_property_pre_limitation_basis(t, pship, propB, basisB);
+    when section_732c_basis_to_allocate(t, pship, partner, to_allocate);
+    when section_732c_sum_of_partnership_bases(t, pship, sum_basis);
+    when to_allocate > sum_basis;
+    when section_732c_unrealized_appreciation(t, propA, appA);
+    when section_732c_unrealized_appreciation(t, propB, appB);
+    when property_fmv_at_distribution_732(t, propA, fmvA);
+    when property_fmv_at_distribution_732(t, propB, fmvB);
+    when (appA + appB) > 0 USD;
+    then distributed_properties_basis(t, pship, partner, propA,
+        basisA + min(appA, round((to_allocate - sum_basis) * (appA / (appA + appB)), 2, "HALF_UP"))
+              + round(max(0 USD, (to_allocate - sum_basis) - (appA + appB)) * (fmvA / (fmvA + fmvB)), 2, "HALF_UP"));
+}
+rule S732cIncreaseAllocationNoAppreciation(t: Transaction, pship: Partnership, partner: Person, propA: Asset, propB: Asset, basisA: Money, basisB: Money, to_allocate: Money, sum_basis: Money, appA: Money, appB: Money, fmvA: Money, fmvB: Money) defeasible {
+    label en official "when neither property has unrealized appreciation, an increase in basis under section 732(c)(1)(B) is allocated entirely by fair market value (section 732(c)(2)(B))";
+    when distributed_other_properties_pair(t, pship, partner, propA, propB);
+    when distributed_property_pre_limitation_basis(t, pship, propA, basisA);
+    when distributed_property_pre_limitation_basis(t, pship, propB, basisB);
+    when section_732c_basis_to_allocate(t, pship, partner, to_allocate);
+    when section_732c_sum_of_partnership_bases(t, pship, sum_basis);
+    when to_allocate > sum_basis;
+    when section_732c_unrealized_appreciation(t, propA, appA);
+    when section_732c_unrealized_appreciation(t, propB, appB);
+    when (appA + appB) == 0 USD;
+    when property_fmv_at_distribution_732(t, propA, fmvA);
+    when property_fmv_at_distribution_732(t, propB, fmvB);
+    then distributed_properties_basis(t, pship, partner, propA,
+        basisA + round((to_allocate - sum_basis) * (fmvA / (fmvA + fmvB)), 2, "HALF_UP"));
+}
+
+@source(IRC_S732_C, relation = formalizes, coverage = exact, quote = "first to properties with unrealized depreciation in proportion to their respective amounts of unrealized depreciation before such decrease (but only to the extent of each property's unrealized depreciation), and")
+rule S732cDecreaseAllocationA(t: Transaction, pship: Partnership, partner: Person, propA: Asset, propB: Asset, basisA: Money, basisB: Money, to_allocate: Money, sum_basis: Money, depA: Money, depB: Money) defeasible {
+    label en official "a decrease in basis under section 732(c)(1)(A)/(B) is allocated first to properties with unrealized depreciation, in proportion to their depreciation (capped at each property's own depreciation), then by adjusted basis (section 732(c)(3)) — computed here for propA of the two-property pair";
+    when distributed_other_properties_pair(t, pship, partner, propA, propB);
+    when distributed_property_pre_limitation_basis(t, pship, propA, basisA);
+    when distributed_property_pre_limitation_basis(t, pship, propB, basisB);
+    when section_732c_basis_to_allocate(t, pship, partner, to_allocate);
+    when section_732c_sum_of_partnership_bases(t, pship, sum_basis);
+    when to_allocate < sum_basis;
+    when section_732c_unrealized_depreciation(t, propA, depA);
+    when section_732c_unrealized_depreciation(t, propB, depB);
+    when (depA + depB) > 0 USD;
+    then distributed_properties_basis(t, pship, partner, propA,
+        basisA - min(depA, round((sum_basis - to_allocate) * (depA / (depA + depB)), 2, "HALF_UP"))
+              - round(max(0 USD, (sum_basis - to_allocate) - (depA + depB)) * (basisA / (basisA + basisB)), 2, "HALF_UP"));
+}
+rule S732cDecreaseAllocationNoDepreciation(t: Transaction, pship: Partnership, partner: Person, propA: Asset, propB: Asset, basisA: Money, basisB: Money, to_allocate: Money, sum_basis: Money, depA: Money, depB: Money) defeasible {
+    label en official "when neither property has unrealized depreciation, a decrease in basis is allocated entirely by adjusted basis (section 732(c)(3)(B))";
+    when distributed_other_properties_pair(t, pship, partner, propA, propB);
+    when distributed_property_pre_limitation_basis(t, pship, propA, basisA);
+    when distributed_property_pre_limitation_basis(t, pship, propB, basisB);
+    when section_732c_basis_to_allocate(t, pship, partner, to_allocate);
+    when section_732c_sum_of_partnership_bases(t, pship, sum_basis);
+    when to_allocate < sum_basis;
+    when section_732c_unrealized_depreciation(t, propA, depA);
+    when section_732c_unrealized_depreciation(t, propB, depB);
+    when (depA + depB) == 0 USD;
+    then distributed_properties_basis(t, pship, partner, propA,
+        basisA - round((sum_basis - to_allocate) * (basisA / (basisA + basisB)), 2, "HALF_UP"));
+}
+
+// ============================================================================
+// §732(d): special partnership basis to a transferee partner
+// ============================================================================
+
+pub relation partner_acquired_interest_by_transfer_no_754(t_transfer: Transaction, partner: Person, pship: Partnership, on: Date) kind empirical {
+    label en unofficial "the partner acquired all or part of the interest by a transfer, with respect to which no section 754 election was in effect, on the given date (section 732(d) chapeau input)";
+}
+pub relation distribution_of_property_other_than_money_to_transferee(t_distribution: Transaction, t_transfer: Transaction, partner: Person, pship: Partnership, prop: Asset, on: Date) kind empirical {
+    label en unofficial "property (other than money) is distributed to the transferee partner with respect to the transferred interest, on the given date (section 732(d) chapeau input)";
+}
+pub relation elects_section_732d_treatment(t_distribution: Transaction, partner: Person, pship: Partnership) kind empirical {
+    label en unofficial "the transferee partner elects, under regulations prescribed by the Secretary, to treat the property's basis as if the section 743(b) adjustment were in effect (section 732(d) election)";
+}
+pub relation section_732d_within_2_years(t_distribution: Transaction, t_transfer: Transaction, partner: Person, pship: Partnership) kind institutional {
+    label en official "the distribution occurred within 2 years after the transfer (section 732(d) chapeau, exact date window)";
+}
+@source(IRC_S732_D, relation = formalizes, coverage = partial, quote = "a distribution of property (other than money) is made with respect to the transferred interest within 2 years after such transfer")
+rule S732dWithin2Years(t_distribution: Transaction, t_transfer: Transaction, partner: Person, pship: Partnership, prop: Asset, transferred_on: Date, distributed_on: Date) strict {
+    when partner_acquired_interest_by_transfer_no_754(t_transfer, partner, pship, transferred_on);
+    when distribution_of_property_other_than_money_to_transferee(t_distribution, t_transfer, partner, pship, prop, distributed_on);
+    when distributed_on <= add_calendar_period(transferred_on, 2 calendar_year);
+    then section_732d_within_2_years(t_distribution, t_transfer, partner, pship);
+}
+pub relation section_732d_basis_as_if_743b_in_effect(t_distribution: Transaction, partner: Person, pship: Partnership, prop: Asset, amount: Money) kind empirical {
+    label en unofficial "the adjusted basis the distributed property would have if the section 743(b) adjustment were in effect with respect to the partnership property — a case-computed figure reusing this package's own section 743(b) machinery (module 06), not re-derived here";
+}
+pub relation section_732d_special_basis_in_effect(t_distribution: Transaction, partner: Person, pship: Partnership, prop: Asset) kind institutional {
+    label en official "the transferee partner's basis in the distributed property is treated as the section 743(b)-style adjusted basis, by valid election under section 732(d)";
+}
+@source(IRC_S732_D, relation = formalizes, coverage = exact, quote = "may elect, under regulations prescribed by the Secretary, to treat as the adjusted partnership basis of such property the adjusted basis such property would have if the adjustment provided in section 743(b) were in effect with respect to the partnership property")
+rule S732dElectionPowerRule(t_distribution: Transaction, t_transfer: Transaction, partner: Person, pship: Partnership, prop: Asset) strict {
+    label en official "a transferee partner within section 732(d)'s 2-year window, whose transfer had no section 754 election in effect, may elect to use the section 743(b)-style basis for distributed property (section 732(d))";
+    when section_732d_within_2_years(t_distribution, t_transfer, partner, pship);
+    when distribution_of_property_other_than_money_to_transferee(t_distribution, t_transfer, partner, pship, prop, _);
+    then power S732dSpecialBasisElection {
+        holder partner;
+        over prop;
+        exercise elects_section_732d_treatment(t_distribution, partner, pship);
+        valid_when section_732d_within_2_years(t_distribution, t_transfer, partner, pship);
+        effect create(section_732d_special_basis_in_effect(t_distribution, partner, pship, prop));
+        subject Asset;
+        window [-infinity, infinity);
+    };
+}
+relation section_732d_regulation_requires_treatment(t_distribution: Transaction, partner: Person, pship: Partnership, prop: Asset) kind institutional {
+    label en unofficial "EXTERNAL_DEPENDENCY (section 732(d), second sentence: the Secretary MAY by regulations require section 732(d) treatment above the 110%-of-basis threshold, whether or not within 2 years or elected) — a delegated, non-self-executing standing rule, case-asserted only";
+}
+
+// ============================================================================
+// §732(f): corresponding basis reduction to a distributed controlled
+// corporation's assets
+// ============================================================================
+
+pub relation corporate_partner_receives_distributed_stock(t: Transaction, corporate_partner: us.irc.core::Corporation, pship: Partnership, distributed_corp: us.irc.core::Corporation) kind institutional {
+    label en unofficial "the corporate partner received a distribution from the partnership of stock in the distributed corporation (section 732(f)(1)(A) input)";
+}
+pub relation corporate_partner_basis_in_stock_after_distribution(t: Transaction, corporate_partner: us.irc.core::Corporation, distributed_corp: us.irc.core::Corporation, amount: Money) kind empirical {
+    label en unofficial "the corporate partner's adjusted basis in the distributed corporation's stock immediately after the distribution (section 732(f)(1)(C) input)";
+}
+pub relation partnership_basis_in_stock_before_distribution(t: Transaction, pship: Partnership, distributed_corp: us.irc.core::Corporation, amount: Money) kind empirical {
+    label en unofficial "the partnership's adjusted basis in the stock immediately before the distribution (section 732(f)(1)(C) input)";
+}
+pub relation section_732f_controls_at_or_after(t: Transaction, corporate_partner: us.irc.core::Corporation, distributed_corp: us.irc.core::Corporation, on: Date) kind institutional {
+    label en unofficial "the corporate partner has section 1504(a)(2) control of the distributed corporation immediately after the distribution or at any time thereafter, as of the given date (section 732(f)(1)(B)/(5))";
+}
+rule S732fControlFromCorporations(t: Transaction, corporate_partner: us.irc.core::Corporation, pship: Partnership, distributed_corp: us.irc.core::Corporation, on: Date) strict {
+    label en official "section 1504(a)(2) control, reused from us.irc.corporations for the section 732(f)(5) 'control' definition";
+    when corporate_partner_receives_distributed_stock(t, corporate_partner, pship, distributed_corp);
+    when us.irc.corporations::meets_1504a2_ownership(corporate_partner, distributed_corp, on);
+    then section_732f_controls_at_or_after(t, corporate_partner, distributed_corp, on);
+}
+
+pub relation section_732f_excess(t: Transaction, corporate_partner: us.irc.core::Corporation, distributed_corp: us.irc.core::Corporation, amount: Money) kind institutional {
+    label en unofficial "the excess of the partnership's pre-distribution basis in the stock over the corporate partner's post-distribution basis (section 732(f)(1)(C) intermediate value)";
+}
+rule S732fExcess(t: Transaction, corporate_partner: us.irc.core::Corporation, pship: Partnership, distributed_corp: us.irc.core::Corporation, pship_basis: Money, partner_basis: Money) strict {
+    when partnership_basis_in_stock_before_distribution(t, pship, distributed_corp, pship_basis);
+    when corporate_partner_basis_in_stock_after_distribution(t, corporate_partner, distributed_corp, partner_basis);
+    when pship_basis > partner_basis;
+    then section_732f_excess(t, corporate_partner, distributed_corp, pship_basis - partner_basis);
+}
+
+pub relation section_732f_distributed_corp_aggregate_basis_and_money(distributed_corp: us.irc.core::Corporation, on: Date, amount: Money) kind empirical {
+    label en unofficial "the sum of the aggregate adjusted bases of the distributed corporation's property plus its money, at the relevant time (section 732(f)(3)(A) limitation input)";
+}
+pub relation section_732f_reduction_limit(t: Transaction, corporate_partner: us.irc.core::Corporation, distributed_corp: us.irc.core::Corporation, on: Date, amount: Money) kind institutional {
+    label en official "the section 732(f)(3)(A) limit on the amount of the reduction: the excess of the distributed corporation's aggregate basis-plus-money over the corporate partner's basis in the stock";
+}
+rule S732fReductionLimit(t: Transaction, corporate_partner: us.irc.core::Corporation, distributed_corp: us.irc.core::Corporation, on: Date, agg: Money, partner_basis: Money) strict {
+    when section_732f_distributed_corp_aggregate_basis_and_money(distributed_corp, on, agg);
+    when corporate_partner_basis_in_stock_after_distribution(t, corporate_partner, distributed_corp, partner_basis);
+    then section_732f_reduction_limit(t, corporate_partner, distributed_corp, on, max(0 USD, agg - partner_basis));
+}
+
+pub relation section_732f_reduction_applied(t: Transaction, corporate_partner: us.irc.core::Corporation, distributed_corp: us.irc.core::Corporation, on: Date, amount: Money) kind institutional {
+    label en official "the amount of the section 732(f)(1) basis reduction actually applied, after the section 732(f)(3)(A) aggregate limit (section 732(f)(1),(3)(A))";
+}
+@source(IRC_S732_F, relation = formalizes, coverage = partial, quote = "then an amount equal to such excess shall be applied to reduce (in accordance with subsection (c)) the basis of property held by the distributed corporation at such time")
+rule S732fReductionApplied(t: Transaction, corporate_partner: us.irc.core::Corporation, distributed_corp: us.irc.core::Corporation, on: Date, excess: Money, limit: Money) defeasible {
+    when section_732f_controls_at_or_after(t, corporate_partner, distributed_corp, on);
+    when section_732f_excess(t, corporate_partner, distributed_corp, excess);
+    when section_732f_reduction_limit(t, corporate_partner, distributed_corp, on, limit);
+    unless section_732f_control_exception(t, corporate_partner, distributed_corp) and section_732f_excess(t, corporate_partner, distributed_corp, excess) and section_732f_reduction_limit(t, corporate_partner, distributed_corp, on, limit);
+    then section_732f_reduction_applied(t, corporate_partner, distributed_corp, on, min(excess, limit));
+}
+relation section_732f_control_exception(t: Transaction, corporate_partner: us.irc.core::Corporation, distributed_corp: us.irc.core::Corporation) kind institutional {
+    label en unofficial "EVALUATIVE (DECISION-0194, external judgment channel): the section 732(f)(2) exception — no control immediately after the distribution AND the corporate partner establishes to the Secretary's satisfaction that the distribution was not part of a plan to acquire control — case-asserted, the 'satisfaction of the Secretary' prong is not an arithmetic guard";
+}
+
+pub relation section_732f_gain_recognized(t: Transaction, corporate_partner: us.irc.core::Corporation, distributed_corp: us.irc.core::Corporation, amount: Money) kind institutional {
+    label en official "if the section 732(f)(1) reduction (after the paragraph (3)(A) limit) exceeds the distributed corporation's aggregate adjusted bases, the corporate partner recognizes the excess as long-term capital gain, and increases its stock basis by that excess (section 732(f)(4))";
+}
+@source(IRC_S732_F, relation = formalizes, coverage = exact, quote = "such excess shall be recognized by the corporate partner as long-term capital gain, and")
+rule S732fGainRecognized(t: Transaction, corporate_partner: us.irc.core::Corporation, distributed_corp: us.irc.core::Corporation, on: Date, reduction: Money, agg: Money) defeasible {
+    when section_732f_reduction_applied(t, corporate_partner, distributed_corp, on, reduction);
+    when section_732f_distributed_corp_aggregate_basis_and_money(distributed_corp, on, agg);
+    when reduction > agg;
+    then section_732f_gain_recognized(t, corporate_partner, distributed_corp, reduction - agg);
+}
+
+// ============================================================================
+// §734(b),(d): optional adjustment to basis of undistributed partnership
+// property
+// ============================================================================
+
+pub relation section_734d_substantial_basis_reduction(t: Transaction, pship: Partnership) kind institutional {
+    label en official "there is a substantial basis reduction with respect to the distribution: the sum of the section 734(b)(2)(A)-(B) decrease components exceeds $250,000 (section 734(d)(1))";
+}
+@source(IRC_S734_D, relation = formalizes, coverage = exact, quote = "there is a substantial basis reduction with respect to a distribution if the sum of the amounts described in subparagraphs (A) and (B) of subsection (b)(2) exceeds $250,000")
+rule S734dSubstantialBasisReduction(t: Transaction, pship: Partnership, lossA: Money, excessB: Money) defeasible {
+    when distribution_loss_recognized(t, pship, _, lossA);
+    when section_734b2B_excess(t, pship, excessB);
+    when (lossA + excessB) > 250000.00 USD;
+    unless section_734e_securitization_exception(t, pship);
+    then section_734d_substantial_basis_reduction(t, pship);
+}
+rule S734dSubstantialBasisReductionLossOnly(t: Transaction, pship: Partnership, lossA: Money) defeasible {
+    when distribution_loss_recognized(t, pship, _, lossA);
+    unless section_734b2B_excess(t, pship, _) and distribution_loss_recognized(t, pship, _, lossA);
+    when lossA > 250000.00 USD;
+    unless section_734e_securitization_exception(t, pship);
+    then section_734d_substantial_basis_reduction(t, pship);
+}
+relation section_734d2_regulations(t: Transaction, pship: Partnership) kind institutional {
+    label en unofficial "EXTERNAL_DEPENDENCY (section 734(d)(2): 'for regulations to carry out this subsection, see section 743(d)(2)') — cross-reference, not reproduced";
+}
+
+pub relation section_734b1A_gain_component(t: Transaction, pship: Partnership, partner: Person, amount: Money) kind institutional {
+    label en unofficial "the amount of gain recognized to the distributee partner under section 731(a)(1) (section 734(b)(1)(A) increase component)";
+}
+rule S734b1AGainComponent(t: Transaction, pship: Partnership, partner: Person, amount: Money) defeasible {
+    when distribution_gain_recognized(t, pship, partner, amount);
+    then section_734b1A_gain_component(t, pship, partner, amount);
+}
+pub relation section_734b1B_excess(t: Transaction, pship: Partnership, amount: Money) kind institutional {
+    label en unofficial "for property to which section 732(a)(2) or (b) applies, the excess of the property's partnership basis (as adjusted by section 732(d)) over the distributee's section 732 basis (section 734(b)(1)(B) increase component)";
+}
+rule S734b1BExcess(t: Transaction, pship: Partnership, partner: Person, prop: Asset, pre_basis: Money, distributee_basis: Money) defeasible {
+    when distributed_property_pre_limitation_basis(t, pship, prop, pre_basis);
+    when distributed_property_basis(t, pship, partner, prop, distributee_basis);
+    when pre_basis > distributee_basis;
+    unless section_734b1B_interest_in_other_partnership_no_754(t, prop) and distributed_property_pre_limitation_basis(t, pship, prop, pre_basis) and distributed_property_basis(t, pship, partner, prop, distributee_basis);
+    then section_734b1B_excess(t, pship, pre_basis - distributee_basis);
+}
+relation section_734b1B_interest_in_other_partnership_no_754(t: Transaction, prop: Asset) kind empirical {
+    label en unofficial "the distributed property is an interest in another partnership with respect to which no section 754 election is in effect — defeats the section 734(b)(1)(B) component (section 734(b) flush language)";
+}
+
+pub relation section_734b_increase(t: Transaction, pship: Partnership, amount: Money) kind institutional {
+    label en official "the section 734(b)(1) increase to the adjusted basis of partnership property: gain recognized to the distributee under section 731(a)(1), plus any section 732(a)(2)/(b) basis excess (section 734(b)(1))";
+}
+@source(IRC_S734_B, relation = formalizes, coverage = exact, quote = "the amount of any gain recognized to the distributee partner with respect to such distribution under section 731(a)(1), and")
+rule S734bIncreaseUnder754(t: Transaction, pship: Partnership, y: TaxableYear, gainA: Money, excessB: Money) defeasible {
+    when s754_election_in_effect(pship, y);
+    when section_734b1A_gain_component(t, pship, _, gainA);
+    when section_734b1B_excess(t, pship, excessB);
+    then section_734b_increase(t, pship, gainA + excessB);
+}
+rule S734bIncreaseUnderSubstantialReduction(t: Transaction, pship: Partnership, gainA: Money, excessB: Money) defeasible {
+    when section_734d_substantial_basis_reduction(t, pship);
+    when section_734b1A_gain_component(t, pship, _, gainA);
+    when section_734b1B_excess(t, pship, excessB);
+    then section_734b_increase(t, pship, gainA + excessB);
+}
+
+pub relation section_734b2A_loss_component(t: Transaction, pship: Partnership, partner: Person, amount: Money) kind institutional {
+    label en unofficial "the amount of loss recognized to the distributee partner under section 731(a)(2) (section 734(b)(2)(A) decrease component)";
+}
+rule S734b2ALossComponent(t: Transaction, pship: Partnership, partner: Person, amount: Money) defeasible {
+    when distribution_loss_recognized(t, pship, partner, amount);
+    then section_734b2A_loss_component(t, pship, partner, amount);
+}
+pub relation section_734b2B_excess(t: Transaction, pship: Partnership, amount: Money) kind institutional {
+    label en official "for property to which section 732(b) applies, the excess of the distributee's section 732 basis over the property's partnership basis (as adjusted by section 732(d)) (section 734(b)(2)(B) decrease component, also section 734(d)(1)'s second summand)";
+}
+rule S734b2BExcess(t: Transaction, pship: Partnership, partner: Person, prop: Asset, pre_basis: Money, distributee_basis: Money) defeasible {
+    when distribution_is_liquidating(t);
+    when distributed_property_pre_limitation_basis(t, pship, prop, pre_basis);
+    when distributed_property_basis(t, pship, partner, prop, distributee_basis);
+    when distributee_basis > pre_basis;
+    then section_734b2B_excess(t, pship, distributee_basis - pre_basis);
+}
+
+pub relation section_734b_decrease(t: Transaction, pship: Partnership, amount: Money) kind institutional {
+    label en official "the section 734(b)(2) decrease to the adjusted basis of partnership property: loss recognized to the distributee under section 731(a)(2), plus any section 732(b) basis excess (section 734(b)(2))";
+}
+@source(IRC_S734_B, relation = formalizes, coverage = partial, quote = "(2) decrease the adjusted basis of partnership property by—")
+rule S734bDecreaseUnder754(t: Transaction, pship: Partnership, y: TaxableYear, lossA: Money, excessB: Money) defeasible {
+    when s754_election_in_effect(pship, y);
+    when section_734b2A_loss_component(t, pship, _, lossA);
+    when section_734b2B_excess(t, pship, excessB);
+    then section_734b_decrease(t, pship, lossA + excessB);
+}
+rule S734bDecreaseUnderSubstantialReduction(t: Transaction, pship: Partnership, lossA: Money, excessB: Money) defeasible {
+    when section_734d_substantial_basis_reduction(t, pship);
+    when section_734b2A_loss_component(t, pship, _, lossA);
+    when section_734b2B_excess(t, pship, excessB);
+    then section_734b_decrease(t, pship, lossA + excessB);
+}
+
+// ============================================================================
+// §735: character and holding period of distributed property
+// ============================================================================
+
+pub relation distributed_property_is_unrealized_receivable(t: Transaction, prop: Asset) kind empirical {
+    label en unofficial "the property distributed is an unrealized receivable (section 751(c)) (section 735(a)(1) input, bridging to module 11's 751(c) test)";
+}
+pub relation distributee_disposition_gain_or_loss(t_distribution: Transaction, t_disposition: Transaction, partner: Person, prop: Asset, amount: Money, is_gain: Boolean) kind empirical {
+    label en unofficial "the gain or loss recognized by the distributee partner on a later disposition of the distributed property (section 735(a) input)";
+}
+pub relation section_735a1_ordinary_character(t_distribution: Transaction, t_disposition: Transaction, partner: Person, prop: Asset, amount: Money, is_gain: Boolean) kind institutional {
+    label en official "gain or loss on the distributee's disposition of a distributed unrealized receivable is ordinary income or ordinary loss (section 735(a)(1), no time limit)";
+}
+@source(IRC_S735_A, relation = formalizes, coverage = exact, quote = "Gain or loss on the disposition by a distributee partner of unrealized receivables (as defined in section 751(c)) distributed by a partnership, shall be considered as ordinary income or as ordinary loss, as the case may be.")
+rule S735a1OrdinaryCharacter(t_distribution: Transaction, t_disposition: Transaction, partner: Person, prop: Asset, amount: Money, is_gain: Boolean) strict {
+    when distributed_property_is_unrealized_receivable(t_distribution, prop);
+    when distributee_disposition_gain_or_loss(t_distribution, t_disposition, partner, prop, amount, is_gain);
+    then section_735a1_ordinary_character(t_distribution, t_disposition, partner, prop, amount, is_gain);
+}
+
+pub relation distributed_property_is_inventory_item(t: Transaction, prop: Asset) kind empirical {
+    label en unofficial "the property distributed is an inventory item (section 751(d)) (section 735(a)(2) input, bridging to module 11's 751(d) test)";
+}
+pub relation distribution_date_735(t: Transaction, prop: Asset, on: Date) kind empirical {
+    label en unofficial "the date of the section 735(a)(2) distribution (5-year window anchor)";
+}
+pub relation disposition_date_735(t: Transaction, prop: Asset, on: Date) kind empirical {
+    label en unofficial "the date of the distributee's sale or exchange of the distributed inventory item (5-year window test)";
+}
+pub relation section_735a2_ordinary_character(t_distribution: Transaction, t_disposition: Transaction, partner: Person, prop: Asset, amount: Money, is_gain: Boolean) kind institutional {
+    label en official "gain or loss on the distributee's sale or exchange of a distributed inventory item, within 5 years of the distribution, is ordinary income or ordinary loss (section 735(a)(2))";
+}
+@source(IRC_S735_A, relation = formalizes, coverage = exact, quote = "Gain or loss on the sale or exchange by a distributee partner of inventory items (as defined in section 751(d)) distributed by a partnership shall, if sold or exchanged within 5 years from the date of the distribution, be considered as ordinary income or as ordinary loss, as the case may be.")
+rule S735a2OrdinaryCharacter(t_distribution: Transaction, t_disposition: Transaction, partner: Person, prop: Asset, amount: Money, is_gain: Boolean, distributed_on: Date, disposed_on: Date) strict {
+    when distributed_property_is_inventory_item(t_distribution, prop);
+    when distributee_disposition_gain_or_loss(t_distribution, t_disposition, partner, prop, amount, is_gain);
+    when distribution_date_735(t_distribution, prop, distributed_on);
+    when disposition_date_735(t_disposition, prop, disposed_on);
+    when disposed_on <= add_calendar_period(distributed_on, 5 calendar_year);
+    then section_735a2_ordinary_character(t_distribution, t_disposition, partner, prop, amount, is_gain);
+}
+
+pub relation partnership_holding_period_start(prop: Asset, since: Date) kind empirical {
+    label en unofficial "the date the partnership's own holding period in the property began (section 1223, imported conceptually — this package does not import us.irc.property_transactions's own holding-period machinery, see header note)";
+}
+pub relation property_distributed_to_partner(t: Transaction, partner: Person, prop: Asset) kind empirical {
+    label en unofficial "a generic anchor fact: property was distributed to this partner in this transaction (section 735(b) binding fact, also usable by other section 735 rules)";
+}
+pub relation distributed_property_holding_period_start(t: Transaction, partner: Person, prop: Asset, since: Date) kind institutional {
+    label en official "in determining how long a distributee partner has held distributed property (other than for section 735(a)(2) purposes), the partnership's own holding period tacks on (section 735(b))";
+}
+@source(IRC_S735_B, relation = formalizes, coverage = exact, quote = "there shall be included the holding period of the partnership, as determined under section 1223, with respect to such property")
+rule S735bTackedHoldingPeriod(t: Transaction, partner: Person, prop: Asset, since: Date) strict {
+    when property_distributed_to_partner(t, partner, prop);
+    when partnership_holding_period_start(prop, since);
+    then distributed_property_holding_period_start(t, partner, prop, since);
+}
+
+pub relation substituted_basis_property_from_735_property(original_prop: Asset, substituted_prop: Asset, t_exchange: Transaction) kind empirical {
+    label en unofficial "substituted_prop is substituted basis property resulting from a nonrecognition transaction disposing of original_prop, a property described in section 735(a) (section 735(c)(2)(A) input fact)";
+}
+pub relation substituted_735_prop_is_c_corp_stock_in_351(substituted_prop: Asset, t_exchange: Transaction) kind empirical {
+    label en unofficial "the substituted basis property is stock in a C corporation received in a section 351 exchange (section 735(c)(2)(B) exception input)";
+}
+pub relation section_735_character_carries_to_substituted_property(original_prop: Asset, substituted_prop: Asset, t_exchange: Transaction) kind institutional {
+    label en official "section 735(a) character treatment carries over to substituted basis property from a nonrecognition transaction, unless the substituted property is C-corporation stock received in a section 351 exchange (section 735(c)(2))";
+}
+@source(IRC_S735_C, relation = formalizes, coverage = exact, quote = "If any property described in subsection (a) is disposed of in a nonrecognition transaction, the tax treatment which applies to such property under such subsection shall also apply to any substituted basis property resulting from such transaction.")
+rule S735c2CharacterCarriesOver(original_prop: Asset, substituted_prop: Asset, t_exchange: Transaction) defeasible {
+    when substituted_basis_property_from_735_property(original_prop, substituted_prop, t_exchange);
+    unless substituted_735_prop_is_c_corp_stock_in_351(substituted_prop, t_exchange) and substituted_basis_property_from_735_property(original_prop, substituted_prop, t_exchange);
+    then section_735_character_carries_to_substituted_property(original_prop, substituted_prop, t_exchange);
+}
+
+// ============================================================================
+// §755: allocation of basis adjustments among partnership properties
+// ============================================================================
+
+pub enum Section755LikeCharacterClass {
+    CapitalAssetOr1231bProperty;
+    OtherPartnershipProperty;
+    label en unofficial "the two like-character buckets of section 755(b)(1)-(2)";
+}
+pub relation section_755_property_class(prop: Asset, class: Section755LikeCharacterClass) kind empirical {
+    label en unofficial "which section 755(b) like-character bucket the property belongs to (a case-asserted classification of us.irc.property_transactions::capital_asset plus section 1231(b), not re-derived here)";
+}
+pub relation section_755_partner_is_corporation_or_related(prop_owner_partner: Person) kind empirical {
+    label en unofficial "the partner is a corporation (or a person related to a corporate partner within sections 267(b) and 707(b)(1)) holding this property as stock (section 755(c)(1) input)";
+}
+
+pub relation section_755_two_properties_same_class(t: Transaction, pship: Partnership, propA: Asset, propB: Asset, class: Section755LikeCharacterClass) kind empirical {
+    label en unofficial "propA and propB are the two partnership properties of the same section 755(b) like-character class eligible to receive an allocated section 734(b) basis adjustment (the two-property case, mirroring section 732(c)'s own scope limitation)";
+}
+pub relation section_755_allocation_amount(t: Transaction, pship: Partnership, amount: Money) kind empirical {
+    label en unofficial "the total section 734(b) (or section 743(b)) increase or decrease amount to be allocated among partnership properties under section 755(a) (a signed value: positive for an increase, negative for a decrease — read alongside section_734b_increase/section_734b_decrease)";
+}
+
+pub relation section_755_allocated_adjustment(t: Transaction, pship: Partnership, prop: Asset, amount: Money) kind institutional {
+    label en official "the portion of a section 734(b)/743(b) basis adjustment allocated to this property under section 755(a)-(b): like-character bucketing, proportional to unrealized appreciation/depreciation then FMV/basis (the section 732(c) two-property method, reused here since the statute cross-references the same allocation shape), with the basis of any property never reduced below zero (section 755(b) flush language)";
+}
+@source(IRC_S755_A, relation = formalizes, coverage = exact, quote = "in a manner which has the effect of reducing the difference between the fair market value and the adjusted basis of partnership properties")
+rule S755IncreaseAllocation(t: Transaction, pship: Partnership, propA: Asset, propB: Asset, class: Section755LikeCharacterClass, total: Money, basisA: Money, basisB: Money, appA: Money, appB: Money, fmvA: Money, fmvB: Money) strict {
+    when section_755_two_properties_same_class(t, pship, propA, propB, class);
+    when section_755_allocation_amount(t, pship, total);
+    when total > 0 USD;
+    when distributed_property_pre_limitation_basis(t, pship, propA, basisA);
+    when distributed_property_pre_limitation_basis(t, pship, propB, basisB);
+    when section_732c_unrealized_appreciation(t, propA, appA);
+    when section_732c_unrealized_appreciation(t, propB, appB);
+    when property_fmv_at_distribution_732(t, propA, fmvA);
+    when property_fmv_at_distribution_732(t, propB, fmvB);
+    when (appA + appB) > 0 USD;
+    then section_755_allocated_adjustment(t, pship, propA,
+        min(appA, round(total * (appA / (appA + appB)), 2, "HALF_UP"))
+        + round(max(0 USD, total - (appA + appB)) * (fmvA / (fmvA + fmvB)), 2, "HALF_UP"));
+}
+rule S755DecreaseAllocation(t: Transaction, pship: Partnership, propA: Asset, propB: Asset, class: Section755LikeCharacterClass, total: Money, basisA: Money, basisB: Money, depA: Money, depB: Money) strict {
+    label en official "a section 734(b) decrease is allocated to like-character property under section 755(a)/(b), never below zero basis";
+    when section_755_two_properties_same_class(t, pship, propA, propB, class);
+    when section_755_allocation_amount(t, pship, total);
+    when total < 0 USD;
+    when distributed_property_pre_limitation_basis(t, pship, propA, basisA);
+    when distributed_property_pre_limitation_basis(t, pship, propB, basisB);
+    when section_732c_unrealized_depreciation(t, propA, depA);
+    when section_732c_unrealized_depreciation(t, propB, depB);
+    when (depA + depB) > 0 USD;
+    then section_755_allocated_adjustment(t, pship, propA,
+        0 USD - min(basisA, min(depA, round((0 USD - total) * (depA / (depA + depB)), 2, "HALF_UP"))
+        + round(max(0 USD, (0 USD - total) - (depA + depB)) * (basisA / (basisA + basisB)), 2, "HALF_UP")));
+}
+
+pub relation section_755c_no_allocation_to_corporate_stock(t: Transaction, pship: Partnership, prop: Asset) kind institutional {
+    label en official "no part of a section 734(b) DECREASE may be allocated to stock in a corporation (or a related person within sections 267(b)/707(b)(1)) that is a partner in the partnership (section 755(c)(1))";
+}
+@source(IRC_S755_C, relation = formalizes, coverage = exact, quote = "no allocation may be made to stock in a corporation (or any person related (within the meaning of sections 267(b) and 707(b)(1)) to such corporation) which is a partner in the partnership")
+rule S755cNoAllocationToCorporateStock(t: Transaction, pship: Partnership, prop: Asset, owner: Person) strict {
+    when distributed_property_pre_limitation_basis(t, pship, prop, _);
+    when section_755_partner_is_corporation_or_related(owner);
+    when us.irc.core::ownership_interest(_, owner, pship, _);
+    then section_755c_no_allocation_to_corporate_stock(t, pship, prop);
+}
+pub relation section_755c_gain_recognized(t: Transaction, pship: Partnership, amount: Money) kind institutional {
+    label en official "gain is recognized to the partnership to the extent the amount reallocated away from corporate-partner stock under section 755(c)(1)-(2) exceeds the aggregate adjusted basis of the other property it is reallocated to (section 755(c), flush language)";
+}
+pub relation section_755c_reallocated_amount(t: Transaction, pship: Partnership, amount: Money) kind empirical {
+    label en unofficial "the amount not allocable to corporate-partner stock by reason of section 755(c)(1), reallocated to other partnership property under section 755(c)(2) (case-computed, reusing the section_755_allocation_amount machinery over the remaining eligible properties)";
+}
+pub relation other_property_aggregate_basis_before_reallocation(t: Transaction, pship: Partnership, amount: Money) kind empirical {
+    label en unofficial "the aggregate adjusted basis of the other partnership property immediately before the section 755(c)(2) reallocation (section 755(c) flush-language input)";
+}
+rule S755cGainRecognized(t: Transaction, pship: Partnership, reallocated: Money, aggregate_basis: Money) strict {
+    when section_755c_reallocated_amount(t, pship, reallocated);
+    when other_property_aggregate_basis_before_reallocation(t, pship, aggregate_basis);
+    when reallocated > aggregate_basis;
+    then section_755c_gain_recognized(t, pship, reallocated - aggregate_basis);
+}

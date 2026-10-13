@@ -1,0 +1,427 @@
+// 26 U.S.C. §§666, 667(a)(1),(4), 667(b)(2)-(6), 667(c), 667(e), 668(a)(4)-(5), 668(b)
+// (stage 3 "добор": the throwback rows earlier recorded as one "self-referential
+// multi-year ledger" gap).
+//
+// JUDGMENT CALLS AND GAPS (see coverage/trusts-estates.json, TECH-GAPS.md G42xx):
+//  - The preceding taxable years of the trust are a case-asserted finite list keyed by
+//    an ORDER INDEX (1 = earliest); `preceding_year_uni_amount(t, ad, idx, uni)` is the
+//    undistributed net income of that year "computed without regard to" the
+//    accumulation distribution (§666(a), last sentence). §666(a)'s "earlier years"
+//    total is a sum over the empirical facts with a smaller index — no self-recursive
+//    ledger (LDC-E4102 avoided). An empty aggregate is EMPTY_AGGREGATE, so the first
+//    year has its own rule (earlier total = 0).
+//  - What stays TECH_GAP: §667(a)(2)-(3) and §667(b)(1) (the partial tax needs the
+//    beneficiary's tax recomputed at hypothetical taxable incomes for three chosen
+//    years, and the average is an aggregate over a DERIVED selection — §111 subset
+//    limitation), §667(d) (foreign tax credit computation for the computation
+//    years), §668(a)(1)-(3) (section 6621 interest over a period of a VARIABLE number
+//    of years — LDC-E2108 — and the sum of products UNI x years, an aggregate over
+//    computed products), §668(a)(5)'s reduction is modelled, §664(b) cumulative
+//    capital gain ledger.
+//  - §667(b)(1)(B) is not modelled (see above); §667(b)(3)'s 25 percent test is
+//    `amount * 4 * N < accumulation distribution` (exact, no rounded share).
+
+language "law.core" version "0.2";
+package us.irc.trusts_estates version "0.1.1";
+namespace "urn:us:irc:trusts_estates:clir";
+
+use self::{
+    IRC_S666_A,
+    IRC_S666_B,
+    IRC_S666_C,
+    IRC_S666_D,
+    IRC_S666_E,
+    IRC_S667_A,
+    IRC_S667_B,
+    IRC_S667_C,
+    IRC_S667_E,
+    IRC_S668_A,
+    IRC_S668_B,
+    Person,
+    Secretary,
+    TaxableYear,
+    Trust,
+    accumulation_distribution_665,
+    has_computed_partial_taxes_667,
+};
+
+// ============================================================================
+// §666(a): amount allocated to preceding taxable years
+// ============================================================================
+
+pub relation preceding_year_uni_amount(t: Trust, ad: TaxableYear, idx: Integer, uni: Money) kind empirical {
+    label en unofficial "the undistributed net income of the idx-th preceding taxable year of the trust (1 = earliest), computed without regard to the accumulation distribution of year ad and to any accumulation distribution determined for any succeeding year (case-asserted; section 666(a))";
+}
+pub relation preceding_year_of_index(t: Trust, ad: TaxableYear, idx: Integer, py: TaxableYear) kind empirical {
+    label en unofficial "the taxable year of the trust that is the idx-th preceding year for the accumulation distribution of year ad (case-asserted)";
+}
+pub relation preceding_year_taxes_on_uni(t: Trust, ad: TaxableYear, idx: Integer, taxes: Money) kind empirical {
+    label en unofficial "the taxes (other than the tax imposed by section 55) imposed on the trust for the idx-th preceding year attributable to that year's undistributed net income, computed without regard to the accumulation distribution (case-asserted; section 666(b), (c))";
+}
+pub relation earlier_preceding_uni_total(t: Trust, ad: TaxableYear, idx: Integer, total: Money) kind institutional {
+    label en unofficial "the total of the undistributed net income of all earlier preceding taxable years (section 666(a), first sentence)";
+}
+rule S666aEarlierTotalFirstYear(t: Trust, ad: TaxableYear, uni: Money) defeasible {
+    label en unofficial "the earliest preceding year has no earlier years: the earlier total is zero";
+    when preceding_year_uni_amount(t, ad, 1, uni);
+    then earlier_preceding_uni_total(t, ad, 1, 0 USD);
+}
+rule S666aEarlierTotal(t: Trust, ad: TaxableYear, idx: Integer, uni: Money) defeasible {
+    label en unofficial "for a later preceding year, the sum of the undistributed net income of the years with a smaller index";
+    when preceding_year_uni_amount(t, ad, idx, uni);
+    when idx > 1;
+    then earlier_preceding_uni_total(t, ad, idx,
+        sum all u: Money for j: Integer where preceding_year_uni_amount(t, ad, j, u) and j < idx);
+}
+pub relation deemed_distribution_in_preceding_year_666a(t: Trust, ad: TaxableYear, idx: Integer, amount: Money) kind institutional {
+    label en official "the amount of the accumulation distribution deemed distributed on the last day of the idx-th preceding year, commencing with the earliest, to the extent it exceeds the undistributed net income of all earlier years, and not more than the undistributed net income of that year (section 666(a))";
+}
+@source(IRC_S666_A, relation = formalizes, coverage = exact, quote = "the amount of the accumulation distribution of such trust for a taxable year shall be deemed to be an amount within the meaning of paragraph (2) of section 661(a) distributed on the last day of each of the preceding taxable years, commencing with the earliest of such years, to the extent that such amount exceeds the total of any undistributed net income for all earlier preceding taxable years")
+rule S666aAllocation(t: Trust, ad: TaxableYear, idx: Integer, uni: Money, earlier: Money, ad_amount: Money) defeasible {
+    label en official "allocation of the accumulation distribution to preceding years, earliest first: min(UNI of the year, the excess over the earlier UNI total) (section 666(a))";
+    when accumulation_distribution_665(t, ad, ad_amount);
+    when preceding_year_uni_amount(t, ad, idx, uni);
+    when earlier_preceding_uni_total(t, ad, idx, earlier);
+    when ad_amount > earlier;
+    then deemed_distribution_in_preceding_year_666a(t, ad, idx, min(uni, ad_amount - earlier));
+}
+
+// ============================================================================
+// §666(b)-(c): taxes deemed distributed
+// ============================================================================
+
+pub relation additional_taxes_deemed_distributed_666(t: Trust, ad: TaxableYear, idx: Integer, amount: Money) kind institutional {
+    label en official "an additional amount deemed distributed on the last day of the preceding year: the taxes attributable to its undistributed net income (whole when the portion reaches the year's UNI, section 666(b); pro rata by the ratio of the portion to the UNI otherwise, section 666(c))";
+}
+@source(IRC_S666_B, relation = formalizes, coverage = exact, quote = "and such portion of such distribution is not less than the undistributed net income for such preceding taxable year, the trust shall be deemed to have distributed on the last day of such preceding taxable year an additional amount")
+rule S666bWholeTaxes(t: Trust, ad: TaxableYear, idx: Integer, portion: Money, uni: Money, taxes: Money) defeasible {
+    label en official "when the deemed portion is not less than the year's undistributed net income, the additional deemed distribution equals the taxes attributable to that income (section 666(b))";
+    when deemed_distribution_in_preceding_year_666a(t, ad, idx, portion);
+    when preceding_year_uni_amount(t, ad, idx, uni);
+    when preceding_year_taxes_on_uni(t, ad, idx, taxes);
+    when portion >= uni;
+    then additional_taxes_deemed_distributed_666(t, ad, idx, taxes);
+}
+@source(IRC_S666_C, relation = formalizes, coverage = exact, quote = "Such additional amount shall be equal to the taxes (other than the tax imposed by section 55) imposed on the trust for such taxable year attributable to the undistributed net income multiplied by the ratio of the portion of the accumulation distribution to the undistributed net income of the trust for such year")
+rule S666cProRataTaxes(t: Trust, ad: TaxableYear, idx: Integer, portion: Money, uni: Money, taxes: Money) defeasible {
+    label en official "when the deemed portion is less than the year's undistributed net income, the additional deemed distribution is the attributable taxes times portion over UNI (section 666(c)); cents HALF_UP is a JUDGMENT CALL";
+    when deemed_distribution_in_preceding_year_666a(t, ad, idx, portion);
+    when preceding_year_uni_amount(t, ad, idx, uni);
+    when preceding_year_taxes_on_uni(t, ad, idx, taxes);
+    when portion < uni;
+    when uni > 0 USD;
+    then additional_taxes_deemed_distributed_666(t, ad, idx, div_round(taxes * (portion / 1.00 USD), uni / 1.00 USD, 2, "HALF_UP"));
+}
+
+// ============================================================================
+// §666(d)-(e): inadequate records; denial of refund
+// ============================================================================
+
+pub relation distribution_records_inadequate(t: Trust, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "adequate records are not available to determine the proper application of subpart D to an amount distributed by the trust (case-asserted; section 666(d))";
+}
+pub relation earliest_preceding_year_trust_established_in_existence(t: Trust, py: TaxableYear) kind empirical {
+    label en unofficial "the earliest preceding taxable year of the trust in which it can be established that the trust was in existence (case-asserted; section 666(d))";
+}
+pub relation amount_deemed_accumulation_distribution_of_earliest_year_uni_666d(t: Trust, y: TaxableYear, py: TaxableYear, amount: Money) kind institutional {
+    label en official "the amount is deemed an accumulation distribution consisting of undistributed net income earned during the earliest preceding taxable year in which the trust can be established to have been in existence (section 666(d))";
+}
+@source(IRC_S666_D, relation = formalizes, coverage = exact, quote = "such amount shall be deemed to be an accumulation distribution consisting of undistributed net income earned during the earliest preceding taxable year of the trust in which it can be established that the trust was in existence")
+rule S666dInadequateRecords(t: Trust, y: TaxableYear, py: TaxableYear, amount: Money) defeasible {
+    when distribution_records_inadequate(t, y, amount);
+    when earliest_preceding_year_trust_established_in_existence(t, py);
+    then amount_deemed_accumulation_distribution_of_earliest_year_uni_666d(t, y, py, amount);
+}
+pub relation beneficiary_of_trust_for_throwback(b: Person, t: Trust) kind empirical {
+    label en unofficial "the person is a beneficiary of the trust (case-asserted; section 666(e))";
+}
+pub relation refund_or_credit_barred_666e(p: Person, py: TaxableYear) kind institutional {
+    label en official "no refund or credit is allowed to the trust or to a beneficiary for the preceding taxable year by reason of a distribution deemed made in that year under section 666 (section 666(e))";
+}
+@source(IRC_S666_E, relation = formalizes, coverage = exact, quote = "No refund or credit shall be allowed to a trust or a beneficiary of such trust for any preceding taxable year by reason of a distribution deemed to have been made by such trust in such year under this section.")
+rule S666eTrustRefundBarred(t: Trust, ad: TaxableYear, idx: Integer, amount: Money, py: TaxableYear) defeasible {
+    when deemed_distribution_in_preceding_year_666a(t, ad, idx, amount);
+    when preceding_year_of_index(t, ad, idx, py);
+    then refund_or_credit_barred_666e(t, py);
+}
+rule S666eBeneficiaryRefundBarred(t: Trust, b: Person, ad: TaxableYear, idx: Integer, amount: Money, py: TaxableYear) defeasible {
+    when deemed_distribution_in_preceding_year_666a(t, ad, idx, amount);
+    when preceding_year_of_index(t, ad, idx, py);
+    when beneficiary_of_trust_for_throwback(b, t);
+    then refund_or_credit_barred_666e(b, py);
+}
+
+// ============================================================================
+// §667(a): inclusion in the beneficiary's income; components of the tax
+// ============================================================================
+
+pub relation amount_includible_under_662a2_if_paid_last_day_of_preceding_year(b: Person, t: Trust, ad: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the part of the amounts treated under section 666 as distributed in preceding years that would have been included in the beneficiary's income under section 662(a)(2) (and, for tax-exempt interest, section 662(b)) had it been paid on the last day of the preceding year (case-asserted; the section 662 recomputation is not rerun here)";
+}
+pub relation accumulation_distribution_paid_credited_or_required_to_beneficiary(b: Person, t: Trust, ad: TaxableYear, y: TaxableYear) kind empirical {
+    label en unofficial "the accumulation distribution is paid, credited or required to be distributed to the beneficiary in the beneficiary's taxable year y (case-asserted; section 667(a))";
+}
+pub relation beneficiary_inclusion_667a(b: Person, t: Trust, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the total of the amounts treated under section 666 as distributed in preceding years is included in the beneficiary's income when paid, credited or required to be distributed, to the extent it would have been included under section 662(a)(2) had it been paid on the last day of the preceding year (section 667(a), first sentence)";
+}
+@source(IRC_S667_A, relation = formalizes, coverage = exact, quote = "shall be included in the income of a beneficiary of the trust when paid, credited, or required to be distributed to the extent that such total would have been included in the income of such beneficiary under section 662(a)(2)")
+rule S667aInclusion(b: Person, t: Trust, ad: TaxableYear, y: TaxableYear, amount: Money) defeasible {
+    when accumulation_distribution_paid_credited_or_required_to_beneficiary(b, t, ad, y);
+    when amount_includible_under_662a2_if_paid_last_day_of_preceding_year(b, t, ad, amount);
+    then beneficiary_inclusion_667a(b, t, y, amount);
+}
+pub relation partial_tax_on_reduced_income_667a1(b: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the partial tax computed on the taxable income reduced by the section 667(a) amounts, at the rate and in the manner as if section 667 had not been enacted (case-asserted: a hypothetical recomputation of the beneficiary's tax — TECH_GAP)";
+}
+pub relation partial_tax_667b(b: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the partial tax determined under section 667(b) (case-asserted: the section 667(b)(1) recomputation over hypothetical incomes is TECH_GAP)";
+}
+pub relation interest_charge_668_for_beneficiary(b: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "for a foreign trust, the interest charge determined under section 668 (case-asserted: section 6621 interest over a variable period is TECH_GAP)";
+}
+pub relation beneficiary_tax_for_year_667a(b: Person, t: Trust, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the tax for a year in which an amount is included under section 667 consists of the sum of the partial tax on reduced income, the section 667(b) partial tax, and (for a foreign trust) the section 668 interest charge (section 667(a))";
+}
+@source(IRC_S667_A, relation = formalizes, coverage = exact, quote = "in the case of a foreign trust, the interest charge determined as provided in section 668")
+rule S667aTaxForeignTrust(b: Person, t: Trust, y: TaxableYear, p1: Money, p2: Money, interest: Money) defeasible {
+    label en official "for a foreign trust the year's tax is the sum of the two partial taxes and the interest charge (section 667(a)(1)-(3))";
+    when us.irc.definitions::foreign_trust(t);
+    when beneficiary_inclusion_667a(b, t, y, _);
+    when partial_tax_on_reduced_income_667a1(b, y, p1);
+    when partial_tax_667b(b, y, p2);
+    when interest_charge_668_for_beneficiary(b, y, interest);
+    unless has_computed_partial_taxes_667(b, t, y) and beneficiary_inclusion_667a(b, t, y, _) and partial_tax_on_reduced_income_667a1(b, y, p1) and partial_tax_667b(b, y, p2) and interest_charge_668_for_beneficiary(b, y, interest); // stage 4: the partial taxes computed in module 13 take precedence over the asserted ones
+    then beneficiary_tax_for_year_667a(b, t, y, p1 + p2 + interest);
+}
+rule S667aTaxDomesticTrust(b: Person, t: Trust, y: TaxableYear, p1: Money, p2: Money) defeasible {
+    label en official "for a trust that is not a foreign trust the year's tax is the sum of the two partial taxes (section 667(a)(1)-(2))";
+    when beneficiary_inclusion_667a(b, t, y, _);
+    when partial_tax_on_reduced_income_667a1(b, y, p1);
+    when partial_tax_667b(b, y, p2);
+    unless us.irc.definitions::foreign_trust(t) and beneficiary_inclusion_667a(b, t, y, _) and partial_tax_on_reduced_income_667a1(b, y, p1) and partial_tax_667b(b, y, p2);
+    unless has_computed_partial_taxes_667(b, t, y) and beneficiary_inclusion_667a(b, t, y, _) and partial_tax_on_reduced_income_667a1(b, y, p1) and partial_tax_667b(b, y, p2); // stage 4: the partial taxes computed in module 13 take precedence over the asserted ones
+    then beneficiary_tax_for_year_667a(b, t, y, p1 + p2);
+}
+
+// ============================================================================
+// §667(b)(2)-(6)
+// ============================================================================
+
+pub relation beneficiary_taxable_income_for_year(b: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the beneficiary's taxable income for the year (case-asserted; may be negative in a loss year)";
+}
+pub relation beneficiary_taxable_income_deemed_for_667b(b: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "for section 667(b)(1) the beneficiary's taxable income for any year is deemed to be not less than zero (section 667(b)(2))";
+}
+@source(IRC_S667_B, relation = formalizes, coverage = exact, quote = "the taxable income of the beneficiary for any taxable year shall be deemed to be not less than zero")
+rule S667b2LossYearsFloor(b: Person, y: TaxableYear, ti: Money) defeasible {
+    when beneficiary_taxable_income_for_year(b, y, ti);
+    then beneficiary_taxable_income_deemed_for_667b(b, y, max(0 USD, ti));
+}
+pub relation prior_year_previously_deemed_distributed_income(b: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "amounts previously deemed distributed to the beneficiary in the year under section 666 as a result of prior accumulation distributions, from the same or another trust (case-asserted; section 667(b)(4))";
+}
+pub relation beneficiary_prior_year_income_for_partial_tax_667b4(b: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "in computing the partial tax, the beneficiary's income for each prior year includes amounts previously deemed distributed to the beneficiary in that year under section 666 (section 667(b)(4))";
+}
+@source(IRC_S667_B, relation = formalizes, coverage = exact, quote = "the income of such beneficiary for each of his prior taxable years shall include amounts previously deemed distributed to such beneficiary in such year under section 666")
+rule S667b4PriorYearIncludesEarlierDeemedAmounts(b: Person, y: TaxableYear, deemed: Money, ti: Money) defeasible {
+    when beneficiary_taxable_income_deemed_for_667b(b, y, ti);
+    when prior_year_previously_deemed_distributed_income(b, y, deemed);
+    then beneficiary_prior_year_income_for_partial_tax_667b4(b, y, ti + deemed);
+}
+pub relation number_of_allocated_preceding_years(t: Trust, ad: TaxableYear, n: Integer) kind institutional {
+    label en unofficial "the number of preceding years to which the accumulation distribution is allocated under section 666(a) (an amount is deemed distributed)";
+}
+rule S667b1ANumberOfYears(t: Trust, ad: TaxableYear, idx0: Integer, amount0: Money) defeasible {
+    when deemed_distribution_in_preceding_year_666a(t, ad, idx0, amount0);
+    then number_of_allocated_preceding_years(t, ad, count(collect j: Integer where deemed_distribution_in_preceding_year_666a(t, ad, j, _)));
+}
+pub relation preceding_year_below_25_percent_of_average_667b3(t: Trust, ad: TaxableYear, idx: Integer) kind institutional {
+    label en official "the undistributed net income deemed distributed in a preceding year is less than 25 percent of the accumulation distribution divided by the number of preceding years to which it is allocated, so the year is not counted (section 667(b)(3))";
+}
+@source(IRC_S667_B, relation = formalizes, coverage = exact, quote = "is less than 25 percent of the amount of the accumulation distribution divided by the number of preceding taxable years to which the accumulation distribution is allocated under section 666(a)")
+rule S667b3Below25Percent(t: Trust, ad: TaxableYear, idx: Integer, deemed: Money, ad_amount: Money, n: Integer) defeasible {
+    when deemed_distribution_in_preceding_year_666a(t, ad, idx, deemed);
+    when accumulation_distribution_665(t, ad, ad_amount);
+    when number_of_allocated_preceding_years(t, ad, n);
+    when deemed * 4 * n < ad_amount;
+    then preceding_year_below_25_percent_of_average_667b3(t, ad, idx);
+}
+pub relation preceding_year_counted_for_667b1A(t: Trust, ad: TaxableYear, idx: Integer) kind institutional {
+    label en official "a preceding year with a deemed distribution counts in the section 667(b)(1)(A) number of years unless it falls under the 25 percent rule of paragraph (3)";
+}
+rule S667b3YearCounted(t: Trust, ad: TaxableYear, idx: Integer, deemed: Money) defeasible {
+    when deemed_distribution_in_preceding_year_666a(t, ad, idx, deemed);
+    unless preceding_year_below_25_percent_of_average_667b3(t, ad, idx);
+    then preceding_year_counted_for_667b1A(t, ad, idx);
+}
+
+pub relation beneficiary_year_is_in_multiple_trust_distribution_year(b: Person, y: TaxableYear) kind empirical {
+    label en unofficial "the beneficiary receives accumulation distributions from more than one trust that are includible in the same taxable year (case-asserted; section 667(b)(5))";
+}
+@source(IRC_S667_B, relation = formalizes, coverage = exact, quote = "the distributions shall be deemed to have been made consecutively in whichever order the beneficiary shall determine")
+rule S667b5OrderChoiceRule(b: Person, y: TaxableYear) defeasible {
+    label en official "the beneficiary of accumulation distributions from more than one trust in the same year may determine the order in which they are deemed made consecutively (section 667(b)(5)): a liberty of the beneficiary against the Secretary";
+    when beneficiary_year_is_in_multiple_trust_distribution_year(b, y);
+    then liberty S667b5BeneficiaryOrdersDistributions {
+        holder b;
+        against Secretary;
+        action beneficiary_chooses_order_of_consecutive_distributions(b, y);
+        window [-infinity, infinity];
+    };
+}
+pub relation beneficiary_chooses_order_of_consecutive_distributions(b: Person, y: TaxableYear) kind empirical {
+    label en unofficial "the beneficiary determines the order in which the accumulation distributions of the year are deemed made consecutively (section 667(b)(5))";
+}
+
+pub relation partial_tax_before_estate_gst_adjustment(b: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the partial tax imposed by section 667(a)(2) determined without regard to section 667(b)(6) (case-asserted; section 667(b)(6)(B))";
+}
+pub relation accumulation_distribution_pre_death_portion(t: Trust, ad: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the portion of the accumulation distribution attributable to the period before the death of the decedent or the generation-skipping transfer (case-asserted; section 667(b)(6)(C))";
+}
+pub relation chapter_11_or_13_tax_attributable_to_distribution(t: Trust, ad: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the portion of the tax imposed by chapter 11 or 13 attributable on a proportionate basis to amounts included in the accumulation distribution (case-asserted; section 667(b)(6)(A)(i))";
+}
+pub relation accumulation_distribution_subject_to_chapter_11_or_13_tax(t: Trust, ad: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the amount of the accumulation distribution that is subject to the tax imposed by chapter 11 or 13 (case-asserted; section 667(b)(6)(A)(ii))";
+}
+pub relation partial_tax_pre_death_portion_667b6C(b: Person, t: Trust, ad: TaxableYear, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the pre-death portion of the partial tax bears the same ratio to the partial tax as the pre-death part of the accumulation distribution bears to the whole (section 667(b)(6)(C))";
+}
+@source(IRC_S667_B, relation = formalizes, coverage = exact, quote = "the pre-death portion of the partial tax shall be an amount which bears the same ratio to the partial tax as the portion of the accumulation distribution which is attributable to the period before the date of the death")
+rule S667b6CPreDeathPortion(b: Person, t: Trust, ad: TaxableYear, y: TaxableYear, partial: Money, pre: Money, ad_amount: Money) defeasible {
+    when partial_tax_before_estate_gst_adjustment(b, y, partial);
+    when accumulation_distribution_pre_death_portion(t, ad, pre);
+    when accumulation_distribution_665(t, ad, ad_amount);
+    when ad_amount > 0 USD;
+    then partial_tax_pre_death_portion_667b6C(b, t, ad, y, div_round(partial * (pre / 1.00 USD), ad_amount / 1.00 USD, 2, "HALF_UP"));
+}
+pub relation partial_tax_reduction_667b6A(b: Person, t: Trust, ad: TaxableYear, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the partial tax is reduced by the pre-death portion times the fraction of the chapter 11 or 13 tax attributable to the distribution over the amount of the distribution subject to that tax (section 667(b)(6)(A))";
+}
+@source(IRC_S667_B, relation = formalizes, coverage = exact, quote = "The partial tax shall be reduced by an amount which is equal to the pre-death portion of the partial tax multiplied by a fraction")
+rule S667b6AReduction(b: Person, t: Trust, ad: TaxableYear, y: TaxableYear, predeath: Money, numerator: Money, denominator: Money) defeasible {
+    when partial_tax_pre_death_portion_667b6C(b, t, ad, y, predeath);
+    when chapter_11_or_13_tax_attributable_to_distribution(t, ad, numerator);
+    when accumulation_distribution_subject_to_chapter_11_or_13_tax(t, ad, denominator);
+    when denominator > 0 USD;
+    then partial_tax_reduction_667b6A(b, t, ad, y, div_round(predeath * (numerator / 1.00 USD), denominator / 1.00 USD, 2, "HALF_UP"));
+}
+pub relation partial_tax_after_estate_gst_adjustment(b: Person, t: Trust, ad: TaxableYear, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the partial tax after the section 667(b)(6) reduction";
+}
+rule S667b6PartialTaxAfterReduction(b: Person, t: Trust, ad: TaxableYear, y: TaxableYear, partial: Money, reduction: Money) defeasible {
+    when partial_tax_before_estate_gst_adjustment(b, y, partial);
+    when partial_tax_reduction_667b6A(b, t, ad, y, reduction);
+    then partial_tax_after_estate_gst_adjustment(b, t, ad, y, max(0 USD, partial - reduction));
+}
+
+// ============================================================================
+// §667(c): multiple trusts; §667(e): nonresident aliens and foreign corporations
+// ============================================================================
+
+pub relation deemed_distribution_fact_for_beneficiary_year(b: Person, trust: Trust, py: TaxableYear, cid: Text, amount: Money) kind empirical {
+    label en unofficial "a part of an accumulation distribution from the trust deemed under section 666(a) distributed to the beneficiary for the beneficiary's prior taxable year py (case-asserted per part; section 667(c))";
+}
+pub relation trust_distribution_total_for_beneficiary_year(b: Person, trust: Trust, py: TaxableYear, total: Money) kind institutional {
+    label en unofficial "intermediate value: the sum of the accumulation distributions from the trust deemed distributed to the beneficiary for the prior year";
+}
+rule S667cTotalPerTrust(b: Person, trust: Trust, py: TaxableYear, cid0: Text) defeasible {
+    when deemed_distribution_fact_for_beneficiary_year(b, trust, py, cid0, _);
+    then trust_distribution_total_for_beneficiary_year(b, trust, py,
+        sum all a: Money for cid: Text where deemed_distribution_fact_for_beneficiary_year(b, trust, py, cid, a));
+}
+pub relation distribution_taken_into_account_667c2(b: Person, trust: Trust, py: TaxableYear) kind institutional {
+    label en official "an accumulation distribution from a trust is taken into account for the multiple-trust rule only if, with prior ones for the same prior year, it equals or exceeds $1,000 (section 667(c)(2))";
+}
+@source(IRC_S667_C, relation = formalizes, coverage = exact, quote = "an accumulation distribution from a trust to a beneficiary shall be taken into account only if such distribution, when added to any prior accumulation distributions from such trust which are deemed under section 666(a) to have been distributed to such beneficiary for the same prior taxable year of the beneficiary, equals or exceeds $1,000")
+rule S667c2Threshold(b: Person, trust: Trust, py: TaxableYear, total: Money) defeasible {
+    when trust_distribution_total_for_beneficiary_year(b, trust, py, total);
+    when total >= 1000 USD;
+    then distribution_taken_into_account_667c2(b, trust, py);
+}
+pub relation section_666bc_inapplicable_to_third_trust_667c1(b: Person, third: Trust, py: TaxableYear) kind institutional {
+    label en official "if in the same prior year some part of prior distributions by each of 2 or more other trusts is deemed distributed to the beneficiary, section 666(b) and (c) do not apply to the part of the accumulation distribution from the third trust (section 667(c)(1))";
+}
+@source(IRC_S667_C, relation = formalizes, coverage = exact, quote = "then subsections (b) and (c) of section 666 shall not apply with respect to such part of the accumulation distribution from such third trust")
+rule S667c1MultipleTrusts(b: Person, third: Trust, py: TaxableYear, other1: Trust, other2: Trust) defeasible {
+    label en official "two distinct other trusts' distributions taken into account for the same prior year switch off the section 666(b)-(c) tax deemed distribution for the third trust (section 667(c)(1))";
+    when deemed_distribution_fact_for_beneficiary_year(b, third, py, _, _);
+    when distribution_taken_into_account_667c2(b, other1, py);
+    when distribution_taken_into_account_667c2(b, other2, py);
+    when other1 != other2;
+    when other1 != third;
+    when other2 != third;
+    then section_666bc_inapplicable_to_third_trust_667c1(b, third, py);
+}
+pub relation distributee_is_nonresident_alien_or_foreign_corporation(b: Person) kind empirical {
+    label en unofficial "the distributee is a nonresident alien individual or a foreign corporation (case-asserted; section 667(e))";
+}
+pub relation character_of_all_amounts_retained_667e(b: Person, t: Trust) kind institutional {
+    label en official "for a distribution to a nonresident alien individual or a foreign corporation, the character determination under section 662(b) applies to all amounts, not just tax-exempt interest (section 667(e))";
+}
+@source(IRC_S667_E, relation = formalizes, coverage = exact, quote = "the first sentence of subsection (a) shall be applied as if the reference to the determination of character under section 662(b) applied to all amounts instead of just to tax-exempt interest")
+rule S667eCharacterRetained(b: Person, t: Trust, ad: TaxableYear, y: TaxableYear) defeasible {
+    when distributee_is_nonresident_alien_or_foreign_corporation(b);
+    when accumulation_distribution_paid_credited_or_required_to_beneficiary(b, t, ad, y);
+    then character_of_all_amounts_retained_667e(b, t);
+}
+
+// ============================================================================
+// §668(a)(4)-(5), (b)
+// ============================================================================
+
+pub relation trust_year_has_undistributed_net_income(t: Trust, y: TaxableYear, uni: Money) kind empirical {
+    label en unofficial "the prior taxable year of the trust has the stated undistributed net income (case-asserted; section 668(a)(4))";
+}
+pub relation beneficiary_not_us_citizen_or_resident_all_year(b: Person, y: TaxableYear) kind empirical {
+    label en unofficial "during all of the taxable year the beneficiary receiving the distribution was not a citizen or resident of the United States (case-asserted; section 668(a)(4))";
+}
+pub relation undistributed_income_year_668(t: Trust, b: Person, y: TaxableYear) kind institutional {
+    label en official "an undistributed income year: a prior taxable year of the trust with undistributed net income, other than a year during all of which the beneficiary was not a citizen or resident of the United States (section 668(a)(4))";
+}
+@source(IRC_S668_A, relation = formalizes, coverage = exact, quote = "the term \"undistributed income year\" means any prior taxable year of the trust for which there is undistributed net income")
+rule S668a4UndistributedIncomeYear(t: Trust, b: Person, y: TaxableYear, uni: Money) defeasible {
+    when trust_year_has_undistributed_net_income(t, y, uni);
+    when beneficiary_of_trust_for_throwback(b, t);
+    when uni > 0 USD;
+    unless beneficiary_not_us_citizen_or_resident_all_year(b, y) and trust_year_has_undistributed_net_income(t, y, uni) and beneficiary_of_trust_for_throwback(b, t) and uni > 0 USD;
+    then undistributed_income_year_668(t, b, y);
+}
+pub relation accumulation_distribution_reduces_uni_proportionately_668a5(t: Trust, y: TaxableYear, uni_after: Money) kind institutional {
+    label en official "for the interest computation, an accumulation distribution reduces the undistributed net income of the undistributed income years proportionately (section 668(a)(5))";
+}
+pub relation aggregate_undistributed_net_income_668(t: Trust, ad: TaxableYear, total: Money) kind empirical {
+    label en unofficial "the aggregate undistributed net income of the undistributed income years before the distribution (case-asserted; section 668(a)(3)(A)(ii))";
+}
+@source(IRC_S668_A, relation = formalizes, coverage = exact, quote = "an accumulation distribution from the trust shall be treated as reducing proportionately the undistributed net income for undistributed income years")
+rule S668a5ProportionateReduction(t: Trust, ad: TaxableYear, y: TaxableYear, uni: Money, total: Money, ad_amount: Money) defeasible {
+    label en official "each undistributed income year's UNI is reduced by the same fraction: uni x (aggregate - accumulation distribution) / aggregate (section 668(a)(5)); cents HALF_UP is a JUDGMENT CALL";
+    when trust_year_has_undistributed_net_income(t, y, uni);
+    when aggregate_undistributed_net_income_668(t, ad, total);
+    when accumulation_distribution_665(t, ad, ad_amount);
+    when total > 0 USD;
+    when ad_amount <= total;
+    then accumulation_distribution_reduces_uni_proportionately_668a5(t, y, div_round(uni * ((total - ad_amount) / 1.00 USD), total / 1.00 USD, 2, "HALF_UP"));
+}
+pub relation total_partial_tax_667b(b: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the total partial tax computed under section 667(b) (case-asserted; section 668(b))";
+}
+pub relation total_interest_charge_668(b: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the total amount of the interest charge under section 668 (case-asserted)";
+}
+pub relation accumulation_distribution_excluding_666bc_taxes(b: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the accumulation distribution in respect of which the partial tax was determined, other than the amount of tax deemed distributed by section 666(b) or (c) (case-asserted; section 668(b))";
+}
+pub relation interest_charge_after_limitation_668b(b: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the interest charge, when added to the total partial tax, does not exceed the accumulation distribution (other than the tax deemed distributed by section 666(b) or (c)) in respect of which the partial tax was determined (section 668(b))";
+}
+@source(IRC_S668_B, relation = formalizes, coverage = exact, quote = "The total amount of the interest charge shall not, when added to the total partial tax computed under section 667(b), exceed the amount of the accumulation distribution")
+rule S668bLimitation(b: Person, y: TaxableYear, interest: Money, partial: Money, cap: Money) defeasible {
+    when total_interest_charge_668(b, y, interest);
+    when total_partial_tax_667b(b, y, partial);
+    when accumulation_distribution_excluding_666bc_taxes(b, y, cap);
+    then interest_charge_after_limitation_668b(b, y, min(interest, max(0 USD, cap - partial)));
+}

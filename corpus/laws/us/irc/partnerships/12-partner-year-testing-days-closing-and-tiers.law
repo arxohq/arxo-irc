@@ -1,0 +1,316 @@
+// 26 U.S.C. §706(b)(2), (b)(4)(A)(ii), (b)(4)(B), (b)(5), §706(c)(1)-(2), §706(d)(2)(D),
+// §706(d)(3) (stage 3 "добор": the six §706 rows left `unreviewed`, plus the TECH_GAP
+// rows G360/G361 and the testing-day fold of §706(b)(4)(A)(ii)).
+//
+// JUDGMENT CALLS AND GAPS (see coverage/partnerships.json, TECH-GAPS.md G42xx):
+//  - §706(b)(2) is a PROHIBITION on the partner (bearer: the partner; action: changing to a
+//    non-conforming taxable year), with the Secretary's satisfaction about a business
+//    purpose as an external judgment relation (DECISION-0194): the prohibition rule and the
+//    action rule share one `unless` pair, so the breach exists exactly when the change is
+//    established, non-conforming and without an established business purpose (E-0179:
+//    VIOLATED on the prohibition itself; no §137 pair).
+//  - §706(b)(4)(A)(ii): the majority-interest year is now derivable from per-testing-day
+//    facts (`testing_day_year_interest`): a candidate year is the majority interest year
+//    unless it fails the more-than-50-percent test on some testing day. The earlier
+//    case-computed `testing_day_taxable_year_share` path is kept (two producers of the
+//    same head). The Secretary's representative-period days are asserted (EXTERNAL_DEPENDENCY).
+//  - §706(c)(1): the partner-level closing rules of (c)(2) are separate relations; the
+//    partnership's own year is not closed by the four listed events unless the partnership is
+//    terminated (`partnership_terminated`, §708).
+//  - §706(d)(3): the tiered rule reuses the constant-interest period method of module 07
+//    (`interest_period_of_year`, `partner_interest_share_during_period`); the lower-tier item
+//    amount per period is asserted (the "principles similar to (C) and (D)" assignment to days
+//    is the asserted input). The sum is over a derived per-period share, as in module 07 —
+//    an aggregate over a derived predicate: RUNTIME SUBSET LIMITATION (§111) to keep in mind.
+//  - §706(d)(2)(D)(ii): the amount "capitalized by the partnership and treated in the manner
+//    provided for in section 755" is exposed as `prior_period_item_capitalized_706d2Dii`; the
+//    §755 allocation runs on transaction-keyed inputs of module 10, so the hand-off to
+//    `section_755_allocation_amount` is asserted by the case (JUDGMENT CALL).
+
+language "law.core" version "0.2";
+package us.irc.partnerships version "0.1.1";
+namespace "urn:us:irc:partnerships:clir";
+
+use self::{
+    DistributiveShareItem,
+    IRC_S706_B,
+    IRC_S706_C,
+    IRC_S706_D,
+    Partnership,
+    Person,
+    TaxableYear,
+    Transaction,
+    VaryingInterestPeriod,
+    candidate_taxable_year,
+    interest_period_of_year,
+    is_partner,
+    majority_interest_taxable_year,
+    partner_interest_share_during_period,
+    partnership_terminated,
+    principal_partner,
+};
+
+// ============================================================================
+// §706(b)(2): partner's taxable year
+// ============================================================================
+
+pub relation partnership_taxable_year_is(pship: Partnership, y: TaxableYear) kind empirical {
+    label en unofficial "y is the taxable year of the partnership (case-asserted; section 706(b)(2))";
+}
+pub relation partner_changes_to_taxable_year(partner: Person, y: TaxableYear) kind empirical {
+    label en unofficial "the partner changes to the taxable year y (case-asserted event; section 706(b)(2))";
+}
+pub relation partner_year_matches_principal_partnership_year(partner: Person, y: TaxableYear) kind institutional {
+    label en official "the taxable year is that of a partnership in which the partner is a principal partner (section 706(b)(2))";
+}
+@source(IRC_S706_B, relation = formalizes, coverage = exact, quote = "A partner may not change to a taxable year other than that of a partnership in which he is a principal partner")
+rule S706b2ConformingYear(partner: Person, pship: Partnership, y: TaxableYear) defeasible {
+    when principal_partner(partner, pship);
+    when partnership_taxable_year_is(pship, y);
+    then partner_year_matches_principal_partnership_year(partner, y);
+}
+external judgment relation secretary_satisfied_partner_business_purpose_706b2(partner: Person, y: TaxableYear) {
+    authority Secretary;
+    label en unofficial "the partner establishes, to the satisfaction of the Secretary, a business purpose for the taxable year (DECISION-0194 judgment channel; section 706(b)(2))";
+}
+pub relation partner_changes_to_nonconforming_taxable_year(partner: Person, y: TaxableYear) kind institutional {
+    label en official "the partner changes to a taxable year other than that of a partnership in which he is a principal partner, without an established business purpose (the action of the section 706(b)(2) prohibition)";
+}
+rule S706b2NonconformingChange(partner: Person, y: TaxableYear) defeasible {
+    when partner_changes_to_taxable_year(partner, y);
+    unless partner_year_matches_principal_partnership_year(partner, y) and partner_changes_to_taxable_year(partner, y);
+    unless secretary_satisfied_partner_business_purpose_706b2(partner, y) and partner_changes_to_taxable_year(partner, y);
+    then partner_changes_to_nonconforming_taxable_year(partner, y);
+}
+@source(IRC_S706_B, relation = formalizes, coverage = exact, quote = "A partner may not change to a taxable year other than that of a partnership in which he is a principal partner unless he establishes, to the satisfaction of the Secretary, a business purpose therefor.")
+rule S706b2Prohibition(partner: Person, y: TaxableYear) defeasible {
+    label en official "a partner must not change to a taxable year other than that of a partnership in which he is a principal partner unless he establishes a business purpose to the Secretary's satisfaction; an established non-conforming change without that showing is a breach (section 706(b)(2))";
+    when partner_changes_to_taxable_year(partner, y);
+    unless partner_year_matches_principal_partnership_year(partner, y) and partner_changes_to_taxable_year(partner, y);
+    unless secretary_satisfied_partner_business_purpose_706b2(partner, y) and partner_changes_to_taxable_year(partner, y);
+    then prohibition S706b2NoNonconformingYearChange {
+        bearer partner;
+        action partner_changes_to_nonconforming_taxable_year(partner, y);
+        window [-infinity, infinity];
+    };
+}
+
+// ============================================================================
+// §706(b)(4)(A)(ii): testing days; majority interest year from the testing days
+// ============================================================================
+
+pub relation partnership_first_day_of_year_without_regard_to_majority_test(pship: Partnership, d: Date) kind empirical {
+    label en unofficial "the 1st day of the partnership taxable year, determined without regard to clause (i) (case-asserted date; section 706(b)(4)(A)(ii)(I))";
+}
+pub relation partnership_representative_period_day_prescribed(pship: Partnership, d: Date) kind empirical {
+    label en unofficial "a day during the representative period the Secretary may prescribe (case-asserted: the regulatory content is EXTERNAL_DEPENDENCY; section 706(b)(4)(A)(ii)(II))";
+}
+pub relation partnership_testing_day(pship: Partnership, d: Date) kind institutional {
+    label en official "a testing day of the partnership for the majority interest taxable year (section 706(b)(4)(A)(ii))";
+}
+@source(IRC_S706_B, relation = formalizes, coverage = exact, quote = "the 1st day of the partnership taxable year (determined without regard to clause (i))")
+rule S706b4AiiIFirstDay(pship: Partnership, d: Date) defeasible {
+    when partnership_first_day_of_year_without_regard_to_majority_test(pship, d);
+    then partnership_testing_day(pship, d);
+}
+@source(IRC_S706_B, relation = formalizes, coverage = partial, quote = "the days during such representative period as the Secretary may prescribe")
+rule S706b4AiiIIRepresentativePeriodDays(pship: Partnership, d: Date) defeasible {
+    when partnership_representative_period_day_prescribed(pship, d);
+    then partnership_testing_day(pship, d);
+}
+pub relation testing_day_year_interest(pship: Partnership, d: Date, y: TaxableYear, share: Decimal) kind empirical {
+    label en unofficial "on the testing day d, the aggregate interest in partnership profits and capital of the partners whose taxable year is y (a case-computed roster sum per testing day; section 706(b)(4)(A)(i))";
+}
+relation year_majority_on_testing_day(pship: Partnership, d: Date, y: TaxableYear) kind institutional {
+    label en unofficial "on the testing day the partners whose taxable year is y hold more than 50 percent of profits and capital";
+}
+rule S706b4AiMajorityOnTestingDay(pship: Partnership, d: Date, y: TaxableYear, share: Decimal) defeasible {
+    when testing_day_year_interest(pship, d, y, share);
+    when share > 50 percent;
+    then year_majority_on_testing_day(pship, d, y);
+}
+relation year_fails_majority_on_some_testing_day(pship: Partnership, y: TaxableYear) kind institutional {
+    label en unofficial "the candidate year is not the taxable year of partners holding more than 50 percent on at least one testing day";
+}
+rule S706b4AiFailsOnSomeTestingDay(pship: Partnership, y: TaxableYear, d: Date) defeasible {
+    when partnership_testing_day(pship, d);
+    when candidate_taxable_year(pship, y);
+    unless year_majority_on_testing_day(pship, d, y) and partnership_testing_day(pship, d) and candidate_taxable_year(pship, y);
+    then year_fails_majority_on_some_testing_day(pship, y);
+}
+@source(IRC_S706_B, relation = formalizes, coverage = exact, quote = "The testing days shall be")
+rule S706b4AiMajorityInterestYearFromTestingDays(pship: Partnership, y: TaxableYear, d0: Date) defeasible {
+    label en official "the majority interest taxable year is the candidate year that, on each testing day, was the taxable year of partners holding more than 50 percent (section 706(b)(4)(A)(i)-(ii))";
+    when candidate_taxable_year(pship, y);
+    when partnership_testing_day(pship, d0);
+    unless year_fails_majority_on_some_testing_day(pship, y) and candidate_taxable_year(pship, y) and partnership_testing_day(pship, d0);
+    then majority_interest_taxable_year(pship, y);
+}
+
+// ============================================================================
+// §706(b)(4)(B): further change not required for 3 years
+// ============================================================================
+
+pub relation partnership_year_changed_by_majority_interest_rule(pship: Partnership, change_year: TaxableYear) kind empirical {
+    label en unofficial "by reason of paragraph (1)(B)(i) the taxable year of the partnership is changed, effective for the year change_year (case-asserted; section 706(b)(4)(B))";
+}
+pub relation taxable_year_following_change_year(pship: Partnership, change_year: TaxableYear, y: TaxableYear, n: Integer) kind empirical {
+    label en unofficial "y is the n-th taxable year following the year of change (case-asserted ordinal; section 706(b)(4)(B))";
+}
+pub relation regulations_require_change_despite_706b4B(pship: Partnership, y: TaxableYear) kind empirical {
+    label en unofficial "regulations necessary to prevent the avoidance of section 706 require the change (case-asserted; EXTERNAL_DEPENDENCY on the Secretary's regulations; section 706(b)(4)(B), \"Except as provided in regulations\")";
+}
+pub relation not_required_to_change_taxable_year_706b4B(pship: Partnership, y: TaxableYear) kind institutional {
+    label en official "the partnership is not required to change to another taxable year for either of the 2 taxable years following the year of change (section 706(b)(4)(B))";
+}
+@source(IRC_S706_B, relation = formalizes, coverage = exact, quote = "such partnership shall not be required to change to another taxable year for either of the 2 taxable years following the year of change")
+rule S706b4BNoFurtherChangeForTwoYears(pship: Partnership, change_year: TaxableYear, y: TaxableYear, n: Integer) defeasible {
+    when partnership_year_changed_by_majority_interest_rule(pship, change_year);
+    when taxable_year_following_change_year(pship, change_year, y, n);
+    when n >= 1;
+    when n <= 2;
+    unless regulations_require_change_despite_706b4B(pship, y) and taxable_year_following_change_year(pship, change_year, y, n);
+    then not_required_to_change_taxable_year_706b4B(pship, y);
+}
+
+// ============================================================================
+// §706(b)(5): application with other sections
+// ============================================================================
+
+enum Section706b5Source {
+    Section706bItself;
+    Section441i;
+    Section584i;
+    Section644;
+    Section1378a;
+}
+pub relation required_year_change_of_person(p: Person, provision: Section706b5Source, new_year: TaxableYear) kind empirical {
+    label en unofficial "a change in the taxable year of the person is required by the listed provision (case-asserted; section 706(b)(5))";
+}
+pub relation taxable_year_taken_into_account_706b5(p: Person, y: TaxableYear) kind institutional {
+    label en official "for determining the taxable year to which a partnership is required to change, changes in taxable years of other persons required by section 706(b), 441(i), 584(i), 644 or 1378(a) are taken into account (section 706(b)(5))";
+}
+@source(IRC_S706_B, relation = formalizes, coverage = exact, quote = "changes in taxable years of other persons required by this subsection, section 441(i), section 584(i), section 644, or section 1378(a) shall be taken into account")
+rule S706b5RequiredChangesTakenIntoAccount(p: Person, provision: Section706b5Source, y: TaxableYear) defeasible {
+    label en official "the required (post-change) taxable year of a person is the year taken into account, for each of the five listed provisions (section 706(b)(5)); the regulations exception is EXTERNAL_DEPENDENCY";
+    when required_year_change_of_person(p, provision, y);
+    then taxable_year_taken_into_account_706b5(p, y);
+}
+
+// ============================================================================
+// §706(c): closing of partnership year
+// ============================================================================
+
+enum Section706cEvent {
+    DeathOfPartner;
+    EntryOfNewPartner;
+    LiquidationOfPartnersInterest;
+    SaleOrExchangeOfPartnersInterest;
+}
+pub relation partnership_interest_event(t: Transaction, pship: Partnership, partner: Person, kind: Section706cEvent) kind empirical {
+    label en unofficial "the death of a partner, the entry of a new partner, the liquidation of a partner's interest or the sale or exchange of a partner's interest occurs (case-asserted event; section 706(c)(1))";
+}
+relation event_in_terminating_partnership(t: Transaction, pship: Partnership) kind institutional {
+    label en unofficial "helper: the event occurs in a partnership that is terminated (section 706(c)(1), 'except in the case of a termination')";
+}
+rule S706c1EventInTerminatingPartnership(t: Transaction, pship: Partnership, partner: Person, kind: Section706cEvent) defeasible {
+    when partnership_interest_event(t, pship, partner, kind);
+    when partnership_terminated(pship);
+    then event_in_terminating_partnership(t, pship);
+}
+pub relation partnership_year_not_closed_by_event_706c1(pship: Partnership, t: Transaction) kind institutional {
+    label en official "the taxable year of a partnership does not close as the result of the death of a partner, the entry of a new partner, the liquidation of a partner's interest or the sale or exchange of a partner's interest, except in the case of a termination (section 706(c)(1))";
+}
+@source(IRC_S706_C, relation = formalizes, coverage = exact, quote = "the taxable year of a partnership shall not close as the result of the death of a partner, the entry of a new partner, the liquidation of a partner's interest in the partnership, or the sale or exchange of a partner's interest in the partnership")
+rule S706c1NoClosing(t: Transaction, pship: Partnership, partner: Person, kind: Section706cEvent) defeasible {
+    when partnership_interest_event(t, pship, partner, kind);
+    unless event_in_terminating_partnership(t, pship) and partnership_interest_event(t, pship, partner, kind);
+    then partnership_year_not_closed_by_event_706c1(pship, t);
+}
+pub relation partner_entire_interest_terminates(t: Transaction, pship: Partnership, partner: Person) kind empirical {
+    label en unofficial "the partner's entire interest in the partnership terminates, whether by death, liquidation or otherwise (case-asserted; section 706(c)(2)(A))";
+}
+pub relation partnership_year_closes_for_partner_706c2A(pship: Partnership, partner: Person, t: Transaction) kind institutional {
+    label en official "the taxable year of the partnership closes with respect to a partner whose entire interest in the partnership terminates (section 706(c)(2)(A))";
+}
+@source(IRC_S706_C, relation = formalizes, coverage = exact, quote = "The taxable year of a partnership shall close with respect to a partner whose entire interest in the partnership terminates")
+rule S706c2AClosesForPartner(t: Transaction, pship: Partnership, partner: Person) defeasible {
+    when partner_entire_interest_terminates(t, pship, partner);
+    then partnership_year_closes_for_partner_706c2A(pship, partner, t);
+}
+pub relation partner_interest_reduced_without_termination(t: Transaction, pship: Partnership, partner: Person) kind empirical {
+    label en unofficial "the partner sells or exchanges less than his entire interest, or his interest is reduced by the entry of a new partner, a partial liquidation, a gift or otherwise (case-asserted; section 706(c)(2)(B))";
+}
+pub relation partnership_year_does_not_close_for_partner_706c2B(pship: Partnership, partner: Person, t: Transaction) kind institutional {
+    label en official "the taxable year of the partnership does not close (other than at the end of the year determined under subsection (b)(1)) with respect to a partner who sells less than his entire interest or whose interest is reduced (section 706(c)(2)(B))";
+}
+@source(IRC_S706_C, relation = formalizes, coverage = exact, quote = "shall not close (other than at the end of a partnership's taxable year as determined under subsection (b)(1)) with respect to a partner who sells or exchanges less than his entire interest in the partnership")
+rule S706c2BDoesNotCloseForPartner(t: Transaction, pship: Partnership, partner: Person) defeasible {
+    when partner_interest_reduced_without_termination(t, pship, partner);
+    unless partner_entire_interest_terminates(t, pship, partner) and partner_interest_reduced_without_termination(t, pship, partner);
+    then partnership_year_does_not_close_for_partner_706c2B(pship, partner, t);
+}
+
+// ============================================================================
+// §706(d)(2)(D): deductible cash basis items attributable to prior periods
+// ============================================================================
+
+pub relation deductible_cash_basis_item_assigned_to_first_day(pship: Partnership, y: TaxableYear, item: DistributiveShareItem, amount: Money) kind empirical {
+    label en unofficial "a portion of a deductible cash basis item is assigned under subparagraph (C)(i) to the first day of the taxable year (case-asserted amount; section 706(d)(2)(D))";
+}
+pub relation person_interest_share_in_attributable_period(person: Person, pship: Partnership, y: TaxableYear, share: Decimal) kind empirical {
+    label en unofficial "the person's varying interest in the partnership during the period to which the portion is attributable (case-asserted; section 706(d)(2)(D)(i))";
+}
+pub relation was_partner_on_first_day_of_year(person: Person, pship: Partnership, y: TaxableYear) kind empirical {
+    label en unofficial "the person is a partner in the partnership on the first day of the taxable year (case-asserted; section 706(d)(2)(D)(ii))";
+}
+pub relation prior_period_item_allocated_706d2Di(person: Person, pship: Partnership, y: TaxableYear, item: DistributiveShareItem, amount: Money) kind institutional {
+    label en official "the portion is allocated among persons who are partners during the period to which it is attributable in accordance with their varying interests (section 706(d)(2)(D)(i))";
+}
+@source(IRC_S706_D, relation = formalizes, coverage = exact, quote = "such portion shall be allocated among persons who are partners in the partnership during the period to which such portion is attributable in accordance with their varying interests in the partnership during such period")
+rule S706d2DiAllocatedByVaryingInterests(person: Person, pship: Partnership, y: TaxableYear, item: DistributiveShareItem, portion: Money, share: Decimal) defeasible {
+    when deductible_cash_basis_item_assigned_to_first_day(pship, y, item, portion);
+    when person_interest_share_in_attributable_period(person, pship, y, share);
+    then prior_period_item_allocated_706d2Di(person, pship, y, item, portion * share);
+}
+pub relation prior_period_item_capitalized_706d2Dii(person: Person, pship: Partnership, y: TaxableYear, item: DistributiveShareItem, amount: Money) kind institutional {
+    label en official "an amount allocated under clause (i) to a person who is not a partner on the first day of the year is capitalized by the partnership and treated as provided in section 755 (section 706(d)(2)(D)(ii))";
+}
+@source(IRC_S706_D, relation = formalizes, coverage = partial, quote = "shall be capitalized by the partnership and treated in the manner provided for in section 755")
+rule S706d2DiiCapitalized(person: Person, pship: Partnership, y: TaxableYear, item: DistributiveShareItem, amount: Money) defeasible {
+    when prior_period_item_allocated_706d2Di(person, pship, y, item, amount);
+    unless was_partner_on_first_day_of_year(person, pship, y) and prior_period_item_allocated_706d2Di(person, pship, y, item, amount);
+    then prior_period_item_capitalized_706d2Dii(person, pship, y, item, amount);
+}
+
+// ============================================================================
+// §706(d)(3): items attributable to an interest in a lower tier partnership
+// ============================================================================
+
+pub relation partner_interest_changed_during_year(pship: Partnership, y: TaxableYear) kind empirical {
+    label en unofficial "during the taxable year there is a change in any partner's interest in the (upper tier) partnership (case-asserted; section 706(d)(3)(A))";
+}
+pub relation lower_tier_item_amount_for_period(upper: Partnership, lower: Partnership, period: VaryingInterestPeriod, item: DistributiveShareItem, amount: Money) kind empirical {
+    label en unofficial "the portion of the upper tier partnership's item attributable to the lower tier partnership that is assigned to the days of the period during which the upper tier partnership is a partner in the lower tier partnership (case-asserted, by principles similar to subparagraphs (C) and (D) of paragraph (2); section 706(d)(3))";
+}
+pub relation lower_tier_partner_item_share_for_period(partner: Person, upper: Partnership, lower: Partnership, y: TaxableYear, period: VaryingInterestPeriod, item: DistributiveShareItem, amount: Money) kind institutional {
+    label en unofficial "intermediate value: one period's contribution to the partner's share of an upper tier item attributable to the lower tier partnership (the period amount times the partner's interest in the upper tier partnership during the period)";
+}
+@source(IRC_S706_D, relation = formalizes, coverage = exact, quote = "each partner's distributive share of any item of the upper tier partnership attributable to the lower tier partnership shall be determined by assigning the appropriate portion")
+rule S706d3LowerTierPeriodShare(partner: Person, upper: Partnership, lower: Partnership, y: TaxableYear, period: VaryingInterestPeriod, item: DistributiveShareItem, amount: Money, share: Decimal) defeasible {
+    label en official "when the upper tier partnership is a partner in a lower tier partnership and a partner's interest in the upper tier changed during the year, the partner's share of an item attributable to the lower tier is assigned period by period and allocated by his interest in the upper tier at that time (section 706(d)(3))";
+    when is_partner(upper, lower);
+    when partner_interest_changed_during_year(upper, y);
+    when interest_period_of_year(period, upper, y);
+    when lower_tier_item_amount_for_period(upper, lower, period, item, amount);
+    when partner_interest_share_during_period(partner, period, share);
+    then lower_tier_partner_item_share_for_period(partner, upper, lower, y, period, item, amount * share);
+}
+pub relation lower_tier_varying_interest_share(partner: Person, upper: Partnership, lower: Partnership, y: TaxableYear, item: DistributiveShareItem, amount: Money) kind institutional {
+    label en official "the partner's distributive share of the upper tier item attributable to the lower tier partnership, summed over the constant-interest periods (section 706(d)(3))";
+}
+rule S706d3LowerTierShare(partner: Person, upper: Partnership, lower: Partnership, y: TaxableYear, item: DistributiveShareItem, some_period: VaryingInterestPeriod, a0: Money) defeasible {
+    when lower_tier_partner_item_share_for_period(partner, upper, lower, y, some_period, item, a0);
+    then lower_tier_varying_interest_share(partner, upper, lower, y, item,
+        sum all a: Money for period: VaryingInterestPeriod where lower_tier_partner_item_share_for_period(partner, upper, lower, y, period, item, a));
+}

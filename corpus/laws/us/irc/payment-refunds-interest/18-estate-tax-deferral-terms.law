@@ -1,0 +1,480 @@
+// Stage 3 (26.09.2026) — the remaining terms of the estate tax deferrals:
+// §6166(b)(2)(C) indirect ownership, (b)(7)(A)(iii) and (b)(8) holding company
+// look-through, the 2-percent portion of §6601(j), the estate-tax extensions of
+// §6161(a)(2) and (b)(2), and §6163(b)-(c).
+//
+// JUDGMENT CALLS AND GAPS
+//  - Look-through (b)(2)(C) is unrolled to three levels (entity -> owner,
+//    entity -> entity -> owner, entity -> entity -> entity -> owner) with
+//    distinct relations: a recursive chain over entities is a self-recursive
+//    predicate (LDC-E4102, TECH-GAPS G5320 class); a fourth level is not derived.
+//    A trust beneficiary counts only with a present interest (second sentence).
+//  - The 2-percent portion needs the rate schedule of section 2001(c): it is read
+//    from `us.irc.estate_gift::tentative_tax_on_amount` (pub). The applicable
+//    credit amount of section 2010(c) is taken as the tentative tax on the
+//    applicable exclusion amount (JUDGMENT CALL: its statutory definition, with the
+//    deceased spousal unused exclusion, is the estate-gift owner's; here the
+//    exclusion amount is an asserted input).
+//  - The inflation adjustment of (j)(3): the cost-of-living adjustment for the
+//    calendar year of death is an asserted fraction (Secretary-published under
+//    section 1(f)(3) with 1997 as the base year; TECH-GAPS G5805).
+
+language "law.core" version "0.2";
+package us.irc.payment_refunds_interest version "0.1.1";
+namespace "urn:us:irc:payment_refunds_interest:clir";
+
+use self::{
+    BusinessInterest6166,
+    BusinessInterestKind,
+    DecedentEstate,
+    IRC_S6161_A,
+    IRC_S6161_B,
+    IRC_S6163_A,
+    IRC_S6163_B,
+    IRC_S6166_B,
+    IRC_S6601_J,
+    PaymentExtensionRequest,
+    Person,
+    Secretary,
+    TaxableYear,
+    business_carries_on_trade_or_business,
+    business_interest_kind,
+    deficiency_due_to_negligence_disregard_or_fraud,
+    deficiency_extension_requested,
+    deficiency_prorated_amount,
+    estate_tax_installment_paid_total,
+    estate_tax_payment_date_6151a,
+    executor_elects_b7,
+    executor_elects_b8,
+    executor_of_estate,
+    extension_from_date,
+    extension_request_is_estate_tax,
+    extension_until_date,
+    federal_short_term_rate,
+    holding_percent,
+    installment_due_date,
+    installments_elected,
+    interest_included_in_gross_estate_of,
+    qualifies_as_interest_in_closely_held_business,
+    s6161_estate_reasonable_cause_shown,
+    tax_elected_for_installments,
+    voting_stock_percent_included_in_gross_estate,
+};
+
+// ============================================================================
+// §6166(b)(2)(C) indirect ownership
+// ============================================================================
+
+relation entity_ownership_percent(ent: Person, owner: Person, percent: Decimal) kind empirical { label en official "the percent (of 100) of the entity that the shareholder, partner or beneficiary owns; a trust beneficiary is counted only with a present interest"; }
+relation trust_beneficiary_present_interest(owner: Person, trust: Person) kind empirical { label en official "a person has a present interest in the trust (section 6166(b)(2)(C), second sentence)"; }
+relation is_trust_entity(ent: Person) kind empirical { label en official "the entity is a trust"; }
+relation ownership_edge(ent: Person, owner: Person, percent: Decimal) kind institutional { label en official "the property of the entity is considered owned proportionately by its shareholders, partners or beneficiaries"; }
+@source(IRC_S6166_B, relation = formalizes, coverage = partial, quote = "shall be considered as being owned proportionately by or for its shareholders, partners, or beneficiaries")
+rule S6166B2COwnershipEdge strict {
+    for ent: Person;
+    for owner: Person;
+    for pct: Decimal;
+    when entity_ownership_percent(ent, owner, pct) and not_known(is_trust_entity(ent));
+    then ownership_edge(ent, owner, pct);
+}
+@source(IRC_S6166_B, relation = formalizes, coverage = partial, quote = "a person shall be treated as a beneficiary of any trust only if such person has a present interest in the trust")
+rule S6166B2CTrustEdge strict {
+    for ent: Person;
+    for owner: Person;
+    for pct: Decimal;
+    when entity_ownership_percent(ent, owner, pct) and is_trust_entity(ent) and trust_beneficiary_present_interest(owner, ent);
+    then ownership_edge(ent, owner, pct);
+}
+relation indirect_path(i: BusinessInterest6166, owner: Person, hop1: Person, hop2: Person, hop3: Person, percent: Decimal) kind institutional { label en official "the percent of the interest treated as owned by the owner through one path of up to 3 entities (unused hops repeat the owner)"; }
+rule S6166B2CPathOneLevel strict {
+    for i: BusinessInterest6166;
+    for h1: Person;
+    for owner: Person;
+    for a: Decimal;
+    for b: Decimal;
+    when holding_percent(i, h1, a) and ownership_edge(h1, owner, b);
+    then indirect_path(i, owner, h1, owner, owner, div_round(a * b, 100.0, 6, "HALF_UP"));
+}
+rule S6166B2CPathTwoLevels strict {
+    for i: BusinessInterest6166;
+    for h1: Person;
+    for h2: Person;
+    for owner: Person;
+    for a: Decimal;
+    for b: Decimal;
+    for c: Decimal;
+    when holding_percent(i, h1, a) and ownership_edge(h1, h2, b) and ownership_edge(h2, owner, c);
+    then indirect_path(i, owner, h1, h2, owner, div_round(div_round(a * b, 100.0, 6, "HALF_UP") * c, 100.0, 6, "HALF_UP"));
+}
+rule S6166B2CPathThreeLevels strict {
+    for i: BusinessInterest6166;
+    for h1: Person;
+    for h2: Person;
+    for h3: Person;
+    for owner: Person;
+    for a: Decimal;
+    for b: Decimal;
+    for c: Decimal;
+    for d: Decimal;
+    when holding_percent(i, h1, a) and ownership_edge(h1, h2, b) and ownership_edge(h2, h3, c) and ownership_edge(h3, owner, d);
+    then indirect_path(i, owner, h1, h2, h3, div_round(div_round(div_round(a * b, 100.0, 6, "HALF_UP") * c, 100.0, 6, "HALF_UP") * d, 100.0, 6, "HALF_UP"));
+}
+relation indirect_percent_stated(i: BusinessInterest6166, owner: Person) kind institutional { label en unofficial "helper: some indirect path reaches the owner"; }
+rule S6166B2CIndirectStated strict { for i: BusinessInterest6166; for owner: Person; for h1: Person; for h2: Person; for h3: Person; for p: Decimal; when indirect_path(i, owner, h1, h2, h3, p); then indirect_percent_stated(i, owner); }
+relation direct_percent_stated(i: BusinessInterest6166, holder: Person) kind institutional { label en unofficial "helper: the holder holds directly"; }
+rule S6166B2CDirectStated strict { for i: BusinessInterest6166; for holder: Person; for p: Decimal; when holding_percent(i, holder, p); then direct_percent_stated(i, holder); }
+relation ownership_percent_after_look_through(i: BusinessInterest6166, holder: Person, percent: Decimal) kind institutional { label en official "the percent of the interest the holder owns directly plus proportionately through corporations, partnerships, estates and trusts"; }
+rule S6166B2CDirectAndIndirect strict {
+    for i: BusinessInterest6166;
+    for holder: Person;
+    for direct: Decimal;
+    when holding_percent(i, holder, direct) and indirect_percent_stated(i, holder);
+    then ownership_percent_after_look_through(i, holder, direct + sum all p: Decimal for h1: Person, h2: Person, h3: Person where indirect_path(i, holder, h1, h2, h3, p));
+}
+rule S6166B2CDirectOnly strict {
+    for i: BusinessInterest6166;
+    for holder: Person;
+    for direct: Decimal;
+    when holding_percent(i, holder, direct) and not_known(indirect_percent_stated(i, holder));
+    then ownership_percent_after_look_through(i, holder, direct);
+}
+rule S6166B2CIndirectOnly strict {
+    for i: BusinessInterest6166;
+    for holder: Person;
+    when indirect_percent_stated(i, holder) and not_known(direct_percent_stated(i, holder));
+    then ownership_percent_after_look_through(i, holder, sum all p: Decimal for h1: Person, h2: Person, h3: Person where indirect_path(i, holder, h1, h2, h3, p));
+}
+
+// ============================================================================
+// §6166(b)(8) holding company stock treated as business company stock
+// ============================================================================
+
+relation corporation_holds_stock_in(holder: Person, other: Person) kind empirical { label en official "the corporation holds stock in another corporation"; }
+relation corporation_carries_on_trade_or_business(c: Person) kind empirical { label en official "the corporation carries on a trade or business"; }
+relation holding_company(c: Person) kind institutional { label en official "any corporation holding stock in another corporation (section 6166(b)(8)(D)(i))"; }
+@source(IRC_S6166_B, relation = formalizes, coverage = exact, quote = "The term \"holding company\" means any corporation holding stock in another corporation.")
+rule S6166B8DiHoldingCompany strict { for c: Person; for other: Person; when corporation_holds_stock_in(c, other); then holding_company(c); }
+relation business_company(c: Person) kind institutional { label en official "any corporation carrying on a trade or business (section 6166(b)(8)(D)(ii))"; }
+@source(IRC_S6166_B, relation = formalizes, coverage = exact, quote = "The term \"business company\" means any corporation carrying on a trade or business.")
+rule S6166B8DiiBusinessCompany strict { for c: Person; when corporation_carries_on_trade_or_business(c); then business_company(c); }
+relation interest_in_company(i: BusinessInterest6166, company: Person) kind empirical { label en official "the interest is stock in the company"; }
+relation company_voting_percent_of_estate_interest(i: BusinessInterest6166, percent: Decimal) kind institutional { label en unofficial "the percentage in value of the voting stock included in the gross estate, for an interest that is stock in a holding company"; }
+rule S6166B8VotingPercentOfHolding strict { for i: BusinessInterest6166; for x: Decimal; when voting_stock_percent_included_in_gross_estate(i, x); then company_voting_percent_of_estate_interest(i, x); }
+relation holding_company_voting_percent_in(holder: Person, target: Person, percent: Decimal) kind empirical { label en official "the percent of the voting stock of the target company that the holding company owns directly"; }
+relation deemed_voting_path(e: DecedentEstate, business: Person, hop1: Person, hop2: Person, hop3: Person, percent: Decimal) kind institutional { label en official "the deemed voting stock in a business company through one path of 1, 2 or 3 holding companies (an unused hop repeats the business company)"; }
+@source(IRC_S6166_B, relation = formalizes, coverage = partial, quote = "the portion of the stock of any holding company which represents direct ownership (or indirect ownership through 1 or more other holding companies) by such company in a business company shall be deemed to be stock in such business company")
+rule S6166B8AiDeemedOneHolding strict {
+    for e: DecedentEstate;
+    for ih: BusinessInterest6166;
+    for h1: Person;
+    for b: Person;
+    for x: Decimal;
+    for y: Decimal;
+    when executor_elects_b8(e) and interest_included_in_gross_estate_of(ih, e) and interest_in_company(ih, h1) and holding_company(h1) and company_voting_percent_of_estate_interest(ih, x) and holding_company_voting_percent_in(h1, b, y) and business_company(b);
+    then deemed_voting_path(e, b, h1, b, b, div_round(x * y, 100.0, 6, "HALF_UP"));
+}
+rule S6166B8AiDeemedTwoHoldings strict {
+    for e: DecedentEstate;
+    for ih: BusinessInterest6166;
+    for h1: Person;
+    for h2: Person;
+    for b: Person;
+    for x: Decimal;
+    for y: Decimal;
+    for z: Decimal;
+    when executor_elects_b8(e) and interest_included_in_gross_estate_of(ih, e) and interest_in_company(ih, h1) and holding_company(h1) and company_voting_percent_of_estate_interest(ih, x) and holding_company_voting_percent_in(h1, h2, y) and holding_company(h2) and holding_company_voting_percent_in(h2, b, z) and business_company(b);
+    then deemed_voting_path(e, b, h1, h2, b, div_round(div_round(x * y, 100.0, 6, "HALF_UP") * z, 100.0, 6, "HALF_UP"));
+}
+rule S6166B8AiDeemedThreeHoldings strict {
+    for e: DecedentEstate;
+    for ih: BusinessInterest6166;
+    for h1: Person;
+    for h2: Person;
+    for h3: Person;
+    for b: Person;
+    for x: Decimal;
+    for y: Decimal;
+    for z: Decimal;
+    for w: Decimal;
+    when executor_elects_b8(e) and interest_included_in_gross_estate_of(ih, e) and interest_in_company(ih, h1) and holding_company(h1) and company_voting_percent_of_estate_interest(ih, x)
+        and holding_company_voting_percent_in(h1, h2, y) and holding_company(h2) and holding_company_voting_percent_in(h2, h3, z) and holding_company(h3) and holding_company_voting_percent_in(h3, b, w) and business_company(b);
+    then deemed_voting_path(e, b, h1, h2, h3, div_round(div_round(div_round(x * y, 100.0, 6, "HALF_UP") * z, 100.0, 6, "HALF_UP") * w, 100.0, 6, "HALF_UP"));
+}
+relation deemed_voting_stock_percent(e: DecedentEstate, business: Person, percent: Decimal) kind institutional { label en official "the deemed stock in the business company, treated as voting stock to the extent voting stock in the holding company owns voting stock in the business company (section 6166(b)(8)(C))"; }
+@source(IRC_S6166_B, relation = formalizes, coverage = partial, quote = "the deemed stock resulting from the application of subparagraph (A) shall be treated as voting stock to the extent that voting stock in the holding company owns directly (or through the voting stock of 1 or more other holding companies) voting stock in the business company")
+rule S6166B8CDeemedVoting strict {
+    for e: DecedentEstate;
+    for b: Person;
+    for h1: Person;
+    for h2: Person;
+    for h3: Person;
+    when deemed_voting_path(e, b, h1, h2, h3, _);
+    then deemed_voting_stock_percent(e, b, sum all p: Decimal for x1: Person, x2: Person, x3: Person where deemed_voting_path(e, b, x1, x2, x3, p));
+}
+relation deemed_stock_stated(i: BusinessInterest6166) kind institutional { label en unofficial "helper: deemed stock is stated for the business company of the interest"; }
+rule S6166B8DeemedStated strict { for i: BusinessInterest6166; for e: DecedentEstate; for b: Person; for p: Decimal; when interest_included_in_gross_estate_of(i, e) and interest_in_company(i, b) and deemed_voting_stock_percent(e, b, p); then deemed_stock_stated(i); }
+relation twenty_percent_test_with_deemed_stock(i: BusinessInterest6166, percent: Decimal) kind institutional { label en official "the voting stock percentage of the business company tested against 20 percent, with the deemed stock added"; }
+rule S6166B8CTestPercentageWithDeemed strict {
+    for i: BusinessInterest6166;
+    for e: DecedentEstate;
+    for b: Person;
+    for direct: Decimal;
+    for deemed: Decimal;
+    when interest_included_in_gross_estate_of(i, e) and business_interest_kind(i, CorporateStock) and interest_in_company(i, b) and voting_stock_percent_included_in_gross_estate(i, direct) and deemed_voting_stock_percent(e, b, deemed);
+    then twenty_percent_test_with_deemed_stock(i, direct + deemed);
+}
+@source(IRC_S6166_B, relation = formalizes, coverage = partial, quote = "For purposes of clause (i) of paragraph (1)(C), the deemed stock resulting from the application of subparagraph (A)")
+rule S6166B8CQualifiesWithDeemed strict {
+    for i: BusinessInterest6166;
+    for x: Decimal;
+    when business_interest_kind(i, CorporateStock) and business_carries_on_trade_or_business(i) and twenty_percent_test_with_deemed_stock(i, x) and x >= 20.0;
+    then qualifies_as_interest_in_closely_held_business(i);
+}
+
+// ============================================================================
+// §6601(j) 2-percent portion
+// ============================================================================
+
+relation estate_death_year(e: DecedentEstate, cy: Integer) kind empirical { label en official "the calendar year of the decedent's death"; }
+relation cost_of_living_adjustment_6601j3(cy: Integer, factor: Decimal) kind empirical { label en official "the cost-of-living adjustment determined under section 1(f)(3) for the calendar year, substituting calendar year 1997 for calendar year 2016 in subparagraph (A)(ii) (a fraction; Secretary-published)"; }
+relation applicable_exclusion_amount_2010c(e: DecedentEstate, amount: Money) kind empirical { label en official "the applicable exclusion amount in effect under section 2010(c)"; }
+relation one_million_base_6601j2(e: DecedentEstate, amount: Money) kind institutional { label en official "the $1,000,000 of (j)(2)(A)(i), inflation adjusted for a decedent dying after 1998 and rounded down to a multiple of $10,000"; }
+@source(IRC_S6601_J, relation = formalizes, coverage = partial, quote = "In the case of estates of decedents dying in a calendar year after 1998, the $1,000,000 amount contained in paragraph (2)(A) shall be increased by an amount equal to")
+rule S6601J3AdjustedBase strict {
+    for e: DecedentEstate;
+    for cy: Integer;
+    for factor: Decimal;
+    when estate_death_year(e, cy) and cy > 1998 and cost_of_living_adjustment_6601j3(cy, factor);
+    then one_million_base_6601j2(e, round((1000000.00 USD + 1000000.00 USD * factor) / 10000.00 USD, 0, "FLOOR") * 10000.00 USD);
+}
+@source(IRC_S6601_J, relation = formalizes, coverage = partial, quote = "the sum of $1,000,000 and the applicable exclusion amount in effect under section 2010(c)")
+rule S6601J2NoAdjustmentBefore1999 strict {
+    for e: DecedentEstate;
+    for cy: Integer;
+    when estate_death_year(e, cy) and cy <= 1998;
+    then one_million_base_6601j2(e, 1000000.00 USD);
+}
+relation tentative_tax_on_base_plus_exclusion(e: DecedentEstate, amount: Money) kind institutional { label en official "the tentative tax under the rate schedule of section 2001(c) on the sum of the $1,000,000 base and the applicable exclusion amount"; }
+rule S6601J2AiTentativeTax strict {
+    for e: DecedentEstate;
+    for base: Money;
+    for exclusion: Money;
+    for tax: Money;
+    when one_million_base_6601j2(e, base) and applicable_exclusion_amount_2010c(e, exclusion) and us.irc.estate_gift::tentative_tax_on_amount(base + exclusion, tax);
+    then tentative_tax_on_base_plus_exclusion(e, tax);
+}
+relation applicable_credit_amount_2010c(e: DecedentEstate, amount: Money) kind institutional { label en official "the applicable credit amount in effect under section 2010(c): the tentative tax on the applicable exclusion amount (JUDGMENT CALL, see the module header)"; }
+rule S6601J2AiiCreditAmount strict {
+    for e: DecedentEstate;
+    for exclusion: Money;
+    for credit: Money;
+    when applicable_exclusion_amount_2010c(e, exclusion) and us.irc.estate_gift::tentative_tax_on_amount(exclusion, credit);
+    then applicable_credit_amount_2010c(e, credit);
+}
+relation tax_extended_under_6166(e: DecedentEstate, amount: Money) kind institutional { label en official "the amount of the tax imposed by chapter 11 which is extended as provided in section 6166, including a deficiency prorated to the installments"; }
+@source(IRC_S6601_J, relation = formalizes, coverage = partial, quote = "the amount of any deficiency which is prorated to installments payable under section 6166 shall be treated as an amount of tax payable in installments under such section")
+rule S6601J1DeficiencyIncluded defeasible {
+    for e: DecedentEstate;
+    for elected: Money;
+    for prorated: Money;
+    when tax_elected_for_installments(e, elected) and deficiency_prorated_amount(e, prorated);
+    then tax_extended_under_6166(e, elected + prorated);
+}
+relation deficiency_prorated_stated(e: DecedentEstate) kind institutional { label en unofficial "helper: a prorated deficiency amount is stated for the estate"; }
+rule S6601J1DeficiencyStated defeasible { for e: DecedentEstate; for a: Money; when deficiency_prorated_amount(e, a); then deficiency_prorated_stated(e); }
+rule S6601J1NoDeficiency defeasible {
+    for e: DecedentEstate;
+    for elected: Money;
+    when tax_elected_for_installments(e, elected) and not_known(deficiency_prorated_stated(e));
+    then tax_extended_under_6166(e, elected);
+}
+relation two_percent_portion_before_election_rules(e: DecedentEstate, amount: Money) kind institutional { label en official "the lesser of the tentative-tax difference of (A) and the tax extended under section 6166 (B)"; }
+@source(IRC_S6601_J, relation = formalizes, coverage = partial, quote = "the term \"2-percent portion\" means the lesser of")
+rule S6601J2LesserIsDifference defeasible {
+    for e: DecedentEstate;
+    for t1: Money;
+    for credit: Money;
+    for extended: Money;
+    when tentative_tax_on_base_plus_exclusion(e, t1) and applicable_credit_amount_2010c(e, credit) and tax_extended_under_6166(e, extended) and t1 - credit <= extended;
+    then two_percent_portion_before_election_rules(e, max(0 USD, t1 - credit));
+}
+rule S6601J2LesserIsExtended defeasible {
+    for e: DecedentEstate;
+    for t1: Money;
+    for credit: Money;
+    for extended: Money;
+    when tentative_tax_on_base_plus_exclusion(e, t1) and applicable_credit_amount_2010c(e, credit) and tax_extended_under_6166(e, extended) and t1 - credit > extended;
+    then two_percent_portion_before_election_rules(e, extended);
+}
+relation two_percent_portion_zero_by_election(e: DecedentEstate) kind institutional { label en official "for purposes of section 6601(j), the 2-percent portion is treated as being zero by an election under (b)(7) or (b)(8)"; }
+@source(IRC_S6166_B, relation = formalizes, coverage = partial, quote = "for purposes of applying section 6601(j), the 2-percent portion (as defined in such section) shall be treated as being zero")
+rule S6166B7AiiiZeroPortion strict { for e: DecedentEstate; when executor_elects_b7(e); then two_percent_portion_zero_by_election(e); }
+rule S6166B8AiiiZeroPortion strict { for e: DecedentEstate; when executor_elects_b8(e); then two_percent_portion_zero_by_election(e); }
+relation two_percent_portion(e: DecedentEstate, amount: Money) kind institutional { label en official "the 2-percent portion: zero when a (b)(7) or (b)(8) election applies, else the lesser amount"; }
+rule S6601J2PortionZero defeasible { for e: DecedentEstate; for x: Money; when two_percent_portion_before_election_rules(e, x) and two_percent_portion_zero_by_election(e); then two_percent_portion(e, 0 USD); }
+rule S6601J2PortionOrdinary defeasible { for e: DecedentEstate; for x: Money; when two_percent_portion_before_election_rules(e, x) and not_known(two_percent_portion_zero_by_election(e)); then two_percent_portion(e, x); }
+relation estate_extension_interest_rate_on_two_percent_portion(e: DecedentEstate, rate_percent: Decimal) kind institutional { label en official "interest on the 2-percent portion is paid at the rate of 2 percent"; }
+@source(IRC_S6601_J, relation = formalizes, coverage = exact, quote = "interest on the 2-percent portion of such amount shall be paid at the rate of 2 percent")
+rule S6601J1ATwoPercentRate defeasible { for e: DecedentEstate; for x: Money; for extended: Money; when two_percent_portion(e, x) and tax_extended_under_6166(e, extended); then estate_extension_interest_rate_on_two_percent_portion(e, 2.0); }
+relation estate_extension_interest_rate_on_excess(e: DecedentEstate, quarter_start: Date, rate_percent: Decimal) kind institutional { label en official "interest on the amount exceeding the 2-percent portion is paid at 45 percent of the annual rate provided by subsection (a), the underpayment rate (the Federal short-term rate plus 3 percentage points)"; }
+@source(IRC_S6601_J, relation = formalizes, coverage = exact, quote = "interest on so much of such amount as exceeds the 2-percent portion shall be paid at a rate equal to 45 percent of the annual rate provided by subsection (a)")
+rule S6601J1BFortyFivePercentRate defeasible {
+    for e: DecedentEstate;
+    for quarter_start: Date;
+    for base: Decimal;
+    for x: Money;
+    when two_percent_portion(e, x) and federal_short_term_rate(quarter_start, base);
+    then estate_extension_interest_rate_on_excess(e, quarter_start, 0.45 * (base + 3.0));
+}
+relation two_percent_portion_reduction_by_payments(e: DecedentEstate, amount: Money) kind institutional { label en official "payments reduce the 2-percent portion, for later periods, by the payment times the ratio of the portion (without regard to paragraph (4)) to the tax extended"; }
+@source(IRC_S6601_J, relation = formalizes, coverage = exact, quote = "be treated as reducing the 2-percent portion by an amount which bears the same ratio to the amount of such payment as the amount of the 2-percent portion (determined without regard to this paragraph) bears to the amount of the tax which is extended as provided in section 6166")
+rule S6601J4Reduction defeasible {
+    for e: DecedentEstate;
+    for portion: Money;
+    for extended: Money;
+    for paid: Money;
+    when two_percent_portion(e, portion) and tax_extended_under_6166(e, extended) and estate_tax_installment_paid_total(e, paid) and extended > portion and extended > 0 USD;
+    then two_percent_portion_reduction_by_payments(e, div_round(paid * (portion / 1.00 USD), extended / 1.00 USD, 2, "HALF_UP"));
+}
+relation two_percent_portion_remaining(e: DecedentEstate, amount: Money) kind institutional { label en official "the 2-percent portion left after the payments, for computing interest for periods after the payments"; }
+rule S6601J4Remaining defeasible {
+    for e: DecedentEstate;
+    for portion: Money;
+    for reduction: Money;
+    when two_percent_portion(e, portion) and two_percent_portion_reduction_by_payments(e, reduction);
+    then two_percent_portion_remaining(e, max(0 USD, portion - reduction));
+}
+
+// ============================================================================
+// §6161(a)(2), (b)(2) estate tax extensions; §6163(b)-(c)
+// ============================================================================
+
+enum EstateExtensionPart {
+    PartOfTaxDetermined;
+    PartOfInstallment;
+    label en official "§6161(a)(2): (A) any part of the amount determined by the executor as the chapter 11 tax, (B) any part of any installment under section 6166 (including a deficiency part prorated to an installment)";
+}
+relation estate_extension_request(req: PaymentExtensionRequest, e: DecedentEstate, part: EstateExtensionPart) kind empirical;
+relation estate_extension_within_ten_years_of_payment_date(req: PaymentExtensionRequest) kind institutional { label en official "the extension does not run beyond 10 years from the section 6151(a) date"; }
+rule S6161A2TenYears strict {
+    for req: PaymentExtensionRequest;
+    for e: DecedentEstate;
+    for part: EstateExtensionPart;
+    for pay: Date;
+    for until: Date;
+    when estate_extension_request(req, e, part) and estate_tax_payment_date_6151a(e, pay) and extension_until_date(req, until) and until <= add_calendar_period(pay, 120 calendar_month);
+    then estate_extension_within_ten_years_of_payment_date(req);
+}
+relation estate_extension_within_last_installment_plus_12_months(req: PaymentExtensionRequest) kind institutional { label en official "for an installment part, if later, not beyond 12 months after the due date for the last installment"; }
+rule S6161A2LastInstallmentPlusTwelve strict {
+    for req: PaymentExtensionRequest;
+    for e: DecedentEstate;
+    for n: Integer;
+    for last: Date;
+    for until: Date;
+    when estate_extension_request(req, e, PartOfInstallment) and installments_elected(e, n) and installment_due_date(e, n, last) and extension_until_date(req, until) and until <= add_calendar_period(last, 12 calendar_month);
+    then estate_extension_within_last_installment_plus_12_months(req);
+}
+relation estate_extension_length_valid_6161a2(req: PaymentExtensionRequest) kind institutional { label en official "the extension is for a period within the section 6161(a)(2) limits"; }
+@source(IRC_S6161_A, relation = formalizes, coverage = partial, quote = "for a reasonable period not in excess of 10 years from the date prescribed by section 6151(a) for payment of the tax")
+rule S6161A2LengthOk10 strict { for req: PaymentExtensionRequest; when estate_extension_within_ten_years_of_payment_date(req); then estate_extension_length_valid_6161a2(req); }
+@source(IRC_S6161_A, relation = formalizes, coverage = partial, quote = "if later, not beyond the date which is 12 months after the due date for the last installment")
+rule S6161A2LengthOkInstallment strict { for req: PaymentExtensionRequest; when estate_extension_within_last_installment_plus_12_months(req); then estate_extension_length_valid_6161a2(req); }
+relation estate_extension_terms_valid_6161a2(req: PaymentExtensionRequest, e: DecedentEstate) kind institutional { label en official "reasonable cause and a length within the limits"; }
+rule S6161A2TermsValid strict {
+    for req: PaymentExtensionRequest;
+    for e: DecedentEstate;
+    for part: EstateExtensionPart;
+    for x: Person;
+    when estate_extension_request(req, e, part) and executor_of_estate(e, x) and s6161_estate_reasonable_cause_shown(x, req) and estate_extension_length_valid_6161a2(req);
+    then estate_extension_terms_valid_6161a2(req, e);
+}
+relation estate_extension_granted_6161a2(req: PaymentExtensionRequest) kind institutional { label en official "the Secretary extended the time for payment of the estate tax"; }
+@source(IRC_S6161_A, relation = formalizes, coverage = partial, quote = "The Secretary may, for reasonable cause, extend the time for payment of—")
+rule S6161A2ExtendEstateTaxPower strict {
+    label en official "the Secretary may, for reasonable cause, extend the time for payment of the estate tax or of an installment part (section 6161(a)(2))";
+    for req: PaymentExtensionRequest;
+    for e: DecedentEstate;
+    for part: EstateExtensionPart;
+    when estate_extension_request(req, e, part);
+    then power S6161A2EstateExtensionPower {
+        holder Secretary;
+        over e;
+        exercise estate_extension_request(req, e, part);
+        valid_when estate_extension_terms_valid_6161a2(req, e);
+        effect create(estate_extension_granted_6161a2(req));
+    };
+}
+relation deficiency_extension_within_four_years(req: PaymentExtensionRequest) kind institutional { label en official "the extension does not exceed 4 years from the date otherwise fixed for the payment of the deficiency"; }
+rule S6161B2FourYears strict {
+    for req: PaymentExtensionRequest;
+    for from: Date;
+    for until: Date;
+    when extension_request_is_estate_tax(req) and extension_from_date(req, from) and extension_until_date(req, until) and until <= add_calendar_period(from, 48 calendar_month);
+    then deficiency_extension_within_four_years(req);
+}
+relation estate_deficiency_extension_terms_valid(req: PaymentExtensionRequest, p: Person) kind institutional { label en official "reasonable cause, at most 4 years, and no negligence, disregard or fraud (section 6161(b)(2)-(3))"; }
+@source(IRC_S6161_B, relation = formalizes, coverage = partial, quote = "No extension shall be granted under this subsection for any deficiency if the deficiency is due to negligence, to intentional disregard of rules and regulations, or to fraud with intent to evade tax.")
+rule S6161B2TermsValid strict {
+    for req: PaymentExtensionRequest;
+    for p: Person;
+    when deficiency_extension_requested(req, p) and extension_request_is_estate_tax(req) and s6161_estate_reasonable_cause_shown(p, req) and deficiency_extension_within_four_years(req) and not_known(deficiency_due_to_negligence_disregard_or_fraud(req));
+    then estate_deficiency_extension_terms_valid(req, p);
+}
+relation estate_deficiency_extension_granted(req: PaymentExtensionRequest) kind institutional { label en official "the Secretary extended the time for payment of the estate tax deficiency"; }
+@source(IRC_S6161_B, relation = formalizes, coverage = partial, quote = "the Secretary may, for reasonable cause, extend the time for the payment of any deficiency of a tax imposed by chapter 11 for a reasonable period not to exceed 4 years from the date otherwise fixed for the payment of the deficiency")
+rule S6161B2ExtendEstateDeficiencyPower strict {
+    for req: PaymentExtensionRequest;
+    for p: Person;
+    when deficiency_extension_requested(req, p) and extension_request_is_estate_tax(req);
+    then power S6161B2EstateDeficiencyExtensionPower {
+        holder Secretary;
+        over p;
+        exercise deficiency_extension_requested(req, p);
+        valid_when estate_deficiency_extension_terms_valid(req, p);
+        effect create(estate_deficiency_extension_granted(req));
+    };
+}
+// §6163(b): a further extension for reasonable cause after the postponement.
+relation precedent_interest_terminated_on(p: Person, y: TaxableYear, d: Date) kind empirical { label en official "the precedent interest or interests in the property terminated on the date"; }
+relation postponement_period_end_6163(p: Person, y: TaxableYear, end: Date) kind institutional { label en official "the period of postponement provided in subsection (a) ends 6 months after the termination of the precedent interests"; }
+@source(IRC_S6163_A, relation = formalizes, coverage = partial, quote = "be postponed until 6 months after the termination of the precedent interest or interests in the property")
+rule S6163APostponementEnd strict { for p: Person; for y: TaxableYear; for d: Date; when precedent_interest_terminated_on(p, y, d); then postponement_period_end_6163(p, y, add_calendar_period(d, 6 calendar_month)); }
+relation reversionary_extension_request(req: PaymentExtensionRequest, p: Person, y: TaxableYear) kind empirical { label en official "a request under section 6163(b) for a further extension for reasonable cause"; }
+pub external judgment relation s6163_reasonable_cause_shown(p: Person, req: PaymentExtensionRequest) {
+    authority Secretary;
+    label en official "the Secretary determines there is reasonable cause to extend the time for payment (section 6163(b))";
+}
+relation reversionary_further_extension_within_three_years(req: PaymentExtensionRequest) kind institutional { label en official "the further extension is for a period or periods not in excess of 3 years from the expiration of the period of postponement"; }
+rule S6163BThreeYears strict {
+    for req: PaymentExtensionRequest;
+    for p: Person;
+    for y: TaxableYear;
+    for end: Date;
+    for until: Date;
+    when reversionary_extension_request(req, p, y) and postponement_period_end_6163(p, y, end) and extension_until_date(req, until) and until <= add_calendar_period(end, 36 calendar_month);
+    then reversionary_further_extension_within_three_years(req);
+}
+relation reversionary_further_extension_terms_valid(req: PaymentExtensionRequest, p: Person) kind institutional { label en official "reasonable cause and within 3 years of the end of the postponement"; }
+rule S6163BTermsValid strict {
+    for req: PaymentExtensionRequest;
+    for p: Person;
+    for y: TaxableYear;
+    when reversionary_extension_request(req, p, y) and s6163_reasonable_cause_shown(p, req) and reversionary_further_extension_within_three_years(req);
+    then reversionary_further_extension_terms_valid(req, p);
+}
+relation reversionary_further_extension_granted(req: PaymentExtensionRequest) kind institutional { label en official "the Secretary extended the time for payment for reasonable cause after the postponement"; }
+@source(IRC_S6163_B, relation = formalizes, coverage = exact, quote = "the Secretary may, for reasonable cause, extend the time for payment for a reasonable period or periods not in excess of 3 years from the expiration of the period of postponement provided in subsection (a)")
+rule S6163BFurtherExtensionRule strict {
+    for req: PaymentExtensionRequest;
+    for p: Person;
+    for y: TaxableYear;
+    when reversionary_extension_request(req, p, y);
+    then power S6163BFurtherExtensionPower {
+        holder Secretary;
+        over p;
+        exercise reversionary_extension_request(req, p, y);
+        valid_when reversionary_further_extension_terms_valid(req, p);
+        effect create(reversionary_further_extension_granted(req));
+    };
+}

@@ -1,0 +1,307 @@
+// Sections 3131-3134: temporary, EXPIRED COVID-19-era employment tax
+// credits (paid sick leave, paid family leave, and employee retention).
+// Stage 2b scope: "classify by pinned text/expiration". Each section's own
+// (h)/(m)/similar subsection states an explicit application WINDOW; this
+// package models the CORE credit computation (rate x qualified wages,
+// per-employee/per-day/per-quarter caps, limited to applicable employment
+// taxes, excess refundable) gated on that window, and classifies the dense
+// procedural/definitional remainder (health-plan and collectively-bargained
+// add-ons, coordination with other credits, non-discrimination, PPP-loan
+// interaction, regulations) as TECH_GAP/NON_NORMATIVE rather than
+// re-deriving each paragraph — these are frozen, expired provisions with no
+// live 2024+ fact pattern, and the task's own instruction is to classify,
+// not to reach full depth.
+
+// `Person`, `TaxableYear`, `WagePayment` are package-level symbols already
+// declared in `01-fica-tax.law` (one namespace across this package's
+// files); not redeclared here to avoid a duplicate-symbol error.
+
+// --- Section 3131: credit for paid sick leave (April 1 - September 30, 2021)
+
+use self::{
+    CovidLeaveCredit,
+    IRC_S3131_A,
+    IRC_S3131_B,
+    IRC_S3131_H,
+    IRC_S3132_A,
+    IRC_S3132_B,
+    IRC_S3133_A,
+    IRC_S3134_A,
+    IRC_S3134_B,
+    Person,
+    WagePayment,
+    credit_denied_for_discrimination,
+    credit_not_applicable_to_governmental_employer,
+};
+
+pub relation qualified_sick_leave_wages_per_day(pay: WagePayment, employer: Person, employee: Person, quarterStart: Date, on: Date, amount: Money, extendedCap: Boolean) kind empirical {
+    label en official "wages paid for a day (or portion) of Emergency-Paid-Sick-Leave-Act-type leave, with whether the extended $511 cap applies (section 5102(a)(1)-(3) type leave) rather than the $200 cap (case fact; the day-count aggregation of section 3131(b)(2)'s 10-day annual limit is TECH_GAP, not derived here)";
+}
+pub relation qualified_sick_leave_wages_capped(pay: WagePayment, amount: Money) kind institutional {
+    label en official "section 3131(b)(1): qualified sick leave wages for the day, after the $200/$511 per-day cap";
+}
+@source(IRC_S3131_B, relation = formalizes, coverage = partial, quote = "shall not exceed $200 ($511 in the case of any day any portion of which is paid sick time described in paragraph (1), (2), or (3) of section 5102(a) of the Emergency Paid Sick Leave Act")
+rule Section3131DailyCapExtended(pay: WagePayment, employer: Person, employee: Person, quarterStart: Date, on: Date, amount: Money) strict {
+    when qualified_sick_leave_wages_per_day(pay, employer, employee, quarterStart, on, amount, true) and amount > 511.00 USD;
+    then qualified_sick_leave_wages_capped(pay, 511.00 USD);
+}
+rule Section3131DailyCapExtendedBelow(pay: WagePayment, employer: Person, employee: Person, quarterStart: Date, on: Date, amount: Money) strict {
+    when qualified_sick_leave_wages_per_day(pay, employer, employee, quarterStart, on, amount, true) and amount <= 511.00 USD;
+    then qualified_sick_leave_wages_capped(pay, amount);
+}
+rule Section3131DailyCapStandard(pay: WagePayment, employer: Person, employee: Person, quarterStart: Date, on: Date, amount: Money) strict {
+    when qualified_sick_leave_wages_per_day(pay, employer, employee, quarterStart, on, amount, false) and amount > 200.00 USD;
+    then qualified_sick_leave_wages_capped(pay, 200.00 USD);
+}
+rule Section3131DailyCapStandardBelow(pay: WagePayment, employer: Person, employee: Person, quarterStart: Date, on: Date, amount: Money) strict {
+    when qualified_sick_leave_wages_per_day(pay, employer, employee, quarterStart, on, amount, false) and amount <= 200.00 USD;
+    then qualified_sick_leave_wages_capped(pay, amount);
+}
+
+pub relation applicable_employment_taxes_for_quarter(employer: Person, quarterStart: Date, amount: Money) kind empirical {
+    label en unofficial "case fact: the section 3131(f)(1)/3132(f) 'applicable employment taxes' (the section 3111(b) HI-employer-rate portion, plus the analogous section 3221(a) RRTA portion) for this employer's calendar quarter";
+}
+pub relation section_3131_gross_credit(employer: Person, quarterStart: Date, amount: Money) kind institutional {
+    label en official "section 3131(a): 100 percent of the employer's total qualified sick leave wages for the calendar quarter, before the section 3131(b)(3) employment-tax limitation";
+}
+pub relation qualified_sick_leave_wages_total_for_quarter(employer: Person, quarterStart: Date, amount: Money) kind institutional {
+    label en unofficial "aggregate section 3131(b)(1) capped qualified sick leave wages an employer paid during the calendar quarter, summed over case-asserted daily amounts";
+}
+rule QualifiedSickLeaveWagesTotalForQuarter(employer0: Person, quarterStart0: Date, pay0: WagePayment, employee0: Person, on0: Date) strict {
+    when qualified_sick_leave_wages_per_day(pay0, employer0, employee0, quarterStart0, on0, _, _) and qualified_sick_leave_wages_capped(pay0, _);
+    then qualified_sick_leave_wages_total_for_quarter(employer0, quarterStart0,
+        sum all amount: Money for pay: WagePayment, employee: Person, on: Date, extendedCap: Boolean
+            where qualified_sick_leave_wages_per_day(pay, employer0, employee, quarterStart0, on, _, extendedCap) and qualified_sick_leave_wages_capped(pay, amount));
+}
+@source(IRC_S3131_A, relation = formalizes, coverage = partial, quote = "there shall be allowed as a credit against applicable employment taxes for each calendar quarter an amount equal to 100 percent of the qualified sick leave wages paid by such employer with respect to such calendar quarter")
+rule Section3131GrossCredit(employer: Person, quarterStart: Date, totalWages: Money, quarterInWindow: Date) strict {
+    when qualified_sick_leave_wages_total_for_quarter(employer, quarterStart, totalWages)
+        and quarterStart >= @2021-04-01 and quarterStart <= @2021-09-30
+        and not_known(credit_denied_for_discrimination(employer, quarterStart, SickLeave));
+    then section_3131_gross_credit(employer, quarterStart, totalWages);
+}
+pub relation section_3131_credit(employer: Person, quarterStart: Date, amount: Money) kind institutional {
+    label en official "section 3131(b)(3): the section 3131 credit after the applicable-employment-tax limitation for the calendar quarter (the (b)(4) excess is refundable — see `section_3131_refundable_excess`)";
+}
+pub relation section_3131_refundable_excess(employer: Person, quarterStart: Date, amount: Money) kind institutional {
+    label en official "section 3131(b)(4)(A): the excess of the gross section 3131 credit over the employment-tax limitation, refundable under sections 6402(a)/6413(b)";
+}
+rule Section3131CreditBelowLimit(employer: Person, quarterStart: Date, gross: Money, limit: Money) strict {
+    when section_3131_gross_credit(employer, quarterStart, gross) and applicable_employment_taxes_for_quarter(employer, quarterStart, limit) and gross <= limit;
+    then section_3131_credit(employer, quarterStart, gross);
+}
+rule Section3131CreditAboveLimit(employer: Person, quarterStart: Date, gross: Money, limit: Money) strict {
+    when section_3131_gross_credit(employer, quarterStart, gross) and applicable_employment_taxes_for_quarter(employer, quarterStart, limit) and gross > limit;
+    then section_3131_credit(employer, quarterStart, limit);
+}
+@source(IRC_S3131_B, relation = formalizes, coverage = exact, quote = "If the amount of the credit under subsection (a) exceeds the limitation of paragraph (3) for any calendar quarter, such excess shall be treated as an overpayment that shall be refunded under sections 6402(a) and 6413(b).")
+rule Section3131RefundableExcess(employer: Person, quarterStart: Date, gross: Money, limit: Money) strict {
+    when section_3131_gross_credit(employer, quarterStart, gross) and applicable_employment_taxes_for_quarter(employer, quarterStart, limit) and gross > limit;
+    then section_3131_refundable_excess(employer, quarterStart, gross - limit);
+}
+@source(IRC_S3131_H, relation = formalizes, coverage = exact, quote = "This section shall apply only to wages paid with respect to the period beginning on April 1, 2021, and ending on September 30, 2021.")
+relation section_3131_application_window(startOn: Date, endOn: Date) kind institutional {
+    label en unofficial "documents the section 3131(h) application window; the window is enforced directly in `Section3131GrossCredit`'s `quarterStart` guard rather than through a separate lookup relation";
+}
+// (c) qualified-sick-leave-wages ELIGIBILITY test (Emergency Paid Sick Leave
+// Act cross-reference), (d)/(e) health-plan and collectively-bargained
+// add-ons, (f)(3) denial of double benefit / coordination with sections 45A,
+// 45P, 45S, 51, 3132, 3134, and CARES Act 2301/section 41, (f)(4) election
+// out, (f)(5) governmental-employer denial, (f)(6) extended assessment
+// period, (f)(7) PPP-loan coordination, (g) regulations, (i) deposit-penalty
+// waiver, (j) non-discrimination: TECH_GAP/NON_NORMATIVE, not re-derived —
+// each is its own bounded rule the task's "classify" instruction does not
+// ask this pass to reach.
+
+// --- Section 3132: payroll credit for paid family leave (same window) ------
+//
+// Same computation SHAPE as section 3131 (100 percent of qualified wages,
+// employment-tax-limited, refundable excess), with its OWN caps ($200/day,
+// $12,000 aggregate per individual) and its OWN quarter-limit reduction (the
+// applicable employment taxes are reduced by any section 3131 credit
+// already used against them, per (b)(2)) — not reused wholesale from
+// section 3131 despite the structural resemblance.
+pub relation qualified_family_leave_wages_per_day(pay: WagePayment, employer: Person, employee: Person, quarterStart: Date, on: Date, amount: Money) kind empirical {
+    label en official "wages paid for a day (or portion) of Emergency Family and Medical Leave Expansion Act-type leave (case fact)";
+}
+pub relation qualified_family_leave_wages_capped(pay: WagePayment, amount: Money) kind institutional {
+    label en official "section 3132(b)(1)(A): qualified family leave wages for the day, after the $200 per-day cap (the $12,000 aggregate-per-individual cap of (b)(1)(B) is TECH_GAP — a running per-individual ledger this package does not chain here)";
+}
+@source(IRC_S3132_B, relation = formalizes, coverage = partial, quote = "for any day (or portion thereof) for which the individual is paid qualified family leave wages, $200")
+rule Section3132DailyCap(pay: WagePayment, employer: Person, employee: Person, quarterStart: Date, on: Date, amount: Money) strict {
+    when qualified_family_leave_wages_per_day(pay, employer, employee, quarterStart, on, amount) and amount > 200.00 USD;
+    then qualified_family_leave_wages_capped(pay, 200.00 USD);
+}
+rule Section3132DailyCapBelow(pay: WagePayment, employer: Person, employee: Person, quarterStart: Date, on: Date, amount: Money) strict {
+    when qualified_family_leave_wages_per_day(pay, employer, employee, quarterStart, on, amount) and amount <= 200.00 USD;
+    then qualified_family_leave_wages_capped(pay, amount);
+}
+pub relation qualified_family_leave_wages_total_for_quarter(employer: Person, quarterStart: Date, amount: Money) kind institutional;
+rule QualifiedFamilyLeaveWagesTotalForQuarter(employer0: Person, quarterStart0: Date, pay0: WagePayment, employee0: Person, on0: Date) strict {
+    when qualified_family_leave_wages_per_day(pay0, employer0, employee0, quarterStart0, on0, _) and qualified_family_leave_wages_capped(pay0, _);
+    then qualified_family_leave_wages_total_for_quarter(employer0, quarterStart0,
+        sum all amount: Money for pay: WagePayment, employee: Person, on: Date
+            where qualified_family_leave_wages_per_day(pay, employer0, employee, quarterStart0, on, _) and qualified_family_leave_wages_capped(pay, amount));
+}
+pub relation section_3132_gross_credit(employer: Person, quarterStart: Date, amount: Money) kind institutional {
+    label en official "section 3132(a): 100 percent of the employer's total qualified family leave wages for the calendar quarter";
+}
+@source(IRC_S3132_A, relation = formalizes, coverage = partial, quote = "there shall be allowed as a credit against applicable employment taxes for each calendar quarter an amount equal to 100 percent of the qualified family leave wages paid by such employer with respect to such calendar quarter")
+rule Section3132GrossCredit(employer: Person, quarterStart: Date, totalWages: Money) strict {
+    when qualified_family_leave_wages_total_for_quarter(employer, quarterStart, totalWages)
+        and quarterStart >= @2021-04-01 and quarterStart <= @2021-09-30
+        and not_known(credit_denied_for_discrimination(employer, quarterStart, FamilyLeave));
+    then section_3132_gross_credit(employer, quarterStart, totalWages);
+}
+pub relation section_3132_credit(employer: Person, quarterStart: Date, amount: Money) kind institutional {
+    label en official "section 3132(b)(2): the section 3132 credit after the employment-tax limitation, reduced by any section 3131 credit already applied against the same quarter's applicable employment taxes";
+}
+pub relation section_3132_refundable_excess(employer: Person, quarterStart: Date, amount: Money) kind institutional {
+    label en official "section 3132(b)(3)(A): the excess of the gross section 3132 credit over the reduced employment-tax limitation, refundable under sections 6402(a)/6413(b)";
+}
+rule Section3132CreditBelowLimitNo3131(employer: Person, quarterStart: Date, gross: Money, limit: Money) strict {
+    when section_3132_gross_credit(employer, quarterStart, gross) and applicable_employment_taxes_for_quarter(employer, quarterStart, limit)
+        and not_known(section_3131_credit_exists(employer, quarterStart)) and gross <= limit;
+    then section_3132_credit(employer, quarterStart, gross);
+}
+rule Section3132CreditAboveLimitNo3131(employer: Person, quarterStart: Date, gross: Money, limit: Money) strict {
+    when section_3132_gross_credit(employer, quarterStart, gross) and applicable_employment_taxes_for_quarter(employer, quarterStart, limit)
+        and not_known(section_3131_credit_exists(employer, quarterStart)) and gross > limit;
+    then section_3132_credit(employer, quarterStart, limit);
+}
+rule Section3132RefundableExcessNo3131(employer: Person, quarterStart: Date, gross: Money, limit: Money) strict {
+    when section_3132_gross_credit(employer, quarterStart, gross) and applicable_employment_taxes_for_quarter(employer, quarterStart, limit)
+        and not_known(section_3131_credit_exists(employer, quarterStart)) and gross > limit;
+    then section_3132_refundable_excess(employer, quarterStart, gross - limit);
+}
+relation section_3131_credit_exists(employer: Person, quarterStart: Date) kind institutional;
+rule Section3131CreditExists(employer: Person, quarterStart: Date, amount: Money) strict {
+    when section_3131_credit(employer, quarterStart, amount);
+    then section_3131_credit_exists(employer, quarterStart);
+}
+rule Section3132CreditReducedByLimit(employer: Person, quarterStart: Date, gross: Money, limit: Money, used3131: Money) strict {
+    when section_3132_gross_credit(employer, quarterStart, gross) and applicable_employment_taxes_for_quarter(employer, quarterStart, limit)
+        and section_3131_credit(employer, quarterStart, used3131) and limit > used3131 and gross <= (limit - used3131);
+    then section_3132_credit(employer, quarterStart, gross);
+}
+rule Section3132CreditReducedByLimitExceeded(employer: Person, quarterStart: Date, gross: Money, limit: Money, used3131: Money) strict {
+    when section_3132_gross_credit(employer, quarterStart, gross) and applicable_employment_taxes_for_quarter(employer, quarterStart, limit)
+        and section_3131_credit(employer, quarterStart, used3131) and limit > used3131 and gross > (limit - used3131);
+    then section_3132_credit(employer, quarterStart, limit - used3131);
+}
+// TECH_GAP: the "limit <= used3131" edge case (section 3131 already consumed
+// the entire quarter's applicable employment taxes) yields no rule output
+// here (honest NEITHER) rather than a zero-credit rule, since Money does
+// not admit a negative remaining-limit subtraction without an explicit
+// floor-at-zero policy this pass does not add.
+
+// --- Section 3133: increase for the employer's own share of Medicare/RRTA
+//     tax ---------------------------------------------------------------------
+pub relation section_3133_increase(employer: Person, quarterStart: Date, forCredit: Text, amount: Money) kind institutional {
+    label en official "section 3133(a): the section 3131 or 3132 credit is increased by the section 3111(a)/(b)/3221(a) tax on the wages for which that credit is allowed (case-asserted amount, since this package's own section 3101/3111/3221 tax rules are not re-summed here for the specific wage subset)";
+}
+pub relation section_3133_tax_on_credited_wages(employer: Person, quarterStart: Date, forCredit: Text, amount: Money) kind empirical {
+    label en unofficial "case fact: the section 3111(a)/(b) plus section 3221(a) tax attributable to the qualified sick/family leave wages for which a section 3131/3132 credit is allowed for this quarter — feeds the section 3133(a) increase (this package does not re-derive it from the general FICA/RRTA tax rules for this specific wage subset, TECH_GAP)";
+}
+@source(IRC_S3133_A, relation = formalizes, coverage = exact, quote = "The credit allowed by section 3131 and the credit allowed by section 3132 shall each be increased by the amount of the taxes imposed by subsections (a) and (b) of section 3111 and section 3221(a) on qualified sick leave wages, or qualified family leave wages, for which credit is allowed under such section 3131 or 3132 (respectively).")
+rule Section3133Increase(employer: Person, quarterStart: Date, forCredit: Text, amount: Money) strict {
+    when section_3133_tax_on_credited_wages(employer, quarterStart, forCredit, amount);
+    then section_3133_increase(employer, quarterStart, forCredit, amount);
+}
+// (b) denial of double benefit: cross-reference only, NON_NORMATIVE.
+
+// --- Section 3134: employee retention credit (2020-2021 COVID-19 closures) -
+
+pub relation eligible_employer_3134(employer: Person, quarterStart: Date) kind empirical {
+    label en unofficial "case fact: this employer is an \"eligible employer\" under section 3134(c) for this calendar quarter (full or partial suspension of operations by a COVID-19 governmental order, or a significant decline in gross receipts — the (c)(1)-(4) tests are TECH_GAP, folded into this one case fact)";
+}
+pub relation qualified_wages_3134_per_employee_quarter(employer: Person, employee: Person, quarterStart: Date, amount: Money, isRecoveryStartup: Boolean) kind empirical {
+    label en official "qualified wages (section 3134(c)(3)-type) paid to this employee for this calendar quarter, before the per-employee cap, and whether the employer is a recovery startup business (section 3134(c)(5)) (case fact)";
+}
+pub relation qualified_wages_3134_capped(employer: Person, employee: Person, quarterStart: Date, amount: Money) kind institutional {
+    label en official "section 3134(b)(1)(A): qualified wages per employee per quarter, capped at $10,000";
+}
+@source(IRC_S3134_B, relation = formalizes, coverage = exact, quote = "The amount of qualified wages with respect to any employee which may be taken into account under subsection (a) by the eligible employer for any calendar quarter shall not exceed $10,000.")
+rule Section3134PerEmployeeCapAbove(employer: Person, employee: Person, quarterStart: Date, amount: Money, isRecoveryStartup: Boolean) strict {
+    when qualified_wages_3134_per_employee_quarter(employer, employee, quarterStart, amount, isRecoveryStartup) and amount > 10000.00 USD;
+    then qualified_wages_3134_capped(employer, employee, quarterStart, 10000.00 USD);
+}
+rule Section3134PerEmployeeCapBelow(employer: Person, employee: Person, quarterStart: Date, amount: Money, isRecoveryStartup: Boolean) strict {
+    when qualified_wages_3134_per_employee_quarter(employer, employee, quarterStart, amount, isRecoveryStartup) and amount <= 10000.00 USD;
+    then qualified_wages_3134_capped(employer, employee, quarterStart, amount);
+}
+pub relation qualified_wages_3134_total_for_quarter(employer: Person, quarterStart: Date, amount: Money) kind institutional;
+rule QualifiedWages3134TotalForQuarter(employer0: Person, quarterStart0: Date, employee0: Person) strict {
+    when qualified_wages_3134_capped(employer0, employee0, quarterStart0, _);
+    then qualified_wages_3134_total_for_quarter(employer0, quarterStart0,
+        sum all amount: Money for employee: Person where qualified_wages_3134_capped(employer0, employee, quarterStart0, amount));
+}
+pub relation section_3134_gross_credit(employer: Person, quarterStart: Date, amount: Money) kind institutional {
+    label en official "section 3134(a): 70 percent of total qualified wages across all employees for the calendar quarter";
+}
+@source(IRC_S3134_A, relation = formalizes, coverage = exact, quote = "there shall be allowed as a credit against applicable employment taxes for each calendar quarter an amount equal to 70 percent of the qualified wages with respect to each employee of such employer for such calendar quarter")
+rule Section3134GrossCredit(employer: Person, quarterStart: Date, totalWages: Money) strict {
+    // stage 3: section 3134(n) — only wages paid after June 30, 2021 and before October 1, 2021; governmental employers (f)(1)
+    when eligible_employer_3134(employer, quarterStart) and qualified_wages_3134_total_for_quarter(employer, quarterStart, totalWages)
+        and quarterStart >= @2021-07-01 and quarterStart <= @2021-09-30
+        and not_known(credit_not_applicable_to_governmental_employer(employer));
+    then section_3134_gross_credit(employer, quarterStart, round(totalWages * 0.70, 2, "HALF_UP"));
+}
+rule Section3134GrossCreditRecoveryStartupWindow(employer: Person, quarterStart: Date, totalWages: Money) strict {
+    label en official "section 3134(n) parenthetical: for a recovery startup business the wage window runs to January 1, 2022 (the fourth quarter of 2021 is added)";
+    when eligible_employer_3134(employer, quarterStart) and qualified_wages_3134_total_for_quarter(employer, quarterStart, totalWages)
+        and is_recovery_startup_business(employer, quarterStart)
+        and quarterStart >= @2021-10-01 and quarterStart <= @2021-12-31
+        and not_known(credit_not_applicable_to_governmental_employer(employer));
+    then section_3134_gross_credit(employer, quarterStart, round(totalWages * 0.70, 2, "HALF_UP"));
+}
+pub relation section_3134_credit(employer: Person, quarterStart: Date, amount: Money) kind institutional {
+    label en official "section 3134(b)(2): the section 3134 credit after the employment-tax limitation (reduced by sections 3131/3132 credits already applied)";
+}
+pub relation section_3134_refundable_excess(employer: Person, quarterStart: Date, amount: Money) kind institutional {
+    label en official "section 3134(b)(3): the excess of the gross section 3134 credit over the limitation, refundable under sections 6402(a)/6413(b)";
+}
+rule Section3134CreditBelowLimit(employer: Person, quarterStart: Date, gross: Money, limit: Money) strict {
+    when section_3134_gross_credit(employer, quarterStart, gross) and applicable_employment_taxes_for_quarter(employer, quarterStart, limit)
+        and not_known(section_3131_credit_exists(employer, quarterStart)) and not_known(section_3132_credit_exists(employer, quarterStart)) and gross <= limit;
+    then section_3134_credit(employer, quarterStart, gross);
+}
+rule Section3134CreditAboveLimit(employer: Person, quarterStart: Date, gross: Money, limit: Money) strict {
+    when section_3134_gross_credit(employer, quarterStart, gross) and applicable_employment_taxes_for_quarter(employer, quarterStart, limit)
+        and not_known(section_3131_credit_exists(employer, quarterStart)) and not_known(section_3132_credit_exists(employer, quarterStart)) and gross > limit;
+    then section_3134_credit(employer, quarterStart, limit);
+}
+rule Section3134RefundableExcess(employer: Person, quarterStart: Date, gross: Money, limit: Money) strict {
+    when section_3134_gross_credit(employer, quarterStart, gross) and applicable_employment_taxes_for_quarter(employer, quarterStart, limit)
+        and not_known(section_3131_credit_exists(employer, quarterStart)) and not_known(section_3132_credit_exists(employer, quarterStart)) and gross > limit;
+    then section_3134_refundable_excess(employer, quarterStart, gross - limit);
+}
+relation section_3132_credit_exists(employer: Person, quarterStart: Date) kind institutional;
+rule Section3132CreditExists(employer: Person, quarterStart: Date, amount: Money) strict {
+    when section_3132_credit(employer, quarterStart, amount);
+    then section_3132_credit_exists(employer, quarterStart);
+}
+// TECH_GAP: when EITHER a section 3131 or 3132 credit has already reduced
+// the same quarter's applicable employment taxes, this package does NOT
+// re-derive the doubly-reduced limitation for section 3134 (it takes no
+// position rather than computing an incorrect number) — a real
+// implementation would chain all three credits' consumption of the same
+// tax base in a fixed order, matching section 3134(b)(2)'s own cross-
+// reference to "reduced by any credits allowed under sections 3131 and
+// 3132".
+pub relation recovery_startup_business_cap(employer: Person, quarterStart: Date, amount: Money) kind institutional {
+    label en official "section 3134(b)(1)(B): for a recovery startup business, the credit (after the per-employee $10,000 cap) is further capped at $50,000 for the quarter";
+}
+relation is_recovery_startup_business(employer: Person, quarterStart: Date) kind empirical {
+    label en unofficial "case fact: this employer is a recovery startup business under section 3134(c)(5) for this quarter";
+}
+rule RecoveryStartupCapApplies(employer: Person, quarterStart: Date, credit: Money) strict {
+    when is_recovery_startup_business(employer, quarterStart) and section_3134_credit(employer, quarterStart, credit) and credit > 50000.00 USD;
+    then recovery_startup_business_cap(employer, quarterStart, 50000.00 USD);
+}
+// (c) eligible-employer/qualified-wages/recovery-startup-business
+// definitions beyond the case facts above, (d)-(n) (aggregation rules,
+// election out, PPP-loan double-benefit denial, advance payments, IRS
+// assessment authority, and the section 3134(m) September-30-2021
+// application window with its (n) third-and-fourth-quarter-2021 recovery-
+// startup extension): TECH_GAP/NON_NORMATIVE, not re-derived this pass.

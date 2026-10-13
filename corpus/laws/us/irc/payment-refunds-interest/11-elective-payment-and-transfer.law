@@ -1,0 +1,871 @@
+// 26 U.S.C. §§6417 and 6418 — elective payment of applicable credits (§6417)
+// and transfer of certain credits (§6418), Chapter 65, Subchapter B. Stage 2,
+// with the Pub. L. 119-21 amendments that reach these sections.
+//
+// JUDGMENT CALLS AND GAPS
+//  - The credits themselves (§§30C, 45, 45Q, 45U, 45V, 45W, 45X, 45Y, 45Z,
+//    48, 48C, 48E, 40A(b)(4)) are computed by `credits`; this module reads
+//    a credit item as a case-asserted fact (`elective_credit_item`) and
+//    decides whether it is an applicable/eligible credit, whether an
+//    election is valid, and what the election does. Dependency contracts are
+//    listed in `coverage/payment-refunds-interest.deps.json`.
+//  - An election is a POWER (it changes the regime: the credit is deemed
+//    allowed and zeroed, a payment against tax is treated as made, or the
+//    credit passes to the transferee). `valid_when` takes one atom
+//    (`LDC-E1305`), so every condition of validity is folded into a derived
+//    relation (`elective_payment_election_valid`, `credit_transfer_election_valid`).
+//  - The applicability boundary is "taxable years beginning after Dec. 31,
+//    2022" (Pub. L. 117-169 sec. 13801(g), note): it is a condition on the
+//    beginning of the electing taxable year, not an `effective` window (the
+//    boundary is a property of the year, not of the date the law is read).
+//  - The credit period ("10-year period beginning on the date such facility
+//    was originally placed in service", §45(a)(2)(A)(ii); 12 years for §45Q)
+//    belongs to `credits`: its end date is a case fact
+//    (`credit_period_end`), TECH-GAPS G2626.
+//  - "Reasonable cause" (§6417(d)(6)(B), §6418(g)(2)(B)) is an external
+//    judgment of the Secretary (DECISION-0194 channel 1).
+//  - "180 days after the date of the enactment of this section": enactment
+//    2022-08-16 (the Pub. L. 117-169 note), so 2023-02-12.
+//  - Pub. L. 119-21: sec. 70512(h) inserts §6418(g)(5) (no transfer of
+//    the clause (iii), (iv), (vi), (vii), (viii), (xi) credits to a specified
+//    foreign entity); sec. 70512(j)(2) inserts §6417(d)(6)(D) (disallowance
+//    of an applicable energy credit under §6662(m)(2) is an excessive
+//    payment); sec. 70521(j)(2) inserts clause (xii) (small agri-biodiesel
+//    producer credit) into §6418(f)(1)(A), for fuel sold or used after
+//    2025-06-30. The conforming renumbering of §6418(g)(3)
+//    ("(a)(5)" -> "(a)(7)") and §6417(d)(3)(C)(i)(II)(bb) (45Q paragraph
+//    references) change no modelled condition (SOURCE_GAP rows).
+
+language "law.core" version "0.2";
+package us.irc.payment_refunds_interest version "0.1.1";
+namespace "urn:us:irc:payment_refunds_interest:clir";
+
+use self::{
+    IRC_S6417_A,
+    IRC_S6417_B,
+    IRC_S6417_C,
+    IRC_S6417_D,
+    IRC_S6417_E,
+    IRC_S6417_F,
+    IRC_S6417_NOTE_5,
+    IRC_S6418_A,
+    IRC_S6418_B,
+    IRC_S6418_C,
+    IRC_S6418_D,
+    IRC_S6418_E,
+    IRC_S6418_F,
+    IRC_S6418_G,
+    Person,
+    Secretary,
+    TaxableYear,
+    election_45V_timing_defect,
+    transfer_election_outside_facility_period,
+};
+
+entity ElectiveCredit { label en unofficial "a credit determined with respect to a facility or property for a taxable year, which may be the subject of an election under §6417 or §6418"; }
+enum CreditItemKind {
+    AlternativeFuelRefuelingProperty30C;
+    RenewableElectricityProduction45;
+    CarbonOxideSequestration45Q;
+    ZeroEmissionNuclearPower45U;
+    CleanHydrogenProduction45V;
+    QualifiedCommercialVehicles45W;
+    AdvancedManufacturingProduction45X;
+    CleanElectricityProduction45Y;
+    CleanFuelProduction45Z;
+    EnergyCredit48;
+    QualifyingAdvancedEnergyProject48C;
+    CleanElectricityInvestment48E;
+    SmallAgriBiodieselProducer40A;
+    label en unofficial "the kind of credit item (the section of the Code that determines it)";
+}
+relation elective_credit_item(cr: ElectiveCredit, holder: Person, y: TaxableYear, k: CreditItemKind, amount: Money) kind empirical {
+    label en unofficial "the credit determined for the holder for the taxable year: kind and amount — dependency contract: `credits`";
+}
+relation credit_originally_placed_in_service_on(cr: ElectiveCredit, d: Date) kind empirical {
+    label en official "the date the qualified facility / carbon capture equipment / clean hydrogen facility was originally placed in service";
+}
+relation credit_30C_treated_as_38b_credit(cr: ElectiveCredit) kind empirical {
+    label en official "so much of the credit for alternative fuel vehicle refueling property which, pursuant to section 30C(d)(1), is treated as a credit listed in section 38(b)";
+}
+relation entity_described_168h2A_i_ii_iv(e: Person) kind empirical {
+    label en official "a tax-exempt entity described in clause (i), (ii), or (iv) of section 168(h)(2)(A)";
+}
+relation credit_held_directly_by_pass_through(cr: ElectiveCredit, pt: Person) kind empirical {
+    label en official "the credit is determined with respect to any facility or property held directly by a partnership or S corporation";
+}
+relation credit_period_end(cr: ElectiveCredit, d: Date) kind empirical {
+    label en unofficial "TECH_GAP G2626: the last day of the credit period of the facility (10 years from placement in service for §45; 12 years for §45Q; §45Y(b)(1)(B)) — computed by `credits`, asserted here";
+}
+
+// ============================================================================
+// §6417(b) — Applicable credit
+// ============================================================================
+
+relation applicable_credit_6417(cr: ElectiveCredit) kind institutional {
+    label en official "the credit is one of the twelve applicable credits of section 6417(b)";
+}
+@source(IRC_S6417_B, relation = formalizes, coverage = exact, quote = "(1) So much of the credit for alternative fuel vehicle refueling property allowed under section 30C which, pursuant to subsection (d)(1) of such section, is treated as a credit listed in section 38(b).")
+rule S6417Applicable30C strict { for cr: ElectiveCredit; for h: Person; for y: TaxableYear; for amt: Money; when elective_credit_item(cr, h, y, AlternativeFuelRefuelingProperty30C, amt) and credit_30C_treated_as_38b_credit(cr); then applicable_credit_6417(cr); }
+@source(IRC_S6417_B, relation = formalizes, coverage = exact, quote = "(2) So much of the renewable electricity production credit determined under section 45(a) as is attributable to qualified facilities which are originally placed in service after December 31, 2022.")
+rule S6417Applicable45 strict { for cr: ElectiveCredit; for h: Person; for y: TaxableYear; for amt: Money; for d: Date; when elective_credit_item(cr, h, y, RenewableElectricityProduction45, amt) and credit_originally_placed_in_service_on(cr, d) and d > @2022-12-31; then applicable_credit_6417(cr); }
+@source(IRC_S6417_B, relation = formalizes, coverage = exact, quote = "(3) So much of the credit for carbon oxide sequestration determined under section 45Q(a) as is attributable to carbon capture equipment which is originally placed in service after December 31, 2022.")
+rule S6417Applicable45Q strict { for cr: ElectiveCredit; for h: Person; for y: TaxableYear; for amt: Money; for d: Date; when elective_credit_item(cr, h, y, CarbonOxideSequestration45Q, amt) and credit_originally_placed_in_service_on(cr, d) and d > @2022-12-31; then applicable_credit_6417(cr); }
+@source(IRC_S6417_B, relation = formalizes, coverage = exact, quote = "(4) The zero-emission nuclear power production credit determined under section 45U(a).")
+rule S6417Applicable45U strict { for cr: ElectiveCredit; for h: Person; for y: TaxableYear; for amt: Money; when elective_credit_item(cr, h, y, ZeroEmissionNuclearPower45U, amt); then applicable_credit_6417(cr); }
+@source(IRC_S6417_B, relation = formalizes, coverage = exact, quote = "(5) So much of the credit for production of clean hydrogen determined under section 45V(a) as is attributable to qualified clean hydrogen production facilities which are originally placed in service after December 31, 2012.")
+rule S6417Applicable45V strict { for cr: ElectiveCredit; for h: Person; for y: TaxableYear; for amt: Money; for d: Date; when elective_credit_item(cr, h, y, CleanHydrogenProduction45V, amt) and credit_originally_placed_in_service_on(cr, d) and d > @2012-12-31; then applicable_credit_6417(cr); }
+@source(IRC_S6417_B, relation = formalizes, coverage = exact, quote = "(6) In the case of a tax-exempt entity described in clause (i), (ii), or (iv) of section 168(h)(2)(A), the credit for qualified commercial vehicles determined under section 45W by reason of subsection (d)(3) thereof.")
+rule S6417Applicable45W strict { for cr: ElectiveCredit; for h: Person; for y: TaxableYear; for amt: Money; when elective_credit_item(cr, h, y, QualifiedCommercialVehicles45W, amt) and entity_described_168h2A_i_ii_iv(h); then applicable_credit_6417(cr); }
+@source(IRC_S6417_B, relation = formalizes, coverage = exact, quote = "(7) The credit for advanced manufacturing production under section 45X(a).")
+rule S6417Applicable45X strict { for cr: ElectiveCredit; for h: Person; for y: TaxableYear; for amt: Money; when elective_credit_item(cr, h, y, AdvancedManufacturingProduction45X, amt); then applicable_credit_6417(cr); }
+@source(IRC_S6417_B, relation = formalizes, coverage = exact, quote = "(8) The clean electricity production credit determined under section 45Y(a).")
+rule S6417Applicable45Y strict { for cr: ElectiveCredit; for h: Person; for y: TaxableYear; for amt: Money; when elective_credit_item(cr, h, y, CleanElectricityProduction45Y, amt); then applicable_credit_6417(cr); }
+@source(IRC_S6417_B, relation = formalizes, coverage = exact, quote = "(9) The clean fuel production credit determined under section 45Z(a).")
+rule S6417Applicable45Z strict { for cr: ElectiveCredit; for h: Person; for y: TaxableYear; for amt: Money; when elective_credit_item(cr, h, y, CleanFuelProduction45Z, amt); then applicable_credit_6417(cr); }
+@source(IRC_S6417_B, relation = formalizes, coverage = exact, quote = "(10) The energy credit determined under section 48.")
+rule S6417Applicable48 strict { for cr: ElectiveCredit; for h: Person; for y: TaxableYear; for amt: Money; when elective_credit_item(cr, h, y, EnergyCredit48, amt); then applicable_credit_6417(cr); }
+@source(IRC_S6417_B, relation = formalizes, coverage = exact, quote = "(11) The qualifying advanced energy project credit determined under section 48C.")
+rule S6417Applicable48C strict { for cr: ElectiveCredit; for h: Person; for y: TaxableYear; for amt: Money; when elective_credit_item(cr, h, y, QualifyingAdvancedEnergyProject48C, amt); then applicable_credit_6417(cr); }
+@source(IRC_S6417_B, relation = formalizes, coverage = exact, quote = "(12) The clean electricity investment credit determined under section 48E.")
+rule S6417Applicable48E strict { for cr: ElectiveCredit; for h: Person; for y: TaxableYear; for amt: Money; when elective_credit_item(cr, h, y, CleanElectricityInvestment48E, amt); then applicable_credit_6417(cr); }
+
+// ============================================================================
+// §6417(d)(1) — Applicable entity
+// ============================================================================
+
+relation entity_is_tax_exempt_organization(e: Person) kind empirical { label en official "(i) any organization exempt from the tax imposed by subtitle A"; }
+relation entity_is_state_or_political_subdivision(e: Person) kind empirical { label en official "(ii) any State or political subdivision thereof"; }
+relation entity_is_tennessee_valley_authority(e: Person) kind empirical { label en official "(iii) the Tennessee Valley Authority"; }
+relation entity_is_indian_tribal_government(e: Person) kind empirical { label en official "(iv) an Indian tribal government (as defined in section 30D(g)(9))"; }
+relation entity_is_alaska_native_corporation(e: Person) kind empirical { label en official "(v) any Alaska Native Corporation (as defined in section 3 of the Alaska Native Claims Settlement Act)"; }
+relation entity_is_rural_electric_cooperative(e: Person) kind empirical { label en official "(vi) any corporation operating on a cooperative basis which is engaged in furnishing electric energy to persons in rural areas"; }
+relation applicable_entity_by_type(e: Person) kind institutional { label en official "the entity is described in section 6417(d)(1)(A)"; }
+@source(IRC_S6417_D, relation = formalizes, coverage = exact, quote = "(i) any organization exempt from the tax imposed by subtitle A,")
+rule S6417EntityExemptOrg strict { for e: Person; when entity_is_tax_exempt_organization(e); then applicable_entity_by_type(e); }
+@source(IRC_S6417_D, relation = formalizes, coverage = exact, quote = "(ii) any State or political subdivision thereof,")
+rule S6417EntityState strict { for e: Person; when entity_is_state_or_political_subdivision(e); then applicable_entity_by_type(e); }
+@source(IRC_S6417_D, relation = formalizes, coverage = exact, quote = "(iii) the Tennessee Valley Authority,")
+rule S6417EntityTva strict { for e: Person; when entity_is_tennessee_valley_authority(e); then applicable_entity_by_type(e); }
+@source(IRC_S6417_D, relation = formalizes, coverage = exact, quote = "(iv) an Indian tribal government (as defined in section 30D(g)(9)),")
+rule S6417EntityTribe strict { for e: Person; when entity_is_indian_tribal_government(e); then applicable_entity_by_type(e); }
+@source(IRC_S6417_D, relation = formalizes, coverage = exact, quote = "(v) any Alaska Native Corporation (as defined in section 3 of the Alaska Native Claims Settlement Act (43 U.S.C. 1602(m)), or")
+rule S6417EntityAlaskaNative strict { for e: Person; when entity_is_alaska_native_corporation(e); then applicable_entity_by_type(e); }
+@source(IRC_S6417_D, relation = formalizes, coverage = exact, quote = "(vi) any corporation operating on a cooperative basis which is engaged in furnishing electric energy to persons in rural areas.")
+rule S6417EntityRuralCoop strict { for e: Person; when entity_is_rural_electric_cooperative(e); then applicable_entity_by_type(e); }
+
+// (d)(1)(B)-(E): other taxpayers may elect to be applicable entities for one credit.
+relation optin_election_45V_facility(e: Person, y: TaxableYear) kind empirical { label en official "(B) a taxpayer other than an applicable entity makes an election with respect to a taxable year in which it placed in service a qualified clean hydrogen production facility"; }
+relation optin_election_45Q_equipment(e: Person, y: TaxableYear) kind empirical { label en official "(C) a taxpayer other than an applicable entity makes an election with respect to a taxable year in which it has, after 2022-12-31, placed in service carbon capture equipment at a qualified facility"; }
+relation optin_election_45X_components(e: Person, y: TaxableYear) kind empirical { label en official "(D)(i) a taxpayer other than an applicable entity makes an election with respect to a taxable year in which it has, after 2022-12-31, produced eligible components"; }
+relation optin_election_year_begins_after_2032(y: TaxableYear) kind institutional { label en official "(E)(ii) no election may be made under (B), (C) or (D) with respect to a taxable year beginning after December 31, 2032"; }
+rule S6417OptinYearTooLate strict {
+    for y: TaxableYear;
+    for b: Date;
+    when us.irc.core::begins(y, b) and b > @2032-12-31;
+    then optin_election_year_begins_after_2032(y);
+}
+relation optin_applicable_entity_for_credit(e: Person, y: TaxableYear, k: CreditItemKind) kind institutional {
+    label en official "the opt-in taxpayer is treated as an applicable entity for the taxable year, but only with respect to the credit named";
+}
+@source(IRC_S6417_D, relation = formalizes, coverage = exact, quote = "such taxpayer shall be treated as an applicable entity for purposes of this section for such taxable year, but only with respect to the credit described in subsection (b)(5).")
+rule S6417Optin45V strict {
+    for e: Person;
+    for y: TaxableYear;
+    when optin_election_45V_facility(e, y) and not_known(optin_election_year_begins_after_2032(y));
+    then optin_applicable_entity_for_credit(e, y, CleanHydrogenProduction45V);
+}
+@source(IRC_S6417_D, relation = formalizes, coverage = exact, quote = "such taxpayer shall be treated as an applicable entity for purposes of this section for such taxable year, but only with respect to the credit described in subsection (b)(3).")
+rule S6417Optin45Q strict {
+    for e: Person;
+    for y: TaxableYear;
+    when optin_election_45Q_equipment(e, y) and not_known(optin_election_year_begins_after_2032(y));
+    then optin_applicable_entity_for_credit(e, y, CarbonOxideSequestration45Q);
+}
+@source(IRC_S6417_D, relation = formalizes, coverage = exact, quote = "such taxpayer shall be treated as an applicable entity for purposes of this section for such taxable year, but only with respect to the credit described in subsection (b)(7).")
+rule S6417Optin45X strict {
+    for e: Person;
+    for y: TaxableYear;
+    when optin_election_45X_components(e, y) and not_known(optin_election_year_begins_after_2032(y));
+    then optin_applicable_entity_for_credit(e, y, AdvancedManufacturingProduction45X);
+}
+// (D)(ii)(II), (C)/(D) revocation: an opt-in election may be revoked for later years and not re-revoked.
+relation optin_revocation_made_for_year(e: Person, y: TaxableYear) kind empirical { label en official "the taxpayer elects to revoke the application of the opt-in election for the specified year and each subsequent year within the 5-year period"; }
+relation optin_revocation_already_made(e: Person, y: TaxableYear) kind empirical { label en official "any election to revoke may not be subsequently revoked"; }
+
+// ============================================================================
+// §6417(a), (d)(3): the election, its timing and its validity
+// ============================================================================
+
+relation elects_under_6417(e: Person, cr: ElectiveCredit, made_on: Date) kind empirical {
+    label en official "an applicable entity elects (at such time and in such manner as the Secretary may provide) under section 6417 with respect to an applicable credit";
+}
+relation credit_election_year(cr: ElectiveCredit, y: TaxableYear) kind institutional { label en unofficial "the taxable year for which the credit was determined"; }
+rule S6417ElectionYearOfCredit strict {
+    for cr: ElectiveCredit;
+    for h: Person;
+    for y: TaxableYear;
+    for k: CreditItemKind;
+    for amt: Money;
+    when elective_credit_item(cr, h, y, k, amt);
+    then credit_election_year(cr, y);
+}
+relation taxable_year_begins_after_2022(y: TaxableYear) kind institutional {
+    label en official "taxable years beginning after December 31, 2022 (Pub. L. 117-169 sec. 13801(g))";
+}
+@source(IRC_S6417_NOTE_5, relation = applies, coverage = exact, quote = "shall apply to taxable years beginning after December 31, 2022")
+rule S6417YearAfter2022 strict {
+    for y: TaxableYear;
+    for b: Date;
+    when us.irc.core::begins(y, b) and b > @2022-12-31;
+    then taxable_year_begins_after_2022(y);
+}
+relation entity_may_elect_for_credit(e: Person, cr: ElectiveCredit) kind institutional {
+    label en official "the entity is an applicable entity (by type, or by opt-in for that credit) with respect to the credit";
+}
+rule S6417MayElectByType strict {
+    for e: Person;
+    for cr: ElectiveCredit;
+    when applicable_entity_by_type(e) and applicable_credit_6417(cr);
+    then entity_may_elect_for_credit(e, cr);
+}
+rule S6417MayElectByOptin strict {
+    for e: Person;
+    for cr: ElectiveCredit;
+    for y: TaxableYear;
+    for k: CreditItemKind;
+    for amt: Money;
+    when optin_applicable_entity_for_credit(e, y, k) and elective_credit_item(cr, e, y, k, amt) and applicable_credit_6417(cr);
+    then entity_may_elect_for_credit(e, cr);
+}
+relation return_due_date_with_extensions(e: Person, y: TaxableYear, d: Date) kind empirical {
+    label en official "the due date (including extensions of time) for the return of tax for the taxable year for which the election is made";
+}
+relation entity_files_no_return_6011_or_6033a(e: Person) kind empirical { label en official "a government or political subdivision for which no return is required under section 6011 or 6033(a)"; }
+relation secretary_determined_election_date_for_government(e: Person, d: Date) kind empirical { label en official "such date as is determined appropriate by the Secretary"; }
+relation election_within_time(e: Person, cr: ElectiveCredit) kind institutional { label en official "made not later than the due date (including extensions) for the return, and not earlier than 180 days after the enactment of section 6417 (2023-02-12)"; }
+@source(IRC_S6417_D, relation = formalizes, coverage = partial, quote = "(II) in any other case, the due date (including extensions of time) for the return of tax for the taxable year for which the election is made, but in no event earlier than 180 days after the date of the enactment of this section.")
+rule S6417ElectionWithinTimeOrdinary strict {
+    for e: Person;
+    for cr: ElectiveCredit;
+    for y: TaxableYear;
+    for made: Date;
+    for due: Date;
+    when elects_under_6417(e, cr, made) and credit_election_year(cr, y) and return_due_date_with_extensions(e, y, due) and made <= due and made >= @2023-02-12;
+    then election_within_time(e, cr);
+}
+@source(IRC_S6417_D, relation = formalizes, coverage = partial, quote = "(I) in the case of any government, or political subdivision, described in paragraph (1) and for which no return is required under section 6011 or 6033(a), such date as is determined appropriate by the Secretary, or")
+rule S6417ElectionWithinTimeGovernment strict {
+    for e: Person;
+    for cr: ElectiveCredit;
+    for made: Date;
+    for latest: Date;
+    when elects_under_6417(e, cr, made) and entity_files_no_return_6011_or_6033a(e) and secretary_determined_election_date_for_government(e, latest) and made <= latest;
+    then election_within_time(e, cr);
+}
+relation registration_required_by_secretary(cr: ElectiveCredit) kind empirical { label en official "the Secretary requires such information or registration as he deems necessary for preventing duplication, fraud, improper payments, or excessive payments"; }
+relation registration_satisfied(cr: ElectiveCredit) kind empirical;
+relation registration_condition_met(cr: ElectiveCredit) kind institutional { label en official "as a condition of, and prior to, any amount being treated as a payment: any registration the Secretary requires has been made"; }
+@source(IRC_S6417_D, relation = formalizes, coverage = exact, quote = "As a condition of, and prior to, any amount being treated as a payment which is made by an applicable entity under subsection (a), the Secretary may require such information or registration as the Secretary deems necessary")
+rule S6417RegistrationNotRequired strict {
+    for cr: ElectiveCredit;
+    for h: Person;
+    for y: TaxableYear;
+    for k: CreditItemKind;
+    for amt: Money;
+    when elective_credit_item(cr, h, y, k, amt) and not_known(registration_required_by_secretary(cr));
+    then registration_condition_met(cr);
+}
+rule S6417RegistrationRequiredAndSatisfied strict {
+    for cr: ElectiveCredit;
+    when registration_required_by_secretary(cr) and registration_satisfied(cr);
+    then registration_condition_met(cr);
+}
+relation elective_payment_election_valid(e: Person, cr: ElectiveCredit) kind institutional {
+    label en official "the election is valid: applicable entity, applicable credit, taxable year after 2022, timely, and the registration condition met";
+}
+rule S6417ElectionValid strict {
+    for e: Person;
+    for cr: ElectiveCredit;
+    for y: TaxableYear;
+    for made: Date;
+    when elects_under_6417(e, cr, made) and entity_may_elect_for_credit(e, cr) and credit_election_year(cr, y) and taxable_year_begins_after_2022(y)
+        and election_within_time(e, cr) and registration_condition_met(cr) and not_known(election_45V_timing_defect(cr));
+    then elective_payment_election_valid(e, cr);
+}
+relation electing_entity_treated_as_paying_tax(e: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "such entity shall be treated as making a payment against the tax imposed by subtitle A for the taxable year equal to the amount of such credit";
+}
+@source(IRC_S6417_A, relation = formalizes, coverage = exact, quote = "such entity shall be treated as making a payment against the tax imposed by subtitle A (for the taxable year with respect to which such credit was determined) equal to the amount of such credit.")
+rule S6417ElectionCreatesPaymentAgainstTax strict {
+    for e: Person;
+    for cr: ElectiveCredit;
+    for made: Date;
+    for y: TaxableYear;
+    for k: CreditItemKind;
+    for amt: Money;
+    when elects_under_6417(e, cr, made) and elective_credit_item(cr, e, y, k, amt);
+    then power S6417ElectiveEntityPaymentPower {
+        holder e;
+        over Secretary;
+        exercise elects_under_6417(e, cr, made);
+        valid_when elective_payment_election_valid(e, cr);
+        effect create(electing_entity_treated_as_paying_tax(e, y, amt));
+    };
+}
+// (a)(1)-(4): irrevocability and the years the election covers.
+relation revokes_6417_election(e: Person, cr: ElectiveCredit) kind empirical;
+relation election_revocation_permitted(e: Person, cr: ElectiveCredit) kind empirical {
+    label en official "revocation permitted by (d)(1)(D)(ii)(II), (d)(3)(C)(iii) or (d)(3)(D)(iii)";
+}
+@source(IRC_S6417_D, relation = formalizes, coverage = exact, quote = "Any election under subsection (a), once made, shall be irrevocable and shall apply (except as otherwise provided in this paragraph) with respect to any credit for the taxable year for which the election is made.")
+rule S6417ElectionIsIrrevocable defeasible {
+    for e: Person;
+    for cr: ElectiveCredit;
+    for made: Date;
+    when elects_under_6417(e, cr, made) and revokes_6417_election(e, cr);
+    then prohibition NoRevocationOfElectivePaymentElection {
+        bearer e;
+        beneficiary Secretary;
+        action revokes_6417_election(e, cr);
+        window [made, infinity];
+    };
+    unless election_revocation_permitted(e, cr) and revokes_6417_election(e, cr) and elects_under_6417(e, cr, made);
+}
+relation election_covers_year(cr: ElectiveCredit, y: TaxableYear) kind institutional {
+    label en official "the election applies to the taxable year for which it is made and to any subsequent year within the credit period of the facility";
+}
+@source(IRC_S6417_D, relation = formalizes, coverage = partial, quote = "(iii) shall apply to such taxable year and to any subsequent taxable year which is within the period described in subsection (a)(2)(A)(ii) of section 45 with respect to such qualified facility.")
+rule S6417ElectionCoversCreditPeriod strict {
+    for cr: ElectiveCredit;
+    for e: Person;
+    for made: Date;
+    for y: TaxableYear;
+    for y2: TaxableYear;
+    for b: Date;
+    for last: Date;
+    when elects_under_6417(e, cr, made) and credit_election_year(cr, y) and credit_period_end(cr, last) and not_known(optin_year_covered_for_credit(cr, y)) and us.irc.core::begins(y2, b) and b <= last and taxable_year_after_or_same(y, y2);
+    then election_covers_year(cr, y2);
+}
+relation taxable_year_after_or_same(y: TaxableYear, y2: TaxableYear) kind empirical {
+    label en unofficial "the second taxable year is the first or a later year of the same taxpayer (ordering of years is asserted; the core vocabulary carries no successor relation)";
+}
+// (d)(1)(D)(iii), (d)(3)(C)(ii), (d)(3)(D)(ii): no §6418 transfer for years covered by the opt-in election.
+relation transfer_election_made_for_covered_year(cr: ElectiveCredit, y: TaxableYear) kind empirical;
+relation optin_year_covered_for_credit(cr: ElectiveCredit, y: TaxableYear) kind institutional { label en official "the taxable year is one of the years covered by an opt-in election under (d)(1)(B), (C) or (D) with respect to the credit"; }
+rule S6417OptinCoveredYear strict {
+    for cr: ElectiveCredit;
+    for e: Person;
+    for y: TaxableYear;
+    for k: CreditItemKind;
+    for amt: Money;
+    when optin_applicable_entity_for_credit(e, y, k) and elective_credit_item(cr, e, y, k, amt);
+    then optin_year_covered_for_credit(cr, y);
+}
+relation transfer_barred_by_optin(cr: ElectiveCredit, y: TaxableYear) kind institutional { label en official "no election may be made under section 6418(a) for that taxable year with respect to the credit"; }
+@source(IRC_S6417_D, relation = formalizes, coverage = exact, quote = "For any taxable year described in clause (ii)(I), no election may be made by the taxpayer under section 6418(a) for such taxable year with respect to eligible components for purposes of the credit described in subsection (b)(7).")
+rule S6417OptinBarsTransfer strict {
+    for cr: ElectiveCredit;
+    for y: TaxableYear;
+    when optin_year_covered_for_credit(cr, y) and transfer_election_made_for_covered_year(cr, y);
+    then transfer_barred_by_optin(cr, y);
+}
+
+// (d)(4): the date the payment is treated as made.
+relation return_due_date_without_extensions(e: Person, y: TaxableYear, d: Date) kind empirical { label en official "the due date (determined without regard to extensions) of the return of tax for the taxable year"; }
+relation return_filed_on_for_year(e: Person, y: TaxableYear, d: Date) kind empirical { label en official "the date on which such return is filed"; }
+relation government_claim_submitted_on(e: Person, d: Date) kind empirical { label en official "the date on which a government or subdivision submits a claim for credit or refund"; }
+relation government_hypothetical_6033a_due_date(e: Person, y: TaxableYear, d: Date) kind empirical { label en official "the date that a return would be due under section 6033(a) if such government or subdivision were described in that section"; }
+relation payment_date_candidate_6417(e: Person, y: TaxableYear, d: Date) kind institutional { label en unofficial "a candidate date for the deemed payment; the later one is the payment date"; }
+rule S6417PaymentCandidateDueDate strict { for e: Person; for y: TaxableYear; for d: Date; when not_known(entity_files_no_return_6011_or_6033a(e)) and return_due_date_without_extensions(e, y, d); then payment_date_candidate_6417(e, y, d); }
+rule S6417PaymentCandidateFiling strict { for e: Person; for y: TaxableYear; for d: Date; when not_known(entity_files_no_return_6011_or_6033a(e)) and return_filed_on_for_year(e, y, d); then payment_date_candidate_6417(e, y, d); }
+rule S6417PaymentCandidateGovernmentDue strict { for e: Person; for y: TaxableYear; for d: Date; when entity_files_no_return_6011_or_6033a(e) and government_hypothetical_6033a_due_date(e, y, d); then payment_date_candidate_6417(e, y, d); }
+rule S6417PaymentCandidateGovernmentClaim strict { for e: Person; for y: TaxableYear; for d: Date; when entity_files_no_return_6011_or_6033a(e) and government_claim_submitted_on(e, d) and return_due_date_without_extensions(e, y, _); then payment_date_candidate_6417(e, y, d); }
+relation later_payment_candidate_exists(e: Person, y: TaxableYear, d: Date) kind institutional { label en unofficial "helper (TECH-GAPS G136): a strictly later candidate exists"; }
+rule S6417LaterPaymentCandidateExists strict {
+    for e: Person;
+    for y: TaxableYear;
+    for d: Date;
+    for other: Date;
+    when payment_date_candidate_6417(e, y, d) and payment_date_candidate_6417(e, y, other) and other > d;
+    then later_payment_candidate_exists(e, y, d);
+}
+pub relation elective_payment_treated_made_on(e: Person, y: TaxableYear, d: Date) kind institutional {
+    label en official "the payment described in subsection (a) is treated as made on the later of the two dates of paragraph (4)";
+}
+@source(IRC_S6417_D, relation = formalizes, coverage = exact, quote = "(B) in any other case, the later of the due date (determined without regard to extensions) of the return of tax for the taxable year or the date on which such return is filed.")
+rule S6417PaymentTreatedMadeOnLaterDate strict {
+    for e: Person;
+    for y: TaxableYear;
+    for d: Date;
+    when payment_date_candidate_6417(e, y, d) and not_known(later_payment_candidate_exists(e, y, d));
+    then elective_payment_treated_made_on(e, y, d);
+}
+
+// (c): partnerships and S corporations.
+relation pass_through_elects_under_6417(pt: Person, cr: ElectiveCredit) kind empirical { label en official "the partnership or S corporation makes the election with respect to the credit (in such manner as the Secretary may provide)"; }
+relation secretary_pays_pass_through(pt: Person, cr: ElectiveCredit) kind empirical;
+@source(IRC_S6417_C, relation = formalizes, coverage = exact, quote = "(A) the Secretary shall make a payment to such partnership or S corporation equal to the amount of such credit,")
+rule S6417SecretaryPaysPassThrough strict {
+    for pt: Person;
+    for cr: ElectiveCredit;
+    for h: Person;
+    for y: TaxableYear;
+    for k: CreditItemKind;
+    for amt: Money;
+    when pass_through_elects_under_6417(pt, cr) and credit_held_directly_by_pass_through(cr, pt) and elective_credit_item(cr, pt, y, k, amt) and elective_payment_election_valid(pt, cr);
+    then duty PaySectionSixFourOneSevenPassThroughAmount {
+        bearer Secretary;
+        beneficiary pt;
+        goal achievement {
+            condition secretary_pays_pass_through(pt, cr);
+            window [-infinity, infinity];
+        }
+    };
+}
+relation partner_or_shareholder_elects_6417(partner: Person, cr: ElectiveCredit) kind empirical;
+@source(IRC_S6417_C, relation = formalizes, coverage = exact, quote = "no election by any partner or shareholder shall be allowed under subsection (a) with respect to any applicable credit determined with respect to such facility or property.")
+rule S6417NoPartnerElectionForDirectlyHeldFacility strict {
+    for partner: Person;
+    for cr: ElectiveCredit;
+    for pt: Person;
+    when partner_or_shareholder_elects_6417(partner, cr) and credit_held_directly_by_pass_through(cr, pt);
+    then prohibition NoPartnerOrShareholderElectionUnder6417 {
+        bearer partner;
+        beneficiary Secretary;
+        action partner_or_shareholder_elects_6417(partner, cr);
+        window [-infinity, infinity];
+    };
+}
+relation partner_distributive_share_of_credit(cr: ElectiveCredit, partner: Person, share: Decimal) kind empirical { label en official "the partner's distributive share (or shareholder's pro rata share) of the otherwise applicable credit for the taxable year"; }
+pub relation partner_share_of_tax_exempt_income_6417(cr: ElectiveCredit, partner: Person, amount: Money) kind institutional {
+    label en official "the amount with respect to which the election is made is tax exempt income (sections 705 and 1366), the partner's distributive share based on the partner's share of the otherwise applicable credit";
+}
+@source(IRC_S6417_C, relation = formalizes, coverage = exact, quote = "(C) any amount with respect to which the election in subsection (a) is made shall be treated as tax exempt income for purposes of sections 705 and 1366, and")
+rule S6417PassThroughElectionIsTaxExemptIncome strict {
+    for pt: Person;
+    for cr: ElectiveCredit;
+    for partner: Person;
+    for y: TaxableYear;
+    for k: CreditItemKind;
+    for amt: Money;
+    for share: Decimal;
+    when pass_through_elects_under_6417(pt, cr) and elective_payment_election_valid(pt, cr) and elective_credit_item(cr, pt, y, k, amt) and partner_distributive_share_of_credit(cr, partner, share);
+    then partner_share_of_tax_exempt_income_6417(cr, partner, round(amt * share, 2, "HALF_UP"));
+}
+
+// (d)(2): how the credit is determined for an electing entity.
+relation electing_entity_credit_determined_without_50b3_50b4Ai(cr: ElectiveCredit) kind institutional { label en official "any applicable credit shall be determined without regard to paragraphs (3) and (4)(A)(i) of section 50(b), treating the property as used in a trade or business of the applicable entity"; }
+@source(IRC_S6417_D, relation = formalizes, coverage = exact, quote = "(A) without regard to paragraphs (3) and (4)(A)(i) of section 50(b), and")
+rule S6417CreditDeterminedWithoutSection50bLimits strict {
+    for e: Person;
+    for cr: ElectiveCredit;
+    for made: Date;
+    when elects_under_6417(e, cr, made) and applicable_entity_by_type(e);
+    then electing_entity_credit_determined_without_50b3_50b4Ai(cr);
+}
+// (e): the credit is reduced to zero and deemed allowed.
+pub relation credit_after_6417_election(cr: ElectiveCredit, amount: Money) kind institutional { label en official "the credit is reduced to zero (for the purposes of the credit's own computation)"; }
+relation credit_deemed_allowed_after_election(cr: ElectiveCredit, amount: Money) kind institutional { label en official "for any other purposes under this title the credit is deemed to have been allowed to the entity for the taxable year"; }
+@source(IRC_S6417_E, relation = formalizes, coverage = exact, quote = "such credit shall be reduced to zero and shall, for any other purposes under this title, be deemed to have been allowed to such entity for such taxable year.")
+rule S6417CreditReducedToZeroAndDeemedAllowed strict {
+    for e: Person;
+    for cr: ElectiveCredit;
+    for made: Date;
+    for y: TaxableYear;
+    for k: CreditItemKind;
+    for amt: Money;
+    when elects_under_6417(e, cr, made) and elective_payment_election_valid(e, cr) and elective_credit_item(cr, e, y, k, amt);
+    then credit_after_6417_election(cr, 0 USD);
+}
+rule S6417CreditDeemedAllowedForOtherPurposes strict {
+    for e: Person;
+    for cr: ElectiveCredit;
+    for made: Date;
+    for y: TaxableYear;
+    for k: CreditItemKind;
+    for amt: Money;
+    when elects_under_6417(e, cr, made) and elective_payment_election_valid(e, cr) and elective_credit_item(cr, e, y, k, amt);
+    then credit_deemed_allowed_after_election(cr, amt);
+}
+// (d)(6): excessive payments.
+relation election_payment_amount(cr: ElectiveCredit, amount: Money) kind empirical { label en official "the amount treated as a payment under subsection (a), or the payment made pursuant to subsection (c), with respect to the facility or property for the taxable year"; }
+relation credit_otherwise_allowable(cr: ElectiveCredit, amount: Money) kind empirical { label en official "the amount of the credit which, without application of this section, would be otherwise allowable (determined pursuant to paragraph (2) and without regard to section 38(c))"; }
+relation excessive_payment_6417(cr: ElectiveCredit, amount: Money) kind institutional { label en official "the excess of the amount treated as paid over the credit otherwise allowable"; }
+@source(IRC_S6417_D, relation = formalizes, coverage = exact, quote = "the term \"excessive payment\" means, with respect to a facility or property for which an election is made under this section for any taxable year, an amount equal to the excess of—")
+rule S6417ExcessivePaymentIsExcess strict {
+    for cr: ElectiveCredit;
+    for paid: Money;
+    for allowable: Money;
+    when election_payment_amount(cr, paid) and credit_otherwise_allowable(cr, allowable) and paid > allowable;
+    then excessive_payment_6417(cr, paid - allowable);
+}
+relation applicable_energy_credit_disallowed_6662m2(cr: ElectiveCredit) kind empirical { label en official "disallowance of a credit under section 45X, 45Y, or 48E by reason of overstating the material assistance cost ratio (section 6662(m)(2))"; }
+relation excessive_payment_from_energy_credit_disallowance(cr: ElectiveCredit, amount: Money) kind institutional { label en official "Pub. L. 119-21 sec. 70512(j)(2), new §6417(d)(6)(D): subparagraph (A) applies to any excessive payment resulting from a §6662(m)(2) disallowance"; }
+@source(us.irc.temporal::PL119_21_S70512, quote = "In the case of an applicable entity which made an election under subsection (a) with respect to an applicable credit for which there is a disallowance described in section 6662(m)(2), subparagraph (A) shall apply with respect to any excessive payment resulting from such disallowance.")
+rule S6417DExcessivePaymentFromDisallowancePL119_21 strict {
+    effective [@2025-07-04, infinity);
+    for cr: ElectiveCredit;
+    for amount: Money;
+    when applicable_energy_credit_disallowed_6662m2(cr) and excessive_payment_6417(cr, amount);
+    then excessive_payment_from_energy_credit_disallowance(cr, amount);
+}
+relation secretary_determines_excessive_payment(e: Person, y: TaxableYear, cr: ElectiveCredit) kind empirical { label en official "the Secretary determines that the payment constitutes an excessive payment, in the taxable year in which the determination is made"; }
+external judgment relation reasonable_cause_for_excessive_payment(e: Person, cr: ElectiveCredit) {
+    authority Secretary;
+}
+pub relation tax_increase_for_excessive_payment(e: Person, y: TaxableYear, cr: ElectiveCredit, amount: Money) kind institutional {
+    label en official "the tax imposed on the entity by chapter 1 for the taxable year of the determination is increased by the excessive payment plus 20 percent of it (no 20 percent if reasonable cause)";
+}
+@source(IRC_S6417_D, relation = formalizes, coverage = partial, quote = "(i) the amount of such excessive payment, plus")
+rule S6417TaxIncreaseExcessivePayment defeasible {
+    for e: Person;
+    for y: TaxableYear;
+    for cr: ElectiveCredit;
+    for excess: Money;
+    when secretary_determines_excessive_payment(e, y, cr) and excessive_payment_6417(cr, excess);
+    then tax_increase_for_excessive_payment(e, y, cr, round(excess * 1.20, 2, "HALF_UP"));
+    unless reasonable_cause_for_excessive_payment(e, cr) and secretary_determines_excessive_payment(e, y, cr) and excessive_payment_6417(cr, excess);
+}
+@source(IRC_S6417_D, relation = formalizes, coverage = partial, quote = "Subparagraph (A)(ii) shall not apply if the applicable entity demonstrates to the satisfaction of the Secretary that the excessive payment resulted from reasonable cause.")
+rule S6417TaxIncreaseExcessivePaymentReasonableCause defeasible {
+    for e: Person;
+    for y: TaxableYear;
+    for cr: ElectiveCredit;
+    for excess: Money;
+    when secretary_determines_excessive_payment(e, y, cr) and excessive_payment_6417(cr, excess) and reasonable_cause_for_excessive_payment(e, cr);
+    then tax_increase_for_excessive_payment(e, y, cr, excess);
+}
+// (f): mirror code possessions.
+relation possession_with_mirror_code_tax_system(pos: Person) kind empirical { label en official "any possession of the United States with a mirror code tax system (as defined in section 24(k))"; }
+relation possession_elects_to_treat_6417_as_income_tax_law(pos: Person) kind empirical { label en official "such possession elects to have this section be so treated"; }
+pub relation section_6417_part_of_possession_income_tax_law(pos: Person) kind institutional { label en official "this section is treated as part of the income tax laws of the United States for purposes of determining the income tax law of the possession"; }
+@source(IRC_S6417_F, relation = formalizes, coverage = exact, quote = "this section shall not be treated as part of the income tax laws of the United States for purposes of determining the income tax law of such possession unless such possession elects to have this section be so treated.")
+rule S6417MirrorCodeNotPartUnlessElects defeasible {
+    for pos: Person;
+    when possession_with_mirror_code_tax_system(pos);
+    then not section_6417_part_of_possession_income_tax_law(pos);
+}
+rule S6417MirrorCodePartWhenPossessionElects defeasible {
+    for pos: Person;
+    when possession_with_mirror_code_tax_system(pos) and possession_elects_to_treat_6417_as_income_tax_law(pos);
+    then section_6417_part_of_possession_income_tax_law(pos);
+}
+priority MirrorCodeElectionOutranksDefault {
+    prefer S6417MirrorCodePartWhenPossessionElects over S6417MirrorCodeNotPartUnlessElects;
+    reason lex_specialis;
+}
+
+// ============================================================================
+// §6418 — Transfer of certain credits
+// ============================================================================
+
+enum EligibleCreditClause { ClauseI30C; ClauseII45; ClauseIII45Q; ClauseIV45U; ClauseV45V; ClauseVI45X; ClauseVII45Y; ClauseVIII45Z; ClauseIX48; ClauseX48C; ClauseXI48E; ClauseXII40A; label en unofficial "the clause of §6418(f)(1)(A) that lists the credit"; }
+relation eligible_credit_clause(cr: ElectiveCredit, c: EligibleCreditClause) kind institutional { label en official "the credit is listed in section 6418(f)(1)(A)"; }
+rule S6418ClauseI strict { for cr: ElectiveCredit; for h: Person; for y: TaxableYear; for amt: Money; when elective_credit_item(cr, h, y, AlternativeFuelRefuelingProperty30C, amt) and credit_30C_treated_as_38b_credit(cr); then eligible_credit_clause(cr, ClauseI30C); }
+rule S6418ClauseII strict { for cr: ElectiveCredit; for h: Person; for y: TaxableYear; for amt: Money; when elective_credit_item(cr, h, y, RenewableElectricityProduction45, amt); then eligible_credit_clause(cr, ClauseII45); }
+rule S6418ClauseIII strict { for cr: ElectiveCredit; for h: Person; for y: TaxableYear; for amt: Money; when elective_credit_item(cr, h, y, CarbonOxideSequestration45Q, amt); then eligible_credit_clause(cr, ClauseIII45Q); }
+rule S6418ClauseIV strict { for cr: ElectiveCredit; for h: Person; for y: TaxableYear; for amt: Money; when elective_credit_item(cr, h, y, ZeroEmissionNuclearPower45U, amt); then eligible_credit_clause(cr, ClauseIV45U); }
+rule S6418ClauseV strict { for cr: ElectiveCredit; for h: Person; for y: TaxableYear; for amt: Money; when elective_credit_item(cr, h, y, CleanHydrogenProduction45V, amt); then eligible_credit_clause(cr, ClauseV45V); }
+rule S6418ClauseVI strict { for cr: ElectiveCredit; for h: Person; for y: TaxableYear; for amt: Money; when elective_credit_item(cr, h, y, AdvancedManufacturingProduction45X, amt); then eligible_credit_clause(cr, ClauseVI45X); }
+rule S6418ClauseVII strict { for cr: ElectiveCredit; for h: Person; for y: TaxableYear; for amt: Money; when elective_credit_item(cr, h, y, CleanElectricityProduction45Y, amt); then eligible_credit_clause(cr, ClauseVII45Y); }
+rule S6418ClauseVIII strict { for cr: ElectiveCredit; for h: Person; for y: TaxableYear; for amt: Money; when elective_credit_item(cr, h, y, CleanFuelProduction45Z, amt); then eligible_credit_clause(cr, ClauseVIII45Z); }
+rule S6418ClauseIX strict { for cr: ElectiveCredit; for h: Person; for y: TaxableYear; for amt: Money; when elective_credit_item(cr, h, y, EnergyCredit48, amt); then eligible_credit_clause(cr, ClauseIX48); }
+rule S6418ClauseX strict { for cr: ElectiveCredit; for h: Person; for y: TaxableYear; for amt: Money; when elective_credit_item(cr, h, y, QualifyingAdvancedEnergyProject48C, amt); then eligible_credit_clause(cr, ClauseX48C); }
+rule S6418ClauseXI strict { for cr: ElectiveCredit; for h: Person; for y: TaxableYear; for amt: Money; when elective_credit_item(cr, h, y, CleanElectricityInvestment48E, amt); then eligible_credit_clause(cr, ClauseXI48E); }
+@source(us.irc.temporal::PL119_21_S70521, quote = "(xii) So much of the biodiesel fuels credit determined under section 40A which consists of the small agri-biodiesel producer credit determined under subsection (b)(4) of such section.")
+rule S6418ClauseXIISmallAgriBiodieselPL119_21 strict {
+    effective [@2025-07-04, infinity);
+    for cr: ElectiveCredit;
+    for h: Person;
+    for y: TaxableYear;
+    for amt: Money;
+    when elective_credit_item(cr, h, y, SmallAgriBiodieselProducer40A, amt);
+    then eligible_credit_clause(cr, ClauseXII40A);
+}
+relation credit_is_business_credit_carryforward_or_carryback(cr: ElectiveCredit) kind empirical { label en official "any business credit carryforward or business credit carryback determined under section 39"; }
+relation eligible_credit_6418(cr: ElectiveCredit) kind institutional { label en official "an eligible credit: listed in §6418(f)(1)(A), and not a section 39 carryforward or carryback"; }
+@source(IRC_S6418_F, relation = formalizes, coverage = exact, quote = "The term \"eligible credit\" shall not include any business credit carryforward or business credit carryback determined under section 39.")
+rule S6418EligibleCredit strict {
+    for cr: ElectiveCredit;
+    for c: EligibleCreditClause;
+    when eligible_credit_clause(cr, c) and not_known(credit_is_business_credit_carryforward_or_carryback(cr));
+    then eligible_credit_6418(cr);
+}
+relation eligible_taxpayer_6418(cr: ElectiveCredit, p: Person) kind institutional { label en official "an eligible taxpayer: any taxpayer which is not described in section 6417(d)(1)(A)"; }
+@source(IRC_S6418_F, relation = formalizes, coverage = exact, quote = "The term \"eligible taxpayer\" means any taxpayer which is not described in section 6417(d)(1)(A).")
+rule S6418EligibleTaxpayer strict {
+    for cr: ElectiveCredit;
+    for p: Person;
+    when elects_under_6418(cr, p, _, _, _) and not_known(applicable_entity_by_type(p));
+    then eligible_taxpayer_6418(cr, p);
+}
+relation elects_under_6418(cr: ElectiveCredit, transferor: Person, transferee: Person, made_on: Date, portion: Money) kind empirical {
+    label en official "an eligible taxpayer elects to transfer all (or a specified portion of) an eligible credit to a transferee taxpayer";
+}
+relation transferee_related_to_transferor_267b_707b(transferor: Person, transferee: Person) kind empirical { label en official "the transferee is related to the eligible taxpayer within the meaning of section 267(b) or 707(b)(1)"; }
+relation transfer_return_due_date_with_extensions(transferor: Person, y: TaxableYear, d: Date) kind empirical { label en official "the due date (including extensions of time) for the return of tax for the taxable year for which the credit is determined"; }
+relation credit_previously_transferred_to_transferor(cr: ElectiveCredit, transferor: Person) kind empirical { label en official "the portion of the eligible credit has been previously transferred to such taxpayer pursuant to this section"; }
+relation consideration_paid_in_cash_or_none(cr: ElectiveCredit) kind empirical { label en official "(b)(1) consideration for the transfer is paid in cash"; }
+relation credit_allowed_by_rules_similar_to_46c4_and_d(cr: ElectiveCredit) kind empirical { label en official "an amount of an eligible credit allowed pursuant to rules similar to the rules of subsections (c)(4) and (d) of section 46 as in effect before the Revenue Reconciliation Act of 1990"; }
+relation transfer_election_year_facility_period_ok(cr: ElectiveCredit) kind empirical { label en official "(f)(1)(B): for clauses (ii), (iii), (v), (vii) the election is made separately per facility for each taxable year within the 10-year period from placement in service (12 years for the §45Q equipment)"; }
+relation transferee_is_specified_foreign_entity(transferee: Person) kind empirical { label en official "a taxpayer that is a specified foreign entity (as defined in section 7701(a)(51)(B))"; }
+relation transfer_barred_by_foreign_entity_prohibition(cr: ElectiveCredit, transferee: Person) kind institutional { label en official "Pub. L. 119-21 sec. 70512(h), §6418(g)(5): no transfer of the clause (iii), (iv), (vi), (vii), (viii), or (xi) credits to a specified foreign entity"; }
+@source(us.irc.temporal::PL119_21_S70512, quote = "an eligible taxpayer may not elect to transfer any portion of such credit to a taxpayer that is a specified foreign entity (as defined in section 7701(a)(51)(B)).")
+rule S6418G5NoTransferToSpecifiedForeignEntityPL119_21 strict {
+    effective [@2025-07-04, infinity);
+    for cr: ElectiveCredit;
+    for transferor: Person;
+    for transferee: Person;
+    for made: Date;
+    for portion: Money;
+    for c: EligibleCreditClause;
+    for y: TaxableYear;
+    for b: Date;
+    when elects_under_6418(cr, transferor, transferee, made, portion) and transferee_is_specified_foreign_entity(transferee) and eligible_credit_clause(cr, c)
+        and credit_election_year(cr, y) and us.irc.core::begins(y, b) and b > @2025-07-04
+        and (c == ClauseIII45Q or c == ClauseIV45U or c == ClauseVI45X or c == ClauseVII45Y or c == ClauseVIII45Z or c == ClauseXI48E);
+    then transfer_barred_by_foreign_entity_prohibition(cr, transferee);
+}
+relation credit_transfer_election_valid(cr: ElectiveCredit, transferor: Person, transferee: Person) kind institutional {
+    label en official "the transfer election is valid: eligible credit and taxpayer, unrelated transferee, timely (not earlier than 180 days after enactment), cash consideration, no prior transfer to the transferor, not barred";
+}
+rule S6418TransferElectionValid strict {
+    for cr: ElectiveCredit;
+    for transferor: Person;
+    for transferee: Person;
+    for made: Date;
+    for portion: Money;
+    for y: TaxableYear;
+    for due: Date;
+    when elects_under_6418(cr, transferor, transferee, made, portion) and eligible_credit_6418(cr) and eligible_taxpayer_6418(cr, transferor)
+        and credit_election_year(cr, y) and taxable_year_begins_after_2022(y)
+        and transfer_return_due_date_with_extensions(transferor, y, due) and made <= due and made >= @2023-02-12
+        and consideration_paid_in_cash_or_none(cr)
+        and not_known(transferee_related_to_transferor_267b_707b(transferor, transferee))
+        and not_known(credit_previously_transferred_to_transferor(cr, transferor))
+        and not_known(credit_allowed_by_rules_similar_to_46c4_and_d(cr))
+        and not_known(transfer_barred_by_foreign_entity_prohibition(cr, transferee))
+        and not_known(transfer_election_outside_facility_period(cr));
+    then credit_transfer_election_valid(cr, transferor, transferee);
+}
+relation transferee_treated_as_taxpayer_for_credit(cr: ElectiveCredit, transferee: Person, amount: Money) kind institutional {
+    label en official "the transferee taxpayer (and not the eligible taxpayer) is treated as the taxpayer for purposes of this title with respect to the transferred credit or portion";
+}
+@source(IRC_S6418_A, relation = formalizes, coverage = exact, quote = "the transferee taxpayer specified in such election (and not the eligible taxpayer) shall be treated as the taxpayer for purposes of")
+rule S6418ElectionTransfersCredit strict {
+    for cr: ElectiveCredit;
+    for transferor: Person;
+    for transferee: Person;
+    for made: Date;
+    for portion: Money;
+    when elects_under_6418(cr, transferor, transferee, made, portion);
+    then power S6418TransferCreditPower {
+        holder transferor;
+        over transferee;
+        exercise elects_under_6418(cr, transferor, transferee, made, portion);
+        valid_when credit_transfer_election_valid(cr, transferor, transferee);
+        effect create(transferee_treated_as_taxpayer_for_credit(cr, transferee, portion));
+    };
+}
+relation revokes_6418_election(cr: ElectiveCredit, transferor: Person) kind empirical;
+@source(IRC_S6418_E, relation = formalizes, coverage = exact, quote = "Any such election, once made, shall be irrevocable.")
+rule S6418TransferElectionIrrevocable strict {
+    for cr: ElectiveCredit;
+    for transferor: Person;
+    for transferee: Person;
+    for made: Date;
+    for portion: Money;
+    when elects_under_6418(cr, transferor, transferee, made, portion) and revokes_6418_election(cr, transferor);
+    then prohibition NoRevocationOfCreditTransferElection {
+        bearer transferor;
+        beneficiary Secretary;
+        action revokes_6418_election(cr, transferor);
+        window [made, infinity];
+    };
+}
+relation transferee_elects_to_retransfer(cr: ElectiveCredit, transferee: Person) kind empirical;
+@source(IRC_S6418_E, relation = formalizes, coverage = exact, quote = "No election may be made under subsection (a) by a transferee taxpayer with respect to any portion of an eligible credit which has been previously transferred to such taxpayer pursuant to this section.")
+rule S6418NoRetransferByTransferee strict {
+    for cr: ElectiveCredit;
+    for transferee: Person;
+    for transferor: Person;
+    for made: Date;
+    for portion: Money;
+    when transferee_elects_to_retransfer(cr, transferee) and elects_under_6418(cr, transferor, transferee, made, portion);
+    then prohibition NoRetransferOfTransferredCredit {
+        bearer transferee;
+        beneficiary Secretary;
+        action transferee_elects_to_retransfer(cr, transferee);
+        window [made, infinity];
+    };
+}
+// (b): consideration.
+relation consideration_paid_by_transferee(cr: ElectiveCredit, transferor: Person, transferee: Person, amount: Money) kind empirical { label en official "an amount paid by a transferee taxpayer to an eligible taxpayer as consideration for a transfer described in subsection (a)"; }
+pub relation transfer_consideration_excluded_from_gross_income(cr: ElectiveCredit, transferor: Person, amount: Money) kind institutional { label en official "(b)(2) such consideration shall not be includible in gross income of the eligible taxpayer"; }
+@source(IRC_S6418_B, relation = formalizes, coverage = exact, quote = "(2) shall not be includible in gross income of the eligible taxpayer, and")
+rule S6418ConsiderationExcludedFromIncome strict {
+    for cr: ElectiveCredit;
+    for transferor: Person;
+    for transferee: Person;
+    for amount: Money;
+    when consideration_paid_by_transferee(cr, transferor, transferee, amount) and credit_transfer_election_valid(cr, transferor, transferee);
+    then transfer_consideration_excluded_from_gross_income(cr, transferor, amount);
+}
+pub relation transfer_consideration_not_deductible(cr: ElectiveCredit, transferee: Person, amount: Money) kind institutional { label en official "(b)(3) with respect to the transferee taxpayer, such consideration shall not be deductible under this title"; }
+@source(IRC_S6418_B, relation = formalizes, coverage = exact, quote = "(3) with respect to the transferee taxpayer, shall not be deductible under this title.")
+rule S6418ConsiderationNotDeductible strict {
+    for cr: ElectiveCredit;
+    for transferor: Person;
+    for transferee: Person;
+    for amount: Money;
+    when consideration_paid_by_transferee(cr, transferor, transferee, amount) and credit_transfer_election_valid(cr, transferor, transferee);
+    then transfer_consideration_not_deductible(cr, transferee, amount);
+}
+// (c): pass-through transferors.
+relation pass_through_transfers_credit(cr: ElectiveCredit, pt: Person) kind empirical;
+relation partner_elects_6418(partner: Person, cr: ElectiveCredit) kind empirical;
+@source(IRC_S6418_C, relation = formalizes, coverage = exact, quote = "no election by any partner or shareholder shall be allowed under subsection (a) with respect to any eligible credit determined with respect to such facility or property.")
+rule S6418NoPartnerElectionForDirectlyHeldFacility strict {
+    for partner: Person;
+    for cr: ElectiveCredit;
+    for pt: Person;
+    when partner_elects_6418(partner, cr) and credit_held_directly_by_pass_through(cr, pt);
+    then prohibition NoPartnerOrShareholderElectionUnder6418 {
+        bearer partner;
+        beneficiary Secretary;
+        action partner_elects_6418(partner, cr);
+        window [-infinity, infinity];
+    };
+}
+pub relation partner_share_of_transfer_tax_exempt_income(cr: ElectiveCredit, partner: Person, amount: Money) kind institutional { label en official "any amount received as consideration for a transfer by a partnership or S corporation is tax exempt income (sections 705 and 1366), the partner's share based on the partner's share of the otherwise eligible credit"; }
+@source(IRC_S6418_C, relation = formalizes, coverage = exact, quote = "(A) any amount received as consideration for a transfer described in such subsection shall be treated as tax exempt income for purposes of sections 705 and 1366, and")
+rule S6418PassThroughConsiderationIsTaxExemptIncome strict {
+    for cr: ElectiveCredit;
+    for pt: Person;
+    for transferee: Person;
+    for amount: Money;
+    for partner: Person;
+    for share: Decimal;
+    when pass_through_transfers_credit(cr, pt) and credit_held_directly_by_pass_through(cr, pt) and consideration_paid_by_transferee(cr, pt, transferee, amount)
+        and credit_transfer_election_valid(cr, pt, transferee) and partner_distributive_share_of_credit(cr, partner, share);
+    then partner_share_of_transfer_tax_exempt_income(cr, partner, round(amount * share, 2, "HALF_UP"));
+}
+// (d): the transferee's taxable year for the credit — the first ending with or after the transferor's year.
+relation transferor_year_end(cr: ElectiveCredit, d: Date) kind empirical { label en official "the end of the eligible taxpayer's taxable year with respect to which the credit was determined"; }
+relation transferee_year_end_candidate(cr: ElectiveCredit, transferee: Person, ty: TaxableYear, d: Date) kind empirical { label en unofficial "a taxable year of the transferee and its end date"; }
+relation earlier_transferee_year_ending_on_or_after(cr: ElectiveCredit, transferee: Person, d: Date) kind institutional { label en unofficial "helper (TECH-GAPS G136): another qualifying year of the transferee ends strictly earlier"; }
+rule S6418EarlierTransfereeYearExists strict {
+    for cr: ElectiveCredit;
+    for transferee: Person;
+    for ty: TaxableYear;
+    for ty2: TaxableYear;
+    for d: Date;
+    for d2: Date;
+    for tend: Date;
+    when transferor_year_end(cr, tend) and transferee_year_end_candidate(cr, transferee, ty, d) and transferee_year_end_candidate(cr, transferee, ty2, d2) and d >= tend and d2 >= tend and d2 < d;
+    then earlier_transferee_year_ending_on_or_after(cr, transferee, d);
+}
+pub relation credit_taken_into_account_in_transferee_year(cr: ElectiveCredit, transferee: Person, ty: TaxableYear) kind institutional { label en official "the credit is taken into account in the first taxable year of the transferee taxpayer ending with, or after, the taxable year of the eligible taxpayer"; }
+@source(IRC_S6418_D, relation = formalizes, coverage = exact, quote = "such credit shall be taken into account in the first taxable year of the transferee taxpayer ending with, or after, the taxable year of the eligible taxpayer with respect to which the credit was determined.")
+rule S6418CreditTakenIntoAccountInFirstTransfereeYear strict {
+    for cr: ElectiveCredit;
+    for transferee: Person;
+    for ty: TaxableYear;
+    for d: Date;
+    for tend: Date;
+    when transferor_year_end(cr, tend) and transferee_year_end_candidate(cr, transferee, ty, d) and d >= tend and not_known(earlier_transferee_year_ending_on_or_after(cr, transferee, d));
+    then credit_taken_into_account_in_transferee_year(cr, transferee, ty);
+}
+// (g)(1) registration; (g)(2) excessive credit transfer; (g)(3) recapture notice; (g)(4).
+relation transfer_registration_required_by_secretary(cr: ElectiveCredit) kind empirical { label en official "the Secretary requires information (including information returns) or registration as a condition of, and prior to, any transfer"; }
+relation transfer_registration_satisfied(cr: ElectiveCredit) kind empirical;
+relation transfer_condition_registration_met(cr: ElectiveCredit) kind institutional { label en official "as a condition of any transfer: any information or registration the Secretary requires has been provided"; }
+rule S6418RegistrationNotRequired strict {
+    for cr: ElectiveCredit;
+    for c: EligibleCreditClause;
+    when eligible_credit_clause(cr, c) and not_known(transfer_registration_required_by_secretary(cr));
+    then transfer_condition_registration_met(cr);
+}
+rule S6418RegistrationRequiredAndSatisfied strict {
+    for cr: ElectiveCredit;
+    when transfer_registration_required_by_secretary(cr) and transfer_registration_satisfied(cr);
+    then transfer_condition_registration_met(cr);
+}
+relation credit_claimed_by_transferee(cr: ElectiveCredit, amount: Money) kind empirical { label en official "(g)(2)(C)(i) the amount of the eligible credit claimed by the transferee taxpayer with respect to such facility or property for such taxable year"; }
+relation credit_otherwise_allowable_to_transferee(cr: ElectiveCredit, amount: Money) kind empirical { label en official "(g)(2)(C)(ii) the amount of such credit which, without application of this section, would be otherwise allowable"; }
+relation excessive_credit_transfer(cr: ElectiveCredit, amount: Money) kind institutional { label en official "the excess of the credit claimed by the transferee over the credit otherwise allowable"; }
+@source(IRC_S6418_G, relation = formalizes, coverage = exact, quote = "the term \"excessive credit transfer\" means, with respect to a facility or property for which an election is made under subsection (a) for any taxable year, an amount equal to the excess of—")
+rule S6418ExcessiveCreditTransferIsExcess strict {
+    for cr: ElectiveCredit;
+    for claimed: Money;
+    for allowable: Money;
+    when credit_claimed_by_transferee(cr, claimed) and credit_otherwise_allowable_to_transferee(cr, allowable) and claimed > allowable;
+    then excessive_credit_transfer(cr, claimed - allowable);
+}
+relation secretary_determines_excessive_credit_transfer(transferee: Person, y: TaxableYear, cr: ElectiveCredit) kind empirical;
+external judgment relation reasonable_cause_for_excessive_credit_transfer(transferee: Person, cr: ElectiveCredit) {
+    authority Secretary;
+}
+pub relation tax_increase_for_excessive_credit_transfer(transferee: Person, y: TaxableYear, cr: ElectiveCredit, amount: Money) kind institutional { label en official "the tax imposed on the transferee by chapter 1 for the taxable year of the determination is increased by the excessive credit transfer plus 20 percent of it (no 20 percent if reasonable cause)"; }
+@source(IRC_S6418_G, relation = formalizes, coverage = partial, quote = "(i) the amount of such excessive credit transfer, plus")
+rule S6418TaxIncreaseExcessiveCreditTransfer defeasible {
+    for transferee: Person;
+    for y: TaxableYear;
+    for cr: ElectiveCredit;
+    for excess: Money;
+    when secretary_determines_excessive_credit_transfer(transferee, y, cr) and excessive_credit_transfer(cr, excess);
+    then tax_increase_for_excessive_credit_transfer(transferee, y, cr, round(excess * 1.20, 2, "HALF_UP"));
+    unless reasonable_cause_for_excessive_credit_transfer(transferee, cr) and secretary_determines_excessive_credit_transfer(transferee, y, cr) and excessive_credit_transfer(cr, excess);
+}
+@source(IRC_S6418_G, relation = formalizes, coverage = partial, quote = "Subparagraph (A)(ii) shall not apply if the transferee taxpayer demonstrates to the satisfaction of the Secretary that the excessive credit transfer resulted from reasonable cause.")
+rule S6418TaxIncreaseExcessiveCreditTransferReasonableCause defeasible {
+    for transferee: Person;
+    for y: TaxableYear;
+    for cr: ElectiveCredit;
+    for excess: Money;
+    when secretary_determines_excessive_credit_transfer(transferee, y, cr) and excessive_credit_transfer(cr, excess) and reasonable_cause_for_excessive_credit_transfer(transferee, cr);
+    then tax_increase_for_excessive_credit_transfer(transferee, y, cr, excess);
+}
+// (g)(3): §50(c) recapture for clauses (ix)-(xi): notices between the parties.
+relation applicable_investment_credit_property_disposed_before_recapture_period_end(cr: ElectiveCredit) kind empirical { label en official "during any taxable year the applicable investment credit property is disposed of, or otherwise ceases to be investment credit property with respect to the eligible taxpayer, before the close of the recapture period"; }
+relation recapture_notice_given_by_eligible_taxpayer(cr: ElectiveCredit) kind empirical { label en official "(i) such eligible taxpayer provides notice of such occurrence to the transferee taxpayer"; }
+relation recapture_amount_notice_given_by_transferee(cr: ElectiveCredit) kind empirical { label en official "(ii) the transferee taxpayer provides notice of the recapture amount, if any, to the eligible taxpayer"; }
+@source(IRC_S6418_G, relation = formalizes, coverage = partial, quote = "(i) such eligible taxpayer shall provide notice of such occurrence to the transferee taxpayer (in such form and manner as the Secretary shall prescribe), and")
+rule S6418EligibleTaxpayerMustNoticeRecaptureEvent strict {
+    for cr: ElectiveCredit;
+    for transferor: Person;
+    for transferee: Person;
+    for made: Date;
+    for portion: Money;
+    for c: EligibleCreditClause;
+    when elects_under_6418(cr, transferor, transferee, made, portion) and eligible_credit_clause(cr, c) and applicable_investment_credit_property_disposed_before_recapture_period_end(cr)
+        and (c == ClauseIX48 or c == ClauseX48C or c == ClauseXI48E);
+    then duty NoticeOfRecaptureEventToTransferee {
+        bearer transferor;
+        beneficiary transferee;
+        goal achievement {
+            condition recapture_notice_given_by_eligible_taxpayer(cr);
+            window [-infinity, infinity];
+        }
+    };
+}
+@source(IRC_S6418_G, relation = formalizes, coverage = partial, quote = "(ii) the transferee taxpayer shall provide notice of the recapture amount (as defined in subsection (c)(2) of such section), if any, to the eligible taxpayer (in such form and manner as the Secretary shall prescribe).")
+rule S6418TransfereeMustNoticeRecaptureAmount strict {
+    for cr: ElectiveCredit;
+    for transferor: Person;
+    for transferee: Person;
+    for made: Date;
+    for portion: Money;
+    for c: EligibleCreditClause;
+    when elects_under_6418(cr, transferor, transferee, made, portion) and eligible_credit_clause(cr, c) and applicable_investment_credit_property_disposed_before_recapture_period_end(cr) and recapture_notice_given_by_eligible_taxpayer(cr)
+        and (c == ClauseIX48 or c == ClauseX48C or c == ClauseXI48E);
+    then duty NoticeOfRecaptureAmountToEligibleTaxpayer {
+        bearer transferee;
+        beneficiary transferor;
+        goal achievement {
+            condition recapture_amount_notice_given_by_transferee(cr);
+            window [-infinity, infinity];
+        }
+    };
+}

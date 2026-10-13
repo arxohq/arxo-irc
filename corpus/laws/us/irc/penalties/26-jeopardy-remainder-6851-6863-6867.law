@@ -1,0 +1,619 @@
+language "law.core" version "0.2";
+package us.irc.penalties version "0.1.1";
+namespace "urn:us:irc:penalties:clir";
+
+use self::{
+    CashPossessionEvent,
+    IRC_S6851_A,
+    IRC_S6851_C,
+    IRC_S6851_D,
+    IRC_S6863_B,
+    IRC_S6863_C,
+    IRC_S6867_B,
+    IRC_S6867_C,
+    IRC_S6867_D,
+    Individual,
+    JeopardyAssessment,
+    JeopardyAssessmentKind,
+    Person,
+    Secretary,
+    TaxCourt,
+    cash_ownership_unclaimed,
+    jeopardy_assessment_made_on,
+    jeopardy_assessment_of,
+    jeopardy_bond_filed,
+};
+
+// 26 U.S.C. §6851(a)(2), (a)(4), (c), (d); §6863(b), (c); §6867(b), (c), (d)(3)
+// (IRC-16 stage 2, DECISION-0379): the jeopardy provisions that module 15 left open
+// and that do not need the Tax Court finality machinery of §6861(c)-(g).
+//
+// JUDGMENT CALLS AND GAPS:
+//  - §6851(a)(4) is a condition of the termination assessment's validity: the relation
+//    `termination_assessment_within_6851a4_limit` is true unless the assessment covers
+//    the preceding year and is made after the return due date; it is added as a
+//    conjunct of `JeopardyAssessmentValidTermination` (module 15).
+//  - §6863(b)(3)(A) is a prohibition on the Secretary keyed to three period facts;
+//    the (i) periods refer to subsection (c)(1)(A) and (B), which govern assessments
+//    under section 6862 and section 7429 — the cross-reference is read as the case's
+//    `sale_barred_until_c1_periods_expire` date and not recomputed (TECH-GAPS G3111).
+//    The Secretary's exception determinations (B) are institutional findings (case
+//    facts); the section 6336 property class is a case fact.
+//  - §6863(b)(2): the proportional bond reduction uses the "same ratio" form with a
+//    single rounding (`div_round`), per the money-forms consultation of 26.09.2026.
+//  - §6867(b)(2): the highest section 1 rate is a typed dependency (owner
+//    income-individual); §6867(b)(3) is exposed as an institutional relation (the
+//    chapters 63, 64 and section 7429(a)(1) rules belong to their owners).
+
+// --- §6851(a)(2), (a)(4): computation and scope --------------------------------------------
+relation taxpayer_current_taxable_year_begins_on(p: Person, d: Date) kind empirical {
+    label en official "the first day of the taxpayer's current taxable year";
+}
+relation termination_determination_date(p: Person, d: Date) kind empirical {
+    label en official "the date of the determination under paragraph (1)";
+}
+pub relation termination_determination_period(p: Person, from: Date, to: Date) kind institutional {
+    label en unofficial "for a current taxable year, the period from its first day to the date of the determination is treated as a taxable year of the taxpayer";
+}
+@source(IRC_S6851_A, relation = formalizes, coverage = exact, quote = "the Secretary shall determine the tax for the period beginning on the first day of such current taxable year and ending on the date of the determination under paragraph (1) as though such period were a taxable year of the taxpayer")
+rule S6851a2Period strict {
+    for p: Person;
+    for s: Date;
+    for e: Date;
+    when taxpayer_current_taxable_year_begins_on(p, s)
+        and termination_determination_date(p, e)
+        and e >= s;
+    then termination_determination_period(p, s, e);
+}
+relation tax_computed_for_termination_period(p: Person, amount: Money) kind empirical {
+    label en unofficial "the tax computed for the period as a taxable year (owner: income taxation; case fact)";
+}
+relation prior_termination_determination_amount(p: Person, amount: Money) kind empirical {
+    label en official "the amount of any prior determination made under subsection (a) with respect to the current taxable year";
+}
+pub relation termination_tax_to_determine_for_current_year(p: Person, amount: Money) kind institutional {
+    label en unofficial "the tax to be determined for the period after taking into account any prior determination";
+}
+@source(IRC_S6851_A, relation = formalizes, coverage = exact, quote = "and shall take into account any prior determination made under this subsection with respect to such current taxable year")
+rule S6851a2NetOfPrior strict {
+    for p: Person;
+    for t: Money;
+    for pr: Money;
+    when tax_computed_for_termination_period(p, t)
+        and prior_termination_determination_amount(p, pr);
+    then termination_tax_to_determine_for_current_year(p, max(0.00 USD, t - pr));
+}
+relation amount_collected_under_6851_assessment(p: Person, amount: Money) kind empirical {
+    label en official "the amounts collected as a result of assessments under section 6851(a)";
+}
+pub relation termination_collection_treated_as_payment_of_tax(p: Person, amount: Money) kind institutional {
+    label en unofficial "the amounts collected are treated, to the extent thereof, as a payment of tax for such taxable year";
+}
+@source(IRC_S6851_A, relation = formalizes, coverage = exact, quote = "Any amounts collected as a result of any assessments under this subsection shall, to the extent thereof, be treated as a payment of tax for such taxable year")
+rule S6851a3TreatedAsPayment strict {
+    for p: Person;
+    for c: Money;
+    when amount_collected_under_6851_assessment(p, c);
+    then termination_collection_treated_as_payment_of_tax(p, c);
+}
+relation termination_assessment_covers_preceding_year(a: JeopardyAssessment) kind empirical {
+    label en unofficial "the assessment includes tax for the preceding taxable year";
+}
+relation preceding_year_return_due_date_incl_extensions_6851(a: JeopardyAssessment, d: Date) kind empirical {
+    label en official "the due date of the taxpayer's return for the preceding taxable year (determined with regard to any extensions)";
+}
+relation termination_assessment_within_6851a4_limit(a: JeopardyAssessment) kind institutional {
+    label en unofficial "the assessment does not reach the preceding taxable year, or is made on or before the due date of the taxpayer's return for that year";
+}
+@source(IRC_S6851_A, relation = formalizes, coverage = exact, quote = "This section shall not authorize any assessment of tax for the preceding taxable year which is made after the due date of the taxpayer's return for such taxable year (determined with regard to any extensions)")
+rule S6851a4NotPreceding strict {
+    for a: JeopardyAssessment;
+    for p: Person;
+    when jeopardy_assessment_of(a, p, Termination6851)
+        and not_known(termination_assessment_covers_preceding_year(a));
+    then termination_assessment_within_6851a4_limit(a);
+}
+@source(IRC_S6851_A, relation = formalizes, coverage = exact, quote = "This section shall not authorize any assessment of tax for the preceding taxable year which is made after the due date of the taxpayer's return for such taxable year (determined with regard to any extensions)")
+rule S6851a4BeforeDueDate strict {
+    for a: JeopardyAssessment;
+    for p: Person;
+    for m: Date;
+    for d: Date;
+    when jeopardy_assessment_of(a, p, Termination6851)
+        and termination_assessment_covers_preceding_year(a)
+        and jeopardy_assessment_made_on(a, m)
+        and preceding_year_return_due_date_incl_extensions_6851(a, d)
+        and m <= d;
+    then termination_assessment_within_6851a4_limit(a);
+}
+
+// --- §6851(c): citizens ------------------------------------------------------------------------
+relation citizen_of_united_states_or_possession_about_to_depart(p: Person) kind empirical {
+    label en official "the taxpayer is a citizen of the United States or of a possession of the United States about to depart from the United States";
+}
+relation secretary_moves_to_waive_6851_requirements(a: JeopardyAssessment) kind empirical {
+    label en unofficial "the Secretary has moved to waive any or all of the requirements placed on the taxpayer by section 6851 (exercise fact)";
+}
+pub relation requirements_waived_6851c(a: JeopardyAssessment) kind institutional {
+    label en unofficial "any or all of the requirements placed on the taxpayer by section 6851 have been waived";
+}
+relation waiver_conditions_6851c(a: JeopardyAssessment) kind institutional {
+    label en unofficial "the taxpayer is a citizen of the United States or of a possession about to depart (single atom for the power valid_when)";
+}
+@source(IRC_S6851_C, relation = formalizes, coverage = exact, quote = "In the case of a citizen of the United States or of a possession of the United States about to depart from the United States")
+rule S6851cWaiverConditions strict {
+    for a: JeopardyAssessment;
+    for p: Person;
+    when jeopardy_assessment_of(a, p, Termination6851)
+        and citizen_of_united_states_or_possession_about_to_depart(p);
+    then waiver_conditions_6851c(a);
+}
+@source(IRC_S6851_C, relation = formalizes, coverage = exact, quote = "the Secretary may, at his discretion, waive any or all of the requirements placed on the taxpayer by this section")
+rule S6851cWaiverPower strict {
+    for a: JeopardyAssessment;
+    when secretary_moves_to_waive_6851_requirements(a);
+    then power WaiveTerminationAssessmentRequirementsForCitizen {
+        holder Secretary;
+        over a;
+        exercise secretary_moves_to_waive_6851_requirements(a);
+        valid_when waiver_conditions_6851c(a);
+        effect create(requirements_waived_6851c(a));
+        window [-infinity, infinity];
+    };
+}
+
+// --- §6851(d): departure of alien ------------------------------------------------------------------
+relation taxpayer_is_alien(p: Person) kind empirical {
+    label en official "the taxpayer is an alien";
+}
+relation alien_procured_tax_compliance_certificate(p: Person) kind empirical {
+    label en official "the alien has first procured from the Secretary a certificate that he has complied with all the obligations imposed upon him by the income tax laws";
+}
+relation alien_departure_excepted_by_regulations(p: Person) kind empirical {
+    label en official "the departure is excepted by regulations prescribed by the Secretary";
+}
+relation alien_departs_from_united_states(p: Person) kind empirical {
+    label en unofficial "the alien departs from the United States";
+}
+@source(IRC_S6851_D, relation = formalizes, coverage = exact, quote = "No alien shall depart from the United States unless he first procures from the Secretary a certificate that he has complied with all the obligations imposed upon him by the income tax laws")
+rule S6851d1AlienDeparture defeasible {
+    for p: Person;
+    when taxpayer_is_alien(p)
+        and not_known(alien_procured_tax_compliance_certificate(p));
+    then prohibition AlienMayNotDepartWithoutTaxCertificate {
+        bearer p;
+        action alien_departs_from_united_states(p);
+        window [-infinity, infinity];
+    };
+    unless alien_departure_excepted_by_regulations(p)
+        and taxpayer_is_alien(p)
+        and not_known(alien_procured_tax_compliance_certificate(p));
+}
+relation alien_about_to_depart_from_united_states(p: Person) kind empirical {
+    label en official "the alien is about to depart from the United States";
+}
+relation secretary_determines_collection_not_jeopardized_by_alien_departure(p: Person) kind empirical {
+    label en official "the Secretary determines that the collection of the tax will not be jeopardized by the departure of the alien";
+}
+relation payment_enforced_by_section_6851_proceedings_before_due(p: Person) kind empirical {
+    label en unofficial "payment of taxes is enforced by proceedings under section 6851 prior to the expiration of the time otherwise allowed for paying such taxes";
+}
+@source(IRC_S6851_D, relation = formalizes, coverage = exact, quote = "Payment of taxes shall not be enforced by any proceedings under the provisions of this section prior to the expiration of the time otherwise allowed for paying such taxes")
+rule S6851d2NoEnforcementBeforeDue strict {
+    for p: Person;
+    when taxpayer_is_alien(p)
+        and alien_about_to_depart_from_united_states(p)
+        and secretary_determines_collection_not_jeopardized_by_alien_departure(p);
+    then prohibition SecretaryMayNotEnforceAlienTaxBeforeDue {
+        bearer Secretary;
+        action payment_enforced_by_section_6851_proceedings_before_due(p);
+        window [-infinity, infinity];
+    };
+}
+
+// --- §6863(b)(1), (b)(2): further bond conditions for Tax Court taxes -------------------------------
+relation bond_given_before_petition_to_tax_court(a: JeopardyAssessment) kind empirical {
+    label en official "the bond is given before the taxpayer has filed his petition under section 6213(a)";
+}
+relation bond_contains_default_payment_condition_if_no_petition(a: JeopardyAssessment) kind empirical {
+    label en official "the bond contains the further condition that if a petition is not filed within the period, the stayed amount will be paid on notice and demand after the period, with interest from the date of the jeopardy notice and demand";
+}
+relation bond_conditioned_on_payment_of_amount_not_abated_by_final_tax_court_decision(a: JeopardyAssessment) kind empirical {
+    label en official "the bond is conditioned upon the payment of so much of the assessment as is not abated by a decision of the Tax Court which has become final";
+}
+pub relation jeopardy_bond_tax_court_conditions_met(a: JeopardyAssessment) kind institutional {
+    label en unofficial "the further bond conditions of section 6863(b)(1) and (2) for taxes subject to the jurisdiction of the Tax Court are met";
+}
+@source(IRC_S6863_B, relation = formalizes, coverage = exact, quote = "the bond shall contain a further condition that if a petition is not filed within the period provided in such section, then the amount, the collection of which is stayed by the bond, will be paid on notice and demand at any time after the expiration of such period")
+rule S6863b1PrePetitionCondition strict {
+    for a: JeopardyAssessment;
+    when bond_given_before_petition_to_tax_court(a)
+        and bond_contains_default_payment_condition_if_no_petition(a)
+        and bond_conditioned_on_payment_of_amount_not_abated_by_final_tax_court_decision(a);
+    then jeopardy_bond_tax_court_conditions_met(a);
+}
+@source(IRC_S6863_B, relation = formalizes, coverage = exact, quote = "The bond shall be conditioned upon the payment of so much of such assessment (collection of which is stayed by the bond) as is not abated by a decision of the Tax Court which has become final")
+rule S6863b2PostPetitionCondition strict {
+    for a: JeopardyAssessment;
+    when not_known(bond_given_before_petition_to_tax_court(a))
+        and bond_conditioned_on_payment_of_amount_not_abated_by_final_tax_court_decision(a);
+    then jeopardy_bond_tax_court_conditions_met(a);
+}
+relation jeopardy_assessed_amount(a: JeopardyAssessment, amount: Money) kind empirical {
+    label en unofficial "the amount assessed";
+}
+relation tax_court_determined_correct_assessment_amount(a: JeopardyAssessment, amount: Money) kind empirical {
+    label en official "the amount which the Tax Court determines should have been assessed";
+}
+pub relation bond_amount_after_tax_court_reduction(a: JeopardyAssessment, amount: Money) kind institutional {
+    label en unofficial "when the Tax Court determines that the amount assessed is greater than the amount which should have been assessed, the bond is at the taxpayer's request proportionately reduced";
+}
+@source(IRC_S6863_B, relation = formalizes, coverage = exact, quote = "If the Tax Court determines that the amount assessed is greater than the amount which should have been assessed, then when the decision of the Tax Court is rendered the bond shall, at the request of the taxpayer, be proportionately reduced")
+rule S6863b2ProportionateReduction strict {
+    for a: JeopardyAssessment;
+    for b: Money;
+    for x: Money;
+    for y: Money;
+    when jeopardy_bond_filed(a, b)
+        and jeopardy_assessed_amount(a, x)
+        and tax_court_determined_correct_assessment_amount(a, y)
+        and y < x
+        and taxpayer_requests_bond_reduction(a);
+    then bond_amount_after_tax_court_reduction(a, div_round(b * (y / 1.00 USD), x / 1.00 USD, 2, "HALF_UP"));
+}
+relation taxpayer_requests_bond_reduction(a: JeopardyAssessment) kind empirical {
+    label en official "the taxpayer requests that the bond be proportionately reduced";
+}
+
+// --- §6863(b)(3): stay of sale of seized property pending Tax Court decision -------------------------
+relation proposed_sale_date_of_seized_property(a: JeopardyAssessment, d: Date) kind empirical {
+    label en unofficial "the date on which the seized property would be sold";
+}
+relation sale_barred_until_c1_periods_expire(a: JeopardyAssessment, d: Date) kind empirical {
+    label en unofficial "the date on which the periods described in subsection (c)(1)(A) and (B) expire (case fact: see the header note)";
+}
+relation notice_of_deficiency_under_6851b_or_6861b_issued_on(a: JeopardyAssessment, d: Date) kind empirical {
+    label en official "the date the notice of deficiency described in section 6851(b) or 6861(b) is issued";
+}
+relation petition_period_under_6213a_expires_on(a: JeopardyAssessment, d: Date) kind empirical {
+    label en official "the last day of the period provided in section 6213(a) for filing a petition with the Tax Court";
+}
+relation tax_court_petition_filed_before_or_after_assessment(a: JeopardyAssessment) kind empirical {
+    label en official "a petition is filed with the Tax Court (whether before or after the making of the assessment)";
+}
+relation assessment_prohibition_period_ends_on(a: JeopardyAssessment, d: Date) kind empirical {
+    label en official "the end of the period during which the assessment of the deficiency would be prohibited if neither section 6851(a), 6852(a) nor 6861(a) were applicable";
+}
+relation termination_taxpayer_filed_return_by_due_date(a: JeopardyAssessment) kind empirical {
+    label en official "the taxpayer files a return for the taxable year by the due date (determined with regard to any extensions)";
+}
+relation sale_barred_by_6863b3A(a: JeopardyAssessment) kind institutional {
+    label en unofficial "the sale of the seized property is barred by section 6863(b)(3)(A) (before the periods of (c)(1), or before the notice of deficiency and the petition period, or during the Tax Court prohibition period)";
+}
+@source(IRC_S6863_B, relation = formalizes, coverage = exact, quote = "before the expiration of the periods described in subsection (c)(1)(A) and (B)")
+rule S6863b3AiPeriods strict {
+    for a: JeopardyAssessment;
+    for d: Date;
+    for e: Date;
+    when proposed_sale_date_of_seized_property(a, d)
+        and sale_barred_until_c1_periods_expire(a, e)
+        and d <= e;
+    then sale_barred_by_6863b3A(a);
+}
+@source(IRC_S6863_B, relation = formalizes, coverage = exact, quote = "before the issuance of the notice of deficiency described in section 6851(b) or 6861(b), and the expiration of the period provided in section 6213(a) for filing a petition with the Tax Court")
+rule S6863b3AiiBeforeNotice defeasible {
+    for a: JeopardyAssessment;
+    for d: Date;
+    for n: Date;
+    when proposed_sale_date_of_seized_property(a, d)
+        and notice_of_deficiency_under_6851b_or_6861b_issued_on(a, n)
+        and d < n;
+    then sale_barred_by_6863b3A(a);
+    unless termination_return_not_filed_exemption(a)
+        and proposed_sale_date_of_seized_property(a, d)
+        and notice_of_deficiency_under_6851b_or_6861b_issued_on(a, n)
+        and d < n;
+}
+@source(IRC_S6863_B, relation = formalizes, coverage = exact, quote = "before the issuance of the notice of deficiency described in section 6851(b) or 6861(b), and the expiration of the period provided in section 6213(a) for filing a petition with the Tax Court")
+rule S6863b3AiiPetitionPeriod defeasible {
+    for a: JeopardyAssessment;
+    for d: Date;
+    for x: Date;
+    when proposed_sale_date_of_seized_property(a, d)
+        and petition_period_under_6213a_expires_on(a, x)
+        and d <= x;
+    then sale_barred_by_6863b3A(a);
+    unless termination_return_not_filed_exemption(a)
+        and proposed_sale_date_of_seized_property(a, d)
+        and petition_period_under_6213a_expires_on(a, x)
+        and d <= x;
+}
+@source(IRC_S6863_B, relation = formalizes, coverage = exact, quote = "if a petition is filed with the Tax Court (whether before or after the making of such assessment), before the expiration of the period during which the assessment of the deficiency would be prohibited if neither sections 6851(a), 6852(a), nor 6861(a) were applicable")
+rule S6863b3AiiiPetitionFiled defeasible {
+    for a: JeopardyAssessment;
+    for d: Date;
+    for z: Date;
+    when proposed_sale_date_of_seized_property(a, d)
+        and tax_court_petition_filed_before_or_after_assessment(a)
+        and assessment_prohibition_period_ends_on(a, z)
+        and d <= z;
+    then sale_barred_by_6863b3A(a);
+    unless termination_return_not_filed_exemption(a)
+        and proposed_sale_date_of_seized_property(a, d)
+        and tax_court_petition_filed_before_or_after_assessment(a)
+        and assessment_prohibition_period_ends_on(a, z)
+        and d <= z;
+}
+relation termination_return_not_filed_exemption(a: JeopardyAssessment) kind institutional {
+    label en unofficial "clauses (ii) and (iii) do not apply to a termination assessment under section 6851 when the taxpayer did not file a return by the due date";
+}
+@source(IRC_S6863_B, relation = formalizes, coverage = exact, quote = "Clauses (ii) and (iii) shall not apply in the case of a termination assessment under section 6851 if the taxpayer does not file a return for the taxable year by the due date (determined with regard to any extensions)")
+rule S6863b3ANoReturnTermination strict {
+    for a: JeopardyAssessment;
+    for p: Person;
+    when jeopardy_assessment_of(a, p, Termination6851)
+        and not_known(termination_taxpayer_filed_return_by_due_date(a));
+    then termination_return_not_filed_exemption(a);
+}
+relation taxpayer_consents_to_sale(a: JeopardyAssessment) kind empirical {
+    label en official "the taxpayer consents to the sale";
+}
+relation secretary_determines_conservation_expenses_greatly_reduce_net_proceeds(a: JeopardyAssessment) kind empirical {
+    label en official "the Secretary determines that the expenses of conservation and maintenance will greatly reduce the net proceeds";
+}
+relation property_of_type_described_in_section_6336(a: JeopardyAssessment) kind empirical {
+    label en official "the property is of the type described in section 6336";
+}
+pub relation sale_exception_6863b3B(a: JeopardyAssessment) kind institutional {
+    label en unofficial "a section 6863(b)(3)(B) exception applies: consent, conservation expenses, or property described in section 6336";
+}
+@source(IRC_S6863_B, relation = formalizes, coverage = exact, quote = "the taxpayer consents to the sale")
+rule S6863b3BConsent strict {
+    for a: JeopardyAssessment;
+    when taxpayer_consents_to_sale(a);
+    then sale_exception_6863b3B(a);
+}
+@source(IRC_S6863_B, relation = formalizes, coverage = exact, quote = "the Secretary determines that the expenses of conservation and maintenance will greatly reduce the net proceeds")
+rule S6863b3BExpenses strict {
+    for a: JeopardyAssessment;
+    when secretary_determines_conservation_expenses_greatly_reduce_net_proceeds(a);
+    then sale_exception_6863b3B(a);
+}
+@source(IRC_S6863_B, relation = formalizes, coverage = exact, quote = "the property is of the type described in section 6336")
+rule S6863b3BSection6336 strict {
+    for a: JeopardyAssessment;
+    when property_of_type_described_in_section_6336(a);
+    then sale_exception_6863b3B(a);
+}
+relation seized_property_sold(a: JeopardyAssessment) kind empirical {
+    label en unofficial "the seized property is sold";
+}
+@source(IRC_S6863_B, relation = formalizes, coverage = exact, quote = "the property seized for the collection of the tax shall not be sold—")
+rule S6863b3ASaleProhibition defeasible {
+    for a: JeopardyAssessment;
+    for p: Person;
+    when jeopardy_assessment_of(a, p, Termination6851)
+        and sale_barred_by_6863b3A(a);
+    then prohibition SecretaryMayNotSellSeizedPropertyDuringTaxCourtStay {
+        bearer Secretary;
+        action seized_property_sold(a);
+        window [-infinity, infinity];
+    };
+    unless sale_exception_6863b3B(a)
+        and jeopardy_assessment_of(a, p, Termination6851)
+        and sale_barred_by_6863b3A(a);
+}
+@source(IRC_S6863_B, relation = formalizes, coverage = exact, quote = "the property seized for the collection of the tax shall not be sold—")
+rule S6863b3ASaleProhibitionDeficiency defeasible {
+    for a: JeopardyAssessment;
+    for p: Person;
+    when jeopardy_assessment_of(a, p, Deficiency6861)
+        and sale_barred_by_6863b3A(a);
+    then prohibition SecretaryMayNotSellSeizedPropertyDuringDeficiencyStay {
+        bearer Secretary;
+        action seized_property_sold(a);
+        window [-infinity, infinity];
+    };
+    unless sale_exception_6863b3B(a)
+        and jeopardy_assessment_of(a, p, Deficiency6861)
+        and sale_barred_by_6863b3A(a);
+}
+@source(IRC_S6863_B, relation = formalizes, coverage = exact, quote = "the property seized for the collection of the tax shall not be sold—")
+rule S6863b3ASaleProhibitionPolitical defeasible {
+    for a: JeopardyAssessment;
+    for p: Person;
+    when jeopardy_assessment_of(a, p, Political6852)
+        and sale_barred_by_6863b3A(a);
+    then prohibition SecretaryMayNotSellSeizedPropertyDuringPoliticalStay {
+        bearer Secretary;
+        action seized_property_sold(a);
+        window [-infinity, infinity];
+    };
+    unless sale_exception_6863b3B(a)
+        and jeopardy_assessment_of(a, p, Political6852)
+        and sale_barred_by_6863b3A(a);
+}
+relation sale_would_be_prohibited_by_6863b3Aiii_but_for_exception(a: JeopardyAssessment) kind empirical {
+    label en official "but for the application of subparagraph (B), a sale would be prohibited by subparagraph (A)(iii)";
+}
+relation motion_to_review_sale_determination_filed(a: JeopardyAssessment) kind empirical {
+    label en unofficial "a motion to review the Secretary's determination under subparagraph (B) is filed by either the Secretary or the taxpayer";
+}
+pub relation tax_court_review_of_sale_determination(a: JeopardyAssessment) kind institutional {
+    label en unofficial "the Tax Court has reviewed the Secretary's determination that the property may be sold; its order is reviewable in the same manner as a decision of the Tax Court";
+}
+@source(IRC_S6863_B, relation = formalizes, coverage = exact, quote = "then the Tax Court shall have jurisdiction to review the Secretary's determination under subparagraph (B) that the property may be sold")
+rule S6863b3CTaxCourtReviewPower strict {
+    for a: JeopardyAssessment;
+    when motion_to_review_sale_determination_filed(a);
+    then power TaxCourtReviewSaleDetermination {
+        holder TaxCourt;
+        over a;
+        exercise motion_to_review_sale_determination_filed(a);
+        valid_when sale_would_be_prohibited_by_6863b3Aiii_but_for_exception(a);
+        effect create(tax_court_review_of_sale_determination(a));
+        window [-infinity, infinity];
+    };
+}
+
+// --- §6863(c): stay of sale pending district court determination under section 7429 --------------------
+relation civil_action_commenced_under_7429b(a: JeopardyAssessment) kind empirical {
+    label en official "a civil action is commenced in accordance with section 7429(b)";
+}
+relation district_court_judgment_in_7429_action_final_on(a: JeopardyAssessment, d: Date) kind empirical {
+    label en official "the day on which the district court judgment in such action becomes final";
+}
+relation period_for_requesting_7429a_review_expires_on(a: JeopardyAssessment, d: Date) kind empirical {
+    label en official "the last day of the period provided in section 7429(a) for requesting an administrative review";
+}
+relation administrative_review_requested_under_7429a(a: JeopardyAssessment) kind empirical {
+    label en official "an administrative review is requested";
+}
+relation period_for_commencing_7429b_action_expires_on(a: JeopardyAssessment, d: Date) kind empirical {
+    label en official "the last day of the period provided in section 7429(b) for commencing an action in the district court";
+}
+relation sale_barred_by_6863c1(a: JeopardyAssessment) kind institutional {
+    label en unofficial "the sale of the seized property is barred by section 6863(c)(1)";
+}
+@source(IRC_S6863_C, relation = formalizes, coverage = exact, quote = "if a civil action is commenced in accordance with section 7429(b), on or before the day on which the district court judgment in such action becomes final")
+rule S6863c1ACivilAction strict {
+    for a: JeopardyAssessment;
+    for d: Date;
+    for j: Date;
+    when proposed_sale_date_of_seized_property(a, d)
+        and civil_action_commenced_under_7429b(a)
+        and district_court_judgment_in_7429_action_final_on(a, j)
+        and d <= j;
+    then sale_barred_by_6863c1(a);
+}
+@source(IRC_S6863_C, relation = formalizes, coverage = exact, quote = "before the day after the expiration of the period provided in section 7429(a) for requesting an administrative review")
+rule S6863c1BNoReview strict {
+    for a: JeopardyAssessment;
+    for d: Date;
+    for r: Date;
+    when proposed_sale_date_of_seized_property(a, d)
+        and not_known(civil_action_commenced_under_7429b(a))
+        and not_known(administrative_review_requested_under_7429a(a))
+        and period_for_requesting_7429a_review_expires_on(a, r)
+        and d <= r;
+    then sale_barred_by_6863c1(a);
+}
+@source(IRC_S6863_C, relation = formalizes, coverage = exact, quote = "and if such review is requested, before the day after the expiration of the period provided in section 7429(b), for commencing an action in the district court")
+rule S6863c1BReviewRequested strict {
+    for a: JeopardyAssessment;
+    for d: Date;
+    for c: Date;
+    when proposed_sale_date_of_seized_property(a, d)
+        and not_known(civil_action_commenced_under_7429b(a))
+        and administrative_review_requested_under_7429a(a)
+        and period_for_commencing_7429b_action_expires_on(a, c)
+        and d <= c;
+    then sale_barred_by_6863c1(a);
+}
+@source(IRC_S6863_C, relation = formalizes, coverage = exact, quote = "the property seized for the collection of the tax shall not be sold—")
+rule S6863c1SaleProhibition defeasible {
+    for a: JeopardyAssessment;
+    for p: Person;
+    when jeopardy_assessment_of(a, p, NonIncomeTax6862)
+        and sale_barred_by_6863c1(a);
+    then prohibition SecretaryMayNotSellSeizedPropertyPending7429Review {
+        bearer Secretary;
+        action seized_property_sold(a);
+        window [-infinity, infinity];
+    };
+    unless sale_exception_6863b3B(a)
+        and jeopardy_assessment_of(a, p, NonIncomeTax6862)
+        and sale_barred_by_6863c1(a);
+}
+
+// --- §6867(b), (c), (d)(3): rules for assessing, substitution of the true owner, valuation -----------
+relation cash_amount_of_possession(i: Individual, c: CashPossessionEvent, amount: Money) kind empirical {
+    label en unofficial "the amount of the cash (with cash equivalents valued under subsection (d)(3)) in the possession (case fact)";
+}
+pub relation cash_treated_as_taxable_income_6867b1(i: Individual, c: CashPossessionEvent, amount: Money) kind institutional {
+    label en unofficial "the entire amount of the cash is treated as taxable income for the taxable year in which the possession occurs";
+}
+@source(IRC_S6867_B, relation = formalizes, coverage = exact, quote = "the entire amount of the cash shall be treated as taxable income for the taxable year in which the possession occurs")
+rule S6867b1EntireAmountTaxable defeasible {
+    for i: Individual;
+    for c: CashPossessionEvent;
+    for a: Money;
+    when cash_ownership_unclaimed(i, c)
+        and cash_amount_of_possession(i, c, a);
+    then cash_treated_as_taxable_income_6867b1(i, c, a);
+}
+pub relation highest_section_1_rate_for_cash_assessment(c: CashPossessionEvent, rate: Decimal) kind institutional {
+    label en unofficial "PENDING (owner: income-individual) - the highest rate of tax specified in section 1";
+}
+pub relation cash_income_tax_at_highest_rate_6867b2(i: Individual, c: CashPossessionEvent, amount: Money) kind institutional {
+    label en unofficial "such income is taxable at the highest rate of tax specified in section 1";
+}
+@source(IRC_S6867_B, relation = formalizes, coverage = exact, quote = "such income shall be treated as taxable at the highest rate of tax specified in section 1")
+rule S6867b2HighestRate defeasible {
+    for i: Individual;
+    for c: CashPossessionEvent;
+    for a: Money;
+    for r: Decimal;
+    when cash_treated_as_taxable_income_6867b1(i, c, a)
+        and highest_section_1_rate_for_cash_assessment(c, r);
+    then cash_income_tax_at_highest_rate_6867b2(i, c, round(a * r, 2, "HALF_UP"));
+}
+relation cash_true_owner_substituted_by_assessment(i: Individual, c: CashPossessionEvent) kind empirical {
+    label en official "the assessment against the possessor was abated and replaced by an assessment against the owner of the cash";
+}
+pub relation possessor_treated_as_taxpayer_6867b3(i: Individual, c: CashPossessionEvent) kind institutional {
+    label en unofficial "the possessor of the cash is treated (solely with respect to such cash) as the taxpayer for purposes of chapters 63 and 64 and section 7429(a)(1), except as provided in subsection (c)";
+}
+@source(IRC_S6867_B, relation = formalizes, coverage = exact, quote = "the possessor of the cash shall be treated (solely with respect to such cash) as the taxpayer for purposes of chapters 63 and 64 and section 7429(a)(1)")
+rule S6867b3PossessorAsTaxpayer defeasible {
+    for i: Individual;
+    for c: CashPossessionEvent;
+    for a: Money;
+    when cash_treated_as_taxable_income_6867b1(i, c, a);
+    then possessor_treated_as_taxpayer_6867b3(i, c);
+    unless cash_true_owner_substituted_by_assessment(i, c)
+        and cash_treated_as_taxable_income_6867b1(i, c, a);
+}
+relation original_assessment_date_against_possessor(i: Individual, c: CashPossessionEvent, d: Date) kind empirical {
+    label en unofficial "the date of the original assessment against the possessor";
+}
+pub relation later_assessment_against_owner_relates_back_to(i: Individual, c: CashPossessionEvent, d: Date) kind institutional {
+    label en unofficial "the later assessment against the owner is treated, for purposes of all laws relating to lien, levy and collection, as relating back to the date of the original assessment";
+}
+@source(IRC_S6867_C, relation = formalizes, coverage = exact, quote = "such later assessment shall be treated for purposes of all laws relating to lien, levy and collection as relating back to the date of the original assessment")
+rule S6867cRelationBack strict {
+    for i: Individual;
+    for c: CashPossessionEvent;
+    for d: Date;
+    when cash_true_owner_substituted_by_assessment(i, c)
+        and original_assessment_date_against_possessor(i, c, d);
+    then later_assessment_against_owner_relates_back_to(i, c, d);
+}
+relation cash_equivalent_is_bearer_obligation(x: CashPossessionEvent) kind empirical {
+    label en official "the cash equivalent is a bearer obligation";
+}
+relation cash_equivalent_face_amount(x: CashPossessionEvent, amount: Money) kind empirical {
+    label en unofficial "the face amount of the bearer obligation (case fact)";
+}
+relation cash_equivalent_fair_market_value(x: CashPossessionEvent, amount: Money) kind empirical {
+    label en unofficial "the fair market value of the cash equivalent (case fact)";
+}
+pub relation cash_equivalent_value_taken_into_account(x: CashPossessionEvent, amount: Money) kind institutional {
+    label en unofficial "a bearer obligation is taken into account at its face amount, any other cash equivalent at its fair market value";
+}
+@source(IRC_S6867_D, relation = formalizes, coverage = exact, quote = "in the case of a bearer obligation, at its face amount, and")
+rule S6867d3BearerFace strict {
+    for x: CashPossessionEvent;
+    for a: Money;
+    when cash_equivalent_is_bearer_obligation(x)
+        and cash_equivalent_face_amount(x, a);
+    then cash_equivalent_value_taken_into_account(x, a);
+}
+@source(IRC_S6867_D, relation = formalizes, coverage = exact, quote = "in the case of any other cash equivalent, at its fair market value")
+rule S6867d3OtherFairMarketValue strict {
+    for x: CashPossessionEvent;
+    for a: Money;
+    when not_known(cash_equivalent_is_bearer_obligation(x))
+        and cash_equivalent_fair_market_value(x, a);
+    then cash_equivalent_value_taken_into_account(x, a);
+}

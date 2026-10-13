@@ -1,0 +1,652 @@
+// 26 U.S.C. §6402(c)-(f), (h)-(k), (n) — the offset procedures behind the
+// crediting chain of 03-refunds-and-credits.law. Stage 2 (replaces the
+// stage-1 reading that treated notices, conditions and payments to the
+// creditor as "procedural detail not separately modeled").
+//
+// WHAT THIS MODULE ADDS TO THE STAGE-1 CHAIN
+//  - An obligation takes part in an offset only if it is ELIGIBLE: the
+//    Secretary has received the creditor's notice and the debt has the
+//    statutory character of its subsection ((c) past-due support of §464(c)
+//    SSA; (d) past-due legally enforceable Federal agency debt, an OASDI
+//    overpayment only when the §3720A(f) requirements are met; (e) a
+//    past-due, legally enforceable State income tax obligation within (e)(5),
+//    only against a person whose Federal return address is in the State and
+//    only after the State followed (e)(4); (f) a covered unemployment
+//    compensation debt within (f)(4) after the State followed (f)(3)).
+//  - Obligations of one group are satisfied in the order in which they
+//    accrued ((d)(2), (e)(3), (f)(2)); the (e) and (f) debts of a person
+//    share ONE ordering. Two obligations of one group with the same accrual
+//    date are an unresolved tie — the text names no rule for it
+//    (INTERPRETATION row, `offset_order_unresolved`): no amount is allocated
+//    to either, the answer is NEITHER, not a guessed split.
+//  - Per obligation the Secretary owes duties: reduce, pay the creditor (or,
+//    for an OASDI overpayment, deposit in the OASI/DI trust fund), and notify
+//    the person (and, for (e)/(f), the State).
+//  - A State may not act until (e)(4) / (f)(3) are followed (a prohibition
+//    on the State), and repays an erroneous payment promptly (a duty of the
+//    State).
+//
+// JUDGMENT CALLS AND GAPS
+//  - Past-due support (c) has no statutory order among its own obligations
+//    except "first to an amount certified by the State"; obligations of the
+//    support group are also allocated in accrual order (INTERPRETATION).
+//  - "Not delinquent for more than 10 years" ((e)(5)(B)) is measured to the
+//    date the Secretary received the State's notice (add_calendar_period of
+//    120 months).
+//  - (d)(3)(B)(ii) second sentence (deduct a protected joint-filer share from
+//    later reductions payable to a trust fund) is a cross-time netting
+//    over future payments: TECH-GAPS G2634.
+//  - §6402(i) (payment to a State treated as a payment to the person for
+//    interest) and (k) (refund to a fiduciary of an insolvent member of an
+//    affiliated group) are Secretary powers exercised "by regulation": the
+//    power is executable, the regulation is a case fact.
+
+language "law.core" version "0.2";
+package us.irc.payment_refunds_interest version "0.1.1";
+namespace "urn:us:irc:payment_refunds_interest:clir";
+
+use self::{
+    IRC_S6402_C,
+    IRC_S6402_D,
+    IRC_S6402_E,
+    IRC_S6402_F,
+    IRC_S6402_H,
+    IRC_S6402_I,
+    IRC_S6402_K,
+    IRC_S6402_N,
+    OffsetKind,
+    OffsetObligation,
+    Person,
+    Secretary,
+    TaxKind,
+    TaxableYear,
+    offset_obligation_kind,
+    offset_obligation_owed_by,
+    refund_balance_after_federal_agency_offset,
+    refund_balance_after_own_liability_credit,
+    refund_balance_after_support_offset,
+    refund_balance_after_unemployment_offset,
+};
+
+entity OffsetCreditor { label en unofficial "the State, Federal agency, or Indian tribe that notified the Secretary of the debt"; }
+enum OffsetGroup {
+    SupportGroup;     // (c)
+    FederalGroup;     // (d)
+    StateGroup;       // (e) and (f) — one common accrual ordering
+    label en unofficial "the priority tier of the obligation in the §6402(c)-(f) offset sequence";
+}
+relation offset_obligation_creditor(o: OffsetObligation, cr: OffsetCreditor) kind empirical {
+    label en unofficial "the creditor that notified the Secretary";
+}
+relation offset_notice_received_on(o: OffsetObligation, d: Date) kind empirical {
+    label en official "the Secretary receives notice that a named person owes the debt";
+}
+relation offset_obligation_accrued_on(o: OffsetObligation, d: Date) kind empirical {
+    label en official "the date the debt accrued (the order of application is the order of accrual)";
+}
+relation offset_notice_received(o: OffsetObligation) kind institutional { label en unofficial "helper: some notice date is asserted"; }
+rule S6402NoticeReceived strict {
+    for o: OffsetObligation;
+    for d: Date;
+    when offset_notice_received_on(o, d);
+    then offset_notice_received(o);
+}
+relation offset_creditor_is_state_or_indian_tribe(cr: OffsetCreditor) kind empirical {
+    label en official "any reference to a State includes any Indian tribe or tribal organization receiving a grant under section 455(f) of the Social Security Act";
+}
+
+// ---------------------------------------------------------------------------
+// (h): Federal agency
+// ---------------------------------------------------------------------------
+relation creditor_is_department_agency_or_instrumentality_of_united_states(cr: OffsetCreditor) kind empirical { label en official "a department, agency, or instrumentality of the United States"; }
+relation creditor_is_government_corporation(cr: OffsetCreditor) kind empirical { label en official "a Government corporation (as defined in section 103 of title 5, United States Code)"; }
+pub relation federal_agency_6402(cr: OffsetCreditor) kind institutional { label en official "for purposes of section 6402 the term Federal agency"; }
+@source(IRC_S6402_H, relation = formalizes, coverage = exact, quote = "the term \"Federal agency\" means a department, agency, or instrumentality of the United States, and includes a Government corporation")
+rule S6402FederalAgencyDepartment strict { for cr: OffsetCreditor; when creditor_is_department_agency_or_instrumentality_of_united_states(cr); then federal_agency_6402(cr); }
+rule S6402FederalAgencyGovernmentCorporation strict { for cr: OffsetCreditor; when creditor_is_government_corporation(cr); then federal_agency_6402(cr); }
+
+// ---------------------------------------------------------------------------
+// Eligibility of an obligation
+// ---------------------------------------------------------------------------
+relation past_due_support_464c(o: OffsetObligation) kind empirical { label en official "past-due support (as defined in section 464(c) of the Social Security Act) owed by that person, of which the Secretary has been notified by a State in accordance with section 464"; }
+relation past_due_legally_enforceable_federal_debt(o: OffsetObligation) kind empirical { label en official "a past-due legally enforceable debt (other than past-due support subject to subsection (c)) owed to a Federal agency"; }
+relation oasdi_overpayment_debt(o: OffsetObligation) kind empirical { label en official "(d)(3)(D) an overpayment of benefits made to an individual under title II of the Social Security Act"; }
+relation oasdi_requirements_3720A_f_met(o: OffsetObligation) kind empirical { label en official "(d)(3)(A) the requirements of paragraphs (1) and (2) of section 3720A(f) of title 31 are met with respect to the overpayment"; }
+// (e)(4): the State's procedure.
+relation state_notified_by_certified_mail(o: OffsetObligation) kind empirical { label en official "(e)(4)(A) the State notifies by certified mail with return receipt the person owing the liability that the State proposes to take action"; }
+relation state_gave_sixty_days_for_evidence(o: OffsetObligation) kind empirical { label en official "(e)(4)(B) / (f)(3)(B) the State gives such person at least 60 days to present evidence"; }
+relation state_considered_evidence_and_determined(o: OffsetObligation) kind empirical { label en official "(e)(4)(C) / (f)(3)(C) the State considers any evidence and determines that an amount of the debt is past-due (or legally enforceable) and legally enforceable"; }
+relation state_satisfied_other_conditions_of_secretary(o: OffsetObligation) kind empirical { label en official "(e)(4)(D) / (f)(3)(D) the State satisfies such other conditions as the Secretary may prescribe"; }
+relation state_notified_person_of_proposed_action(o: OffsetObligation) kind empirical { label en official "(f)(3)(A) the State notifies the person owing the covered unemployment compensation debt that the State proposes to take action"; }
+relation state_income_tax_procedure_followed(o: OffsetObligation) kind institutional { label en official "the State satisfied paragraph (4) of subsection (e)"; }
+@source(IRC_S6402_E, relation = formalizes, coverage = exact, quote = "No State may take action under this subsection until such State—")
+rule S6402EStateProcedureFollowed strict {
+    for o: OffsetObligation;
+    when state_notified_by_certified_mail(o) and state_gave_sixty_days_for_evidence(o) and state_considered_evidence_and_determined(o) and state_satisfied_other_conditions_of_secretary(o);
+    then state_income_tax_procedure_followed(o);
+}
+relation unemployment_procedure_followed(o: OffsetObligation) kind institutional { label en official "the State satisfied paragraph (3) of subsection (f)"; }
+@source(IRC_S6402_F, relation = formalizes, coverage = exact, quote = "No State may take action under this subsection until such State—")
+rule S6402FStateProcedureFollowed strict {
+    for o: OffsetObligation;
+    when state_notified_person_of_proposed_action(o) and state_gave_sixty_days_for_evidence(o) and state_considered_evidence_and_determined(o) and state_satisfied_other_conditions_of_secretary(o);
+    then unemployment_procedure_followed(o);
+}
+relation state_takes_offset_action(o: OffsetObligation) kind empirical { label en official "the State takes action under the subsection"; }
+@source(IRC_S6402_E, relation = formalizes, coverage = exact, quote = "No State may take action under this subsection until such State—")
+rule S6402EStateMayNotActBeforeProcedure defeasible {
+    for o: OffsetObligation;
+    for cr: OffsetCreditor;
+    when state_takes_offset_action(o) and offset_obligation_creditor(o, cr) and offset_obligation_kind(o, StateIncomeTaxObligation);
+    then prohibition NoStateActionBeforeStateIncomeTaxProcedure {
+        bearer cr;
+        beneficiary Secretary;
+        action state_takes_offset_action(o);
+        window [-infinity, infinity];
+    };
+    unless state_income_tax_procedure_followed(o) and state_takes_offset_action(o) and offset_obligation_creditor(o, cr);
+}
+@source(IRC_S6402_F, relation = formalizes, coverage = exact, quote = "No State may take action under this subsection until such State—")
+rule S6402FStateMayNotActBeforeProcedure defeasible {
+    for o: OffsetObligation;
+    for cr: OffsetCreditor;
+    when state_takes_offset_action(o) and offset_obligation_creditor(o, cr) and offset_obligation_kind(o, UnemploymentCompensationDebt);
+    then prohibition NoStateActionBeforeUnemploymentProcedure {
+        bearer cr;
+        beneficiary Secretary;
+        action state_takes_offset_action(o);
+        window [-infinity, infinity];
+    };
+    unless unemployment_procedure_followed(o) and state_takes_offset_action(o) and offset_obligation_creditor(o, cr);
+}
+// (e)(5): the State income tax obligation.
+relation debt_resulted_from_court_judgment(o: OffsetObligation) kind empirical { label en official "(A)(i)(I) a judgment rendered by a court of competent jurisdiction which has determined an amount of State income tax to be due"; }
+relation debt_resulted_from_administrative_hearing(o: OffsetObligation) kind empirical { label en official "(A)(i)(II) a determination after an administrative hearing which has determined an amount of State income tax to be due"; }
+relation debt_no_longer_subject_to_judicial_review(o: OffsetObligation) kind empirical { label en official "(A)(ii) the debt is no longer subject to judicial review"; }
+relation debt_assessed_but_not_collected_and_redetermination_expired(o: OffsetObligation) kind empirical { label en official "(B) the State income tax has been assessed but not collected and the time for redetermination of it has expired"; }
+relation debt_delinquent_since(o: OffsetObligation, d: Date) kind empirical { label en official "the date from which the debt is delinquent"; }
+relation past_due_legally_enforceable_state_income_tax_obligation(o: OffsetObligation) kind institutional { label en official "a past-due, legally enforceable State income tax obligation within subsection (e)(5)"; }
+@source(IRC_S6402_E, relation = formalizes, coverage = exact, quote = "(ii) which is no longer subject to judicial review; or")
+rule S6402E5ADebtByJudgment strict {
+    for o: OffsetObligation;
+    when debt_resulted_from_court_judgment(o) and debt_no_longer_subject_to_judicial_review(o);
+    then past_due_legally_enforceable_state_income_tax_obligation(o);
+}
+rule S6402E5ADebtByAdministrativeHearing strict {
+    for o: OffsetObligation;
+    when debt_resulted_from_administrative_hearing(o) and debt_no_longer_subject_to_judicial_review(o);
+    then past_due_legally_enforceable_state_income_tax_obligation(o);
+}
+@source(IRC_S6402_E, relation = formalizes, coverage = exact, quote = "which has not been delinquent for more than 10 years.")
+rule S6402E5BDebtAssessedNotCollected strict {
+    for o: OffsetObligation;
+    for since: Date;
+    for notified: Date;
+    when debt_assessed_but_not_collected_and_redetermination_expired(o) and debt_delinquent_since(o, since) and offset_notice_received_on(o, notified) and notified <= add_calendar_period(since, 120 calendar_month);
+    then past_due_legally_enforceable_state_income_tax_obligation(o);
+}
+// (f)(4): covered unemployment compensation debt.
+relation unemployment_debt_final_fraud_or_unreported_earnings(o: OffsetObligation) kind empirical { label en official "(A) a past-due debt for erroneous payment of unemployment compensation due to fraud or the person's failure to report earnings which has become final under the law of a State certified under section 3304 and remains uncollected"; }
+relation unemployment_contributions_due_uncollected(o: OffsetObligation) kind empirical { label en official "(B) contributions due to the unemployment fund of a State for which the State has determined the person to be liable and which remain uncollected"; }
+relation unemployment_penalties_and_interest_on_debt(o: OffsetObligation) kind empirical { label en official "(C) any penalties and interest assessed on such debt"; }
+relation covered_unemployment_compensation_debt(o: OffsetObligation) kind institutional { label en official "a covered unemployment compensation debt within subsection (f)(4)"; }
+rule S6402F4AFraudOrUnreportedEarningsDebt strict { for o: OffsetObligation; when unemployment_debt_final_fraud_or_unreported_earnings(o); then covered_unemployment_compensation_debt(o); }
+rule S6402F4BContributionsDue strict { for o: OffsetObligation; when unemployment_contributions_due_uncollected(o); then covered_unemployment_compensation_debt(o); }
+rule S6402F4CPenaltiesAndInterest strict { for o: OffsetObligation; when unemployment_penalties_and_interest_on_debt(o); then covered_unemployment_compensation_debt(o); }
+// (e)(2): the address requirement, per overpayment year.
+relation offset_state_address_matches(o: OffsetObligation, y: TaxableYear) kind empirical {
+    label en official "the address shown on the Federal return for the taxable year of the overpayment is an address within the State seeking the offset";
+}
+// The eligibility relation read by the crediting chain of 03-refunds-and-credits.law.
+pub relation offset_obligation_eligible(o: OffsetObligation) kind institutional {
+    label en official "the obligation has the statutory character of its subsection and the Secretary has the creditor's notice (and, for a State debt, the State followed its procedure)";
+}
+@source(IRC_S6402_C, relation = formalizes, coverage = partial, quote = "owed by that person of which the Secretary has been notified by a State in accordance with section 464 of such Act")
+rule S6402EligibleSupport strict {
+    for o: OffsetObligation;
+    when offset_obligation_kind(o, PastDueSupport) and offset_notice_received(o) and past_due_support_464c(o);
+    then offset_obligation_eligible(o);
+}
+@source(IRC_S6402_D, relation = formalizes, coverage = partial, quote = "Upon receiving notice from any Federal agency that a named person owes a past-due legally enforceable debt (other than past-due support subject to the provisions of subsection (c)) to such agency")
+rule S6402EligibleFederalNotOasdi strict {
+    for o: OffsetObligation;
+    when offset_obligation_kind(o, FederalAgencyDebt) and offset_notice_received(o) and past_due_legally_enforceable_federal_debt(o) and not_known(oasdi_overpayment_debt(o));
+    then offset_obligation_eligible(o);
+}
+@source(IRC_S6402_D, relation = formalizes, coverage = exact, quote = "Paragraph (1) shall apply with respect to an OASDI overpayment only if the requirements of paragraphs (1) and (2) of section 3720A(f) of title 31, United States Code, are met with respect to such overpayment.")
+rule S6402EligibleFederalOasdi strict {
+    for o: OffsetObligation;
+    when offset_obligation_kind(o, FederalAgencyDebt) and offset_notice_received(o) and past_due_legally_enforceable_federal_debt(o) and oasdi_overpayment_debt(o) and oasdi_requirements_3720A_f_met(o);
+    then offset_obligation_eligible(o);
+}
+@source(IRC_S6402_E, relation = formalizes, coverage = partial, quote = "Upon receiving notice from any State that a named person owes a past-due, legally enforceable State income tax obligation to such State")
+rule S6402EligibleStateIncomeTax strict {
+    for o: OffsetObligation;
+    when offset_obligation_kind(o, StateIncomeTaxObligation) and offset_notice_received(o) and past_due_legally_enforceable_state_income_tax_obligation(o) and state_income_tax_procedure_followed(o);
+    then offset_obligation_eligible(o);
+}
+@source(IRC_S6402_F, relation = formalizes, coverage = partial, quote = "Upon receiving notice from any State that a named person owes a covered unemployment compensation debt to such State")
+rule S6402EligibleUnemployment strict {
+    for o: OffsetObligation;
+    when offset_obligation_kind(o, UnemploymentCompensationDebt) and offset_notice_received(o) and covered_unemployment_compensation_debt(o) and unemployment_procedure_followed(o);
+    then offset_obligation_eligible(o);
+}
+relation offset_obligation_group(o: OffsetObligation, g: OffsetGroup) kind institutional { label en unofficial "the priority tier of the obligation"; }
+rule S6402GroupSupport strict { for o: OffsetObligation; when offset_obligation_kind(o, PastDueSupport); then offset_obligation_group(o, SupportGroup); }
+rule S6402GroupFederal strict { for o: OffsetObligation; when offset_obligation_kind(o, FederalAgencyDebt); then offset_obligation_group(o, FederalGroup); }
+rule S6402GroupStateIncomeTax strict { for o: OffsetObligation; when offset_obligation_kind(o, StateIncomeTaxObligation); then offset_obligation_group(o, StateGroup); }
+rule S6402GroupUnemployment strict { for o: OffsetObligation; when offset_obligation_kind(o, UnemploymentCompensationDebt); then offset_obligation_group(o, StateGroup); }
+
+// ---------------------------------------------------------------------------
+// Order of application within a group: the order in which debts accrued
+// ---------------------------------------------------------------------------
+relation offset_order_unresolved(o: OffsetObligation, p: Person) kind institutional {
+    label en unofficial "INTERPRETATION: another eligible obligation of the same group and person accrued on the same date; the text gives no tie rule";
+}
+rule S6402TieInOrderOfAccrual strict {
+    for o: OffsetObligation;
+    for q: OffsetObligation;
+    for p: Person;
+    for g: OffsetGroup;
+    for d: Date;
+    for a: Money;
+    for b: Money;
+    when offset_obligation_owed_by(o, p, a) and offset_obligation_owed_by(q, p, b) and offset_obligation_eligible(o) and offset_obligation_eligible(q)
+        and offset_obligation_group(o, g) and offset_obligation_group(q, g)
+        and offset_obligation_accrued_on(o, d) and offset_obligation_accrued_on(q, d) and o != q;
+    then offset_order_unresolved(o, p);
+}
+relation offset_applied_support(o: OffsetObligation, p: Person, y: TaxableYear, kind: TaxKind, amount: Money) kind institutional { label en unofficial "the part of the overpayment applied to a (c) support obligation"; }
+relation offset_applied_federal(o: OffsetObligation, p: Person, y: TaxableYear, kind: TaxKind, amount: Money) kind institutional { label en unofficial "the part of the overpayment applied to a (d) Federal agency debt"; }
+relation offset_applied_state_group(o: OffsetObligation, p: Person, y: TaxableYear, kind: TaxKind, amount: Money) kind institutional { label en unofficial "the part of the overpayment applied to a (e) State income tax obligation or (f) unemployment compensation debt"; }
+pub relation offset_applied_to_obligation(o: OffsetObligation, p: Person, y: TaxableYear, kind: TaxKind, amount: Money) kind institutional {
+    label en official "the part of the overpayment applied to the obligation, satisfying debts in the order in which they accrued";
+}
+// One allocation rule per group: the balance a group starts from is produced by the previous group's
+// chain step, so the three groups are separate predicates (a single predicate would be a cycle through the chain).
+@source(IRC_S6402_C, relation = formalizes, coverage = partial, quote = "The Secretary shall apply a reduction under this subsection first to an amount certified by the State as past due support under section 464 of the Social Security Act before any other reductions allowed by law.")
+rule S6402ApplySupportInOrderOfAccrual defeasible {
+    for o: OffsetObligation;
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for owed: Money;
+    for avail: Money;
+    for d: Date;
+    when offset_obligation_owed_by(o, p, owed) and offset_obligation_eligible(o) and offset_obligation_group(o, SupportGroup) and offset_obligation_accrued_on(o, d)
+        and refund_balance_after_own_liability_credit(p, y, kind, avail) and not_known(offset_order_unresolved(o, p));
+    then offset_applied_support(o, p, y, kind, min(owed, max(0 USD, avail - (sum all a2: Money for q: OffsetObligation, d2: Date where offset_obligation_owed_by(q, p, a2) and offset_obligation_eligible(q) and offset_obligation_group(q, SupportGroup) and offset_obligation_accrued_on(q, d2) and d2 < d))));
+}
+@source(IRC_S6402_D, relation = formalizes, coverage = exact, quote = "any overpayment by such person shall be applied against such debts in the order in which such debts accrued.")
+rule S6402ApplyFederalInOrderOfAccrual defeasible {
+    for o: OffsetObligation;
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for owed: Money;
+    for avail: Money;
+    for d: Date;
+    when offset_obligation_owed_by(o, p, owed) and offset_obligation_eligible(o) and offset_obligation_group(o, FederalGroup) and offset_obligation_accrued_on(o, d)
+        and refund_balance_after_support_offset(p, y, kind, avail) and not_known(offset_order_unresolved(o, p));
+    then offset_applied_federal(o, p, y, kind, min(owed, max(0 USD, avail - (sum all a2: Money for q: OffsetObligation, d2: Date where offset_obligation_owed_by(q, p, a2) and offset_obligation_eligible(q) and offset_obligation_group(q, FederalGroup) and offset_obligation_accrued_on(q, d2) and d2 < d))));
+}
+@source(IRC_S6402_E, relation = formalizes, coverage = exact, quote = "any overpayment by such person shall be applied against such debts in the order in which such debts accrued.")
+@source(IRC_S6402_F, relation = formalizes, coverage = exact, quote = "any overpayment by such person shall be applied against such debts in the order in which such debts accrued.")
+rule S6402ApplyStateGroupInOrderOfAccrual defeasible {
+    for o: OffsetObligation;
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for owed: Money;
+    for avail: Money;
+    for d: Date;
+    when offset_obligation_owed_by(o, p, owed) and offset_obligation_eligible(o) and offset_obligation_group(o, StateGroup) and offset_obligation_accrued_on(o, d)
+        and refund_balance_after_federal_agency_offset(p, y, kind, avail) and not_known(offset_order_unresolved(o, p))
+        and (offset_state_address_matches(o, y) or offset_obligation_kind(o, UnemploymentCompensationDebt));
+    then offset_applied_state_group(o, p, y, kind, min(owed, max(0 USD, avail - (sum all a2: Money for q: OffsetObligation, d2: Date where offset_obligation_owed_by(q, p, a2) and offset_obligation_eligible(q) and offset_obligation_group(q, StateGroup) and offset_obligation_accrued_on(q, d2) and d2 < d))));
+}
+rule S6402AppliedUnionSupport defeasible { for o: OffsetObligation; for p: Person; for y: TaxableYear; for kind: TaxKind; for a: Money; when offset_applied_support(o, p, y, kind, a); then offset_applied_to_obligation(o, p, y, kind, a); }
+rule S6402AppliedUnionFederal defeasible { for o: OffsetObligation; for p: Person; for y: TaxableYear; for kind: TaxKind; for a: Money; when offset_applied_federal(o, p, y, kind, a); then offset_applied_to_obligation(o, p, y, kind, a); }
+rule S6402AppliedUnionStateGroup defeasible { for o: OffsetObligation; for p: Person; for y: TaxableYear; for kind: TaxKind; for a: Money; when offset_applied_state_group(o, p, y, kind, a); then offset_applied_to_obligation(o, p, y, kind, a); }
+
+// ---------------------------------------------------------------------------
+// The Secretary's duties for each obligation reduced
+// ---------------------------------------------------------------------------
+relation amount_paid_to_creditor(o: OffsetObligation) kind empirical { label en official "the Secretary pays the amount by which the overpayment is reduced to the creditor (for a State, and notifies it of the person's name, taxpayer identification number, address and the amount collected)"; }
+relation person_notified_of_reduction(o: OffsetObligation) kind empirical { label en official "the Secretary notifies the person making the overpayment that the overpayment has been reduced by an amount necessary to satisfy the debt"; }
+relation joint_return_offset(o: OffsetObligation) kind empirical { label en official "the offset is made pursuant to a joint return"; }
+relation state_notice_includes_joint_filer_particulars(o: OffsetObligation) kind empirical { label en official "(e)(1) the notice to the State includes the names, taxpayer identification numbers, and addresses of each person filing the joint return"; }
+relation person_notice_includes_spouse_rights(o: OffsetObligation) kind empirical { label en official "(f)(1) the notice to the person includes information related to the rights of a spouse of a person subject to the offset"; }
+relation amount_deposited_in_trust_fund(o: OffsetObligation) kind empirical { label en official "(d)(3)(C) the amount is deposited in the Federal Old-Age and Survivors Insurance Trust Fund or the Federal Disability Insurance Trust Fund, as certified by the Commissioner of Social Security"; }
+@source(IRC_S6402_C, relation = formalizes, coverage = exact, quote = "The Secretary shall remit the amount by which the overpayment is so reduced to the State collecting such support")
+rule S6402CDutyToRemitToState defeasible {
+    for o: OffsetObligation;
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for cr: OffsetCreditor;
+    for applied: Money;
+    when offset_applied_to_obligation(o, p, y, kind, applied) and applied > 0 USD and offset_obligation_kind(o, PastDueSupport) and offset_obligation_creditor(o, cr);
+    then duty RemitPastDueSupportOffsetToState {
+        bearer Secretary;
+        beneficiary cr;
+        goal achievement {
+            condition amount_paid_to_creditor(o);
+            window [-infinity, infinity];
+        }
+    };
+}
+@source(IRC_S6402_C, relation = formalizes, coverage = exact, quote = "and notify the person making the overpayment that so much of the overpayment as was necessary to satisfy his obligation for past-due support has been paid to the State.")
+rule S6402CDutyToNotifyPerson defeasible {
+    for o: OffsetObligation;
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for applied: Money;
+    when offset_applied_to_obligation(o, p, y, kind, applied) and applied > 0 USD and offset_obligation_kind(o, PastDueSupport);
+    then duty NotifyPersonOfPastDueSupportOffset {
+        bearer Secretary;
+        beneficiary p;
+        goal achievement {
+            condition person_notified_of_reduction(o);
+            window [-infinity, infinity];
+        }
+    };
+}
+@source(IRC_S6402_D, relation = formalizes, coverage = exact, quote = "(B) pay the amount by which such overpayment is reduced under subparagraph (A) to such agency; and")
+rule S6402DDutyToPayAgency defeasible {
+    for o: OffsetObligation;
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for cr: OffsetCreditor;
+    for applied: Money;
+    when offset_applied_to_obligation(o, p, y, kind, applied) and applied > 0 USD and offset_obligation_kind(o, FederalAgencyDebt) and offset_obligation_creditor(o, cr) and not_known(oasdi_overpayment_debt(o));
+    then duty PayFederalAgencyOffsetToAgency {
+        bearer Secretary;
+        beneficiary cr;
+        goal achievement {
+            condition amount_paid_to_creditor(o);
+            window [-infinity, infinity];
+        }
+    };
+}
+@source(IRC_S6402_D, relation = formalizes, coverage = exact, quote = "(C) notify the person making such overpayment that such overpayment has been reduced by an amount necessary to satisfy such debt.")
+rule S6402DDutyToNotifyPerson defeasible {
+    for o: OffsetObligation;
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for applied: Money;
+    when offset_applied_to_obligation(o, p, y, kind, applied) and applied > 0 USD and offset_obligation_kind(o, FederalAgencyDebt);
+    then duty NotifyPersonOfFederalAgencyOffset {
+        bearer Secretary;
+        beneficiary p;
+        goal achievement {
+            condition person_notified_of_reduction(o);
+            window [-infinity, infinity];
+        }
+    };
+}
+@source(IRC_S6402_D, relation = formalizes, coverage = exact, quote = "the Secretary shall deposit such amount in the Federal Old-Age and Survivors Insurance Trust Fund or the Federal Disability Insurance Trust Fund, whichever is certified to the Secretary as appropriate by the Commissioner of Social Security.")
+rule S6402DDutyToDepositOasdiInTrustFund defeasible {
+    for o: OffsetObligation;
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for cr: OffsetCreditor;
+    for applied: Money;
+    when offset_applied_to_obligation(o, p, y, kind, applied) and applied > 0 USD and offset_obligation_kind(o, FederalAgencyDebt) and oasdi_overpayment_debt(o) and offset_obligation_creditor(o, cr);
+    then duty DepositOasdiOffsetInTrustFund {
+        bearer Secretary;
+        beneficiary cr;
+        goal achievement {
+            condition amount_deposited_in_trust_fund(o);
+            window [-infinity, infinity];
+        }
+    };
+}
+// (d)(3)(B): joint-return protections for an OASDI overpayment.
+relation oasdi_offset_from_joint_return_refund(o: OffsetObligation) kind empirical { label en official "the Secretary determines that the refund from which the reduction would be made is based upon a joint return"; }
+relation joint_filers_notified_of_reduction_and_procedures(o: OffsetObligation) kind empirical { label en official "(I) each taxpayer filing the joint return is notified that the reduction is made from a refund based on the return, and (II) the notification describes the procedures to protect the share of the refund payable to another person"; }
+@source(IRC_S6402_D, relation = formalizes, coverage = exact, quote = "the Secretary shall—")
+rule S6402DDutyToNotifyJointFilersOfOasdiOffset defeasible {
+    for o: OffsetObligation;
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for applied: Money;
+    when offset_applied_to_obligation(o, p, y, kind, applied) and applied > 0 USD and oasdi_overpayment_debt(o) and oasdi_offset_from_joint_return_refund(o);
+    then duty NotifyJointFilersOfOasdiOffset {
+        bearer Secretary;
+        beneficiary p;
+        goal achievement {
+            condition joint_filers_notified_of_reduction_and_procedures(o);
+            window [-infinity, infinity];
+        }
+    };
+}
+relation other_joint_filer_secures_proper_share(o: OffsetObligation, other: Person) kind empirical { label en official "the other person filing the joint return takes appropriate action to secure his or her proper share of the refund subject to reduction"; }
+relation proper_share_paid_to_other_joint_filer(o: OffsetObligation, other: Person) kind empirical;
+@source(IRC_S6402_D, relation = formalizes, coverage = exact, quote = "the Secretary shall pay such share to such other person.")
+rule S6402DDutyToPayProtectedJointFilerShare strict {
+    for o: OffsetObligation;
+    for other: Person;
+    when oasdi_overpayment_debt(o) and other_joint_filer_secures_proper_share(o, other);
+    then duty PayProtectedShareToOtherJointFiler {
+        bearer Secretary;
+        beneficiary other;
+        goal achievement {
+            condition proper_share_paid_to_other_joint_filer(o, other);
+            window [-infinity, infinity];
+        }
+    };
+}
+@source(IRC_S6402_E, relation = formalizes, coverage = exact, quote = "(B) pay the amount by which such overpayment is reduced under subparagraph (A) to such State and notify such State of such person's name, taxpayer identification number, address, and the amount collected; and")
+rule S6402EDutyToPayAndNotifyState defeasible {
+    for o: OffsetObligation;
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for cr: OffsetCreditor;
+    for applied: Money;
+    when offset_applied_to_obligation(o, p, y, kind, applied) and applied > 0 USD and offset_obligation_kind(o, StateIncomeTaxObligation) and offset_obligation_creditor(o, cr);
+    then duty PayStateIncomeTaxOffsetAndNotifyState {
+        bearer Secretary;
+        beneficiary cr;
+        goal achievement {
+            condition amount_paid_to_creditor(o);
+            window [-infinity, infinity];
+        }
+    };
+}
+@source(IRC_S6402_E, relation = formalizes, coverage = exact, quote = "If an offset is made pursuant to a joint return, the notice under subparagraph (B) shall include the names, taxpayer identification numbers, and addresses of each person filing such return.")
+rule S6402EDutyToIncludeJointFilerParticulars defeasible {
+    for o: OffsetObligation;
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for cr: OffsetCreditor;
+    for applied: Money;
+    when offset_applied_to_obligation(o, p, y, kind, applied) and applied > 0 USD and offset_obligation_kind(o, StateIncomeTaxObligation) and offset_obligation_creditor(o, cr) and joint_return_offset(o);
+    then duty IncludeJointFilerParticularsInStateNotice {
+        bearer Secretary;
+        beneficiary cr;
+        goal achievement {
+            condition state_notice_includes_joint_filer_particulars(o);
+            window [-infinity, infinity];
+        }
+    };
+}
+@source(IRC_S6402_E, relation = formalizes, coverage = exact, quote = "(C) notify the person making such overpayment that the overpayment has been reduced by an amount necessary to satisfy a past-due, legally enforceable State income tax obligation.")
+rule S6402EDutyToNotifyPerson defeasible {
+    for o: OffsetObligation;
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for applied: Money;
+    when offset_applied_to_obligation(o, p, y, kind, applied) and applied > 0 USD and offset_obligation_kind(o, StateIncomeTaxObligation);
+    then duty NotifyPersonOfStateIncomeTaxOffset {
+        bearer Secretary;
+        beneficiary p;
+        goal achievement {
+            condition person_notified_of_reduction(o);
+            window [-infinity, infinity];
+        }
+    };
+}
+@source(IRC_S6402_F, relation = formalizes, coverage = exact, quote = "(B) pay the amount by which such overpayment is reduced under subparagraph (A) to such State and notify such State of such person's name, taxpayer identification number, address, and the amount collected; and")
+rule S6402FDutyToPayAndNotifyState defeasible {
+    for o: OffsetObligation;
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for cr: OffsetCreditor;
+    for applied: Money;
+    when offset_applied_to_obligation(o, p, y, kind, applied) and applied > 0 USD and offset_obligation_kind(o, UnemploymentCompensationDebt) and offset_obligation_creditor(o, cr);
+    then duty PayUnemploymentDebtOffsetAndNotifyState {
+        bearer Secretary;
+        beneficiary cr;
+        goal achievement {
+            condition amount_paid_to_creditor(o);
+            window [-infinity, infinity];
+        }
+    };
+}
+@source(IRC_S6402_F, relation = formalizes, coverage = exact, quote = "(C) notify the person making such overpayment that the overpayment has been reduced by an amount necessary to satisfy a covered unemployment compensation debt.")
+rule S6402FDutyToNotifyPerson defeasible {
+    for o: OffsetObligation;
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for applied: Money;
+    when offset_applied_to_obligation(o, p, y, kind, applied) and applied > 0 USD and offset_obligation_kind(o, UnemploymentCompensationDebt);
+    then duty NotifyPersonOfUnemploymentDebtOffset {
+        bearer Secretary;
+        beneficiary p;
+        goal achievement {
+            condition person_notified_of_reduction(o);
+            window [-infinity, infinity];
+        }
+    };
+}
+@source(IRC_S6402_F, relation = formalizes, coverage = exact, quote = "If an offset is made pursuant to a joint return, the notice under subparagraph (C) shall include information related to the rights of a spouse of a person subject to such an offset.")
+rule S6402FDutyToIncludeSpouseRights defeasible {
+    for o: OffsetObligation;
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for applied: Money;
+    when offset_applied_to_obligation(o, p, y, kind, applied) and applied > 0 USD and offset_obligation_kind(o, UnemploymentCompensationDebt) and joint_return_offset(o);
+    then duty IncludeSpouseRightsInUnemploymentOffsetNotice {
+        bearer Secretary;
+        beneficiary p;
+        goal achievement {
+            condition person_notice_includes_spouse_rights(o);
+            window [-infinity, infinity];
+        }
+    };
+}
+// (e)(7), (f)(6): erroneous payment to a State.
+relation erroneous_payment_notice_from_secretary_on(cr: OffsetCreditor, amount: Money, d: Date) kind empirical { label en official "the State receives notice from the Secretary that an erroneous payment has been made to it"; }
+relation state_repaid_erroneous_payment(cr: OffsetCreditor, amount: Money) kind empirical { label en official "the State pays promptly to the Secretary an amount equal to the erroneous payment (without regard to whether other amounts payable to the State have been paid)"; }
+@source(IRC_S6402_E, relation = formalizes, coverage = exact, quote = "shall pay promptly to the Secretary, in accordance with such regulations as the Secretary may prescribe, an amount equal to the amount of such erroneous payment")
+@source(IRC_S6402_F, relation = formalizes, coverage = exact, quote = "shall pay promptly to the Secretary, in accordance with such regulations as the Secretary may prescribe, an amount equal to the amount of such erroneous payment")
+rule S6402StateMustRepayErroneousPayment strict {
+    for cr: OffsetCreditor;
+    for amount: Money;
+    for d: Date;
+    when erroneous_payment_notice_from_secretary_on(cr, amount, d);
+    then duty RepayErroneousOffsetPaymentToSecretary {
+        bearer cr;
+        beneficiary Secretary;
+        goal achievement {
+            condition state_repaid_erroneous_payment(cr, amount);
+            window [d, infinity];
+        }
+    };
+}
+// (i): treatment of payments to States for interest.
+relation regulation_treats_state_payment_as_payment_to_person(p: Person) kind empirical { label en official "the Secretary provides that, for purposes of determining interest, the payment of any amount withheld under (c), (e) or (f) to a State is treated as a payment to the person or persons making the overpayment"; }
+relation secretary_treats_state_payment_as_payment(p: Person, o: OffsetObligation) kind empirical;
+relation state_payment_treated_as_payment_to_person_for_interest(p: Person, o: OffsetObligation) kind institutional;
+@source(IRC_S6402_I, relation = formalizes, coverage = exact, quote = "The Secretary may provide that, for purposes of determining interest, the payment of any amount withheld under subsection (c), (e), or (f) to a State shall be treated as a payment to the person or persons making the overpayment.")
+rule S6402SecretaryMayTreatStatePaymentAsPaymentToPerson strict {
+    for p: Person;
+    for o: OffsetObligation;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for applied: Money;
+    when offset_applied_to_obligation(o, p, y, kind, applied) and applied > 0 USD and not_known(offset_obligation_kind(o, FederalAgencyDebt));
+    then power S6402StatePaymentTreatedAsPaymentToPersonPower {
+        holder Secretary;
+        over p;
+        exercise secretary_treats_state_payment_as_payment(p, o);
+        valid_when regulation_treats_state_payment_as_payment_to_person(p);
+        effect create(state_payment_treated_as_payment_to_person_for_interest(p, o));
+    };
+}
+// (k): refund to the fiduciary of an insolvent member of an affiliated group.
+relation insolvent_member_of_consolidated_group_with_fiduciary(corp: Person) kind empirical { label en official "an insolvent corporation which is a member of an affiliated group of corporations filing a consolidated return for the taxable year and which is subject to a statutory or court-appointed fiduciary"; }
+relation refund_attributable_to_losses_or_credits_of_insolvent_member(corp: Person) kind empirical { label en official "the Secretary determines that the refund is attributable to losses or credits of such insolvent corporation"; }
+relation regulation_permits_payment_to_fiduciary(corp: Person) kind empirical { label en official "the Secretary provides by regulation that any refund for the year may be paid on behalf of the insolvent corporation to the fiduciary"; }
+relation secretary_pays_refund_to_fiduciary(corp: Person) kind empirical;
+relation refund_paid_to_fiduciary_of_insolvent_member(corp: Person) kind institutional;
+relation fiduciary_payment_conditions_met(corp: Person) kind institutional { label en unofficial "insolvent affiliated-group member with a fiduciary; refund attributable to its own losses or credits; regulation in force"; }
+rule S6402KConditionsMet strict {
+    for corp: Person;
+    when insolvent_member_of_consolidated_group_with_fiduciary(corp) and refund_attributable_to_losses_or_credits_of_insolvent_member(corp) and regulation_permits_payment_to_fiduciary(corp);
+    then fiduciary_payment_conditions_met(corp);
+}
+@source(IRC_S6402_K, relation = formalizes, coverage = exact, quote = "the Secretary may by regulation provide that any refund for such taxable year may be paid on behalf of such insolvent corporation to such fiduciary to the extent that the Secretary determines that the refund is attributable to losses or credits of such insolvent corporation.")
+rule S6402KSecretaryMayPayRefundToFiduciary strict {
+    for corp: Person;
+    when insolvent_member_of_consolidated_group_with_fiduciary(corp);
+    then power S6402PayRefundToFiduciaryPower {
+        holder Secretary;
+        over corp;
+        exercise secretary_pays_refund_to_fiduciary(corp);
+        valid_when fiduciary_payment_conditions_met(corp);
+        effect create(refund_paid_to_fiduciary_of_insolvent_member(corp));
+    };
+}
+// (n): misdirected direct deposit refund — the regulation duty.
+relation misdirected_refund_regulation_deadline(d: Date) kind institutional { label en official "not later than 6 months after the date of enactment of the Taxpayer First Act (2019-07-01 + 6 months)"; }
+rule S6402NDeadlineIsSixMonthsAfterTaxpayerFirstAct strict {
+    for d: Date;
+    when taxpayer_first_act_enactment_date(d);
+    then misdirected_refund_regulation_deadline(add_calendar_period(d, 6 calendar_month));
+}
+relation taxpayer_first_act_enactment_date(d: Date) kind empirical { label en official "the date of the enactment of the Taxpayer First Act (Pub. L. 116-25, 2019-07-01)"; }
+relation misdirected_refund_regulations_issued(d: Date) kind empirical;
+@source(IRC_S6402_N, relation = formalizes, coverage = exact, quote = "the Secretary shall prescribe regulations to establish procedures to allow for—")
+rule S6402NDutyToPrescribeMisdirectedRefundRegulations strict {
+    for deadline: Date;
+    when misdirected_refund_regulation_deadline(deadline);
+    then duty PrescribeMisdirectedRefundRegulations {
+        bearer Secretary;
+        goal achievement {
+            condition misdirected_refund_regulations_issued(deadline);
+            window [-infinity, deadline];
+        }
+    };
+}
+
+// ---------------------------------------------------------------------------
+// The crediting of what remains: offsets come BEFORE the credit to future liability
+// ---------------------------------------------------------------------------
+pub relation overpayment_creditable_to_future_liability(p: Person, y: TaxableYear, kind: TaxKind, amount: Money) kind institutional {
+    label en official "subsections (c)-(f) are applied to an overpayment before it is credited to a person's future liability for an internal revenue tax: only the balance after all offsets can be so credited";
+}
+@source(IRC_S6402_C, relation = formalizes, coverage = exact, quote = "This subsection shall be applied to an overpayment prior to its being credited to a person's future liability for an internal revenue tax.")
+@source(IRC_S6402_D, relation = formalizes, coverage = exact, quote = "and before such overpayment is credited to the future liability for tax of such person pursuant to subsection (b).")
+@source(IRC_S6402_E, relation = formalizes, coverage = exact, quote = "(B) before such overpayment is credited to the future liability for any Federal internal revenue tax of such person pursuant to subsection (b).")
+@source(IRC_S6402_F, relation = formalizes, coverage = exact, quote = "(B) before such overpayment is credited to the future liability for any Federal internal revenue tax of such person pursuant to subsection (b).")
+rule S6402CreditToFutureLiabilityAfterOffsets defeasible {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for balance: Money;
+    when refund_balance_after_unemployment_offset(p, y, kind, balance);
+    then overpayment_creditable_to_future_liability(p, y, kind, balance);
+}

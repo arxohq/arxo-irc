@@ -1,0 +1,1381 @@
+language "law.core" version "0.2";
+package us.irc.penalties version "0.1.1";
+namespace "urn:us:irc:penalties:clir";
+
+use self::{
+    CorporateEstimatedInstallment,
+    Corporation,
+    EstimatedTaxInstallment,
+    IRC_S6655_B,
+    IRC_S6655_D,
+    IRC_S6655_E,
+    IRC_S6655_G,
+    IRC_S6655_I,
+    IRC_S6655_TABLE_1,
+    TaxableYear,
+    annualized_income_installment_applicable_percentage,
+    annualized_tax_for_installment,
+    corp_current_year_tax,
+    installment_paid_amount_corp,
+    preceding_year_was_12_months_corp,
+    required_annual_payment_corp,
+    required_installment_before_annualization_corp,
+    required_installment_corp,
+    required_installment_due_date_corp,
+};
+
+// 26 U.S.C. §6655(b)(3), (e)(1)-(5), (g)(3)-(4), (i) — IRC-16 stage 3 (TECH_GAP reduction, 26.09.2026,
+// DECISION-0379 with deontics). The stage-2 register named these G3117, G3119, G3123-G3128.
+//
+// DESIGN. Module 14 stays as it was except three edits: `installment_paid_amount_corp` becomes a derived
+// relation (the crediting order below), the corporate underpayment rule reads `required_installment_corp_final`
+// (this module) instead of `required_installment_corp`, and the three required-annual-payment rules and the
+// large-corporation rule are gated off for an S corporation ((g)(4)(B)-(D) have their own rules here).
+//
+// LOWER INSTALLMENTS (e)(1)-(3). When the corporation establishes them (`corporation_establishes_lower_
+// installments`), the required installment is the lesser of the annualized installment, the adjusted seasonal
+// installment and the (d)(1) amount, any reduction recaptured in the next installments. As for individuals
+// (module 31) the recapture chain is closed without recursion: the cumulative required installments through the
+// k-th installment are S_k = max(S_(k-1), min over the available amounts of A_k (annualized), B_k (seasonal),
+// G_k (regular, cumulative)). Each stage is its own relation. The "tax computed by placing on an annualized basis"
+// and the "tax on the amount determined under clause (ii)" (seasonal) re-run the section 11/55/59A/887
+// schedule on a hypothetical income: they are case leaves (`annualized_tax_for_installment`, module 14, and
+// `seasonal_tax_on_grossed_up_income`), the same class as G1501. The percentages, months, base period
+// percentages, the 70 percent test and the subtraction of the prior required installments are executed.
+// JUDGMENT CALLS: a base period percentage is an average of three ratios, each ratio rounded to 6 decimals
+// (HALF_UP) because the statute names no rounding; "any 6 consecutive months of the taxable year" is read as the
+// 7 windows that begin in months 1-7.
+//
+// SOURCE OBSERVATIONS. None beyond G3118 of module 31: table T2 of section 6655 reads 25/50/75/100 and is used
+// by module 14.
+
+relation s_corporation_6655(c: Corporation, y: TaxableYear) kind empirical {
+    label en official "the corporation is an S corporation for the taxable year";
+}
+relation tax_exempt_organization_subject_511_6655(c: Corporation, y: TaxableYear) kind empirical {
+    label en official "an organization subject to the tax imposed by section 511";
+}
+relation private_foundation_6655(c: Corporation, y: TaxableYear) kind institutional {
+    label en official "a private foundation";
+}
+pub relation exempt_organization_treated_as_corporation_6655(c: Corporation, y: TaxableYear) kind institutional {
+    label en official "the organization subject to section 511 tax, or the private foundation, is treated as a corporation subject to tax under section 11 for this section";
+}
+@source(IRC_S6655_G, relation = formalizes, coverage = exact, quote = "Any organization subject to the tax imposed by section 511, and any private foundation, shall be treated as a corporation subject to tax under section 11.")
+rule ExemptOrganizationTreatedAsCorporation511 strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    when tax_exempt_organization_subject_511_6655(c, y);
+    then exempt_organization_treated_as_corporation_6655(c, y);
+}
+@source(IRC_S6655_G, relation = formalizes, coverage = exact, quote = "Any organization subject to the tax imposed by section 511, and any private foundation, shall be treated as a corporation subject to tax under section 11.")
+rule ExemptOrganizationTreatedAsCorporationFoundation strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    when private_foundation_6655(c, y);
+    then exempt_organization_treated_as_corporation_6655(c, y);
+}
+
+// --- (c)(2), (i)(1), (g)(3): due dates from the beginning of the taxable year -----------------------------
+@source(IRC_S6655_TABLE_1, relation = formalizes, coverage = exact, quote = "1st / April 15")
+rule CorporateDueDateFirst strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for start: Date;
+    when us.irc.core::year_of(c, y) and us.irc.core::begins(y, start) and not_known(private_foundation_6655(c, y));
+    then required_installment_due_date_corp(y, First, add_calendar_period(add_calendar_period(start, 3 calendar_month), 14 calendar_day));
+}
+@source(IRC_S6655_TABLE_1, relation = formalizes, coverage = exact, quote = "2nd / June 15")
+rule CorporateDueDateSecond strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for start: Date;
+    when us.irc.core::year_of(c, y) and us.irc.core::begins(y, start);
+    then required_installment_due_date_corp(y, Second, add_calendar_period(add_calendar_period(start, 5 calendar_month), 14 calendar_day));
+}
+@source(IRC_S6655_TABLE_1, relation = formalizes, coverage = exact, quote = "3rd / September 15")
+rule CorporateDueDateThird strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for start: Date;
+    when us.irc.core::year_of(c, y) and us.irc.core::begins(y, start);
+    then required_installment_due_date_corp(y, Third, add_calendar_period(add_calendar_period(start, 8 calendar_month), 14 calendar_day));
+}
+@source(IRC_S6655_TABLE_1, relation = formalizes, coverage = exact, quote = "4th / December 15")
+rule CorporateDueDateFourth strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for start: Date;
+    when us.irc.core::year_of(c, y) and us.irc.core::begins(y, start);
+    then required_installment_due_date_corp(y, Fourth, add_calendar_period(add_calendar_period(start, 11 calendar_month), 14 calendar_day));
+}
+@source(IRC_S6655_G, relation = formalizes, coverage = exact, quote = "In the case of a private foundation, subsection (c)(2) shall be applied by substituting \"May 15\" for \"April 15\".")
+rule PrivateFoundationFirstInstallmentDueMay15 strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for start: Date;
+    when us.irc.core::year_of(c, y) and us.irc.core::begins(y, start) and private_foundation_6655(c, y);
+    then required_installment_due_date_corp(y, First, add_calendar_period(add_calendar_period(start, 4 calendar_month), 14 calendar_day));
+}
+@source(IRC_S6655_I, relation = formalizes, coverage = exact, quote = "In applying this section to a taxable year beginning on any date other than January 1, there shall be substituted, for the months specified in this section, the months which correspond thereto.")
+rule CorporateFiscalYearMonthsCorrespond strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for start: Date;
+    when us.irc.core::year_of(c, y) and us.irc.core::begins(y, start) and us.irc.core::fiscal_year(y);
+    then corporate_fiscal_year_months_correspond(y);
+}
+pub relation corporate_fiscal_year_months_correspond(y: TaxableYear) kind institutional {
+    label en official "for a taxable year not beginning on January 1 the months of this section are the corresponding months counted from the beginning of the year";
+}
+
+// --- (b)(2)(A), (g)(3), (g)(4)(E): the 15th day of the 4th (5th, 3rd) month following the close -----------
+pub relation corporate_underpayment_period_outer_end(c: Corporation, y: TaxableYear, d: Date) kind institutional {
+    label en official "the 15th day of the 4th month following the close of the taxable year (5th for an organization described in (g)(3)(A), 3rd for an S corporation)";
+}
+@source(IRC_S6655_B, relation = formalizes, coverage = exact, quote = "the 15th day of the 4th month following the close of the taxable year, or")
+rule CorporateOuterEndFourthMonth strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for e: Date;
+    when us.irc.core::ends(y, e) and us.irc.core::year_of(c, y)
+        and not_known(exempt_organization_treated_as_corporation_6655(c, y)) and not_known(s_corporation_6655(c, y));
+    then corporate_underpayment_period_outer_end(c, y, add_calendar_period(add_calendar_period(add_calendar_period(e, 1 calendar_day), 3 calendar_month), 14 calendar_day));
+}
+@source(IRC_S6655_G, relation = formalizes, coverage = exact, quote = "subsection (b)(2)(A) shall be applied by substituting \"5th month\" for \"4th month\"")
+rule CorporateOuterEndFifthMonthExempt strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for e: Date;
+    when us.irc.core::ends(y, e) and exempt_organization_treated_as_corporation_6655(c, y);
+    then corporate_underpayment_period_outer_end(c, y, add_calendar_period(add_calendar_period(add_calendar_period(e, 1 calendar_day), 4 calendar_month), 14 calendar_day));
+}
+@source(IRC_S6655_G, relation = formalizes, coverage = exact, quote = "Subsection (b)(2)(A) shall be applied by substituting \"3rd month\" for \"4th month\".")
+rule CorporateOuterEndThirdMonthSCorporation strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for e: Date;
+    when us.irc.core::ends(y, e) and s_corporation_6655(c, y);
+    then corporate_underpayment_period_outer_end(c, y, add_calendar_period(add_calendar_period(add_calendar_period(e, 1 calendar_day), 2 calendar_month), 14 calendar_day));
+}
+
+// --- (b)(3): order of crediting payments ------------------------------------------------------------------
+relation corporate_installment_ordinal(i: CorporateEstimatedInstallment, n: Integer) kind institutional {
+    label en unofficial "the position of the installment in the order in which the installments are required to be paid";
+}
+rule CorporateInstallmentOrdinalFirst strict { then corporate_installment_ordinal(First, 1); }
+rule CorporateInstallmentOrdinalSecond strict { then corporate_installment_ordinal(Second, 2); }
+rule CorporateInstallmentOrdinalThird strict { then corporate_installment_ordinal(Third, 3); }
+rule CorporateInstallmentOrdinalFourth strict { then corporate_installment_ordinal(Fourth, 4); }
+pub relation corporate_estimated_tax_payment_on(c: Corporation, y: TaxableYear, d: Date, amount: Money) kind empirical {
+    label en official "a payment of estimated tax made on the date (one fact per date)";
+}
+relation has_corporate_estimated_tax_payments(c: Corporation, y: TaxableYear) kind institutional {
+    label en unofficial "at least one dated payment of estimated tax is asserted";
+}
+rule HasCorporateEstimatedTaxPayments strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for d: Date;
+    for a: Money;
+    when corporate_estimated_tax_payment_on(c, y, d, a);
+    then has_corporate_estimated_tax_payments(c, y);
+}
+@source(IRC_S6655_B, relation = formalizes, coverage = exact, quote = "a payment of estimated tax shall be credited against unpaid required installments in the order in which such installments are required to be paid.")
+rule CorporateInstallmentPaidByCreditingOrder defeasible {
+    for c: Corporation;
+    for y: TaxableYear;
+    for inst: CorporateEstimatedInstallment;
+    for required: Money;
+    for due: Date;
+    for k: Integer;
+    when has_corporate_estimated_tax_payments(c, y) and required_installment_corp_final(c, y, inst, required)
+        and required_installment_due_date_corp(y, inst, due) and corporate_installment_ordinal(inst, k);
+    then installment_paid_amount_corp(c, y, inst, min(required, max(0.00 USD,
+        sum(collect all a: Money, t: Date where corporate_estimated_tax_payment_on(c, y, t, a) and t <= due, empty: 0.00 USD)
+        - sum(collect all r: Money, j: CorporateEstimatedInstallment, n: Integer where required_installment_corp_final(c, y, j, r) and corporate_installment_ordinal(j, n) and n < k, empty: 0.00 USD))));
+}
+@source(IRC_S6655_B, relation = formalizes, coverage = exact, quote = "with respect to any portion of the underpayment, the date on which such portion is paid")
+rule CorporateUnderpaymentPortionPaidOn defeasible {
+    for c: Corporation;
+    for y: TaxableYear;
+    for inst: CorporateEstimatedInstallment;
+    for required: Money;
+    for k: Integer;
+    for t: Date;
+    for paid: Money;
+    for due: Date;
+    when required_installment_corp_final(c, y, inst, required) and corporate_installment_ordinal(inst, k)
+        and corporate_estimated_tax_payment_on(c, y, t, paid) and required_installment_due_date_corp(y, inst, due) and t > due
+        and min(required, max(0.00 USD,
+            sum(collect all a: Money, u: Date where corporate_estimated_tax_payment_on(c, y, u, a) and u <= t, empty: 0.00 USD)
+            - sum(collect all r: Money, j: CorporateEstimatedInstallment, n: Integer where required_installment_corp_final(c, y, j, r) and corporate_installment_ordinal(j, n) and n < k, empty: 0.00 USD)))
+          > min(required, max(0.00 USD,
+            sum(collect all a2: Money, u2: Date where corporate_estimated_tax_payment_on(c, y, u2, a2) and u2 < t, empty: 0.00 USD)
+            - sum(collect all r2: Money, j2: CorporateEstimatedInstallment, n2: Integer where required_installment_corp_final(c, y, j2, r2) and corporate_installment_ordinal(j2, n2) and n2 < k, empty: 0.00 USD)));
+    then corporate_underpayment_portion_paid_on(c, y, inst, t);
+}
+pub relation corporate_underpayment_portion_paid_on(c: Corporation, y: TaxableYear, installment: CorporateEstimatedInstallment, d: Date) kind institutional {
+    label en official "the date on which a portion of the underpayment is paid (payments credited to the earliest unpaid installment first)";
+}
+
+// --- (e)(1): lower required installments; the cumulative chain --------------------------------------------
+pub relation corporation_establishes_lower_installments(c: Corporation, y: TaxableYear) kind empirical {
+    label en official "the corporation establishes that the annualized income installment or the adjusted seasonal installment is less than the amount determined under subsection (d)(1)";
+}
+relation corp_regular_cumulative(c: Corporation, y: TaxableYear, installment: CorporateEstimatedInstallment, amount: Money) kind institutional {
+    label en unofficial "the sum of the subsection (d)(1) installments (as modified by (d)(2)) through the installment";
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = partial, quote = "the amount determined under subsection (d)(1) (as modified by paragraphs (2) and (3) of subsection (d))")
+rule CorpRegularCumulativeRule strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for inst: CorporateEstimatedInstallment;
+    for k: Integer;
+    when required_installment_before_annualization_corp(c, y, inst, _) and corporate_installment_ordinal(inst, k);
+    then corp_regular_cumulative(c, y, inst, sum(collect all a: Money, j: CorporateEstimatedInstallment, n: Integer where required_installment_before_annualization_corp(c, y, j, a) and corporate_installment_ordinal(j, n) and n <= k, empty: 0.00 USD));
+}
+relation corp_annualized_cumulative(c: Corporation, y: TaxableYear, installment: CorporateEstimatedInstallment, amount: Money) kind institutional {
+    label en unofficial "the applicable percentage of the annualized tax for the installment, before the prior required installments are deducted";
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "an amount equal to the applicable percentage of the tax for the taxable year computed by placing on an annualized basis the taxable income, adjusted financial statement income (as defined in section 56A), and modified taxable income")
+rule CorpAnnualizedCumulativeRule strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for inst: CorporateEstimatedInstallment;
+    for tax: Money;
+    for pct: Decimal;
+    when annualized_tax_for_installment(c, y, inst, tax) and annualized_income_installment_applicable_percentage(inst, pct);
+    then corp_annualized_cumulative(c, y, inst, max(0.00 USD, round(tax * pct, 2, "HALF_UP")));
+}
+
+// --- (e)(3): the adjusted seasonal installment --------------------------------------------------------------
+pub relation preceding_year_monthly_taxable_income(c: Corporation, y: TaxableYear, k: Integer, m: Integer, amount: Money) kind empirical {
+    label en official "the taxable income of the k-th preceding taxable year (k = 1, 2, 3) for the m-th month of that year";
+}
+pub relation current_year_monthly_taxable_income(c: Corporation, y: TaxableYear, m: Integer, amount: Money) kind empirical {
+    label en official "the taxable income of the taxable year for the m-th month";
+}
+relation preceding_year_annual_taxable_income(c: Corporation, y: TaxableYear, k: Integer, total: Money) kind institutional {
+    label en unofficial "the taxable income of the k-th preceding taxable year (the sum of its months)";
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "bears to the taxable income for the 3 preceding taxable years.")
+rule PrecedingYearAnnualTaxableIncomeRule strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for k: Integer;
+    when preceding_year_monthly_taxable_income(c, y, k, 1, _);
+    then preceding_year_annual_taxable_income(c, y, k, sum(collect all a: Money, m: Integer where preceding_year_monthly_taxable_income(c, y, k, m, a), empty: 0.00 USD));
+}
+relation base_period_request(c: Corporation, y: TaxableYear, from_month: Integer, to_month: Integer) kind institutional {
+    label en unofficial "a period of months for which the base period percentage is wanted";
+}
+rule BasePeriodWindowRequest1 strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    when preceding_year_monthly_taxable_income(c, y, 1, 1, _);
+    then base_period_request(c, y, 1, 6);
+}
+rule BasePeriodWindowRequest2 strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    when preceding_year_monthly_taxable_income(c, y, 1, 1, _);
+    then base_period_request(c, y, 2, 7);
+}
+rule BasePeriodWindowRequest3 strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    when preceding_year_monthly_taxable_income(c, y, 1, 1, _);
+    then base_period_request(c, y, 3, 8);
+}
+rule BasePeriodWindowRequest4 strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    when preceding_year_monthly_taxable_income(c, y, 1, 1, _);
+    then base_period_request(c, y, 4, 9);
+}
+rule BasePeriodWindowRequest5 strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    when preceding_year_monthly_taxable_income(c, y, 1, 1, _);
+    then base_period_request(c, y, 5, 10);
+}
+rule BasePeriodWindowRequest6 strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    when preceding_year_monthly_taxable_income(c, y, 1, 1, _);
+    then base_period_request(c, y, 6, 11);
+}
+rule BasePeriodWindowRequest7 strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    when preceding_year_monthly_taxable_income(c, y, 1, 1, _);
+    then base_period_request(c, y, 7, 12);
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = partial, quote = "The term \"filing month\" means the month in which the installment is required to be paid.")
+rule BasePeriodBeforeFilingMonthRequestFirst strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    when preceding_year_monthly_taxable_income(c, y, 1, 1, _);
+    then base_period_request(c, y, 1, 3);
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = partial, quote = "The term \"filing month\" means the month in which the installment is required to be paid.")
+rule BasePeriodThroughFilingMonthRequestFirst strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    when preceding_year_monthly_taxable_income(c, y, 1, 1, _);
+    then base_period_request(c, y, 1, 4);
+}
+rule BasePeriodBeforeFilingMonthRequestSecond strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    when preceding_year_monthly_taxable_income(c, y, 1, 1, _);
+    then base_period_request(c, y, 1, 5);
+}
+rule BasePeriodThroughFilingMonthRequestSecond strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    when preceding_year_monthly_taxable_income(c, y, 1, 1, _);
+    then base_period_request(c, y, 1, 6);
+}
+rule BasePeriodBeforeFilingMonthRequestThird strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    when preceding_year_monthly_taxable_income(c, y, 1, 1, _);
+    then base_period_request(c, y, 1, 8);
+}
+rule BasePeriodThroughFilingMonthRequestThird strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    when preceding_year_monthly_taxable_income(c, y, 1, 1, _);
+    then base_period_request(c, y, 1, 9);
+}
+rule BasePeriodBeforeFilingMonthRequestFourth strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    when preceding_year_monthly_taxable_income(c, y, 1, 1, _);
+    then base_period_request(c, y, 1, 11);
+}
+rule BasePeriodThroughFilingMonthRequestFourth strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    when preceding_year_monthly_taxable_income(c, y, 1, 1, _);
+    then base_period_request(c, y, 1, 12);
+}
+relation preceding_year_ratio(c: Corporation, y: TaxableYear, k: Integer, from_month: Integer, to_month: Integer, ratio: Decimal) kind institutional {
+    label en unofficial "the taxable income of the months of the k-th preceding year over the taxable income of that year";
+}
+rule PrecedingYearRatioRule strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for k: Integer;
+    for f: Integer;
+    for t: Integer;
+    for total: Money;
+    when base_period_request(c, y, f, t) and preceding_year_annual_taxable_income(c, y, k, total) and total > 0.00 USD;
+    then preceding_year_ratio(c, y, k, f, t, div_round(
+        sum(collect all a: Money, m: Integer where preceding_year_monthly_taxable_income(c, y, k, m, a) and m >= f and m <= t, empty: 0.00 USD),
+        total, 6, "HALF_UP"));
+}
+pub relation base_period_percentage(c: Corporation, y: TaxableYear, from_month: Integer, to_month: Integer, pct: Decimal) kind institutional {
+    label en official "the base period percentage for the period of months: the average percent which the taxable income for the corresponding months in each of the 3 preceding taxable years bears to the taxable income of that year (INTERPRETATION: the average of the yearly ratios, each ratio to 6 decimals)";
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "The base period percentage for any period of months shall be the average percent which the taxable income for the corresponding months in each of the 3 preceding taxable years bears to the taxable income for the 3 preceding taxable years.")
+rule BasePeriodPercentageRule strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for f: Integer;
+    for t: Integer;
+    when base_period_request(c, y, f, t) and count(collect all k: Integer, r: Decimal where preceding_year_ratio(c, y, k, f, t, r)) == 3;
+    then base_period_percentage(c, y, f, t, div_round(sum(collect all r2: Decimal, k2: Integer where preceding_year_ratio(c, y, k2, f, t, r2), empty: 0.0), 3.0, 6, "HALF_UP"));
+}
+pub relation seasonal_method_available(c: Corporation, y: TaxableYear) kind institutional {
+    label en official "the base period percentage for some 6 consecutive months of the taxable year equals or exceeds 70 percent";
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "This paragraph shall apply only if the base period percentage for any 6 consecutive months of the taxable year equals or exceeds 70 percent.")
+rule SeasonalMethodAvailableWindow1 strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for pct: Decimal;
+    when base_period_percentage(c, y, 1, 6, pct) and pct >= 0.70;
+    then seasonal_method_available(c, y);
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "This paragraph shall apply only if the base period percentage for any 6 consecutive months of the taxable year equals or exceeds 70 percent.")
+rule SeasonalMethodAvailableWindow2 strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for pct: Decimal;
+    when base_period_percentage(c, y, 2, 7, pct) and pct >= 0.70;
+    then seasonal_method_available(c, y);
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "This paragraph shall apply only if the base period percentage for any 6 consecutive months of the taxable year equals or exceeds 70 percent.")
+rule SeasonalMethodAvailableWindow3 strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for pct: Decimal;
+    when base_period_percentage(c, y, 3, 8, pct) and pct >= 0.70;
+    then seasonal_method_available(c, y);
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "This paragraph shall apply only if the base period percentage for any 6 consecutive months of the taxable year equals or exceeds 70 percent.")
+rule SeasonalMethodAvailableWindow4 strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for pct: Decimal;
+    when base_period_percentage(c, y, 4, 9, pct) and pct >= 0.70;
+    then seasonal_method_available(c, y);
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "This paragraph shall apply only if the base period percentage for any 6 consecutive months of the taxable year equals or exceeds 70 percent.")
+rule SeasonalMethodAvailableWindow5 strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for pct: Decimal;
+    when base_period_percentage(c, y, 5, 10, pct) and pct >= 0.70;
+    then seasonal_method_available(c, y);
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "This paragraph shall apply only if the base period percentage for any 6 consecutive months of the taxable year equals or exceeds 70 percent.")
+rule SeasonalMethodAvailableWindow6 strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for pct: Decimal;
+    when base_period_percentage(c, y, 6, 11, pct) and pct >= 0.70;
+    then seasonal_method_available(c, y);
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "This paragraph shall apply only if the base period percentage for any 6 consecutive months of the taxable year equals or exceeds 70 percent.")
+rule SeasonalMethodAvailableWindow7 strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for pct: Decimal;
+    when base_period_percentage(c, y, 7, 12, pct) and pct >= 0.70;
+    then seasonal_method_available(c, y);
+}
+pub relation seasonal_tax_on_grossed_up_income(c: Corporation, y: TaxableYear, installment: CorporateEstimatedInstallment, tax: Money) kind empirical {
+    label en official "the tax on the amount determined under clause (ii) (EXTERNAL_DEPENDENCY: the section 11/55/59A/887 schedule on a hypothetical income)";
+}
+pub relation seasonal_grossed_up_income(c: Corporation, y: TaxableYear, installment: CorporateEstimatedInstallment, amount: Money) kind institutional {
+    label en official "the taxable income for all months preceding the filing month divided by the base period percentage for those months";
+}
+pub relation seasonal_amount_corp(c: Corporation, y: TaxableYear, installment: CorporateEstimatedInstallment, amount: Money) kind institutional {
+    label en official "the amount determined under subparagraph (C): the tax on the grossed-up income multiplied by the base period percentage for the filing month and the months preceding it";
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "divide such amount by the base period percentage for all months during the taxable year preceding the filing month,")
+rule SeasonalGrossedUpIncomeFirst strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for pct: Decimal;
+    when seasonal_method_available(c, y) and base_period_percentage(c, y, 1, 3, pct) and pct > 0.0;
+    then seasonal_grossed_up_income(c, y, First, div_round(sum(collect all a: Money, m: Integer where current_year_monthly_taxable_income(c, y, m, a) and m < 4, empty: 0.00 USD), pct, 2, "HALF_UP"));
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "multiply the tax computed under clause (iii) by the base period percentage for the filing month and all months during the taxable year preceding the filing month.")
+rule SeasonalAmountFirst strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for tax: Money;
+    for pct: Decimal;
+    when seasonal_method_available(c, y) and seasonal_tax_on_grossed_up_income(c, y, First, tax) and base_period_percentage(c, y, 1, 4, pct);
+    then seasonal_amount_corp(c, y, First, round(tax * pct, 2, "HALF_UP"));
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "divide such amount by the base period percentage for all months during the taxable year preceding the filing month,")
+rule SeasonalGrossedUpIncomeSecond strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for pct: Decimal;
+    when seasonal_method_available(c, y) and base_period_percentage(c, y, 1, 5, pct) and pct > 0.0;
+    then seasonal_grossed_up_income(c, y, Second, div_round(sum(collect all a: Money, m: Integer where current_year_monthly_taxable_income(c, y, m, a) and m < 6, empty: 0.00 USD), pct, 2, "HALF_UP"));
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "multiply the tax computed under clause (iii) by the base period percentage for the filing month and all months during the taxable year preceding the filing month.")
+rule SeasonalAmountSecond strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for tax: Money;
+    for pct: Decimal;
+    when seasonal_method_available(c, y) and seasonal_tax_on_grossed_up_income(c, y, Second, tax) and base_period_percentage(c, y, 1, 6, pct);
+    then seasonal_amount_corp(c, y, Second, round(tax * pct, 2, "HALF_UP"));
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "divide such amount by the base period percentage for all months during the taxable year preceding the filing month,")
+rule SeasonalGrossedUpIncomeThird strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for pct: Decimal;
+    when seasonal_method_available(c, y) and base_period_percentage(c, y, 1, 8, pct) and pct > 0.0;
+    then seasonal_grossed_up_income(c, y, Third, div_round(sum(collect all a: Money, m: Integer where current_year_monthly_taxable_income(c, y, m, a) and m < 9, empty: 0.00 USD), pct, 2, "HALF_UP"));
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "multiply the tax computed under clause (iii) by the base period percentage for the filing month and all months during the taxable year preceding the filing month.")
+rule SeasonalAmountThird strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for tax: Money;
+    for pct: Decimal;
+    when seasonal_method_available(c, y) and seasonal_tax_on_grossed_up_income(c, y, Third, tax) and base_period_percentage(c, y, 1, 9, pct);
+    then seasonal_amount_corp(c, y, Third, round(tax * pct, 2, "HALF_UP"));
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "divide such amount by the base period percentage for all months during the taxable year preceding the filing month,")
+rule SeasonalGrossedUpIncomeFourth strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for pct: Decimal;
+    when seasonal_method_available(c, y) and base_period_percentage(c, y, 1, 11, pct) and pct > 0.0;
+    then seasonal_grossed_up_income(c, y, Fourth, div_round(sum(collect all a: Money, m: Integer where current_year_monthly_taxable_income(c, y, m, a) and m < 12, empty: 0.00 USD), pct, 2, "HALF_UP"));
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "multiply the tax computed under clause (iii) by the base period percentage for the filing month and all months during the taxable year preceding the filing month.")
+rule SeasonalAmountFourth strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for tax: Money;
+    for pct: Decimal;
+    when seasonal_method_available(c, y) and seasonal_tax_on_grossed_up_income(c, y, Fourth, tax) and base_period_percentage(c, y, 1, 12, pct);
+    then seasonal_amount_corp(c, y, Fourth, round(tax * pct, 2, "HALF_UP"));
+}
+
+relation has_corp_annualized_amount(c: Corporation, y: TaxableYear, installment: CorporateEstimatedInstallment) kind institutional {
+    label en unofficial "an annualized amount is available for the installment";
+}
+relation has_corp_seasonal_amount(c: Corporation, y: TaxableYear, installment: CorporateEstimatedInstallment) kind institutional {
+    label en unofficial "a seasonal amount is available for the installment";
+}
+rule HasCorpAnnualizedAmountRule strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for inst: CorporateEstimatedInstallment;
+    for a: Money;
+    when corp_annualized_cumulative(c, y, inst, a);
+    then has_corp_annualized_amount(c, y, inst);
+}
+rule HasCorpSeasonalAmountRule strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for inst: CorporateEstimatedInstallment;
+    for b: Money;
+    when seasonal_amount_corp(c, y, inst, b);
+    then has_corp_seasonal_amount(c, y, inst);
+}
+relation corp_cap_1(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "the lesser of the regular, annualized and seasonal cumulative amounts for the installment 1";
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "the amount of such required installment shall be the annualized income installment (or, if lesser, the adjusted seasonal installment)")
+rule CorpCap1All strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for g: Money;
+    for a: Money;
+    for b: Money;
+    when corp_regular_cumulative(c, y, First, g) and corp_annualized_cumulative(c, y, First, a) and seasonal_amount_corp(c, y, First, b);
+    then corp_cap_1(c, y, min(g, min(a, b)));
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "the amount of such required installment shall be the annualized income installment (or, if lesser, the adjusted seasonal installment)")
+rule CorpCap1Annualized strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for g: Money;
+    for a: Money;
+    when corp_regular_cumulative(c, y, First, g) and corp_annualized_cumulative(c, y, First, a) and not_known(has_corp_seasonal_amount(c, y, First));
+    then corp_cap_1(c, y, min(g, a));
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "if the corporation establishes that the annualized income installment or the adjusted seasonal installment is less than the amount determined under subsection (d)(1)")
+rule CorpCap1Seasonal strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for g: Money;
+    for b: Money;
+    when corp_regular_cumulative(c, y, First, g) and seasonal_amount_corp(c, y, First, b) and not_known(has_corp_annualized_amount(c, y, First));
+    then corp_cap_1(c, y, min(g, b));
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = partial, quote = "if the corporation establishes that the annualized income installment or the adjusted seasonal installment is less than the amount determined under subsection (d)(1)")
+rule CorpCap1RegularOnly strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for g: Money;
+    when corp_regular_cumulative(c, y, First, g) and not_known(has_corp_annualized_amount(c, y, First)) and not_known(has_corp_seasonal_amount(c, y, First));
+    then corp_cap_1(c, y, g);
+}
+relation corp_cap_2(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "the lesser of the regular, annualized and seasonal cumulative amounts for the installment 2";
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "the amount of such required installment shall be the annualized income installment (or, if lesser, the adjusted seasonal installment)")
+rule CorpCap2All strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for g: Money;
+    for a: Money;
+    for b: Money;
+    when corp_regular_cumulative(c, y, Second, g) and corp_annualized_cumulative(c, y, Second, a) and seasonal_amount_corp(c, y, Second, b);
+    then corp_cap_2(c, y, min(g, min(a, b)));
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "the amount of such required installment shall be the annualized income installment (or, if lesser, the adjusted seasonal installment)")
+rule CorpCap2Annualized strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for g: Money;
+    for a: Money;
+    when corp_regular_cumulative(c, y, Second, g) and corp_annualized_cumulative(c, y, Second, a) and not_known(has_corp_seasonal_amount(c, y, Second));
+    then corp_cap_2(c, y, min(g, a));
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "if the corporation establishes that the annualized income installment or the adjusted seasonal installment is less than the amount determined under subsection (d)(1)")
+rule CorpCap2Seasonal strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for g: Money;
+    for b: Money;
+    when corp_regular_cumulative(c, y, Second, g) and seasonal_amount_corp(c, y, Second, b) and not_known(has_corp_annualized_amount(c, y, Second));
+    then corp_cap_2(c, y, min(g, b));
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = partial, quote = "if the corporation establishes that the annualized income installment or the adjusted seasonal installment is less than the amount determined under subsection (d)(1)")
+rule CorpCap2RegularOnly strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for g: Money;
+    when corp_regular_cumulative(c, y, Second, g) and not_known(has_corp_annualized_amount(c, y, Second)) and not_known(has_corp_seasonal_amount(c, y, Second));
+    then corp_cap_2(c, y, g);
+}
+relation corp_cap_3(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "the lesser of the regular, annualized and seasonal cumulative amounts for the installment 3";
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "the amount of such required installment shall be the annualized income installment (or, if lesser, the adjusted seasonal installment)")
+rule CorpCap3All strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for g: Money;
+    for a: Money;
+    for b: Money;
+    when corp_regular_cumulative(c, y, Third, g) and corp_annualized_cumulative(c, y, Third, a) and seasonal_amount_corp(c, y, Third, b);
+    then corp_cap_3(c, y, min(g, min(a, b)));
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "the amount of such required installment shall be the annualized income installment (or, if lesser, the adjusted seasonal installment)")
+rule CorpCap3Annualized strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for g: Money;
+    for a: Money;
+    when corp_regular_cumulative(c, y, Third, g) and corp_annualized_cumulative(c, y, Third, a) and not_known(has_corp_seasonal_amount(c, y, Third));
+    then corp_cap_3(c, y, min(g, a));
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "if the corporation establishes that the annualized income installment or the adjusted seasonal installment is less than the amount determined under subsection (d)(1)")
+rule CorpCap3Seasonal strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for g: Money;
+    for b: Money;
+    when corp_regular_cumulative(c, y, Third, g) and seasonal_amount_corp(c, y, Third, b) and not_known(has_corp_annualized_amount(c, y, Third));
+    then corp_cap_3(c, y, min(g, b));
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = partial, quote = "if the corporation establishes that the annualized income installment or the adjusted seasonal installment is less than the amount determined under subsection (d)(1)")
+rule CorpCap3RegularOnly strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for g: Money;
+    when corp_regular_cumulative(c, y, Third, g) and not_known(has_corp_annualized_amount(c, y, Third)) and not_known(has_corp_seasonal_amount(c, y, Third));
+    then corp_cap_3(c, y, g);
+}
+relation corp_cap_4(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "the lesser of the regular, annualized and seasonal cumulative amounts for the installment 4";
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "the amount of such required installment shall be the annualized income installment (or, if lesser, the adjusted seasonal installment)")
+rule CorpCap4All strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for g: Money;
+    for a: Money;
+    for b: Money;
+    when corp_regular_cumulative(c, y, Fourth, g) and corp_annualized_cumulative(c, y, Fourth, a) and seasonal_amount_corp(c, y, Fourth, b);
+    then corp_cap_4(c, y, min(g, min(a, b)));
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "the amount of such required installment shall be the annualized income installment (or, if lesser, the adjusted seasonal installment)")
+rule CorpCap4Annualized strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for g: Money;
+    for a: Money;
+    when corp_regular_cumulative(c, y, Fourth, g) and corp_annualized_cumulative(c, y, Fourth, a) and not_known(has_corp_seasonal_amount(c, y, Fourth));
+    then corp_cap_4(c, y, min(g, a));
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "if the corporation establishes that the annualized income installment or the adjusted seasonal installment is less than the amount determined under subsection (d)(1)")
+rule CorpCap4Seasonal strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for g: Money;
+    for b: Money;
+    when corp_regular_cumulative(c, y, Fourth, g) and seasonal_amount_corp(c, y, Fourth, b) and not_known(has_corp_annualized_amount(c, y, Fourth));
+    then corp_cap_4(c, y, min(g, b));
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = partial, quote = "if the corporation establishes that the annualized income installment or the adjusted seasonal installment is less than the amount determined under subsection (d)(1)")
+rule CorpCap4RegularOnly strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for g: Money;
+    when corp_regular_cumulative(c, y, Fourth, g) and not_known(has_corp_annualized_amount(c, y, Fourth)) and not_known(has_corp_seasonal_amount(c, y, Fourth));
+    then corp_cap_4(c, y, g);
+}
+relation corp_cumulative_required_1(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "the required installments through the first installment on the lower-installment method";
+}
+relation corp_cumulative_required_2(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "the required installments through the second installment";
+}
+relation corp_cumulative_required_3(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "the required installments through the third installment";
+}
+relation corp_cumulative_required_4(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "the required installments through the fourth installment";
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "the amount of such required installment shall be the annualized income installment (or, if lesser, the adjusted seasonal installment)")
+rule CorpCumulativeRequired1 strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for cap: Money;
+    when corporation_establishes_lower_installments(c, y) and corp_cap_1(c, y, cap);
+    then corp_cumulative_required_1(c, y, cap);
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "any reduction in a required installment resulting from the application of this paragraph shall be recaptured by increasing the amount of the next required installment determined under subsection (d)(1) (as so modified) by the amount of such reduction")
+rule CorpCumulativeRequired2 strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for s1: Money;
+    for cap: Money;
+    when corporation_establishes_lower_installments(c, y) and corp_cumulative_required_1(c, y, s1) and corp_cap_2(c, y, cap);
+    then corp_cumulative_required_2(c, y, max(s1, cap));
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "(and by increasing subsequent required installments to the extent that the reduction has not previously been recaptured under this subparagraph)")
+rule CorpCumulativeRequired3 strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for s2: Money;
+    for cap: Money;
+    when corporation_establishes_lower_installments(c, y) and corp_cumulative_required_2(c, y, s2) and corp_cap_3(c, y, cap);
+    then corp_cumulative_required_3(c, y, max(s2, cap));
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "(and by increasing subsequent required installments to the extent that the reduction has not previously been recaptured under this subparagraph)")
+rule CorpCumulativeRequired4 strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for s3: Money;
+    for cap: Money;
+    when corporation_establishes_lower_installments(c, y) and corp_cumulative_required_3(c, y, s3) and corp_cap_4(c, y, cap);
+    then corp_cumulative_required_4(c, y, max(s3, cap));
+}
+pub relation corp_lower_required_installment(c: Corporation, y: TaxableYear, installment: CorporateEstimatedInstallment, amount: Money) kind institutional {
+    label en official "the required installment on the lower-installment method: the increase of the cumulative required installments";
+}
+rule CorpLowerRequired1 strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for s1: Money;
+    when corp_cumulative_required_1(c, y, s1);
+    then corp_lower_required_installment(c, y, First, s1);
+}
+rule CorpLowerRequired2 strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for s1: Money;
+    for s2: Money;
+    when corp_cumulative_required_1(c, y, s1) and corp_cumulative_required_2(c, y, s2);
+    then corp_lower_required_installment(c, y, Second, s2 - s1);
+}
+rule CorpLowerRequired3 strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for s2: Money;
+    for s3: Money;
+    when corp_cumulative_required_2(c, y, s2) and corp_cumulative_required_3(c, y, s3);
+    then corp_lower_required_installment(c, y, Third, s3 - s2);
+}
+rule CorpLowerRequired4 strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for s3: Money;
+    for s4: Money;
+    when corp_cumulative_required_3(c, y, s3) and corp_cumulative_required_4(c, y, s4);
+    then corp_lower_required_installment(c, y, Fourth, s4 - s3);
+}
+pub relation adjusted_seasonal_installment_corp(c: Corporation, y: TaxableYear, installment: CorporateEstimatedInstallment, amount: Money) kind institutional {
+    label en official "the adjusted seasonal installment: the excess (if any) of 100 percent of the amount determined under subparagraph (C) over the aggregate of all prior required installments";
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "the amount of the adjusted seasonal installment is the excess (if any) of—")
+rule AdjustedSeasonalInstallmentFirst strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for b: Money;
+    when seasonal_amount_corp(c, y, First, b);
+    then adjusted_seasonal_installment_corp(c, y, First, max(0.00 USD, b));
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "the aggregate amount of all prior required installments for the taxable year.")
+rule AdjustedSeasonalInstallmentSecond strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for b: Money;
+    for s1: Money;
+    when seasonal_amount_corp(c, y, Second, b) and corp_cumulative_required_1(c, y, s1);
+    then adjusted_seasonal_installment_corp(c, y, Second, max(0.00 USD, b - s1));
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "the aggregate amount of all prior required installments for the taxable year.")
+rule AdjustedSeasonalInstallmentThird strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for b: Money;
+    for s2: Money;
+    when seasonal_amount_corp(c, y, Third, b) and corp_cumulative_required_2(c, y, s2);
+    then adjusted_seasonal_installment_corp(c, y, Third, max(0.00 USD, b - s2));
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "the aggregate amount of all prior required installments for the taxable year.")
+rule AdjustedSeasonalInstallmentFourth strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for b: Money;
+    for s3: Money;
+    when seasonal_amount_corp(c, y, Fourth, b) and corp_cumulative_required_3(c, y, s3);
+    then adjusted_seasonal_installment_corp(c, y, Fourth, max(0.00 USD, b - s3));
+}
+pub relation required_installment_corp_final(c: Corporation, y: TaxableYear, installment: CorporateEstimatedInstallment, amount: Money) kind institutional {
+    label en official "the required installment that applies: the lower-installment amount when the corporation establishes it, otherwise the amount of module 14";
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "the amount of such required installment shall be the annualized income installment (or, if lesser, the adjusted seasonal installment)")
+rule RequiredInstallmentCorpFinalLower defeasible {
+    for c: Corporation;
+    for y: TaxableYear;
+    for inst: CorporateEstimatedInstallment;
+    for a: Money;
+    when corporation_establishes_lower_installments(c, y) and corp_lower_required_installment(c, y, inst, a);
+    then required_installment_corp_final(c, y, inst, a);
+}
+@source(IRC_S6655_D, relation = formalizes, coverage = partial, quote = "the amount of any required installment shall be 25 percent of the required annual payment")
+rule RequiredInstallmentCorpFinalOrdinary defeasible {
+    for c: Corporation;
+    for y: TaxableYear;
+    for inst: CorporateEstimatedInstallment;
+    for a: Money;
+    when required_installment_corp(c, y, inst, a) and not_known(corporation_establishes_lower_installments(c, y));
+    then required_installment_corp_final(c, y, inst, a);
+}
+
+// --- (e)(2)(C), (g)(3): alternate annualization periods -------------------------------------------------------
+relation corp_elects_annualization_option_i(c: Corporation, y: TaxableYear) kind empirical {
+    label en official "the taxpayer makes an election under clause (i) of subsection (e)(2)(C) (the exercise)";
+}
+relation corp_elects_annualization_option_ii(c: Corporation, y: TaxableYear) kind empirical {
+    label en official "the taxpayer makes an election under clause (ii) of subsection (e)(2)(C) (the exercise)";
+}
+relation corp_elects_option_i_for_installment(c: Corporation, y: TaxableYear, installment: CorporateEstimatedInstallment) kind empirical {
+    label en official "an organization described in (g)(3)(A) makes the clause (i) election separately for the installment";
+}
+relation annualization_election_made_on(c: Corporation, y: TaxableYear, d: Date) kind empirical {
+    label en official "the date on which the election was made";
+}
+pub relation annualization_election_timely(c: Corporation, y: TaxableYear) kind institutional {
+    label en official "the election is made on or before the date required for the payment of the first required installment for the taxable year";
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "such an election shall be effective only if made on or before the date required for the payment of the first required installment for such taxable year.")
+rule AnnualizationElectionTimely strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for made: Date;
+    for due: Date;
+    when annualization_election_made_on(c, y, made) and required_installment_due_date_corp(y, First, due) and made <= due;
+    then annualization_election_timely(c, y);
+}
+pub relation annualization_option_i_in_effect(c: Corporation, y: TaxableYear) kind institutional {
+    label en official "the clause (i) election applies to the taxable year for which made (the effect of the power)";
+}
+pub relation annualization_option_ii_in_effect(c: Corporation, y: TaxableYear) kind institutional {
+    label en official "the clause (ii) election applies to the taxable year for which made (the effect of the power)";
+}
+pub relation annualization_option_i_made(c: Corporation, y: TaxableYear) kind institutional {
+    label en official "a valid clause (i) election is made for the taxable year (computational twin of the power's effect)";
+}
+pub relation annualization_option_ii_made(c: Corporation, y: TaxableYear) kind institutional {
+    label en official "a valid clause (ii) election is made for the taxable year (computational twin of the power's effect)";
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "(i) If the taxpayer makes an election under this clause—")
+rule CorporationMayElectAnnualizationOptionI defeasible {
+    label en official "section 6655(e)(2)(C)(i): the taxpayer may elect the annualization periods 2, 4, 7 and 10 months";
+    for c: Corporation;
+    for y: TaxableYear;
+    when us.irc.core::year_of(c, y);
+    then power ElectAnnualizationPeriodsOptionI {
+        holder c; over c;
+        exercise corp_elects_annualization_option_i(c, y);
+        valid_when annualization_election_timely(c, y);
+        effect create(annualization_option_i_in_effect(c, y));
+        window [-infinity, infinity];
+    };
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "(ii) If the taxpayer makes an election under this clause—")
+rule CorporationMayElectAnnualizationOptionII defeasible {
+    label en official "section 6655(e)(2)(C)(ii): the taxpayer may elect the annualization periods 3, 5, 8 and 11 months (not an organization described in (g)(3)(A))";
+    for c: Corporation;
+    for y: TaxableYear;
+    when us.irc.core::year_of(c, y) and not_known(exempt_organization_treated_as_corporation_6655(c, y));
+    then power ElectAnnualizationPeriodsOptionII {
+        holder c; over c;
+        exercise corp_elects_annualization_option_ii(c, y);
+        valid_when annualization_election_timely(c, y);
+        effect create(annualization_option_ii_in_effect(c, y));
+        window [-infinity, infinity];
+    };
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "(iii) An election under clause (i) or (ii) shall apply to the taxable year for which made")
+rule AnnualizationOptionIMade strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    when corp_elects_annualization_option_i(c, y) and annualization_election_timely(c, y);
+    then annualization_option_i_made(c, y);
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "(iii) An election under clause (i) or (ii) shall apply to the taxable year for which made")
+rule AnnualizationOptionIIMade strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    when corp_elects_annualization_option_ii(c, y) and annualization_election_timely(c, y) and not_known(exempt_organization_treated_as_corporation_6655(c, y));
+    then annualization_option_ii_made(c, y);
+}
+relation option_i_applies_to_installment(c: Corporation, y: TaxableYear, installment: CorporateEstimatedInstallment) kind institutional {
+    label en unofficial "the clause (i) periods apply to the installment (whole-year election, or for an organization of (g)(3)(A) the election made for the installment)";
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "(i) If the taxpayer makes an election under this clause—")
+rule OptionIAppliesWholeYear strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for inst: CorporateEstimatedInstallment;
+    when annualization_option_i_made(c, y) and corporate_installment_ordinal(inst, _);
+    then option_i_applies_to_installment(c, y, inst);
+}
+@source(IRC_S6655_G, relation = formalizes, coverage = exact, quote = "the election under clause (i) of subsection (e)(2)(C) may be made separately for each installment")
+rule OptionIAppliesPerInstallmentExempt strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for inst: CorporateEstimatedInstallment;
+    when corp_elects_option_i_for_installment(c, y, inst) and annualization_election_timely(c, y)
+        and exempt_organization_treated_as_corporation_6655(c, y);
+    then option_i_applies_to_installment(c, y, inst);
+}
+pub relation annualization_months_corp(c: Corporation, y: TaxableYear, installment: CorporateEstimatedInstallment, months: Integer) kind institutional {
+    label en official "the number of months of the taxable year whose income is annualized for the installment";
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "(I) subclause (I) of subparagraph (A)(i) shall be applied by substituting \"2 months\" for \"3 months\",")
+rule AnnualizationMonthsOptionIFirst strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    when option_i_applies_to_installment(c, y, First);
+    then annualization_months_corp(c, y, First, 2);
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "(II) subclause (II) of subparagraph (A)(i) shall be applied by substituting \"4 months\" for \"3 months\",")
+rule AnnualizationMonthsOptionISecond strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    when option_i_applies_to_installment(c, y, Second);
+    then annualization_months_corp(c, y, Second, 4);
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "(III) subclause (III) of subparagraph (A)(i) shall be applied by substituting \"7 months\" for \"6 months\", and")
+rule AnnualizationMonthsOptionIThird strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    when option_i_applies_to_installment(c, y, Third);
+    then annualization_months_corp(c, y, Third, 7);
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "(IV) subclause (IV) of subparagraph (A)(i) shall be applied by substituting \"10 months\" for \"9 months\".")
+rule AnnualizationMonthsOptionIFourth strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    when option_i_applies_to_installment(c, y, Fourth);
+    then annualization_months_corp(c, y, Fourth, 10);
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "(I) subclause (II) of subparagraph (A)(i) shall be applied by substituting \"5 months\" for \"3 months\",")
+rule AnnualizationMonthsOptionIISecond strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    when annualization_option_ii_made(c, y) and not_known(option_i_applies_to_installment(c, y, Second));
+    then annualization_months_corp(c, y, Second, 5);
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "(II) subclause (III) of subparagraph (A)(i) shall be applied by substituting \"8 months\" for \"6 months\", and")
+rule AnnualizationMonthsOptionIIThird strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    when annualization_option_ii_made(c, y) and not_known(option_i_applies_to_installment(c, y, Third));
+    then annualization_months_corp(c, y, Third, 8);
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "(III) subclause (IV) of subparagraph (A)(i) shall be applied by substituting \"11 months\" for \"9 months\".")
+rule AnnualizationMonthsOptionIIFourth strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    when annualization_option_ii_made(c, y) and not_known(option_i_applies_to_installment(c, y, Fourth));
+    then annualization_months_corp(c, y, Fourth, 11);
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "(I) subclause (II) of subparagraph (A)(i) shall be applied by substituting \"5 months\" for \"3 months\",")
+rule AnnualizationMonthsOptionIIFirst strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    when annualization_option_ii_made(c, y) and not_known(option_i_applies_to_installment(c, y, First));
+    then annualization_months_corp(c, y, First, 3);
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "(I) for the first 3 months of the taxable year, in the case of the 1st required installment,")
+rule AnnualizationMonthsDefaultFirst strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    when us.irc.core::year_of(c, y) and not_known(option_i_applies_to_installment(c, y, First)) and not_known(annualization_option_ii_made(c, y)) and not_known(exempt_organization_treated_as_corporation_6655(c, y));
+    then annualization_months_corp(c, y, First, 3);
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "(II) for the first 3 months of the taxable year, in the case of the 2nd required installment,")
+rule AnnualizationMonthsDefaultSecond strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    when us.irc.core::year_of(c, y) and not_known(option_i_applies_to_installment(c, y, Second)) and not_known(annualization_option_ii_made(c, y)) and not_known(exempt_organization_treated_as_corporation_6655(c, y));
+    then annualization_months_corp(c, y, Second, 3);
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "(III) for the first 6 months of the taxable year in the case of the 3rd required installment, and")
+rule AnnualizationMonthsDefaultThird strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    when us.irc.core::year_of(c, y) and not_known(option_i_applies_to_installment(c, y, Third)) and not_known(annualization_option_ii_made(c, y)) and not_known(exempt_organization_treated_as_corporation_6655(c, y));
+    then annualization_months_corp(c, y, Third, 6);
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "(IV) for the first 9 months of the taxable year, in the case of the 4th required installment, over")
+rule AnnualizationMonthsDefaultFourth strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    when us.irc.core::year_of(c, y) and not_known(option_i_applies_to_installment(c, y, Fourth)) and not_known(annualization_option_ii_made(c, y)) and not_known(exempt_organization_treated_as_corporation_6655(c, y));
+    then annualization_months_corp(c, y, Fourth, 9);
+}
+@source(IRC_S6655_G, relation = formalizes, coverage = exact, quote = "subsection (e)(2)(A) shall be applied by substituting \"2 months\" for \"3 months\" in clause (i)(I)")
+rule AnnualizationMonthsExemptFirst strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    when us.irc.core::year_of(c, y) and exempt_organization_treated_as_corporation_6655(c, y) and not_known(option_i_applies_to_installment(c, y, First));
+    then annualization_months_corp(c, y, First, 2);
+}
+@source(IRC_S6655_G, relation = formalizes, coverage = exact, quote = "the election under clause (i) of subsection (e)(2)(C) may be made separately for each installment")
+rule AnnualizationMonthsExemptSecond strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    when us.irc.core::year_of(c, y) and exempt_organization_treated_as_corporation_6655(c, y) and not_known(option_i_applies_to_installment(c, y, Second));
+    then annualization_months_corp(c, y, Second, 3);
+}
+@source(IRC_S6655_G, relation = formalizes, coverage = exact, quote = "the election under clause (i) of subsection (e)(2)(C) may be made separately for each installment")
+rule AnnualizationMonthsExemptThird strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    when us.irc.core::year_of(c, y) and exempt_organization_treated_as_corporation_6655(c, y) and not_known(option_i_applies_to_installment(c, y, Third));
+    then annualization_months_corp(c, y, Third, 6);
+}
+@source(IRC_S6655_G, relation = formalizes, coverage = exact, quote = "the election under clause (i) of subsection (e)(2)(C) may be made separately for each installment")
+rule AnnualizationMonthsExemptFourth strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    when us.irc.core::year_of(c, y) and exempt_organization_treated_as_corporation_6655(c, y) and not_known(option_i_applies_to_installment(c, y, Fourth));
+    then annualization_months_corp(c, y, Fourth, 9);
+}
+
+// --- (e)(4): subpart F income ---------------------------------------------------------------------------------
+relation subpart_f_inclusion_951a(c: Corporation, y: TaxableYear) kind empirical {
+    label en official "amounts are required to be included in the gross income of the taxpayer under section 951(a) (and credits are properly allocable thereto)";
+}
+relation corp_elects_subpart_f_safe_harbor(c: Corporation, y: TaxableYear) kind empirical {
+    label en official "the taxpayer elects to have subparagraph (B) apply for the taxable year (the exercise)";
+}
+pub relation subpart_f_safe_harbor_in_effect(c: Corporation, y: TaxableYear) kind institutional {
+    label en official "the prior year safe harbor election applies to the taxable year (the effect of the power)";
+}
+pub relation subpart_f_safe_harbor_made(c: Corporation, y: TaxableYear) kind institutional {
+    label en official "a valid prior year safe harbor election is made (computational twin of the power's effect)";
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "If a taxpayer elects to have this subparagraph apply for any taxable year—")
+rule TaxpayerMayElectSubpartFSafeHarbor defeasible {
+    label en official "section 6655(e)(4)(B): the taxpayer may elect the prior year safe harbor for subpart F income";
+    for c: Corporation;
+    for y: TaxableYear;
+    when subpart_f_inclusion_951a(c, y);
+    then power ElectSubpartFSafeHarbor {
+        holder c; over c;
+        exercise corp_elects_subpart_f_safe_harbor(c, y);
+        valid_when subpart_f_inclusion_951a(c, y);
+        effect create(subpart_f_safe_harbor_in_effect(c, y));
+        window [-infinity, infinity];
+    };
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "If a taxpayer elects to have this subparagraph apply for any taxable year—")
+rule SubpartFSafeHarborMade strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    when corp_elects_subpart_f_safe_harbor(c, y) and subpart_f_inclusion_951a(c, y);
+    then subpart_f_safe_harbor_made(c, y);
+}
+pub relation subpart_f_treated_like_partnership_inclusion(c: Corporation, y: TaxableYear) kind institutional {
+    label en official "the section 951(a) inclusions are taken into account in computing any annualized income installment in the manner of partnership income inclusions";
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "shall be taken into account in computing any annualized income installment under paragraph (2) in a manner similar to the manner under which partnership income inclusions (and credits properly allocable thereto) are taken into account.")
+rule SubpartFTreatedLikePartnershipInclusion strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    when subpart_f_inclusion_951a(c, y) and not_known(subpart_f_safe_harbor_made(c, y));
+    then subpart_f_treated_like_partnership_inclusion(c, y);
+}
+relation preceding_year_subpart_f_items_of(c: Corporation, y: TaxableYear, cfc: Corporation, amount: Money) kind empirical {
+    label en official "the items of income and credit described in subparagraph (A) with respect to the corporation shown on the return of the taxpayer for the preceding taxable year";
+}
+relation second_preceding_year_subpart_f_items_of(c: Corporation, y: TaxableYear, cfc: Corporation, amount: Money) kind empirical {
+    label en official "the same items shown on the return for the second preceding taxable year";
+}
+relation taxpayer_owns_more_than_50_percent_of(c: Corporation, cfc: Corporation, y: TaxableYear) kind empirical {
+    label en official "as of the beginning of the taxable year the taxpayer owns (within the meaning of section 958(a)), or is treated as owning (section 958(b)), more than 50 percent (by vote or value) of the stock in the corporation";
+}
+relation taxpayer_is_shareholder_of(c: Corporation, cfc: Corporation, y: TaxableYear) kind empirical {
+    label en official "the taxpayer is a shareholder of the corporation";
+}
+pub relation noncontrolling_shareholder_of(c: Corporation, cfc: Corporation, y: TaxableYear) kind institutional {
+    label en official "a shareholder which does not own, and is not treated as owning, more than 50 percent (by vote or value) of the stock in the corporation";
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "the term \"noncontrolling shareholder\" means, with respect to any corporation, a shareholder which (as of the beginning of the taxable year for which the installment is being made) does not own (within the meaning of section 958(a)), and is not treated as owning (within the meaning of section 958(b)), more than 50 percent (by vote or value) of the stock in the corporation.")
+rule NoncontrollingShareholderRule strict {
+    for c: Corporation;
+    for cfc: Corporation;
+    for y: TaxableYear;
+    when taxpayer_is_shareholder_of(c, cfc, y) and not_known(taxpayer_owns_more_than_50_percent_of(c, cfc, y));
+    then noncontrolling_shareholder_of(c, cfc, y);
+}
+relation safe_harbor_items_for_installment(c: Corporation, y: TaxableYear, installment: CorporateEstimatedInstallment, cfc: Corporation, amount: Money) kind institutional {
+    label en unofficial "the items of the preceding year (the second preceding year for the first and second installments) on which the safe harbor amount is computed";
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "(the second preceding taxable year in the case of the first and second required installments for such taxable year)")
+rule SafeHarborItemsFirst strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for cfc: Corporation;
+    for items: Money;
+    when subpart_f_safe_harbor_made(c, y) and second_preceding_year_subpart_f_items_of(c, y, cfc, items);
+    then safe_harbor_items_for_installment(c, y, First, cfc, items);
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "(the second preceding taxable year in the case of the first and second required installments for such taxable year)")
+rule SafeHarborItemsSecond strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for cfc: Corporation;
+    for items: Money;
+    when subpart_f_safe_harbor_made(c, y) and second_preceding_year_subpart_f_items_of(c, y, cfc, items);
+    then safe_harbor_items_for_installment(c, y, Second, cfc, items);
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "in an amount equal to 115 percent of the amount of such items shown on the return of the taxpayer for the preceding taxable year")
+rule SafeHarborItemsThird strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for cfc: Corporation;
+    for items: Money;
+    when subpart_f_safe_harbor_made(c, y) and preceding_year_subpart_f_items_of(c, y, cfc, items);
+    then safe_harbor_items_for_installment(c, y, Third, cfc, items);
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "in an amount equal to 115 percent of the amount of such items shown on the return of the taxpayer for the preceding taxable year")
+rule SafeHarborItemsFourth strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for cfc: Corporation;
+    for items: Money;
+    when subpart_f_safe_harbor_made(c, y) and preceding_year_subpart_f_items_of(c, y, cfc, items);
+    then safe_harbor_items_for_installment(c, y, Fourth, cfc, items);
+}
+pub relation subpart_f_safe_harbor_amount(c: Corporation, y: TaxableYear, installment: CorporateEstimatedInstallment, cfc: Corporation, amount: Money) kind institutional {
+    label en official "the items the taxpayer is treated as having received ratably during the taxable year: 115 percent of the items shown on the preceding year's return (100 percent for a noncontrolling shareholder)";
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "the taxpayer shall be treated as having received ratably during such taxable year items of income and credit described in subparagraph (A) in an amount equal to 115 percent of the amount of such items")
+rule SubpartFSafeHarborAmountControlling strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for inst: CorporateEstimatedInstallment;
+    for cfc: Corporation;
+    for items: Money;
+    when safe_harbor_items_for_installment(c, y, inst, cfc, items) and not_known(noncontrolling_shareholder_of(c, cfc, y));
+    then subpart_f_safe_harbor_amount(c, y, inst, cfc, round(items * SubpartFSafeHarborPercent, 2, "HALF_UP"));
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "clause (i)(II) shall be applied with respect to items of such corporation by substituting \"100 percent\" for \"115 percent\".")
+rule SubpartFSafeHarborAmountNoncontrolling strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for inst: CorporateEstimatedInstallment;
+    for cfc: Corporation;
+    for items: Money;
+    when safe_harbor_items_for_installment(c, y, inst, cfc, items) and noncontrolling_shareholder_of(c, cfc, y);
+    then subpart_f_safe_harbor_amount(c, y, inst, cfc, round(items * SubpartFSafeHarborNoncontrollingPercent, 2, "HALF_UP"));
+}
+
+// --- (e)(5): dividends from a closely held REIT ---------------------------------------------------------------
+relation five_or_fewer_persons_own_50_percent_of_reit(reit: Corporation) kind empirical {
+    label en official "5 or fewer persons own (after application of section 856(d)(5)) 50 percent or more (by vote or value) of the stock or beneficial interests in the trust";
+}
+relation real_estate_investment_trust_6655(reit: Corporation) kind empirical {
+    label en official "a real estate investment trust";
+}
+pub relation closely_held_reit(reit: Corporation) kind institutional {
+    label en official "closely held real estate investment trust";
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "the term \"closely held real estate investment trust\" means a real estate investment trust with respect to which 5 or fewer persons own (after application of subsection (d)(5) of section 856) 50 percent or more (by vote or value) of the stock or beneficial interests in the trust.")
+rule CloselyHeldReitRule strict {
+    for reit: Corporation;
+    when real_estate_investment_trust_6655(reit) and five_or_fewer_persons_own_50_percent_of_reit(reit);
+    then closely_held_reit(reit);
+}
+relation reit_vote_percentage_owned(c: Corporation, reit: Corporation, pct: Decimal) kind empirical {
+    label en official "the percentage of the vote of the trust owned (after application of section 856(d)(5))";
+}
+relation reit_value_percentage_owned(c: Corporation, reit: Corporation, pct: Decimal) kind empirical {
+    label en official "the percentage of the value of the stock or beneficial interests of the trust owned (after application of section 856(d)(5))";
+}
+relation reit_dividend_received(c: Corporation, y: TaxableYear, reit: Corporation, amount: Money) kind empirical {
+    label en official "a dividend received from the real estate investment trust";
+}
+pub relation reit_dividend_treated_like_partnership_inclusion(c: Corporation, y: TaxableYear, reit: Corporation, amount: Money) kind institutional {
+    label en official "a dividend from a closely held REIT received by a 10-percent owner is taken into account in computing annualized income installments in the manner of partnership income inclusions";
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "Any dividend received from a closely held real estate investment trust by any person which owns (after application of subsection (d)(5) of section 856) 10 percent or more (by vote or value) of the stock or beneficial interests in the trust")
+rule ReitDividendByVoteOwner strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for reit: Corporation;
+    for pct: Decimal;
+    for d: Money;
+    when closely_held_reit(reit) and reit_vote_percentage_owned(c, reit, pct) and pct >= 0.10 and reit_dividend_received(c, y, reit, d);
+    then reit_dividend_treated_like_partnership_inclusion(c, y, reit, d);
+}
+@source(IRC_S6655_E, relation = formalizes, coverage = exact, quote = "Any dividend received from a closely held real estate investment trust by any person which owns (after application of subsection (d)(5) of section 856) 10 percent or more (by vote or value) of the stock or beneficial interests in the trust")
+rule ReitDividendByValueOwner strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for reit: Corporation;
+    for pct: Decimal;
+    for d: Money;
+    when closely_held_reit(reit) and reit_value_percentage_owned(c, reit, pct) and pct >= 0.10 and reit_dividend_received(c, y, reit, d);
+    then reit_dividend_treated_like_partnership_inclusion(c, y, reit, d);
+}
+
+// --- (g)(3): tax-exempt organizations: the taxes and the income ----------------------------------------------
+relation tax_imposed_by_section_511(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the tax imposed by section 511 on the organization";
+}
+relation tax_imposed_on_private_foundation_by_1_or_4940(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the tax imposed by section 1 or 4940 on the private foundation";
+}
+pub relation tax_treated_as_imposed_by_section_11_exempt(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the taxes of an organization described in (g)(3)(A) that are treated as imposed by section 11";
+}
+@source(IRC_S6655_G, relation = formalizes, coverage = exact, quote = "Any tax imposed by section 511, and any tax imposed by section 1 or 4940 on a private foundation, shall be treated as a tax imposed by section 11.")
+rule TaxOfExemptOrganizationTreatedAsSection11 strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    when exempt_organization_treated_as_corporation_6655(c, y);
+    then tax_treated_as_imposed_by_section_11_exempt(c, y,
+        sum(collect all a: Money where tax_imposed_by_section_511(c, y, a), empty: 0.00 USD)
+        + sum(collect all b: Money where tax_imposed_on_private_foundation_by_1_or_4940(c, y, b), empty: 0.00 USD));
+}
+relation unrelated_business_taxable_income_6655(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the unrelated business taxable income of the organization";
+}
+relation net_investment_income_private_foundation(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the net investment income of the private foundation";
+}
+pub relation taxable_income_reference_exempt(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the amount a reference to taxable income includes for an organization described in (g)(3)(A): the unrelated business taxable income or the net investment income, as the case may be";
+}
+@source(IRC_S6655_G, relation = formalizes, coverage = exact, quote = "Any reference to taxable income shall be treated as including a reference to unrelated business taxable income or net investment income (as the case may be).")
+rule TaxableIncomeReferenceExemptUbti strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for a: Money;
+    when tax_exempt_organization_subject_511_6655(c, y) and unrelated_business_taxable_income_6655(c, y, a);
+    then taxable_income_reference_exempt(c, y, a);
+}
+@source(IRC_S6655_G, relation = formalizes, coverage = exact, quote = "Any reference to taxable income shall be treated as including a reference to unrelated business taxable income or net investment income (as the case may be).")
+rule TaxableIncomeReferenceExemptNii strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for a: Money;
+    when private_foundation_6655(c, y) and net_investment_income_private_foundation(c, y, a);
+    then taxable_income_reference_exempt(c, y, a);
+}
+
+// --- (g)(4): S corporations ------------------------------------------------------------------------------------
+pub enum SCorporationTax6655 {
+    Tax1374a;
+    Tax1375a;
+    Tax1371d2;
+}
+relation s_corporation_tax_amount(c: Corporation, y: TaxableYear, kind: SCorporationTax6655, amount: Money) kind empirical {
+    label en official "the tax imposed by section 1374(a), section 1375(a) or for which the S corporation is liable by reason of section 1371(d)(2)";
+}
+pub relation s_corporation_tax_treated_as_section_11(c: Corporation, y: TaxableYear, kind: SCorporationTax6655, amount: Money) kind institutional {
+    label en official "the tax treated as imposed by section 11 for this section";
+}
+@source(IRC_S6655_G, relation = formalizes, coverage = exact, quote = "The following taxes shall be treated as imposed by section 11:")
+rule SCorporationTaxTreatedAsSection11 strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for k: SCorporationTax6655;
+    for a: Money;
+    when s_corporation_6655(c, y) and s_corporation_tax_amount(c, y, k, a);
+    then s_corporation_tax_treated_as_section_11(c, y, k, a);
+}
+pub relation large_corporation_rule_inapplicable_to_s_corporation(c: Corporation, y: TaxableYear) kind institutional {
+    label en official "paragraph (2) of subsection (d) shall not apply to an S corporation";
+}
+@source(IRC_S6655_G, relation = formalizes, coverage = exact, quote = "Paragraph (2) of subsection (d) shall not apply.")
+rule LargeCorporationRuleInapplicableToSCorporation strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    when s_corporation_6655(c, y);
+    then large_corporation_rule_inapplicable_to_s_corporation(c, y);
+}
+relation preceding_year_1375_tax_shown(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the tax imposed by section 1375(a) which was shown on the return of the corporation for the preceding taxable year";
+}
+pub relation s_corporation_required_annual_payment(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the required annual payment of an S corporation: the lesser of 100 percent of the tax shown for the year and the sum of the year's section 1374(a) and 1371(d)(2) taxes and 100 percent of the section 1375(a) tax shown on the preceding return";
+}
+@source(IRC_S6655_G, relation = formalizes, coverage = exact, quote = "\"(I) the amount determined under clause (i) by only taking into account the taxes referred to in clauses (i) and (iii) of subsection (g)(4)(A), and")
+rule SCorporationRequiredAnnualPaymentWithPriorYear strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for all_taxes: Money;
+    for t1374: Money;
+    for t1371: Money;
+    for t1375_prior: Money;
+    when s_corporation_6655(c, y) and corp_current_year_tax(c, y, all_taxes)
+        and s_corporation_tax_amount(c, y, Tax1374a, t1374) and s_corporation_tax_amount(c, y, Tax1371d2, t1371)
+        and preceding_year_1375_tax_shown(c, y, t1375_prior)
+        and not preceding_year_was_12_months_corp(c, y);
+    then s_corporation_required_annual_payment(c, y, min(round(all_taxes * CorporateRequiredAnnualPaymentPercent, 2, "HALF_UP"), round((t1374 + t1371) * CorporateRequiredAnnualPaymentPercent, 2, "HALF_UP") + round(t1375_prior * CorporateRequiredAnnualPaymentPercent, 2, "HALF_UP")));
+}
+@source(IRC_S6655_G, relation = formalizes, coverage = exact, quote = "The requirement in the last sentence of subsection (d)(1)(B) that the return for the preceding taxable year show a liability for tax shall not apply.")
+rule SCorporationRequiredAnnualPaymentNoPriorYear strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for all_taxes: Money;
+    when s_corporation_6655(c, y) and corp_current_year_tax(c, y, all_taxes) and preceding_year_was_12_months_corp(c, y);
+    then s_corporation_required_annual_payment(c, y, round(all_taxes * CorporateRequiredAnnualPaymentPercent, 2, "HALF_UP"));
+}
+pub relation s_corporation_taxable_income_reference(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "what a reference to taxable income includes for an S corporation in subsection (e): the net recognized built-in gain or the excess passive income, as the case may be";
+}
+relation net_recognized_built_in_gain_6655(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the net recognized built-in gain";
+}
+relation excess_passive_income_6655(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the excess passive income";
+}
+@source(IRC_S6655_G, relation = formalizes, coverage = exact, quote = "Any reference in subsection (e) to taxable income shall be treated as including a reference to the net recognized built-in gain or the excess passive income (as the case may be).")
+rule SCorporationTaxableIncomeReferenceBuiltInGain strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for a: Money;
+    when s_corporation_6655(c, y) and net_recognized_built_in_gain_6655(c, y, a);
+    then s_corporation_taxable_income_reference(c, y, a);
+}
+@source(IRC_S6655_G, relation = formalizes, coverage = exact, quote = "Any reference in subsection (e) to taxable income shall be treated as including a reference to the net recognized built-in gain or the excess passive income (as the case may be).")
+rule SCorporationTaxableIncomeReferencePassiveIncome strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for a: Money;
+    when s_corporation_6655(c, y) and excess_passive_income_6655(c, y, a);
+    then s_corporation_taxable_income_reference(c, y, a);
+}
+
+// --- (i)(2), (e)(2)(B)(i): left to regulations -------------------------------------------------------------------
+
+@source(IRC_S6655_G, relation = formalizes, coverage = exact, quote = "Clause (ii) of subsection (d)(1)(B) shall be applied as if it read as follows:")
+rule SCorporationRequiredAnnualPaymentBridge strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for a: Money;
+    when s_corporation_required_annual_payment(c, y, a);
+    then required_annual_payment_corp(c, y, a);
+}

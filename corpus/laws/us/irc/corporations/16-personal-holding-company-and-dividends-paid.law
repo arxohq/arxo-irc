@@ -1,0 +1,422 @@
+// Subchapter G, Part II — the personal holding company tax, sections
+// 541-547; Part III (as applicable to Parts I-II) — the dividends paid
+// deduction, sections 561-565. Stage 2 (IRC-08 stage 2, A06), priority
+// sections.
+//
+// METHOD: mirrors module 15's own structure. Section 541's 20 percent flat
+// rate is a SECOND A3 parameter (the statute prices personal holding
+// company tax and accumulated earnings tax identically today, but the two
+// rates have independent amendment histories, so they are NOT the same
+// parameter — a future rate divergence must not silently couple them).
+// Section 542(a)'s two-part definition — the 60 percent adjusted-ordinary-
+// gross-income test (executable, exact) and the 5-or-fewer/50-percent
+// stock ownership test (the aggregate combined share is read as a case
+// fact, the same judgment call as module 08's section 1563(f)(5) "identical
+// ownership" figures — TECH_GAP for deriving it end-to-end from section 544
+// attribution, same class as G63) — together classify a personal holding
+// company. Section 543(a)'s personal holding company income items are
+// classified by kind (the same enum-classification pattern as section
+// 312(n)'s items), each item's own detailed inclusion/exclusion tests
+// TECH_GAP beyond the bare item amount. Section 544's attribution
+// modifications to section 318(a) are EXTERNAL_DEPENDENCY/TECH_GAP (same
+// bounded-hop posture as sections 304(c)(3)/355(d)(8)/382(l)(3), which this
+// package also does not fully layer onto module 03's `constructive_
+// ownership`). Section 545(a)-(b) mirrors section 535(a)-(b)'s exact
+// adjustment arithmetic. Section 547 is modelled as a power (the deficiency-
+// dividend deduction, conditioned on a "determination" establishing PHC tax
+// liability). Section 561(a)'s dividends-paid-deduction sum, section 563's
+// exact-date "dividends paid within 15 days of the 4th month" rules (both
+// the AET version, automatic, and the PHC version, an ELECTION — a power),
+// and section 565's consent dividend (also a power, since a shareholder's
+// consent changes the legal characterization of an amount never actually
+// distributed) are modelled with the SAME exact-date-arithmetic and power
+// conventions this package's other stage-2 modules use.
+
+// --- Section 541: imposition -------------------------------------------
+
+use self::{
+    Corporation,
+    IRC_S541,
+    IRC_S542_A,
+    IRC_S542_B,
+    IRC_S545_A,
+    IRC_S545_B,
+    IRC_S547_A,
+    IRC_S561_A,
+    IRC_S563_A,
+    IRC_S563_B,
+    IRC_S565_A,
+    IRC_S565_B,
+    Person,
+    TaxableYear,
+    member_meets_aogi_requirement_by_group_542b1,
+    member_of_governing_consolidated_group_542b1,
+    personal_holding_company_excluded_542c_derived,
+};
+
+@source(IRC_S541, quote = "In addition to other taxes imposed by this chapter, there is hereby imposed for each taxable year on the undistributed personal holding company income (as defined in section 545) of every personal holding company (as defined in section 542) a personal holding company tax equal to 20 percent of the undistributed personal holding company income.")
+pub relation undistributed_personal_holding_company_income(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 545(a): the corporation's undistributed personal holding company income for the taxable year";
+}
+pub relation personal_holding_company(c: Corporation, y: TaxableYear) kind institutional {
+    label en official "the corporation is a personal holding company within the meaning of section 542, for the taxable year — this package's real implementation of the `personal_holding_company_542` switch module 15 reads for the section 532(b)(1) exception";
+}
+pub relation personal_holding_company_tax(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 541: the personal holding company tax — 20 percent of undistributed personal holding company income, imposed on a personal holding company";
+}
+@source(IRC_S541, quote = "a personal holding company tax equal to 20 percent of the undistributed personal holding company income.")
+rule PersonalHoldingCompanyTaxRule(c: Corporation, y: TaxableYear, income: Money) strict {
+    label en official "section 541: exact 20 percent calculation";
+    when personal_holding_company(c, y);
+    when undistributed_personal_holding_company_income(c, y, income);
+    then personal_holding_company_tax(c, y, round(income * PersonalHoldingCompanyTaxRate20Percent, 2, "HALF_UP"));
+}
+
+// --- Section 542: personal holding company defined -------------------------
+
+pub relation adjusted_ordinary_gross_income_543b2(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "section 543(b)(2): the corporation's adjusted ordinary gross income for the taxable year";
+}
+pub relation personal_holding_company_income_amount_543a(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "section 543(a): the corporation's total personal holding company income for the taxable year (the sum of the classified items below)";
+}
+pub relation section_542c_excluded_corporation(c: Corporation, y: TaxableYear) kind empirical {
+    label en official "section 542(c): the corporation is one of the types excluded from the personal holding company definition (banks, life insurance companies, surety companies, lending/finance companies meeting the section 542(c)(6) tests, small business investment companies, certain foreign corporations, etc.) — TECH_GAP for the full (c)(1)-(10) exclusion list, read as a case-asserted switch";
+}
+pub relation meets_60_percent_aogi_test_542a1(c: Corporation, y: TaxableYear) kind institutional {
+    label en official "section 542(a)(1): at least 60 percent of adjusted ordinary gross income is personal holding company income";
+}
+@source(IRC_S542_A, quote = "At least 60 percent of its adjusted ordinary gross income (as defined in section 543(b)(2)) for the taxable year is personal holding company income (as defined in section 543(a)), and")
+rule Meets60PercentAogiTestRule(c: Corporation, y: TaxableYear, aogi: Money, phc_income: Money) strict {
+    label en official "section 542(a)(1): exact 60 percent test";
+    when adjusted_ordinary_gross_income_543b2(c, y, aogi);
+    when personal_holding_company_income_amount_543a(c, y, phc_income);
+    when aogi > 0.00 USD;
+    when not_known(member_of_governing_consolidated_group_542b1(c, y));
+    when div_round(phc_income, aogi, 6, "HALF_UP") >= 0.60;
+    then meets_60_percent_aogi_test_542a1(c, y);
+}
+@source(IRC_S542_B, quote = "No member of such an affiliated group shall be considered to meet such adjusted ordinary gross income requirement unless the affiliated group meets such requirement.")
+rule Meets60PercentAogiTestByGroupRule(c: Corporation, y: TaxableYear) strict {
+    label en official "section 542(b)(1): a member of a group whose consolidated test governs meets the requirement through the group";
+    when member_meets_aogi_requirement_by_group_542b1(c, y);
+    then meets_60_percent_aogi_test_542a1(c, y);
+}
+pub relation five_or_fewer_combined_ownership_share_542a2(c: Corporation, y: TaxableYear, share: Decimal) kind empirical {
+    label en official "section 542(a)(2): the greatest value-share of the corporation's outstanding stock owned, directly or indirectly (section 544 attribution), by or for not more than 5 individuals, at any time during the last half of the taxable year — TECH_GAP: read as a case-asserted aggregate rather than derived end-to-end from section 544 attribution (same judgment-call class as module 08's section 1563(f)(5) figures, G63)";
+}
+pub relation meets_stock_ownership_test_542a2(c: Corporation, y: TaxableYear) kind institutional {
+    label en official "section 542(a)(2): more than 50 percent in value of outstanding stock owned by or for not more than 5 individuals during the last half of the taxable year";
+}
+@source(IRC_S542_A, quote = "more than 50 percent in value of its outstanding stock is owned, directly or indirectly, by or for not more than 5 individuals.")
+rule MeetsStockOwnershipTest542a2Rule(c: Corporation, y: TaxableYear, share: Decimal) strict {
+    label en official "section 542(a)(2): exact more-than-50-percent test";
+    when five_or_fewer_combined_ownership_share_542a2(c, y, share);
+    when share > 0.50;
+    then meets_stock_ownership_test_542a2(c, y);
+}
+@source(IRC_S542_A, quote = "the term \"personal holding company\" means any corporation (other than a corporation described in subsection (c)) if—")
+rule PersonalHoldingCompanyRule(c: Corporation, y: TaxableYear) strict {
+    label en official "section 542(a): both the 60 percent AOGI test and the stock ownership test, outside the section 542(c) exclusions";
+    when meets_60_percent_aogi_test_542a1(c, y);
+    when meets_stock_ownership_test_542a2(c, y);
+    when not_known(section_542c_excluded_corporation(c, y));
+    when not_known(personal_holding_company_excluded_542c_derived(c, y));
+    then personal_holding_company(c, y);
+}
+
+// --- Section 543: personal holding company income, by classified item -----
+
+enum PersonalHoldingCompanyIncomeItemKind {
+    DividendsInterestRoyaltiesAnnuities;
+    AdjustedIncomeFromRents;
+    AdjustedIncomeFromMineralOilGasRoyalties;
+    CopyrightRoyalties;
+    ProducedFilmRents;
+    UseOfCorporatePropertyByShareholder;
+    PersonalServiceContracts;
+    EstateOrTrustIncome;
+}
+pub relation personal_holding_company_income_item_543a(c: Corporation, y: TaxableYear, item: PersonalHoldingCompanyIncomeItemKind, amount: Money) kind empirical {
+    label en official "section 543(a)(1)-(8): an item of personal holding company income, by kind — TECH_GAP for each item's own detailed inclusion/exclusion tests (e.g. the (a)(1)(A)-(E) interest exceptions, the (a)(2) 50-percent-of-AOGI-plus-dividends-paid rent exclusion, the (a)(6)/(a)(7) 25-percent-of-ordinary-gross-income thresholds), read as a case-asserted amount per item";
+}
+
+// --- Section 544: constructive ownership (attribution modifications) -------
+// EXTERNAL_DEPENDENCY/TECH_GAP: section 544 modifies section 318(a)-style
+// attribution (dropping some limitations, adding option-chaining and
+// family/partnership rules) for the specific purposes of sections
+// 542(a)(2), 543(a)(4), (a)(6), (a)(7) — a bounded-hop limitation this
+// package does not resolve this stage, same class as sections 304(c)(3)/
+// 355(d)(8)/382(l)(3). `five_or_fewer_combined_ownership_share_542a2` above
+// is the case-asserted RESULT of applying section 544; no rule here derives
+// it from module 03's `constructive_ownership`.
+
+// --- Section 545: undistributed personal holding company income -----------
+
+pub relation taxable_income_545(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the corporation's taxable income for the taxable year, before the section 545(b) adjustments (declared separately from section 535's own base figure, since the two subchapters' adjustment sets differ)";
+}
+pub relation section_545b1_taxes_deduction(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "section 545(b)(1): Federal/foreign income and excess-profits taxes accrued (or deemed paid under section 960), other than the section 531/541 taxes themselves";
+}
+pub relation section_545b2_charitable_contributions(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "section 545(b)(2): the section 170 charitable contributions deduction, with the (b)(1)(A),(B),(D),(E) percentage limitations applying but (b)(2)/(d)(1) not";
+}
+pub relation section_545b3_special_deductions_in_taxable_income(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "section 545(b)(3): the amount of part VIII special deductions allowed in computing the taxable-income figure above, to be DISALLOWED";
+}
+pub relation section_545b4_nol_deduction_in_taxable_income(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "section 545(b)(4): the amount of the section 172 net operating loss deduction allowed in computing the taxable-income figure above, to be DISALLOWED (the preceding-year net-operating-loss replacement deduction of the second clause is TECH_GAP, read as zero unless separately asserted)";
+}
+pub relation section_545b4_preceding_year_nol_replacement(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "section 545(b)(4) second clause: the net operating loss (section 172(c)) for the PRECEDING taxable year, computed without part VIII special deductions, allowed as a deduction in lieu of the general section 172 deduction";
+}
+pub relation section_545b5_net_capital_gain_deduction(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "section 545(b)(5): the net capital gain for the taxable year, minus the taxes attributable to it, allowed as a deduction (TECH_GAP for the attributable-taxes sub-computation, read as a net case-asserted figure)";
+}
+pub relation taxable_income_adjusted_545b(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 545(b): taxable income as adjusted for personal-holding-company-tax purposes";
+}
+@source(IRC_S545_B, quote = "For the purposes of subsection (a), the taxable income shall be adjusted as follows:")
+rule TaxableIncomeAdjusted545bRule(c: Corporation, y: TaxableYear, base: Money, taxes: Money, charitable: Money, special: Money, nol: Money, prior_nol: Money, capgain: Money) strict {
+    label en official "section 545(b)(1)-(5): exact adjustment arithmetic";
+    when taxable_income_545(c, y, base);
+    when section_545b1_taxes_deduction(c, y, taxes);
+    when section_545b2_charitable_contributions(c, y, charitable);
+    when section_545b3_special_deductions_in_taxable_income(c, y, special);
+    when section_545b4_nol_deduction_in_taxable_income(c, y, nol);
+    when section_545b4_preceding_year_nol_replacement(c, y, prior_nol);
+    when section_545b5_net_capital_gain_deduction(c, y, capgain);
+    then taxable_income_adjusted_545b(c, y, base + taxes + charitable - special - nol + prior_nol + capgain);
+}
+pub relation dividends_paid_deduction_561_for_phc(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the section 561 dividends paid deduction, for the section 545(a) computation (a case fact pending end-to-end wiring to this module's own section 561 rules below, same posture as module 15's accumulated-earnings-tax dividends-paid-deduction reference)";
+}
+@source(IRC_S545_A, quote = "the term \"undistributed personal holding company income\" means the taxable income of a personal holding company adjusted in the manner provided in subsections (b), (c), and (d), minus the dividends paid deduction as defined in section 561.")
+rule UndistributedPersonalHoldingCompanyIncomeRule(c: Corporation, y: TaxableYear, adjusted: Money, dpd: Money) strict {
+    label en official "section 545(a): exact UPHCI calculation (sections 545(c)-(d) further adjustments TECH_GAP, not applied)";
+    when taxable_income_adjusted_545b(c, y, adjusted);
+    when dividends_paid_deduction_561_for_phc(c, y, dpd);
+    then undistributed_personal_holding_company_income(c, y, adjusted - dpd);
+}
+
+// --- Section 547: deficiency dividends deduction (a power) -----------------
+
+pub entity PhcDeficiencyDetermination { label en unofficial "a determination (section 547(c)) establishing personal holding company tax liability for a taxable year"; }
+
+pub relation determination_establishes_phc_liability_547a(det: PhcDeficiencyDetermination, c: Corporation, y: TaxableYear) kind empirical {
+    label en official "section 547(a)/(c): a determination establishes liability for personal holding company tax for the taxable year";
+}
+pub relation deficiency_dividends_paid_547d(det: PhcDeficiencyDetermination, c: Corporation, amount: Money, filed_on: Date) kind empirical {
+    label en official "section 547(d): the amount of deficiency dividends distributed by the corporation, claimed within 120 days after the determination (section 547(e), TECH_GAP for the exact 120-day deadline, read as a case-asserted timely claim)";
+}
+pub relation deficiency_dividend_deduction_547_made(det: PhcDeficiencyDetermination, c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 547(a): the deficiency dividend deduction is allowed for purposes of determining the personal holding company tax liability for the taxable year (not for interest/penalties)";
+}
+@source(IRC_S547_A, quote = "a deduction shall be allowed to the taxpayer for the amount of deficiency dividends (as defined in subsection (d)) for the purpose of determining the personal holding company tax for such year, but not for the purpose of determining interest, additional amounts, or assessable penalties computed with respect to such personal holding company tax.")
+rule DeficiencyDividendDeductionPowerRule strict {
+    label en official "section 547(a): the taxpayer's power to claim the deficiency dividend deduction once a determination has been made";
+    for det: PhcDeficiencyDetermination; for c: Corporation; for y: TaxableYear; for amount: Money; for filed_on: Date;
+    when determination_establishes_phc_liability_547a(det, c, y);
+    when deficiency_dividends_paid_547d(det, c, amount, filed_on);
+    then power DeficiencyDividendDeductionElection {
+        holder c;
+        over det;
+        exercise deficiency_dividends_paid_547d(det, c, amount, filed_on);
+        valid_when determination_establishes_phc_liability_547a(det, c, y);
+        effect create(deficiency_dividend_deduction_547_made(det, c, y, amount));
+        window [@1954-01-01, infinity);
+    };
+}
+
+// --- Section 561: dividends paid deduction ----------------------------------
+
+pub relation dividends_paid_during_year_561a1(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "section 561(a)(1): the dividends paid during the taxable year (section 562's own eligibility rules, e.g. the preferential-dividend disqualification of section 562(c), are TECH_GAP, read as a case-asserted eligible amount)";
+}
+pub relation consent_dividends_561a2(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "section 561(a)(2): the consent dividends for the taxable year, determined under section 565 (this module's own power below) — TECH_GAP: not summed end-to-end from `consent_dividend_recognized_565` (aggregate-over-derived-predicate class, §111), read as a case-asserted aggregate, same posture as `dividend_carryover_561a3_phc`";
+}
+pub relation dividend_carryover_561a3_phc(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "section 561(a)(3): in the case of a personal holding company, the section 564 dividend carryover — TECH_GAP for the full multi-year carryover computation (same running-ledger class as G1/G10/G38), read as a case-asserted figure";
+}
+pub relation dividends_paid_deduction_561(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 561(a): the dividends paid deduction — dividends paid during the year, plus consent dividends, plus (for a personal holding company) the section 564 carryover";
+}
+@source(IRC_S561_A, quote = "The deduction for dividends paid shall be the sum of—")
+rule DividendsPaidDeductionPhcRule(c: Corporation, y: TaxableYear, paid: Money, consent: Money, carryover: Money) strict {
+    label en official "section 561(a): sum of all three components, personal holding company";
+    when personal_holding_company(c, y);
+    when dividends_paid_during_year_561a1(c, y, paid);
+    when consent_dividends_561a2(c, y, consent);
+    when dividend_carryover_561a3_phc(c, y, carryover);
+    then dividends_paid_deduction_561(c, y, paid + consent + carryover);
+}
+@source(IRC_S561_A, quote = "The deduction for dividends paid shall be the sum of—")
+rule DividendsPaidDeductionNonPhcRule(c: Corporation, y: TaxableYear, paid: Money, consent: Money) strict {
+    label en official "section 561(a)(1)-(2): sum of the first two components, non-personal-holding-company (no section 564 carryover)";
+    when not_known(personal_holding_company(c, y));
+    when dividends_paid_during_year_561a1(c, y, paid);
+    when consent_dividends_561a2(c, y, consent);
+    then dividends_paid_deduction_561(c, y, paid + consent);
+}
+
+// --- Section 563: dividends paid after the close of the taxable year ------
+
+pub relation dividend_paid_after_year_close(c: Corporation, y: TaxableYear, year_close: Date, paid_on: Date, amount: Money) kind empirical {
+    label en official "a dividend paid by the corporation after the close of the taxable year, for the section 563 grace-period tests";
+}
+pub relation section_563_grace_period_deadline(c: Corporation, y: TaxableYear, year_close: Date, deadline: Date) kind institutional {
+    label en official "sections 563(a)/(b): the 15th day of the 4th month following the close of the taxable year — exact date arithmetic";
+}
+@source(IRC_S563_A, quote = "on or before the 15th day of the fourth month following the close of such taxable year shall be considered as paid during such taxable year.")
+rule Section563GracePeriodDeadlineRule(c: Corporation, y: TaxableYear, year_close: Date) strict {
+    label en official "sections 563(a)/(b): exact date computation for the 15th-day-of-the-4th-month deadline";
+    when dividend_paid_after_year_close(c, y, year_close, _, _);
+    then section_563_grace_period_deadline(c, y, year_close, add_calendar_period(add_calendar_period(year_close, 3 calendar_month), 15 calendar_day));
+}
+pub relation dividend_within_563_grace_period(c: Corporation, y: TaxableYear, paid_on: Date, amount: Money) kind institutional {
+    label en official "the dividend was paid on or before the section 563 grace-period deadline";
+}
+rule DividendWithin563GracePeriodRule(c: Corporation, y: TaxableYear, year_close: Date, paid_on: Date, amount: Money, deadline: Date) strict {
+    label en official "exact grace-period membership test";
+    when dividend_paid_after_year_close(c, y, year_close, paid_on, amount);
+    when section_563_grace_period_deadline(c, y, year_close, deadline);
+    when paid_on <= deadline;
+    then dividend_within_563_grace_period(c, y, paid_on, amount);
+}
+pub relation dividend_considered_paid_during_year_563a(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 563(a): for accumulated-earnings-tax dividends-paid-deduction purposes, a within-grace-period dividend is AUTOMATICALLY considered paid during the taxable year (no election)";
+}
+@source(IRC_S563_A, quote = "a dividend paid after the close of any taxable year and on or before the 15th day of the fourth month following the close of such taxable year shall be considered as paid during such taxable year.")
+rule DividendConsideredPaidDuringYear563aRule(c: Corporation, y: TaxableYear, paid_on: Date, amount: Money) strict {
+    label en official "section 563(a): automatic AET treatment";
+    when dividend_within_563_grace_period(c, y, paid_on, amount);
+    then dividend_considered_paid_during_year_563a(c, y, amount);
+}
+// Section 563(b): the PHC version is an ELECTION (a power), capped at the
+// lesser of UPHCI (computed without this subsection) and 20 percent of
+// dividends paid during the year (also computed without this subsection).
+pub relation section_563b_election_filed(c: Corporation, y: TaxableYear, filed_on: Date) kind empirical {
+    label en official "section 563(b): the taxpayer elects, in its return for the taxable year, to treat a within-grace-period dividend as paid during the taxable year for personal-holding-company-tax purposes";
+}
+pub relation uphci_without_563b(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "section 563(b)(1): undistributed personal holding company income for the year, computed WITHOUT regard to section 563(b)";
+}
+pub relation dividends_paid_without_563b(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "section 563(b)(2): dividends paid during the taxable year, computed WITHOUT regard to section 563(b)";
+}
+pub relation section_563b_cap(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 563(b)(1)-(2): the cap on the amount allowed under section 563(b) — the lesser of UPHCI-without-563(b) and 20 percent of dividends-paid-without-563(b)";
+}
+@source(IRC_S563_B, quote = "The undistributed personal holding company income of the corporation for the taxable year, computed without regard to this subsection, or")
+rule Section563bCapUphciLesserRule(c: Corporation, y: TaxableYear, uphci: Money, paid: Money) strict {
+    label en official "section 563(b)(1): UPHCI governs when it is the lesser figure";
+    when uphci_without_563b(c, y, uphci);
+    when dividends_paid_without_563b(c, y, paid);
+    when uphci <= round(paid * 0.20, 2, "HALF_UP");
+    then section_563b_cap(c, y, uphci);
+}
+@source(IRC_S563_B, quote = "20 percent of the sum of the dividends paid during the taxable year, computed without regard to this subsection.")
+rule Section563bCap20PercentLesserRule(c: Corporation, y: TaxableYear, uphci: Money, paid: Money) strict {
+    label en official "section 563(b)(2): 20 percent of dividends paid governs when it is the lesser figure";
+    when uphci_without_563b(c, y, uphci);
+    when dividends_paid_without_563b(c, y, paid);
+    when round(paid * 0.20, 2, "HALF_UP") < uphci;
+    then section_563b_cap(c, y, round(paid * 0.20, 2, "HALF_UP"));
+}
+pub relation dividend_considered_paid_during_year_563b_made(c: Corporation, y: TaxableYear, paid_on: Date, amount: Money) kind institutional {
+    label en official "section 563(b): the within-grace-period dividend is treated as paid during the taxable year for personal-holding-company-tax purposes, up to the section 563(b) cap";
+}
+pub relation section_563b_election_within_cap(c: Corporation, y: TaxableYear, paid_on: Date, amount: Money) kind institutional {
+    label en official "witness: the elected amount does not exceed the section 563(b) cap (helper for `valid_when`, which takes a single atom, not a bare comparison)";
+}
+rule Section563bElectionWithinCapRule(c: Corporation, y: TaxableYear, paid_on: Date, amount: Money, cap: Money) strict {
+    label en unofficial "projection helper";
+    when dividend_within_563_grace_period(c, y, paid_on, amount);
+    when section_563b_cap(c, y, cap);
+    when amount <= cap;
+    then section_563b_election_within_cap(c, y, paid_on, amount);
+}
+rule Section563bElectionPowerRule strict {
+    label en official "section 563(b): the taxpayer's power to elect PHC-tax grace-period treatment, capped by section 563(b)(1)-(2)";
+    for c: Corporation; for y: TaxableYear; for paid_on: Date; for amount: Money; for filed_on: Date;
+    when dividend_within_563_grace_period(c, y, paid_on, amount);
+    when section_563b_election_filed(c, y, filed_on);
+    then power Section563bElection {
+        holder c;
+        over y;
+        exercise section_563b_election_filed(c, y, filed_on);
+        valid_when section_563b_election_within_cap(c, y, paid_on, amount);
+        effect create(dividend_considered_paid_during_year_563b_made(c, y, paid_on, amount));
+        window [@1954-01-01, infinity);
+    };
+}
+
+// --- Section 565: consent dividends (a power) -------------------------------
+
+pub relation owns_consent_stock_565f1(sh: Person, c: Corporation, y: TaxableYear) kind empirical {
+    label en official "section 565(f)(1): the person owns consent stock in the corporation on the last day of the taxable year";
+}
+pub relation consent_filed_with_return_565a(sh: Person, c: Corporation, y: TaxableYear, amount: Money, filed_on: Date) kind empirical {
+    label en official "section 565(a): the shareholder's consent, filed with the corporation's return, agreeing to treat the specified amount as a dividend";
+}
+pub relation consent_would_be_disqualified_preferential_562c(sh: Person, c: Corporation, y: TaxableYear) kind empirical {
+    label en official "section 565(b)(1): the amount, if distributed in money, would be a disqualified preferential dividend under section 562(c)";
+}
+pub relation consent_amount_not_a_dividend_under_316(sh: Person, c: Corporation, y: TaxableYear) kind empirical {
+    label en official "section 565(b)(2): the amount would not constitute a section 316 dividend if the total of all consents had been distributed in money on the last day of the taxable year";
+}
+pub relation consent_dividend_valid_565(sh: Person, c: Corporation, y: TaxableYear, amount: Money, filed_on: Date) kind institutional {
+    label en official "section 565(a)-(b): the consent dividend is valid — filed by an owner of consent stock, and neither section 565(b) limitation applies";
+}
+@source(IRC_S565_A, quote = "the amount so specified shall, except as provided in subsection (b), constitute a consent dividend for purposes of section 561 (relating to the deduction for dividends paid).")
+rule ConsentDividendPowerRule strict {
+    label en official "section 565(a): the shareholder's power to elect consent dividend treatment";
+    for sh: Person; for c: Corporation; for y: TaxableYear; for amount: Money; for filed_on: Date;
+    when owns_consent_stock_565f1(sh, c, y);
+    when consent_filed_with_return_565a(sh, c, y, amount, filed_on);
+    then power ConsentDividendElection {
+        holder sh;
+        over c;
+        exercise consent_filed_with_return_565a(sh, c, y, amount, filed_on);
+        valid_when consent_dividend_valid_565(sh, c, y, amount, filed_on);
+        effect create(consent_dividend_recognized_565(sh, c, y, amount));
+        window [@1954-01-01, infinity);
+    };
+}
+@source(IRC_S565_B, quote = "A consent dividend shall not include—")
+rule ConsentDividendValidRule(sh: Person, c: Corporation, y: TaxableYear, amount: Money, filed_on: Date) strict {
+    label en official "section 565(a)-(b): validity is filing by a consent-stock owner, outside both (b)(1)-(2) limitations";
+    when owns_consent_stock_565f1(sh, c, y);
+    when consent_filed_with_return_565a(sh, c, y, amount, filed_on);
+    when not_known(consent_would_be_disqualified_preferential_562c(sh, c, y));
+    when not_known(consent_amount_not_a_dividend_under_316(sh, c, y));
+    then consent_dividend_valid_565(sh, c, y, amount, filed_on);
+}
+pub relation consent_dividend_recognized_565(sh: Person, c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 565(a): the consent dividend recognized for the shareholder-corporation-year";
+}
+pub relation consent_dividends_565_total(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "the total consent dividends for the corporation and year — TECH_GAP: not summed end-to-end across shareholders from `consent_dividend_recognized_565` (aggregate-over-derived-predicate class, §111), read as feeding `consent_dividends_561a2` by a case asserting the aggregate directly";
+}
+
+// NOT DONE this stage (TECH_GAP/EXTERNAL_DEPENDENCY, see coverage rows):
+// section 542(b) (consolidated-return AOGI/PHC-income aggregation), 542(c)
+// (the full 10-item exclusion list), 542(d) (special rule for foreign
+// personal holding companies formed before 1970); section 543(a)(1)-(8)'s
+// own sub-exceptions (the interest/rent/royalty carve-outs beyond the item
+// classification above), 543(b)-(d) (adjusted ordinary gross income/
+// ordinary gross income definitions, active-business-computer-software-
+// royalties definition); section 544(a)(1)-(5)/(b) (the full attribution
+// modification apparatus); section 545(c)-(d) (further adjustments: net
+// operating loss allowed as a deduction under section 172 for pre-1975
+// years, and the section 545(d) special adjustment); section 546 (income
+// not placed on annual basis — cross-reference, NON_NORMATIVE); section
+// 547(b),(c)-(h) (deficiency-dividend AMOUNT computation, the
+// "determination" definition, the 120-day claim deadline, interest on the
+// resulting overpayment); section 562(a),(c)-(e) (dividend-in-kind
+// valuation, the preferential-dividend disqualification test itself, RIC/
+// REIT special rules); section 564 (the dividend carryover computation —
+// TECH_GAP, same running-ledger class as G1/G10/G38, read as a case fact
+// above).

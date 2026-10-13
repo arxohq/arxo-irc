@@ -1,0 +1,484 @@
+// Stage 2c (IRC-07, A05). Section 1059 (corporate shareholder's basis
+// reduction for extraordinary dividends) and section 1059A (limitation on
+// taxpayer's basis or inventory cost in property imported from related
+// persons).
+//
+// Modelling notes.
+//  * The 85-day and 365-day aggregation windows of §1059(c)(3) select dividends
+//    by ex-dividend date over a set: the module takes the aggregate as a
+//    case-supplied amount (TECH-GAPS G2311, window aggregation).
+//  * The holding-period rules "similar to §246(c)(3)-(4)" (§1059(d)(3)) are
+//    EXTERNAL_DEPENDENCY (owner: corporations): the holding start date is a
+//    case fact that already reflects them.
+
+use self::{
+    Asset,
+    IRC_S1059A_A,
+    IRC_S1059_A,
+    IRC_S1059_B,
+    IRC_S1059_C,
+    IRC_S1059_D,
+    IRC_S1059_E,
+    IRC_S1059_F,
+    Person,
+    Transaction,
+};
+
+pub entity ShareDividend {
+    label en unofficial "a dividend received with respect to a share of stock (§1059)";
+}
+pub relation dividend_received(dv: ShareDividend, holder: Person, share: Asset, amount: Money) kind empirical {
+    label en official "section 1059(a): a corporation receives a dividend with respect to a share of stock; the amount is the dividend amount (section 1059(d)(2) for property)";
+}
+pub relation dividend_ex_dividend_date(dv: ShareDividend, on: Date) kind empirical {
+    label en official "section 1059(d)(4): the date on which the share becomes ex-dividend";
+}
+pub relation dividend_announcement_date(dv: ShareDividend, on: Date) kind empirical {
+    label en official "section 1059(d)(5): the earliest date the corporation declares, announces or agrees to the amount or payment of the dividend";
+}
+pub relation dividend_includible_in_gross_income(dv: ShareDividend, amount: Money) kind empirical {
+    label en official "section 1059(b)(2)(A): the portion of the dividend includible in gross income";
+}
+pub relation dividend_deduction_allowed_243_245_245a(dv: ShareDividend, amount: Money) kind empirical {
+    label en official "section 1059(b)(2)(B): the amount of any deduction allowable with respect to the dividend under section 243, 245 or 245A";
+}
+pub relation dividend_paid_in_property(dv: ShareDividend) kind empirical {
+    label en official "section 1059(d)(2): the dividend consists of property other than cash";
+}
+pub relation dividend_in_property_fmv(dv: ShareDividend, amount: Money) kind empirical {
+    label en official "section 1059(d)(2): the fair market value of property other than cash distributed as the dividend, at the date of distribution";
+}
+pub relation dividend_liabilities_reduction_301b2(dv: ShareDividend, amount: Money) kind empirical {
+    label en official "section 1059(d)(2): the reduction provided in section 301(b)(2) for liabilities assumed";
+}
+pub relation dividend_amount_1059(dv: ShareDividend, amount: Money) kind institutional {
+    label en official "section 1059(d)(2): the amount of a non-cash dividend is the fair market value of the property reduced as section 301(b)(2) provides";
+}
+@source(IRC_S1059_D, relation = formalizes, coverage = partial, quote = "the amount of such dividend shall be treated as the fair market value of such property (as of the date of the distribution) reduced as provided in section 301(b)(2).")
+rule NonCashDividendAmountRule(dv: ShareDividend, fmv: Money, liabilities: Money) defeasible {
+    label en official "section 1059(d)(2)";
+    when dividend_paid_in_property(dv);
+    when dividend_in_property_fmv(dv, fmv);
+    when dividend_liabilities_reduction_301b2(dv, liabilities);
+    then dividend_amount_1059(dv, fmv - liabilities);
+}
+@source(IRC_S1059_D, relation = formalizes, coverage = partial, quote = "To the extent any dividend consists of property other than cash")
+rule CashDividendAmountRule(dv: ShareDividend, holder: Person, share: Asset, amount: Money) defeasible {
+    label en official "section 1059(d)(2): a cash dividend is its amount";
+    when dividend_received(dv, holder, share, amount);
+    when not_known(dividend_paid_in_property(dv));
+    then dividend_amount_1059(dv, amount);
+}
+
+// (b): nontaxed portion
+pub relation taxable_portion_of_dividend(dv: ShareDividend, amount: Money) kind institutional {
+    label en official "section 1059(b)(2): the portion includible in gross income reduced by the deduction under section 243, 245 or 245A";
+}
+@source(IRC_S1059_B, relation = formalizes, coverage = exact, quote = "(A) the portion of such dividend includible in gross income, reduced by")
+rule TaxablePortionRule(dv: ShareDividend, includible: Money, deduction: Money) defeasible {
+    label en official "section 1059(b)(2) (floored at zero: the reduction cannot make the taxable portion negative)";
+    when dividend_includible_in_gross_income(dv, includible);
+    when dividend_deduction_allowed_243_245_245a(dv, deduction);
+    when includible >= deduction;
+    then taxable_portion_of_dividend(dv, includible - deduction);
+}
+rule TaxablePortionFlooredRule(dv: ShareDividend, includible: Money, deduction: Money) defeasible {
+    label en official "section 1059(b)(2): a deduction larger than the includible portion leaves a zero taxable portion (INTERPRETATION: the statute does not floor, but a negative taxable portion would increase the nontaxed portion above the dividend)";
+    when dividend_includible_in_gross_income(dv, includible);
+    when dividend_deduction_allowed_243_245_245a(dv, deduction);
+    when includible < deduction;
+    then taxable_portion_of_dividend(dv, 0.00 USD);
+}
+pub relation nontaxed_portion_of_dividend(dv: ShareDividend, amount: Money) kind institutional {
+    label en official "section 1059(b)(1): the excess (if any) of the dividend over its taxable portion";
+}
+@source(IRC_S1059_B, relation = formalizes, coverage = exact, quote = "The nontaxed portion of any dividend is the excess (if any) of—")
+rule NontaxedPortionRule(dv: ShareDividend, amount: Money, taxable: Money) defeasible {
+    label en official "section 1059(b)(1)(A)-(B)";
+    when dividend_amount_1059(dv, amount);
+    when taxable_portion_of_dividend(dv, taxable);
+    when amount > taxable;
+    then nontaxed_portion_of_dividend(dv, amount - taxable);
+}
+rule NoNontaxedPortionRule(dv: ShareDividend, amount: Money, taxable: Money) defeasible {
+    label en official "section 1059(b)(1): no excess, no nontaxed portion";
+    when dividend_amount_1059(dv, amount);
+    when taxable_portion_of_dividend(dv, taxable);
+    when amount <= taxable;
+    then nontaxed_portion_of_dividend(dv, 0.00 USD);
+}
+
+// (c): extraordinary dividend
+pub relation share_preferred_as_to_dividends(share: Asset) kind empirical {
+    label en official "section 1059(c)(2)(A): the stock is preferred as to dividends";
+}
+pub relation adjusted_basis_of_share_1059(p: Person, share: Asset, dv: ShareDividend, amount: Money) kind empirical {
+    label en official "section 1059(c)(1): the taxpayer's adjusted basis in the share (determined without regard to this section)";
+}
+pub relation fmv_day_before_ex_dividend_date(p: Person, share: Asset, dv: ShareDividend, amount: Money) kind empirical {
+    label en official "section 1059(c)(4): the fair market value of the share as of the day before the ex-dividend date";
+}
+pub relation elects_fmv_substitution_1059c4(p: Person, share: Asset, dv: ShareDividend) kind empirical {
+    label en official "section 1059(c)(4): the taxpayer elects to substitute the fair market value for the adjusted basis";
+}
+external judgment relation fmv_established_to_satisfaction_of_secretary_1059c4(p: Person, share: Asset, dv: ShareDividend) {
+    authority Secretary;
+    label en official "the taxpayer establishes to the satisfaction of the Secretary the fair market value of the share as of the day before the ex-dividend date (section 1059(c)(4))";
+}
+pub relation fmv_substitution_in_effect_1059(p: Person, share: Asset, dv: ShareDividend) kind institutional {
+    label en official "section 1059(c)(4): the fair market value is substituted for the adjusted basis in applying paragraphs (1) and (3)";
+}
+@source(IRC_S1059_C, relation = formalizes, coverage = exact, quote = "the taxpayer may elect to apply paragraphs (1) and (3) by substituting such value for the taxpayer's adjusted basis.")
+rule Section1059FmvSubstitutionElectionPower(p: Person, share: Asset, dv: ShareDividend) strict {
+    label en official "section 1059(c)(4): the election is a power over the computation base, valid only when the fair market value is established to the Secretary's satisfaction";
+    when elects_fmv_substitution_1059c4(p, share, dv);
+    then power Section1059FmvSubstitutionElection {
+        holder p;
+        over dv;
+        exercise elects_fmv_substitution_1059c4(p, share, dv);
+        valid_when fmv_established_to_satisfaction_of_secretary_1059c4(p, share, dv);
+        effect create(fmv_substitution_in_effect_1059(p, share, dv));
+        window [@1984-07-18, infinity);
+    };
+}
+pub relation measuring_base_1059(p: Person, share: Asset, dv: ShareDividend, amount: Money) kind institutional {
+    label en official "section 1059(c)(1), (c)(4): the base against which the threshold is measured: adjusted basis, or the substituted fair market value";
+}
+@source(IRC_S1059_C, relation = formalizes, coverage = partial, quote = "if the amount of such dividend equals or exceeds the threshold percentage of the taxpayer's adjusted basis in such share of stock.")
+rule MeasuringBaseBasisRule(p: Person, share: Asset, dv: ShareDividend, basis: Money) defeasible {
+    label en official "section 1059(c)(1): the adjusted basis unless the fair market value substitution is in effect";
+    when adjusted_basis_of_share_1059(p, share, dv, basis);
+    when not_known(fmv_substitution_in_effect_1059(p, share, dv));
+    then measuring_base_1059(p, share, dv, basis);
+}
+rule MeasuringBaseFmvRule(p: Person, share: Asset, dv: ShareDividend, fmv: Money) defeasible {
+    label en official "section 1059(c)(4): the substituted fair market value";
+    when fmv_day_before_ex_dividend_date(p, share, dv, fmv);
+    when fmv_substitution_in_effect_1059(p, share, dv);
+    then measuring_base_1059(p, share, dv, fmv);
+}
+pub const Section1059PreferredThreshold: Decimal = 0.05 {
+    label en official "5 percent in the case of stock which is preferred as to dividends (section 1059(c)(2)(A))";
+};
+pub const Section1059OtherThreshold: Decimal = 0.10 {
+    label en official "10 percent in the case of any other stock (section 1059(c)(2)(B))";
+};
+pub const Section1059AggregateThreshold: Decimal = 0.20 {
+    label en official "20 percent of the adjusted basis for dividends with ex-dividend dates within 365 consecutive days (section 1059(c)(3)(B))";
+};
+pub relation extraordinary_dividend_1059(dv: ShareDividend, share: Asset) kind institutional {
+    label en official "section 1059(c): the dividend is an extraordinary dividend";
+}
+@source(IRC_S1059_C, relation = formalizes, coverage = partial, quote = "The term \"extraordinary dividend\" means any dividend with respect to a share of stock")
+rule ExtraordinaryDividendPreferredRule(p: Person, share: Asset, dv: ShareDividend, amount: Money, base: Money) defeasible {
+    label en official "section 1059(c)(1)-(2)(A): a preferred-stock dividend of at least 5 percent of the base";
+    when dividend_received(dv, p, share, amount);
+    when share_preferred_as_to_dividends(share);
+    when measuring_base_1059(p, share, dv, base);
+    when amount >= base * Section1059PreferredThreshold;
+    then extraordinary_dividend_1059(dv, share);
+}
+rule ExtraordinaryDividendOtherRule(p: Person, share: Asset, dv: ShareDividend, amount: Money, base: Money) defeasible {
+    label en official "section 1059(c)(1)-(2)(B): a dividend on other stock of at least 10 percent of the base";
+    when dividend_received(dv, p, share, amount);
+    when not_known(share_preferred_as_to_dividends(share));
+    when measuring_base_1059(p, share, dv, base);
+    when amount >= base * Section1059OtherThreshold;
+    then extraordinary_dividend_1059(dv, share);
+}
+pub relation aggregate_dividends_ex_dates_within_85_days(p: Person, share: Asset, dv: ShareDividend, amount: Money) kind empirical {
+    label en official "section 1059(c)(3)(A): the aggregate of all dividends received by the taxpayer (or a basis-linked person) on the share whose ex-dividend dates fall within the same 85 consecutive days, treated as one dividend (case-supplied aggregate, G2311)";
+}
+pub relation aggregate_dividends_ex_dates_within_365_days(p: Person, share: Asset, dv: ShareDividend, amount: Money) kind empirical {
+    label en official "section 1059(c)(3)(B): the aggregate of all dividends on the share whose ex-dividend dates fall within the same 365 consecutive days (case-supplied aggregate, G2311)";
+}
+@source(IRC_S1059_C, relation = formalizes, coverage = partial, quote = "shall be treated as 1 dividend.")
+rule ExtraordinaryAggregate85Rule(p: Person, share: Asset, dv: ShareDividend, agg: Money, base: Money) defeasible {
+    label en official "section 1059(c)(3)(A): the 85-day aggregate is tested as one dividend against the threshold";
+    when aggregate_dividends_ex_dates_within_85_days(p, share, dv, agg);
+    when measuring_base_1059(p, share, dv, base);
+    when share_preferred_as_to_dividends(share);
+    when agg >= base * Section1059PreferredThreshold;
+    then extraordinary_dividend_1059(dv, share);
+}
+rule ExtraordinaryAggregate85OtherRule(p: Person, share: Asset, dv: ShareDividend, agg: Money, base: Money) defeasible {
+    label en official "section 1059(c)(3)(A) for stock not preferred as to dividends";
+    when aggregate_dividends_ex_dates_within_85_days(p, share, dv, agg);
+    when measuring_base_1059(p, share, dv, base);
+    when not_known(share_preferred_as_to_dividends(share));
+    when agg >= base * Section1059OtherThreshold;
+    then extraordinary_dividend_1059(dv, share);
+}
+@source(IRC_S1059_C, relation = formalizes, coverage = partial, quote = "shall be treated as extraordinary dividends if the aggregate of such dividends exceeds 20 percent of the taxpayer's adjusted basis in such stock (determined without regard to this section).")
+rule ExtraordinaryAggregate365Rule(p: Person, share: Asset, dv: ShareDividend, agg: Money, base: Money) defeasible {
+    label en official "section 1059(c)(3)(B): the 365-day aggregate above 20 percent of the base";
+    when aggregate_dividends_ex_dates_within_365_days(p, share, dv, agg);
+    when measuring_base_1059(p, share, dv, base);
+    when agg > base * Section1059AggregateThreshold;
+    then extraordinary_dividend_1059(dv, share);
+}
+
+// (e), (f): dividends treated as extraordinary regardless of the holding period
+pub relation redemption_partial_liquidation(dv: ShareDividend) kind empirical {
+    label en official "section 1059(e)(1)(A)(i): the redemption is part of a partial liquidation (section 302(e))";
+}
+pub relation redemption_not_pro_rata(dv: ShareDividend) kind empirical {
+    label en official "section 1059(e)(1)(A)(ii): the redemption is not pro rata as to all shareholders";
+}
+pub relation redemption_dividend_only_by_options_or_section_304(dv: ShareDividend) kind empirical {
+    label en official "section 1059(e)(1)(A)(iii): the redemption would not have been a dividend (in whole or part) if options under section 318(a)(4) were disregarded, or section 304(a) had not applied";
+}
+pub relation dividend_from_redemption_or_section_356_dividend(dv: ShareDividend) kind empirical {
+    label en official "section 1059(e)(1): the dividend arises from a redemption, or from a section 356 exchange treated as a dividend (treated as a redemption, (e)(1)(B))";
+}
+pub relation section_1059_applies_without_holding_period(dv: ShareDividend) kind institutional {
+    label en official "sections 1059(e)(1), (f)(1): the amount is treated as an extraordinary dividend to which (a)(1)-(2) apply without regard to the holding period";
+}
+@source(IRC_S1059_E, relation = formalizes, coverage = partial, quote = "any amount treated as a dividend with respect to such redemption shall be treated as an extraordinary dividend to which paragraphs (1) and (2) of subsection (a) apply without regard to the period the taxpayer held such stock.")
+rule RedemptionPartialLiquidationRule(dv: ShareDividend) defeasible {
+    label en official "section 1059(e)(1)(A)(i)";
+    when dividend_from_redemption_or_section_356_dividend(dv);
+    when redemption_partial_liquidation(dv);
+    then section_1059_applies_without_holding_period(dv);
+}
+@source(IRC_S1059_E, relation = formalizes, coverage = partial, quote = "(ii) which is not pro rata as to all shareholders, or")
+rule RedemptionNotProRataRule(dv: ShareDividend) defeasible {
+    label en official "section 1059(e)(1)(A)(ii)";
+    when dividend_from_redemption_or_section_356_dividend(dv);
+    when redemption_not_pro_rata(dv);
+    then section_1059_applies_without_holding_period(dv);
+}
+rule RedemptionOptionsOrSection304Rule(dv: ShareDividend) defeasible {
+    label en official "section 1059(e)(1)(A)(iii); only the basis in the stock redeemed is taken into account (not modelled: G2312)";
+    when dividend_from_redemption_or_section_356_dividend(dv);
+    when redemption_dividend_only_by_options_or_section_304(dv);
+    then section_1059_applies_without_holding_period(dv);
+}
+pub relation share_declining_rate_when_issued(share: Asset) kind empirical {
+    label en official "section 1059(f)(2)(A): when issued, the stock has a dividend rate which declines (or can reasonably be expected to decline) in the future";
+}
+pub relation issue_price_exceeds_liquidation_or_redemption_value(share: Asset) kind empirical {
+    label en official "section 1059(f)(2)(B): the issue price exceeds the liquidation rights or stated redemption price";
+}
+pub relation structured_to_avoid_section_and_reduce_tax_by_dividend_deduction_and_loss(share: Asset) kind empirical {
+    label en official "section 1059(f)(2)(C): the stock is otherwise structured to avoid the other provisions of the section and to enable corporate shareholders to reduce tax through a combination of dividend received deductions and loss on the disposition (an evaluative element, DECISION-0194: adjudicated fact)";
+}
+pub relation disqualified_preferred_stock(share: Asset) kind institutional {
+    label en official "section 1059(f)(2): disqualified preferred stock";
+}
+@source(IRC_S1059_F, relation = formalizes, coverage = partial, quote = "the term \"disqualified preferred stock\" means any stock which is preferred as to dividends if—")
+rule DisqualifiedPreferredDecliningRule(share: Asset) defeasible {
+    label en official "section 1059(f)(2)(A)";
+    when share_preferred_as_to_dividends(share);
+    when share_declining_rate_when_issued(share);
+    then disqualified_preferred_stock(share);
+}
+@source(IRC_S1059_F, relation = formalizes, coverage = partial, quote = "(B) the issue price of such stock exceeds its liquidation rights or its stated redemption price, or")
+rule DisqualifiedPreferredIssuePriceRule(share: Asset) defeasible {
+    label en official "section 1059(f)(2)(B)";
+    when share_preferred_as_to_dividends(share);
+    when issue_price_exceeds_liquidation_or_redemption_value(share);
+    then disqualified_preferred_stock(share);
+}
+rule DisqualifiedPreferredStructuredRule(share: Asset) defeasible {
+    label en official "section 1059(f)(2)(C)";
+    when share_preferred_as_to_dividends(share);
+    when structured_to_avoid_section_and_reduce_tax_by_dividend_deduction_and_loss(share);
+    then disqualified_preferred_stock(share);
+}
+@source(IRC_S1059_F, relation = formalizes, coverage = exact, quote = "Any dividend with respect to disqualified preferred stock shall be treated as an extraordinary dividend to which paragraphs (1) and (2) of subsection (a) apply without regard to the period the taxpayer held the stock.")
+rule DisqualifiedPreferredDividendRule(dv: ShareDividend, p: Person, share: Asset, amount: Money) defeasible {
+    label en official "section 1059(f)(1)";
+    when dividend_received(dv, p, share, amount);
+    when disqualified_preferred_stock(share);
+    then section_1059_applies_without_holding_period(dv);
+}
+
+// (e)(2): qualifying dividends are not extraordinary
+pub relation qualifying_dividend_243(dv: ShareDividend) kind empirical {
+    label en official "section 1059(e)(2)(A): a qualifying dividend within the meaning of section 243 (owner: corporations); the exclusion does not apply to a portion attributable to earnings earned while not in the affiliated group ((e)(2)(B))";
+}
+pub relation dividend_portion_from_pre_affiliation_earnings(dv: ShareDividend) kind empirical {
+    label en official "section 1059(e)(2)(B): a portion attributable to earnings and profits earned during a period the corporation was not a member of the affiliated group, or gain accrued during such a period";
+}
+pub relation qualifying_dividend_exclusion_applies(dv: ShareDividend) kind institutional {
+    label en official "section 1059(e)(2)(A): the qualifying dividend is not an extraordinary dividend";
+}
+@source(IRC_S1059_E, relation = formalizes, coverage = partial, quote = "the term \"extraordinary dividend\" does not include any qualifying dividend (within the meaning of section 243).")
+rule QualifyingDividendExclusionRule(dv: ShareDividend) defeasible {
+    label en official "section 1059(e)(2)(A), (B)";
+    when qualifying_dividend_243(dv);
+    when not_known(dividend_portion_from_pre_affiliation_earnings(dv));
+    then qualifying_dividend_exclusion_applies(dv);
+}
+
+// (d)(6): stock held during the entire existence of the corporation
+pub relation stock_held_during_entire_existence_of_corporation(p: Person, share: Asset) kind empirical {
+    label en official "section 1059(d)(6)(A)(i): the stock was held by the taxpayer during the entire period the corporation was in existence";
+}
+pub relation earnings_attributable_to_non_qualified_corporation(share: Asset) kind empirical {
+    label en official "section 1059(d)(6)(A)(ii): earnings and profits of the corporation were attributable to transfers of property from (or earnings of) a corporation which is not a qualified corporation (except as provided in regulations)";
+}
+pub relation exception_inconsistent_with_purposes_1059d6c(dv: ShareDividend) kind empirical {
+    label en official "section 1059(d)(6)(C): the application of the exception to the dividend is to that extent inconsistent with the purposes of the section (an evaluative element, DECISION-0194: adjudicated fact)";
+}
+pub relation section_1059_entire_existence_exception(dv: ShareDividend) kind institutional {
+    label en official "section 1059(d)(6)(A): subsection (a) does not apply to the extraordinary dividend";
+}
+@source(IRC_S1059_D, relation = formalizes, coverage = partial, quote = "Subsection (a) shall not apply to any extraordinary dividend with respect to any share of stock of a corporation if—")
+rule EntireExistenceExceptionRule(dv: ShareDividend, p: Person, share: Asset, amount: Money) defeasible {
+    label en official "section 1059(d)(6)(A)-(C)";
+    when dividend_received(dv, p, share, amount);
+    when stock_held_during_entire_existence_of_corporation(p, share);
+    when not_known(earnings_attributable_to_non_qualified_corporation(share));
+    when not_known(exception_inconsistent_with_purposes_1059d6c(dv));
+    then section_1059_entire_existence_exception(dv);
+}
+
+// (e)(3): qualified preferred dividends
+pub relation share_held_more_than_5_years_qpd(p: Person, share: Asset) kind empirical {
+    label en official "section 1059(e)(3)(A)(i), (C)(ii): the taxpayer holds the stock for more than 5 years (holding period per (d)(3) with 5 years substituted)";
+}
+pub relation dividend_is_qualified_preferred_dividend(dv: ShareDividend) kind empirical {
+    label en official "section 1059(e)(3)(C)(i): a fixed dividend on stock preferred as to dividends, payable not less frequently than annually, not in arrears when the stock was acquired, and not on stock whose actual rate of return exceeds 15 percent";
+}
+pub relation section_1059_inapplicable_to_qualified_preferred_dividend(dv: ShareDividend) kind institutional {
+    label en official "section 1059(e)(3)(A)(i): this section does not apply to the qualified preferred dividends when the stock is held more than 5 years";
+}
+@source(IRC_S1059_E, relation = formalizes, coverage = partial, quote = "(i) this section shall not apply to such dividends if the taxpayer holds such stock for more than 5 years, and")
+rule QualifiedPreferredFiveYearRule(dv: ShareDividend, p: Person, share: Asset, amount: Money) defeasible {
+    label en official "section 1059(e)(3)(A)(i)";
+    when dividend_received(dv, p, share, amount);
+    when dividend_is_qualified_preferred_dividend(dv);
+    when share_held_more_than_5_years_qpd(p, share);
+    then section_1059_inapplicable_to_qualified_preferred_dividend(dv);
+}
+pub relation qualified_preferred_dividends_paid_during_holding(p: Person, share: Asset, amount: Money) kind empirical {
+    label en official "section 1059(e)(3)(A)(ii)(I): the qualified preferred dividends paid with respect to the stock during the period the taxpayer held it";
+}
+pub relation qualified_preferred_dividends_at_stated_rate(p: Person, share: Asset, amount: Money) kind empirical {
+    label en official "section 1059(e)(3)(A)(ii)(II): the qualified preferred dividends which would have been paid during that period on the basis of the stated rate of return";
+}
+pub relation qualified_preferred_reduction_ceiling(p: Person, share: Asset, amount: Money) kind institutional {
+    label en official "section 1059(e)(3)(A)(ii): if the stock is disposed of before being held more than 5 years, the aggregate reduction under (a)(1) is not greater than the excess of dividends paid over dividends at the stated rate";
+}
+@source(IRC_S1059_E, relation = formalizes, coverage = partial, quote = "the aggregate reduction under subsection (a)(1) with respect to such dividends shall not be greater than the excess (if any) of—")
+rule QualifiedPreferredCeilingRule(p: Person, share: Asset, paid: Money, stated: Money) defeasible {
+    label en official "section 1059(e)(3)(A)(ii)";
+    when qualified_preferred_dividends_paid_during_holding(p, share, paid);
+    when qualified_preferred_dividends_at_stated_rate(p, share, stated);
+    when paid > stated;
+    when not_known(share_held_more_than_5_years_qpd(p, share));
+    then qualified_preferred_reduction_ceiling(p, share, paid - stated);
+}
+rule QualifiedPreferredCeilingZeroRule(p: Person, share: Asset, paid: Money, stated: Money) defeasible {
+    label en official "section 1059(e)(3)(A)(ii): the ceiling is zero when payments do not exceed the stated-rate amount";
+    when qualified_preferred_dividends_paid_during_holding(p, share, paid);
+    when qualified_preferred_dividends_at_stated_rate(p, share, stated);
+    when paid <= stated;
+    when not_known(share_held_more_than_5_years_qpd(p, share));
+    then qualified_preferred_reduction_ceiling(p, share, 0.00 USD);
+}
+
+// (a): the operative rule — basis reduction and gain
+pub relation holding_start_1059(p: Person, share: Asset, on: Date) kind empirical {
+    label en official "section 1059(d)(3): the date the holding period of the share begins under rules similar to section 246(c)(3)-(4) (EXTERNAL_DEPENDENCY: owner corporations); asserted";
+}
+pub relation held_not_more_than_2_years_before_announcement(p: Person, share: Asset, dv: ShareDividend) kind institutional {
+    label en official "section 1059(a): the corporation has not held the stock for more than 2 years before the dividend announcement date";
+}
+@source(IRC_S1059_A, relation = formalizes, coverage = partial, quote = "such corporation has not held such stock for more than 2 years before the dividend announcement date—")
+rule HeldNotMoreThanTwoYearsRule(p: Person, share: Asset, dv: ShareDividend, start: Date, announced: Date) defeasible {
+    label en official "section 1059(a): the announcement date is within 2 calendar years of the holding-period start";
+    when holding_start_1059(p, share, start);
+    when dividend_announcement_date(dv, announced);
+    when announced <= add_calendar_period(start, 2 calendar_year);
+    then held_not_more_than_2_years_before_announcement(p, share, dv);
+}
+pub relation section_1059_basis_reduction_applies(p: Person, share: Asset, dv: ShareDividend) kind institutional {
+    label en official "section 1059(a): the section reduces the basis of the share by the nontaxed portion";
+}
+@source(IRC_S1059_A, relation = formalizes, coverage = partial, quote = "If any corporation receives any extraordinary dividend with respect to any share of stock")
+rule Section1059AppliesShortHoldingRule(p: Person, share: Asset, dv: ShareDividend, amount: Money) defeasible {
+    label en official "section 1059(a): extraordinary dividend received by a corporation holding the stock not more than 2 years before the announcement";
+    when dividend_received(dv, p, share, amount);
+    when corporation_shareholder_1059(p);
+    when extraordinary_dividend_1059(dv, share);
+    when held_not_more_than_2_years_before_announcement(p, share, dv);
+    when not_known(section_1059_entire_existence_exception(dv));
+    when not_known(qualifying_dividend_exclusion_applies(dv));
+    when not_known(section_1059_inapplicable_to_qualified_preferred_dividend(dv));
+    then section_1059_basis_reduction_applies(p, share, dv);
+}
+rule Section1059AppliesWithoutHoldingPeriodRule(p: Person, share: Asset, dv: ShareDividend, amount: Money) defeasible {
+    label en official "section 1059(e)(1), (f)(1): the dividend applies regardless of the holding period";
+    when dividend_received(dv, p, share, amount);
+    when corporation_shareholder_1059(p);
+    when section_1059_applies_without_holding_period(dv);
+    when not_known(section_1059_entire_existence_exception(dv));
+    then section_1059_basis_reduction_applies(p, share, dv);
+}
+pub relation corporation_shareholder_1059(p: Person) kind empirical {
+    label en official "section 1059(a): the recipient is a corporation";
+}
+pub relation section_1059_basis_reduction(p: Person, share: Asset, dv: ShareDividend, amount: Money) kind institutional {
+    label en official "section 1059(a)(1): the reduction of the corporation's basis (not below zero) by the nontaxed portion";
+}
+pub relation section_1059_excess_gain(p: Person, share: Asset, dv: ShareDividend, amount: Money) kind institutional {
+    label en official "section 1059(a)(2): the excess of the nontaxed portion over the basis is gain from the sale or exchange of the stock for the year the dividend is received";
+}
+@source(IRC_S1059_A, relation = formalizes, coverage = exact, quote = "The basis of such corporation in such stock shall be reduced (but not below zero) by the nontaxed portion of such dividends.")
+rule Section1059BasisReductionRule(p: Person, share: Asset, dv: ShareDividend, nontaxed: Money, basis: Money) defeasible {
+    label en official "section 1059(a)(1): reduction = min(nontaxed portion, basis)";
+    when section_1059_basis_reduction_applies(p, share, dv);
+    when nontaxed_portion_of_dividend(dv, nontaxed);
+    when adjusted_basis_of_share_1059(p, share, dv, basis);
+    then section_1059_basis_reduction(p, share, dv, min(nontaxed, basis));
+}
+@source(IRC_S1059_A, relation = formalizes, coverage = exact, quote = "If the nontaxed portion of such dividends exceeds such basis, such excess shall be treated as gain from the sale or exchange of such stock for the taxable year in which the extraordinary dividend is received.")
+rule Section1059ExcessGainRule(p: Person, share: Asset, dv: ShareDividend, nontaxed: Money, basis: Money) defeasible {
+    label en official "section 1059(a)(2): gain = nontaxed portion - basis when positive";
+    when section_1059_basis_reduction_applies(p, share, dv);
+    when nontaxed_portion_of_dividend(dv, nontaxed);
+    when adjusted_basis_of_share_1059(p, share, dv, basis);
+    when nontaxed > basis;
+    then section_1059_excess_gain(p, share, dv, nontaxed - basis);
+}
+pub relation section_1059_reduction_effective_on(dv: ShareDividend, on: Date) kind institutional {
+    label en official "section 1059(d)(1): the reduction is treated as occurring at the beginning of the ex-dividend date";
+}
+@source(IRC_S1059_D, relation = formalizes, coverage = exact, quote = "Any reduction in basis under subsection (a)(1) shall be treated as occurring at the beginning of the ex-dividend date of the extraordinary dividend to which the reduction relates.")
+rule Section1059ReductionDateRule(dv: ShareDividend, on: Date) defeasible {
+    label en official "section 1059(d)(1)";
+    when dividend_ex_dividend_date(dv, on);
+    then section_1059_reduction_effective_on(dv, on);
+}
+
+// =============================================================================
+// §1059A: limitation on basis or inventory cost of imported property
+// =============================================================================
+
+pub relation import_between_related_persons(t: Transaction, purchaser: Person, prop: Asset) kind empirical {
+    label en official "section 1059A(a): property is imported into the United States in a transaction (directly or indirectly) between related persons (section 482)";
+}
+pub relation entered_or_withdrawn_from_warehouse_for_consumption(t: Transaction) kind empirical {
+    label en official "section 1059A(b)(2): the term import means entering, or withdrawal from warehouse, for consumption (except as regulations provide)";
+}
+pub relation costs_in_basis_and_also_in_customs_value(t: Transaction, amount: Money) kind empirical {
+    label en official "section 1059A(a)(1)-(2): costs taken into account in computing the basis or inventory cost and also in computing the customs value";
+}
+pub relation customs_value_of_those_costs(t: Transaction, amount: Money) kind empirical {
+    label en official "section 1059A(a), (b)(1): the amount of such costs taken into account in computing the customs value";
+}
+pub relation section_1059a_limited_costs(t: Transaction, amount: Money) kind institutional {
+    label en official "section 1059A(a): the costs for computing basis or inventory cost are not greater than the amount taken into account for customs value";
+}
+@source(IRC_S1059A_A, relation = formalizes, coverage = partial, quote = "shall not, for purposes of computing such basis or inventory cost for purposes of this chapter, be greater than the amount of such costs taken into account in computing such customs value.")
+rule Section1059ALimitRule(t: Transaction, p: Person, prop: Asset, basis_costs: Money, customs_costs: Money) defeasible {
+    label en official "section 1059A(a): limited costs = min(basis costs, customs value costs)";
+    when import_between_related_persons(t, p, prop);
+    when entered_or_withdrawn_from_warehouse_for_consumption(t);
+    when costs_in_basis_and_also_in_customs_value(t, basis_costs);
+    when customs_value_of_those_costs(t, customs_costs);
+    then section_1059a_limited_costs(t, min(basis_costs, customs_costs));
+}

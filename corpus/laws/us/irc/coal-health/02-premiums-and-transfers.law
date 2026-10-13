@@ -1,0 +1,248 @@
+// 26 U.S.C. §9704 (liabilities of assigned operators — premium
+// computation), §9705 (transfers, incl. the $70,000,000 x3 1950 Plan
+// transfers).
+//
+// JUDGMENT CALLS:
+//  - §9704(a): the annual premium as the SUM of the three component
+//    premiums is EXECUTABLE arithmetic with intermediate values (health +
+//    death + unassigned), per AGENT-BRIEF's calculation method.
+//  - §9704(b)(2) (Commissioner's per-beneficiary premium: aggregate 1950/
+//    1974 Plan health payments divided by beneficiary count, plus a CPI
+//    adjustment) and §9704(f)(1) (applicable percentage: assigned
+//    beneficiaries of the operator over total assigned) are EXECUTABLE
+//    ratio/division computations over case-supplied aggregate figures (this
+//    package does not derive the aggregates themselves from a beneficiary
+//    ledger — the totals are case facts).
+//  - §9704(c) (death benefit premium) and §9704(d) (unassigned beneficiaries
+//    premium, pre/post-October-2006) reuse the SAME applicable-percentage
+//    shape; the (d)(2)(B) "inadequate transfers" branch is TECH_GAP (depends
+//    on §9705(b)'s SMCRA transfer ledger).
+//  - §9704(e) (premium accounts, shortfall/surplus reproration) and (i)
+//    (transition rules for 1988 agreement operators) are TECH_GAP: they are
+//    multi-year account-balance mechanisms this package does not ledger
+//    (00-shared trust-funds judgment call applies here too, restated for
+//    this package).
+//  - §9704(g)(1) (12 equal monthly installments due the 25th) is EXECUTABLE
+//    as a due-date computation; §9704(j) (prepayment/common-parent
+//    substitution) is EXECUTABLE at the classification level (who becomes
+//    solely liable), not the full computation of the prepayment amount.
+//  - §9705(a)'s $70,000,000 x 3 transfers are EXECUTABLE lump-sum facts,
+//    same pattern as the trust-funds package's `appropriated_lump_sum`.
+
+language "law.core" version "0.2";
+package us.irc.coal_health version "0.1.1";
+namespace "urn:us:irc:coal_health:clir";
+
+use self::{
+    IRC_S9704_A,
+    IRC_S9704_B,
+    IRC_S9704_C,
+    IRC_S9704_D,
+    IRC_S9704_F,
+    IRC_S9704_G,
+    IRC_S9704_J,
+    IRC_S9705_A,
+    IRC_S9705_B,
+    Period,
+    Person,
+    combined_fund_first_plan_year,
+    is_related_person,
+    per_beneficiary_premium_adjusted_for_medicare,
+    smcra_transfers_inadequate_stated,
+};
+
+// --- §9704(a) Annual premium = health + death + unassigned -------------------
+
+relation health_benefit_premium(operator: Person, plan_year: Period, amount: Money) kind institutional;
+relation death_benefit_premium(operator: Person, plan_year: Period, amount: Money) kind institutional;
+relation unassigned_beneficiaries_premium(operator: Person, plan_year: Period, amount: Money) kind institutional;
+relation annual_premium(operator: Person, plan_year: Period, amount: Money) kind institutional {
+    label en unofficial "the assigned operator's annual premium: the sum of the health, death, and unassigned beneficiaries premiums (§9704(a))";
+}
+@source(IRC_S9704_A, relation = formalizes, coverage = exact, quote = "Each assigned operator shall pay to the Combined Fund for each plan year beginning on or after February 1, 1993, an annual premium equal to the sum of the following three premiums—")
+rule S9704AnnualPremiumSum strict {
+    for operator: Person;
+    for plan_year: Period;
+    for health: Money;
+    for death: Money;
+    for unassigned: Money;
+    when health_benefit_premium(operator, plan_year, health)
+        and death_benefit_premium(operator, plan_year, death)
+        and unassigned_beneficiaries_premium(operator, plan_year, unassigned)
+        and not_known(combined_fund_first_plan_year(plan_year));
+    then annual_premium(operator, plan_year, health + death + unassigned);
+}
+
+relation related_person_jointly_liable_9704(related: Person, operator: Person) kind institutional;
+@source(IRC_S9704_A, relation = formalizes, coverage = exact, quote = "Any related person with respect to an assigned operator shall be jointly and severally liable for any premium required to be paid by such operator.")
+rule S9704RelatedPersonJointlyLiable strict {
+    for related: Person;
+    for operator: Person;
+    when is_related_person(related, operator);
+    then related_person_jointly_liable_9704(related, operator);
+}
+
+// --- §9704(b) Health benefit premium ------------------------------------------
+
+relation per_beneficiary_premium(plan_year: Period, amount: Money) kind institutional {
+    label en unofficial "the Commissioner of Social Security's calculated per-beneficiary premium for the plan year (§9704(b)(2)) — a DECISION-0194-adjacent Commissioner computation over case-supplied aggregates, not itself an evaluative judgment (the formula is exact once the aggregates are given)";
+}
+relation assigned_beneficiary_count(operator: Person, plan_year: Period, count: Decimal) kind empirical;
+@source(IRC_S9704_B, relation = formalizes, coverage = exact, quote = "The health benefit premium for any plan year for any assigned operator shall be an amount equal to the product of the per beneficiary premium for the plan year multiplied by the number of eligible ben")
+rule S9704HealthBenefitPremiumComputation strict {
+    for operator: Person;
+    for plan_year: Period;
+    for rate: Money;
+    for count: Decimal;
+    when per_beneficiary_premium_adjusted_for_medicare(plan_year, rate) and assigned_beneficiary_count(operator, plan_year, count);
+    then health_benefit_premium(operator, plan_year, round(rate * count, 2, "HALF_UP"));
+}
+
+relation aggregate_plan_health_payments(plan_year: Period, amount: Money) kind empirical {
+    label en unofficial "aggregate 1950/1974 UMWA Benefit Plan health payments (less reimbursements, including admin costs) for the base period — a case-supplied aggregate, per (b)(2)(A)(i)";
+}
+relation individual_count_for_rate(plan_year: Period, count: Decimal) kind empirical;
+relation cpi_medical_component_increase(plan_year: Period, pct: Decimal) kind empirical {
+    label en unofficial "the (b)(2)(B) CPI medical-component percentage increase — an external BLS statistic, case-supplied";
+}
+@source(IRC_S9704_B, relation = formalizes, coverage = partial, quote = "The Commissioner of Social Security shall calculate a per beneficiary premium for each plan year beginning on or after February 1, 1993, which is equal to the sum of—")
+rule S9704PerBeneficiaryPremiumComputation strict {
+    for plan_year: Period;
+    for base_amount: Money;
+    for count: Decimal;
+    for pct: Decimal;
+    when aggregate_plan_health_payments(plan_year, base_amount)
+        and individual_count_for_rate(plan_year, count)
+        and count > 0.0
+        and cpi_medical_component_increase(plan_year, pct);
+    then per_beneficiary_premium(plan_year, round((base_amount / count) * (1.0 + pct), 2, "HALF_UP"));
+}
+
+// --- §9704(c) Death benefit premium; §9704(f) applicable percentage ----------
+
+relation applicable_percentage(operator: Person, plan_year: Period, pct: Decimal) kind institutional {
+    label en unofficial "assigned eligible beneficiaries of the operator divided by total assigned eligible beneficiaries (§9704(f)(1)) — annual-adjustment sub-rules (f)(2) are TECH_GAP (depend on the assignment-appeal/ceased-business ledger)";
+}
+relation operator_assigned_count(operator: Person, plan_year: Period, count: Decimal) kind empirical;
+relation total_assigned_count(plan_year: Period, count: Decimal) kind empirical;
+@source(IRC_S9704_F, relation = formalizes, coverage = partial, quote = "The term \"applicable percentage\" means, with respect to any assigned operator, the percentage determined by dividing the number of eligible beneficiaries assigned under section 9706 to such operator b")
+rule S9704ApplicablePercentage strict {
+    for operator: Person;
+    for plan_year: Period;
+    for own: Decimal;
+    for total: Decimal;
+    when operator_assigned_count(operator, plan_year, own)
+        and total_assigned_count(plan_year, total)
+        and total > 0.0;
+    then applicable_percentage(operator, plan_year, round(own / total, 6, "HALF_UP"));
+}
+
+relation actuarial_death_benefit_total(plan_year: Period, amount: Money) kind empirical {
+    label en unofficial "the actuarially determined amount the Combined Fund will be required to pay for death benefits — a case-supplied actuarial figure, per §9704(c)";
+}
+@source(IRC_S9704_C, relation = formalizes, coverage = exact, quote = "The death benefit premium for any plan year for any assigned operator shall be equal to the applicable percentage of the amount, actuarially determined, which the Combined Fund will be required to pay")
+rule S9704DeathBenefitPremiumComputation strict {
+    for operator: Person;
+    for plan_year: Period;
+    for pct: Decimal;
+    for total: Money;
+    when applicable_percentage(operator, plan_year, pct) and actuarial_death_benefit_total(plan_year, total);
+    then death_benefit_premium(operator, plan_year, round(total * pct, 2, "HALF_UP"));
+}
+
+// --- §9704(d) Unassigned beneficiaries premium --------------------------------
+
+relation plan_year_ends_on_or_before(plan_year: Period, cutoff: Date) kind empirical;
+@source(IRC_S9704_D, relation = formalizes, coverage = partial, quote = "For plan years ending on or before September 30, 2006, the unassigned beneficiaries premium for any assigned operator shall be equal to the applicable percentage of the product of the per beneficiary ")
+rule S9704UnassignedPremiumPreOct2006 strict {
+    for operator: Person;
+    for plan_year: Period;
+    for pct: Decimal;
+    for rate: Money;
+    for count: Decimal;
+    when plan_year_ends_on_or_before(plan_year, @2006-09-30)
+        and applicable_percentage(operator, plan_year, pct)
+        and per_beneficiary_premium_adjusted_for_medicare(plan_year, rate)
+        and total_assigned_count(plan_year, count);
+    then unassigned_beneficiaries_premium(operator, plan_year, round(pct * rate * count, 2, "HALF_UP"));
+}
+relation unassigned_premium_period(operator: Person, plan_year: Period, begins: Date) kind empirical {
+    label en unofficial "the operator's plan-year begin date, for comparison against the October 1, 2006 boundary";
+}
+@source(IRC_S9704_D, relation = formalizes, coverage = partial, quote = "For plan years beginning on or after October 1, 2006, subject to subparagraph (B), there shall be no unassigned beneficiaries premium, and benefit costs with respect to eligible beneficiaries who are ")
+rule S9704NoUnassignedPremiumPostOct2006 strict {
+    for operator: Person;
+    for plan_year: Period;
+    for begins: Date;
+    when unassigned_premium_period(operator, plan_year, begins) and begins >= @2006-10-01 and not_known(smcra_transfers_inadequate_stated(plan_year));
+    then unassigned_beneficiaries_premium(operator, plan_year, 0.00 USD);
+}
+// (d)(2)(B) "inadequate transfers" branch — TECH_GAP, depends on §9705(b).
+
+// --- §9704(g) Payment of premiums ---------------------------------------------
+
+relation monthly_installment_due(operator: Person, plan_year: Period, month: Integer, due: Date) kind institutional;
+relation installment_month(operator: Person, plan_year: Period, month: Integer, month_start: Date) kind empirical {
+    label en unofficial "the operator owes an installment for the stated month of the plan year, beginning on month_start";
+}
+relation twenty_fifth_of_month(month_start: Date, due: Date) kind empirical {
+    label en unofficial "the 25th calendar day of the given month — a case-supplied calendar computation (the general calendar-arithmetic primitive, not reproduced here per §9704(g)(1))";
+}
+@source(IRC_S9704_G, relation = formalizes, coverage = partial, quote = "The annual premium under subsection (a) for any plan year shall be payable in 12 equal monthly installments, due on the twenty-fifth day of each calendar month in the plan year.")
+rule S9704InstallmentDueDate strict {
+    for operator: Person;
+    for plan_year: Period;
+    for month: Integer;
+    for month_start: Date;
+    for due: Date;
+    when installment_month(operator, plan_year, month, month_start) and twenty_fifth_of_month(month_start, due);
+    then monthly_installment_due(operator, plan_year, month, due);
+}
+
+// --- §9704(j) Prepayment of premium liability (classification only) ---------
+
+relation common_parent_solely_liable(parent: Person, operator: Person) kind institutional {
+    label en unofficial "the common parent of the controlled group becomes solely liable for the operator's premium, once a qualifying prepayment is made and the common parent's joint-and-several liability is established (§9704(j)(1)) — the prepayment AMOUNT computation itself is TECH_GAP";
+}
+relation qualifying_prepayment_made(parent_or_related: Person, operator: Person) kind empirical;
+relation common_parent_jointly_liable(parent: Person, operator: Person) kind empirical;
+@source(IRC_S9704_J, relation = formalizes, coverage = partial, quote = "then such common parent (and no other person) shall be liable for such premium.")
+rule S9704PrepaymentSubstitution strict {
+    for parent: Person;
+    for operator: Person;
+    when qualifying_prepayment_made(parent, operator) and common_parent_jointly_liable(parent, operator);
+    then common_parent_solely_liable(parent, operator);
+}
+
+// --- §9705(a) Transfer of assets from 1950 UMWA Pension Plan -----------------
+
+@source(IRC_S9705_A, relation = formalizes, coverage = partial, quote = "(A) $70,000,000 on February 1, 1993,")
+rule S9705Transfer1993Feb strict { then umwa_1950_plan_transfer("1993-02-01", 70000000 USD); }
+@source(IRC_S9705_A, relation = formalizes, coverage = partial, quote = "(B) $70,000,000 on October 1, 1993, and")
+rule S9705Transfer1993Oct strict { then umwa_1950_plan_transfer("1993-10-01", 70000000 USD); }
+@source(IRC_S9705_A, relation = formalizes, coverage = partial, quote = "(C) $70,000,000 on October 1, 1994.")
+rule S9705Transfer1994Oct strict { then umwa_1950_plan_transfer("1994-10-01", 70000000 USD); }
+relation umwa_1950_plan_transfer(occasion: Text, amount: Money) kind institutional {
+    label en unofficial "a $70,000,000 transfer from the 1950 UMWA Pension Plan to the Combined Fund, from the $210,000,000 reserved under §9705(a)(2)";
+}
+
+relation transfer_deductible(occasion: Text) kind institutional;
+@source(IRC_S9705_A, relation = formalizes, coverage = partial, quote = "No deduction shall be allowed under this title with respect to any transfer pursuant to paragraph (1), but such transfer shall not adversely affect the deductibility (under applicable provisions of th")
+rule S9705NoDeductionForTransfer strict {
+    for occasion: Text;
+    for amount: Money;
+    when umwa_1950_plan_transfer(occasion, amount);
+    then transfer_deductible(occasion); // classification name kept per the statute's own double-negative framing; see coverage note
+}
+
+relation smcra_transfer_credited(fiscal_year: Text, amount: Money) kind empirical {
+    label en unofficial "amounts transferred to the Combined Fund under §402(h)/(i) of the Surface Mining Control and Reclamation Act of 1977 — external dependency (Title 30)";
+}
+relation combined_fund_includes_smcra_transfer(fiscal_year: Text, amount: Money) kind institutional;
+@source(IRC_S9705_B, relation = formalizes, coverage = exact, quote = "The Combined Fund shall include any amount transferred to the Fund under subsections (h) and (i) of section 402 of the Surface Mining Control and Reclamation Act of 1977 (30 U.S.C. 1232).")
+rule S9705IncludeSmcraTransfer strict {
+    for fy: Text;
+    for amount: Money;
+    when smcra_transfer_credited(fy, amount);
+    then combined_fund_includes_smcra_transfer(fy, amount);
+}

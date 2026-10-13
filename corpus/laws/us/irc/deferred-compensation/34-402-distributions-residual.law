@@ -1,0 +1,475 @@
+// Section 402 — STAGE 2f residual (IRC-09, DECISION-0379, 25.09.2026): module
+// 04 carries the distribution inclusion, the 60-day rollover, the excess
+// deferral computation and several special rules. This module adds the
+// rollover details of (c): the maximum excluded amount (c)(2), the loan
+// offset deadline (c)(3)(C), eligible retirement plans (c)(8)(B), spouse and
+// nonspouse beneficiaries (c)(9), (c)(11), the qualified disaster repayment
+// (c)(13); the alternate payee rule and lump-sum distribution of (e); the
+// excess deferral correction dates and the 15-year employee increase of (g);
+// and the small rules of (b)(4) and (l)(3).
+//
+// Method: amounts are exact Money arithmetic; dates use exact calendar
+// arithmetic (the IRC calendar-step policy is needed in a scenario); the
+// section 72 exclusion ratio remains outside this package (gross-income).
+
+// =====================================================================
+// (c)(2) Maximum amount excluded by a rollover
+// =====================================================================
+
+use self::{
+    ApplicableRetirementPlanKind402A,
+    Distribution,
+    DistributionEvent403b,
+    IRC_S402_B,
+    IRC_S402_C,
+    IRC_S402_E,
+    IRC_S402_G,
+    IRC_S402_L,
+    PermissibleDistributionEvent,
+    Person,
+    Plan,
+    TaxableYear,
+    distribution,
+    plan_sponsor,
+};
+
+pub relation distribution_includible_portion_402c2(d: Distribution, amount: Money) kind empirical {
+    label en unofficial "the portion of the distribution includible in gross income, determined without regard to paragraph (1), case-asserted (section 402(c)(2))";
+}
+
+pub relation direct_transfer_to_trust_or_403b_with_separate_accounting_402c2A(d: Distribution) kind empirical {
+    label en unofficial "the portion is transferred in a direct trustee-to-trustee transfer to a qualified trust or a section 403(b) contract that separately accounts for the taxable and nontaxable portions, case-asserted ((c)(2)(A))";
+}
+
+pub relation transfer_to_ira_402c2B(d: Distribution) kind empirical {
+    label en unofficial "the portion is transferred to an individual retirement account or annuity, case-asserted ((c)(2)(B))";
+}
+
+pub relation maximum_rollover_exclusion_402c2(d: Distribution, amount: Money) kind institutional {
+    label en official "section 402(c)(2): the excluded amount cannot exceed the includible portion, except for the direct transfer to a qualified trust or 403(b) contract with separate accounting, or a transfer to an IRA";
+}
+
+@source(IRC_S402_C, relation = formalizes, coverage = partial, quote = "the maximum amount transferred to which paragraph (1) applies shall not exceed the portion of such distribution which is includible in gross income")
+rule MaximumRolloverExclusionGeneral402c2(d: Distribution, includible: Money) strict {
+    label en official "PARTIAL: the includible portion, when neither exception applies";
+    when distribution_includible_portion_402c2(d, includible)
+        and not_known(direct_transfer_to_trust_or_403b_with_separate_accounting_402c2A(d))
+        and not_known(transfer_to_ira_402c2B(d));
+    then maximum_rollover_exclusion_402c2(d, includible);
+}
+
+@source(IRC_S402_C, relation = formalizes, coverage = partial, quote = "such portion is transferred in a direct trustee-to-trustee transfer to a qualified trust or to an annuity contract described in section 403(b) and such trust or contract provides for separate accounting")
+rule MaximumRolloverExclusionDirectTransfer402c2A(d: Distribution, plan: Plan, distributee: Person, total: Money, on: Date) strict {
+    label en official "PARTIAL: (A) — the whole distribution may be excluded";
+    when direct_transfer_to_trust_or_403b_with_separate_accounting_402c2A(d) and distribution(d, plan, distributee, total, on);
+    then maximum_rollover_exclusion_402c2(d, total);
+}
+
+@source(IRC_S402_C, relation = formalizes, coverage = partial, quote = "such portion is transferred to an eligible retirement plan described in clause (i) or (ii) of paragraph (8)(B)")
+rule MaximumRolloverExclusionIra402c2B(d: Distribution, plan: Plan, distributee: Person, total: Money, on: Date) strict {
+    label en official "PARTIAL: (B) — the whole distribution may be excluded when transferred to an IRA";
+    when transfer_to_ira_402c2B(d) and distribution(d, plan, distributee, total, on);
+    then maximum_rollover_exclusion_402c2(d, total);
+}
+
+// =====================================================================
+// (c)(3)(C) Qualified plan loan offset
+// =====================================================================
+
+pub relation loan_offset_treated_as_distributed_402c3C(d: Distribution, y: TaxableYear) kind empirical {
+    label en unofficial "the distribution is a qualified plan loan offset amount treated as distributed in the taxable year solely by reason of plan termination or a failure to repay caused by severance from employment, case-asserted ((c)(3)(C)(ii))";
+}
+
+pub relation return_due_date_with_extensions_402(y: TaxableYear, due: Date) kind empirical {
+    label en unofficial "the due date (including extensions) for filing the return for the taxable year, case-asserted";
+}
+
+pub relation loan_offset_transfer_made_on_402c3C(d: Distribution, on: Date) kind empirical {
+    label en unofficial "the date the loan offset amount is transferred to an eligible retirement plan, case-asserted";
+}
+
+pub relation loan_offset_rollover_timely_402c3C(d: Distribution) kind institutional {
+    label en official "section 402(c)(3)(C)(i): a transfer of a qualified plan loan offset amount is timely if made on or before the due date, with extensions, of the return for the year of the deemed distribution";
+}
+
+@source(IRC_S402_C, relation = formalizes, coverage = exact, quote = "paragraph (1) shall not apply to any transfer of such amount made after the due date (including extensions) for filing the return of tax for the taxable year in which such amount is treated as distributed from a qualified employer plan")
+rule LoanOffsetRolloverTimely402c3C(d: Distribution, y: TaxableYear, due: Date, made: Date) strict {
+    label en official "exact boundary: the due date is the last day";
+    when loan_offset_treated_as_distributed_402c3C(d, y)
+        and return_due_date_with_extensions_402(y, due)
+        and loan_offset_transfer_made_on_402c3C(d, made)
+        and made <= due;
+    then loan_offset_rollover_timely_402c3C(d);
+}
+
+// =====================================================================
+// (c)(8)(B) Eligible retirement plans
+// =====================================================================
+
+pub enum EligibleRetirementPlanKind402 {
+    IndividualRetirementAccount;
+    IndividualRetirementAnnuity;
+    QualifiedTrust;
+    AnnuityPlan403a;
+    GovernmentalPlan457b;
+    AnnuityContract403b;
+    EndowmentContractIra;
+}
+
+pub relation retirement_plan_kind_402(plan: Plan, kind: EligibleRetirementPlanKind402) kind empirical {
+    label en unofficial "the kind of the receiving plan, case-asserted";
+}
+
+pub relation plan_457b_maintained_by_state_or_subdivision_402(plan: Plan) kind empirical {
+    label en unofficial "the section 457(b) plan is maintained by an eligible employer that is a State, political subdivision or agency or instrumentality, case-asserted ((B)(v))";
+}
+
+pub relation eligible_retirement_plan_402c8B(plan: Plan) kind institutional {
+    label en official "section 402(c)(8)(B): an IRA, an individual retirement annuity (not an endowment contract), a qualified trust, a section 403(a) plan, a governmental section 457(b) plan, or a section 403(b) contract";
+}
+
+@source(IRC_S402_C, relation = formalizes, coverage = exact, quote = "an individual retirement account described in section 408(a)")
+rule EligibleRetirementPlanCommon402c8B(plan: Plan, kind: EligibleRetirementPlanKind402) strict {
+    label en official "kinds (i), (ii), (iii), (iv), (vi); an endowment contract is excluded by (ii) and a 457(b) plan needs the governmental condition below";
+    when retirement_plan_kind_402(plan, kind)
+        and kind != EndowmentContractIra
+        and kind != GovernmentalPlan457b;
+    then eligible_retirement_plan_402c8B(plan);
+}
+
+@source(IRC_S402_C, relation = formalizes, coverage = exact, quote = "an eligible deferred compensation plan described in section 457(b) which is maintained by an eligible employer described in section 457(e)(1)(A)")
+rule EligibleRetirementPlan457b402c8B(plan: Plan) strict {
+    label en official "(v): only a governmental section 457(b) plan";
+    when retirement_plan_kind_402(plan, GovernmentalPlan457b) and plan_457b_maintained_by_state_or_subdivision_402(plan);
+    then eligible_retirement_plan_402c8B(plan);
+}
+
+// =====================================================================
+// (c)(9), (c)(11) Spouse and nonspouse beneficiaries; (e)(1) alternate payee
+// =====================================================================
+
+pub relation distribution_paid_to_surviving_spouse_402c9(d: Distribution, spouse: Person, employee: Person) kind empirical {
+    label en unofficial "the distribution attributable to the employee is paid to the spouse after the employee's death, case-asserted";
+}
+
+pub relation spouse_treated_as_employee_for_rollover_402c9(d: Distribution, spouse: Person) kind institutional {
+    label en official "section 402(c)(9): the rollover rules apply to the surviving spouse as if the spouse were the employee";
+}
+
+@source(IRC_S402_C, relation = formalizes, coverage = exact, quote = "If any distribution attributable to an employee is paid to the spouse of the employee after the employee's death, the preceding provisions of this subsection shall apply to such distribution in the same manner as if the spouse were the employee.")
+rule SpouseTreatedAsEmployee402c9(d: Distribution, spouse: Person, employee: Person) strict {
+    label en official "the spouse takes the employee's place for the rollover rules";
+    when distribution_paid_to_surviving_spouse_402c9(d, spouse, employee);
+    then spouse_treated_as_employee_for_rollover_402c9(d, spouse);
+}
+
+pub relation direct_transfer_to_inherited_ira_402c11(d: Distribution, beneficiary: Person) kind empirical {
+    label en unofficial "a direct trustee-to-trustee transfer of a deceased employee's qualified-plan distribution to an IRA established to receive it for a designated beneficiary who is not the surviving spouse, case-asserted ((c)(11)(A))";
+}
+
+pub relation nonspouse_transfer_treated_as_rollover_402c11(d: Distribution, beneficiary: Person) kind institutional {
+    label en official "section 402(c)(11)(A): the transfer is treated as an eligible rollover distribution and the IRA as an inherited IRA subject to section 401(a)(9)(B) (other than clause (iv))";
+}
+
+@source(IRC_S402_C, relation = formalizes, coverage = partial, quote = "the transfer shall be treated as an eligible rollover distribution")
+rule NonspouseTransferTreatedAsRollover402c11(d: Distribution, beneficiary: Person) strict {
+    label en official "PARTIAL: the classification; the inherited-IRA treatment under section 401(a)(9)(B) is read from module 23";
+    when direct_transfer_to_inherited_ira_402c11(d, beneficiary);
+    then nonspouse_transfer_treated_as_rollover_402c11(d, beneficiary);
+}
+
+pub relation qdro_payment_to_alternate_payee_402e1(d: Distribution, alternate_payee: Person, participant: Person) kind empirical {
+    label en unofficial "a distribution or payment to an alternate payee who is the spouse or former spouse of the participant under a qualified domestic relations order, case-asserted";
+}
+
+pub relation alternate_payee_treated_as_distributee_402e1(d: Distribution, alternate_payee: Person) kind institutional {
+    label en official "section 402(e)(1)(A): a spouse or former spouse alternate payee is the distributee for section 402(a) and section 72";
+}
+
+@source(IRC_S402_E, relation = formalizes, coverage = exact, quote = "an alternate payee who is the spouse or former spouse of the participant shall be treated as the distributee of any distribution or payment made to the alternate payee under a qualified domestic relations order")
+rule AlternatePayeeDistributee402e1(d: Distribution, alternate_payee: Person, participant: Person) strict {
+    label en official "the alternate payee, not the participant, is taxed";
+    when qdro_payment_to_alternate_payee_402e1(d, alternate_payee, participant);
+    then alternate_payee_treated_as_distributee_402e1(d, alternate_payee);
+}
+
+// =====================================================================
+// (c)(13) Repayment of a qualified disaster distribution
+// =====================================================================
+
+pub relation disaster_distribution_402c13(d: Distribution, incident_start: Date, incident_end: Date) kind empirical {
+    label en unofficial "the distribution was to be used to purchase or construct a principal residence in a qualified disaster area but was not so used because of the disaster; and the incident period bounds, case-asserted ((c)(13)(B)(ii), (c)(13)(C)(i))";
+}
+
+pub relation disaster_distribution_401k_or_403b_hardship_402c13(d: Distribution) kind empirical {
+    label en unofficial "the distribution is described in section 401(k)(2)(B)(i)(IV), 403(b)(7)(A)(i)(V) or 403(b)(11)(B), case-asserted ((B)(i))";
+}
+
+pub relation qualified_disaster_distribution_402c13b(d: Distribution) kind institutional {
+    label en official "section 402(c)(13)(B): a hardship-type distribution intended for a residence in a disaster area, received from 180 days before the incident period through 30 days after it";
+}
+
+@source(IRC_S402_C, relation = formalizes, coverage = exact, quote = "which was received during the period beginning on the date which is 180 days before the first day of the incident period of such qualified disaster and ending on the date which is 30 days after the last day of such incident period")
+rule QualifiedDisasterDistribution402c13b(d: Distribution, plan: Plan, distributee: Person, amount: Money, on: Date, start: Date, end: Date, calendar_before_1: Date) strict {
+    label en official "exact boundaries: 180 days before the first day and 30 days after the last day, inclusive";
+    when disaster_distribution_401k_or_403b_hardship_402c13(d)
+        and disaster_distribution_402c13(d, start, end)
+        and distribution(d, plan, distributee, amount, on)
+        and on >= calendar_before_1
+        and on <= add_calendar_period(end, 30 calendar_day)
+        and us.irc.core::civil_calendar_boundary_before(start, 180, us.irc.core::CalendarDay, calendar_before_1);
+    then qualified_disaster_distribution_402c13b(d);
+}
+
+pub relation disaster_repayment_contributed_402c13(d: Distribution, amount: Money) kind empirical {
+    label en unofficial "the aggregate contributions made during the applicable period to eligible retirement plans, case-asserted";
+}
+
+pub relation disaster_repayment_within_limit_402c13a(d: Distribution) kind institutional {
+    label en official "section 402(c)(13)(A)(i): the repayments do not exceed the amount of the qualified distribution";
+}
+
+@source(IRC_S402_C, relation = formalizes, coverage = partial, quote = "in an aggregate amount not to exceed the amount of such qualified distribution")
+rule DisasterRepaymentWithinLimit402c13a(d: Distribution, plan: Plan, distributee: Person, amount: Money, on: Date, repaid: Money) strict {
+    label en official "PARTIAL: at most the distribution; the applicable period of section 72(t)(8)(F) is not pinned";
+    when qualified_disaster_distribution_402c13b(d)
+        and distribution(d, plan, distributee, amount, on)
+        and disaster_repayment_contributed_402c13(d, repaid)
+        and repaid <= amount;
+    then disaster_repayment_within_limit_402c13a(d);
+}
+
+// =====================================================================
+// (e)(4)(D) Lump-sum distribution
+// =====================================================================
+
+pub relation distribution_of_entire_balance_in_one_taxable_year_402e4(d: Distribution) kind empirical {
+    label en unofficial "the balance to the credit of the employee is distributed or paid within one taxable year of the recipient, case-asserted";
+}
+
+pub relation distribution_reason_402e4(d: Distribution, reason: LumpSumTrigger402) kind empirical {
+    label en unofficial "the reason the balance becomes payable, case-asserted";
+}
+
+pub enum LumpSumTrigger402 {
+    EmployeeDeath;
+    AgeAtLeast59AndAHalf;
+    SeparationFromService;
+    DisabilitySelfEmployed;
+}
+
+pub relation from_qualified_trust_or_403a_plan_402e4(d: Distribution) kind empirical {
+    label en unofficial "the distribution is from a section 401(a) trust exempt under section 501 or from a section 403(a) plan, case-asserted";
+}
+
+pub relation self_employed_402e4(employee: Person) kind empirical {
+    label en unofficial "the employee is treated as an employee only by reason of section 401(c)(1), case-asserted";
+}
+
+pub relation lump_sum_distribution_402e4d(d: Distribution) kind institutional {
+    label en official "section 402(e)(4)(D)(i): the entire balance to the credit of the employee distributed within one taxable year on account of death, after age 59 1/2, on separation from service (not for a self-employed individual), or disability (only for a self-employed individual)";
+}
+
+@source(IRC_S402_E, relation = formalizes, coverage = exact, quote = "The term \"lump-sum distribution\" means the distribution or payment within one taxable year of the recipient of the balance to the credit of an employee which becomes payable to the recipient")
+rule LumpSumDistributionDeath402e4d(d: Distribution) strict {
+    label en official "(I) on account of the employee's death";
+    when distribution_of_entire_balance_in_one_taxable_year_402e4(d)
+        and from_qualified_trust_or_403a_plan_402e4(d)
+        and distribution_reason_402e4(d, EmployeeDeath);
+    then lump_sum_distribution_402e4d(d);
+}
+
+@source(IRC_S402_E, relation = formalizes, coverage = exact, quote = "after the employee attains age 59½")
+rule LumpSumDistributionAge402e4d(d: Distribution) strict {
+    label en official "(II) after the employee attains age 59 1/2";
+    when distribution_of_entire_balance_in_one_taxable_year_402e4(d)
+        and from_qualified_trust_or_403a_plan_402e4(d)
+        and distribution_reason_402e4(d, AgeAtLeast59AndAHalf);
+    then lump_sum_distribution_402e4d(d);
+}
+
+@source(IRC_S402_E, relation = formalizes, coverage = exact, quote = "on account of the employee's separation from service")
+rule LumpSumDistributionSeparation402e4d(d: Distribution, employee: Person, plan: Plan, amount: Money, on: Date) strict {
+    label en official "(III) separation from service, only for an employee within the meaning of the section without section 401(c)(1)";
+    when distribution_of_entire_balance_in_one_taxable_year_402e4(d)
+        and from_qualified_trust_or_403a_plan_402e4(d)
+        and distribution_reason_402e4(d, SeparationFromService)
+        and distribution(d, plan, employee, amount, on)
+        and not_known(self_employed_402e4(employee));
+    then lump_sum_distribution_402e4d(d);
+}
+
+@source(IRC_S402_E, relation = formalizes, coverage = exact, quote = "after the employee has become disabled (within the meaning of section 72(m)(7))")
+rule LumpSumDistributionDisability402e4d(d: Distribution, employee: Person, plan: Plan, amount: Money, on: Date) strict {
+    label en official "(IV) disability, only for a self-employed individual";
+    when distribution_of_entire_balance_in_one_taxable_year_402e4(d)
+        and from_qualified_trust_or_403a_plan_402e4(d)
+        and distribution_reason_402e4(d, DisabilitySelfEmployed)
+        and distribution(d, plan, employee, amount, on)
+        and self_employed_402e4(employee);
+    then lump_sum_distribution_402e4d(d);
+}
+
+pub relation direct_trustee_transfer_402e6(d: Distribution) kind empirical {
+    label en unofficial "the amount is transferred in a direct trustee-to-trustee transfer in accordance with section 401(a)(31), case-asserted";
+}
+
+pub relation direct_transfer_not_includible_402e6(d: Distribution) kind institutional {
+    label en official "section 402(e)(6): an amount transferred by a direct trustee-to-trustee transfer is not includible in gross income for the year of the transfer";
+}
+
+@source(IRC_S402_E, relation = formalizes, coverage = exact, quote = "shall not be includible in gross income for the taxable year of such transfer")
+rule DirectTransferNotIncludible402e6(d: Distribution) strict {
+    label en official "no inclusion for the year of the transfer";
+    when direct_trustee_transfer_402e6(d);
+    then direct_transfer_not_includible_402e6(d);
+}
+
+// =====================================================================
+// (g)(2) Excess deferral correction; (g)(7) 15-year employee increase
+// =====================================================================
+
+pub relation excess_deferral_year_end_402g2(participant: Person, y: TaxableYear, year_end: Date) kind empirical {
+    label en unofficial "the last day of the taxable year of the excess deferrals, case-asserted";
+}
+
+pub relation excess_deferral_allocation_made_on_402g2(participant: Person, y: TaxableYear, on: Date) kind empirical {
+    label en unofficial "the date the individual allocates the excess deferrals among the plans and notifies each plan, case-asserted ((g)(2)(A)(i))";
+}
+
+pub relation excess_deferral_allocation_timely_402g2A(participant: Person, y: TaxableYear) kind institutional {
+    label en official "section 402(g)(2)(A)(i): the allocation is made not later than the first March 1 following the close of the taxable year";
+}
+
+@source(IRC_S402_G, relation = formalizes, coverage = exact, quote = "not later than the 1st March 1 following the close of the taxable year, the individual may allocate the amount of such excess deferrals among the plans under which the deferrals were made")
+rule ExcessDeferralAllocationTimely402g2A(participant: Person, y: TaxableYear, year_end: Date, on: Date) strict {
+    label en official "exact boundary: March 1 (the date after the year-end plus 2 calendar months) is the last day";
+    when excess_deferral_year_end_402g2(participant, y, year_end)
+        and excess_deferral_allocation_made_on_402g2(participant, y, on)
+        and on <= add_calendar_period(add_calendar_period(year_end, 2 calendar_month), 1 calendar_day);
+    then excess_deferral_allocation_timely_402g2A(participant, y);
+}
+
+pub relation excess_deferral_allocated_402g2(participant: Person, y: TaxableYear) kind institutional {
+    label en official "the excess deferrals are allocated among the plans";
+}
+
+pub relation individual_allocates_excess_deferrals_402g2(participant: Person, y: TaxableYear, on: Date) kind empirical {
+    label en unofficial "the individual exercises the allocation right, case-asserted";
+}
+
+@source(IRC_S402_G, relation = formalizes, coverage = exact, quote = "the individual may allocate the amount of such excess deferrals among the plans under which the deferrals were made and may notify each such plan of the portion allocated to it")
+rule AllocateExcessDeferralsPower402g2(participant: Person, y: TaxableYear, on: Date, sponsor: Person) strict {
+    label en official "the individual's power, valid when made by March 1";
+    when individual_allocates_excess_deferrals_402g2(participant, y, on) and plan_sponsor(_, sponsor);
+    then power AllocateExcessDeferrals {
+        holder participant;
+        over sponsor;
+        exercise individual_allocates_excess_deferrals_402g2(participant, y, on);
+        valid_when excess_deferral_allocation_timely_402g2A(participant, y);
+        effect excess_deferral_allocated_402g2(participant, y);
+    };
+}
+
+pub relation excess_deferral_distributed_on_402g2(participant: Person, y: TaxableYear, on: Date) kind empirical {
+    label en unofficial "the date the plan distributes the allocated excess deferral and its income, case-asserted ((g)(2)(A)(ii))";
+}
+
+pub relation excess_deferral_distribution_timely_402g2A(participant: Person, y: TaxableYear) kind institutional {
+    label en official "section 402(g)(2)(A)(ii): the plan distributes not later than the first April 15 following the close of the taxable year";
+}
+
+@source(IRC_S402_G, relation = formalizes, coverage = exact, quote = "not later than the 1st April 15 following the close of the taxable year, each such plan may distribute to the individual the amount allocated to it")
+rule ExcessDeferralDistributionTimely402g2A(participant: Person, y: TaxableYear, year_end: Date, on: Date) strict {
+    label en official "exact boundary: April 15 (year-end plus 3 calendar months and 15 days) is the last day";
+    when excess_deferral_year_end_402g2(participant, y, year_end)
+        and excess_deferral_distributed_on_402g2(participant, y, on)
+        and on <= add_calendar_period(add_calendar_period(year_end, 3 calendar_month), 15 calendar_day);
+    then excess_deferral_distribution_timely_402g2A(participant, y);
+}
+
+pub relation excess_deferral_income_402g2(participant: Person, y: TaxableYear, income: Money) kind empirical {
+    label en unofficial "the income on the excess deferral distributed, case-asserted";
+}
+
+pub relation excess_deferral_distribution_excluded_402g2C(participant: Person, y: TaxableYear) kind institutional {
+    label en official "section 402(g)(2)(C)(i): a timely distribution of the excess deferral is not included in gross income again (the income is taxed in the year distributed)";
+}
+
+@source(IRC_S402_G, relation = formalizes, coverage = partial, quote = "such distribution shall not be included in gross income")
+rule ExcessDeferralDistributionExcluded402g2C(participant: Person, y: TaxableYear) strict {
+    label en official "PARTIAL: the exclusion of the excess deferral amount; the income's year of inclusion is (C)(ii)";
+    when excess_deferral_distribution_timely_402g2A(participant, y);
+    then excess_deferral_distribution_excluded_402g2C(participant, y);
+}
+
+pub relation employee_years_with_qualified_organization_402g7(employee: Person, years: Integer) kind empirical {
+    label en unofficial "the employee's years of service with the qualified organization, case-asserted (section 402(g)(7)(C))";
+}
+
+pub relation excluded_amounts_prior_years_402g7(employee: Person, amount: Money) kind empirical {
+    label en unofficial "the amounts not included in gross income for prior taxable years by reason of paragraph (7), plus the designated Roth contributions permitted, case-asserted ((A)(ii)(I),(II))";
+}
+
+pub relation employer_contributions_prior_years_402g7(employee: Person, amount: Money) kind empirical {
+    label en unofficial "the employer contributions described in paragraph (3) made for prior years, case-asserted ((A)(iii))";
+}
+
+pub relation fifteen_year_increase_402g7(employee: Person, amount: Money) kind institutional {
+    label en official "section 402(g)(7)(A): the limit is increased by the least of $3,000, $15,000 less prior increases, and $5,000 times years of service less prior contributions";
+}
+
+@source(IRC_S402_G, relation = formalizes, coverage = partial, quote = "the limitation of paragraph (1) for any taxable year shall be increased by whichever of the following is the least")
+rule FifteenYearIncrease402g7(employee: Person, years: Integer, prior_excluded: Money, prior_contrib: Money) strict {
+    label en official "PARTIAL: min(3000, 15000 - prior, 5000 x years - prior contributions), floored at zero; a qualified employee has at least 15 years; qualified organization status is asserted";
+    when employee_years_with_qualified_organization_402g7(employee, years)
+        and years >= 15
+        and excluded_amounts_prior_years_402g7(employee, prior_excluded)
+        and employer_contributions_prior_years_402g7(employee, prior_contrib);
+    then fifteen_year_increase_402g7(employee,
+        max(min(3000.00 USD, min(15000.00 USD - prior_excluded, 5000.00 USD * years - prior_contrib)), 0.00 USD));
+}
+
+// =====================================================================
+// (b)(4) Highly compensated employees of a nonexempt trust; (l)(3)
+// =====================================================================
+
+pub relation trust_fails_401a26_or_410b_402b4(trust_plan: Plan) kind empirical {
+    label en unofficial "one of the reasons the trust is not exempt is the failure of the plan to meet section 401(a)(26) or 410(b), case-asserted (section 402(b)(4)(A))";
+}
+
+pub relation vested_accrued_benefit_402b4(trust_plan: Plan, employee: Person, amount: Money) kind empirical {
+    label en unofficial "the highly compensated employee's vested accrued benefit other than the investment in the contract, case-asserted";
+}
+
+pub relation highly_compensated_employee_402b4(employee: Person, trust_plan: Plan) kind empirical {
+    label en unofficial "the employee is a highly compensated employee under section 414(q), case-asserted";
+}
+
+pub relation hce_inclusion_of_vested_accrued_benefit_402b4(trust_plan: Plan, employee: Person, amount: Money) kind institutional {
+    label en official "section 402(b)(4)(A): the highly compensated employee includes the vested accrued benefit in gross income in lieu of the amount under (1) or (2)";
+}
+
+@source(IRC_S402_B, relation = formalizes, coverage = exact, quote = "then a highly compensated employee shall, in lieu of the amount determined under paragraph (1) or (2) include in gross income")
+rule HceInclusionOfVestedBenefit402b4(trust_plan: Plan, employee: Person, amount: Money) strict {
+    label en official "the vested accrued benefit";
+    when trust_fails_401a26_or_410b_402b4(trust_plan)
+        and highly_compensated_employee_402b4(employee, trust_plan)
+        and vested_accrued_benefit_402b4(trust_plan, employee, amount);
+    then hce_inclusion_of_vested_accrued_benefit_402b4(trust_plan, employee, amount);
+}
+
+pub relation psohealth_amount_includible_without_402l1_402(officer: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the amount of a distribution that would be includible in gross income without regard to paragraph (1), case-asserted (section 402(l)(3)(A))";
+}
+
+pub relation psohealth_amount_treated_as_distribution_402l3(officer: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 402(l)(3)(A): an amount is treated as a distribution for paragraph (1) only to the extent it would be includible in gross income without regard to paragraph (1)";
+}
+
+@source(IRC_S402_L, relation = formalizes, coverage = exact, quote = "An amount shall be treated as a distribution for purposes of paragraph (1) only to the extent that such amount would be includible in gross income without regard to paragraph (1)")
+rule PsoAmountTreatedAsDistribution402l3(officer: Person, y: TaxableYear, amount: Money) strict {
+    label en official "the includible portion only";
+    when psohealth_amount_includible_without_402l1_402(officer, y, amount);
+    then psohealth_amount_treated_as_distribution_402l3(officer, y, amount);
+}

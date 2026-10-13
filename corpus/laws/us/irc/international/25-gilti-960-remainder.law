@@ -1,0 +1,381 @@
+// §951A(c)(2) tested income and tested loss; §951A(d) qualified business asset
+// investment (pre-2026 edition — the PL 119-21 §70323 repeal of (b) and (d) is
+// carried in module 11); §951A(e) pro rata share, United States shareholder
+// and CFC status rules; §951A(f) allocation of GILTI to CFCs and treatment as
+// a section 951(a)(1)(A) amount; §960(b) deemed paid credit on distributions
+// of previously taxed earnings, §960(c) increase in the §904 limitation, §960(d)(2)
+// inclusion percentage, §960(e) foreign income taxes. Stage 2c (IRC-10 stage
+// 2c, A13).
+//
+// TECH-GAPS G1743: the multi-year excess limitation account of §960(c)(2) is a
+// running ledger; the balance at the start of the year is a case input and the
+// yearly increase/decrease arithmetic is computed for one year only.
+
+// --- §951A(c)(2): tested income and tested loss -----------------------------
+
+use self::{
+    IRC_S951A_C,
+    IRC_S951A_D,
+    IRC_S951A_E,
+    IRC_S951A_F,
+    IRC_S960_B,
+    IRC_S960_C,
+    IRC_S960_D,
+    IRC_S960_E,
+    cfc_taxable_year_begins_after_20251231,
+    gilti_inclusion,
+    shareholder_pro_rata_share_of_tested_income,
+    us_shareholder_status,
+};
+
+pub relation cfc_gross_income_for_tested_income_951Ac2Ai(corp: us.irc.core::Corporation, y: us.irc.core::TaxableYear, amount: Money) kind institutional {
+    label en official "the gross income of the corporation determined without regard to (I) section 952(b) items, (II) gross income taken into account in determining subpart F income, (III) gross income excluded from foreign base company or insurance income by section 954(b)(4), (IV) dividends from a related person (section 954(d)(3)), and (V) foreign oil and gas extraction income (section 907(c)(1))";
+}
+pub relation cfc_deductions_allocable_to_tested_gross_income_951Ac2Aii(corp: us.irc.core::Corporation, y: us.irc.core::TaxableYear, amount: Money) kind empirical {
+    label en official "the deductions (including taxes) properly allocable to that gross income under rules similar to section 954(b)(5) (or to which they would be allocable if there were such gross income)";
+}
+pub relation tested_income_computed_951Ac2A(corp: us.irc.core::Corporation, y: us.irc.core::TaxableYear, amount: Money) kind institutional {
+    label en official "the tested income of the corporation for the taxable year: the excess (if any) of the tested gross income over the allocable deductions (section 951A(c)(2)(A)); it feeds `tested_income_of_cfc` of module 11 by the case (module 11 reads that relation as an input)";
+}
+@source(IRC_S951A_C, relation = formalizes, coverage = exact, quote = "The term \"tested income\" means, with respect to any controlled foreign corporation for any taxable year of such controlled foreign corporation, the excess (if any) of—")
+rule S951AC2ATestedIncome defeasible {
+    for corp: us.irc.core::Corporation;
+    for y: us.irc.core::TaxableYear;
+    for gross: Money;
+    for deductions: Money;
+    when cfc_gross_income_for_tested_income_951Ac2Ai(corp, y, gross)
+     and cfc_deductions_allocable_to_tested_gross_income_951Ac2Aii(corp, y, deductions)
+     and gross > deductions;
+    then tested_income_computed_951Ac2A(corp, y, gross - deductions);
+}
+pub relation tested_loss_computed_951Ac2B(corp: us.irc.core::Corporation, y: us.irc.core::TaxableYear, amount: Money) kind institutional {
+    label en official "the tested loss of the corporation for the taxable year: the excess (if any) of the allocable deductions over the tested gross income (section 951A(c)(2)(B)(i))";
+}
+@source(IRC_S951A_C, relation = formalizes, coverage = exact, quote = "The term \"tested loss\" means, with respect to any controlled foreign corporation for any taxable year of such controlled foreign corporation, the excess (if any) of the amount described in subparagraph (A)(ii) over the amount described in subparagraph (A)(i).")
+rule S951AC2BTestedLoss defeasible {
+    for corp: us.irc.core::Corporation;
+    for y: us.irc.core::TaxableYear;
+    for gross: Money;
+    for deductions: Money;
+    when cfc_gross_income_for_tested_income_951Ac2Ai(corp, y, gross)
+     and cfc_deductions_allocable_to_tested_gross_income_951Ac2Aii(corp, y, deductions)
+     and deductions > gross;
+    then tested_loss_computed_951Ac2B(corp, y, deductions - gross);
+}
+pub relation cfc_earnings_and_profits_before_tested_loss_952c1A(corp: us.irc.core::Corporation, y: us.irc.core::TaxableYear, amount: Money) kind empirical {
+    label en official "the earnings and profits of the corporation for the taxable year before the coordination with the tested loss";
+}
+pub relation earnings_and_profits_for_952c1A_after_tested_loss(corp: us.irc.core::Corporation, y: us.irc.core::TaxableYear, amount: Money) kind institutional {
+    label en official "section 952(c)(1)(A) is applied by increasing the earnings and profits of the corporation by its tested loss (section 951A(c)(2)(B)(ii))";
+}
+@source(IRC_S951A_C, relation = formalizes, coverage = exact, quote = "Section 952(c)(1)(A) shall be applied by increasing the earnings and profits of the controlled foreign corporation by the tested loss of such corporation.")
+rule S951AC2BiiEarningsIncreasedByTestedLoss defeasible {
+    for corp: us.irc.core::Corporation;
+    for y: us.irc.core::TaxableYear;
+    for ep: Money;
+    for loss: Money;
+    when cfc_earnings_and_profits_before_tested_loss_952c1A(corp, y, ep)
+     and tested_loss_computed_951Ac2B(corp, y, loss);
+    then earnings_and_profits_for_952c1A_after_tested_loss(corp, y, ep + loss);
+}
+
+// --- §951A(d): qualified business asset investment (pre-2026 edition) --------
+
+pub relation cfc_quarter_end_specified_tangible_property_basis_951Ad1(corp: us.irc.core::Corporation, y: us.irc.core::TaxableYear, q1: Money, q2: Money, q3: Money, q4: Money) kind empirical {
+    label en official "the aggregate adjusted bases, as of the close of each of the four quarters of the taxable year, in specified tangible property used in a trade or business of the corporation and of a type for which a deduction is allowable under section 167; the bases follow the alternative depreciation system of section 168(g) with depreciation allocated ratably to each day (section 951A(d)(3))";
+}
+pub relation qualified_business_asset_investment_951Ad1(corp: us.irc.core::Corporation, y: us.irc.core::TaxableYear, amount: Money) kind institutional {
+    label en official "the qualified business asset investment: the average of the aggregate adjusted bases as of the close of each quarter of the taxable year in specified tangible property (section 951A(d)(1)); repealed for taxable years of foreign corporations beginning after December 31, 2025 (PL 119-21 §70323), module 11";
+}
+@source(IRC_S951A_D, relation = formalizes, coverage = exact, quote = "The term \"qualified business asset investment\" means, with respect to any controlled foreign corporation for any taxable year, the average of such corporation's aggregate adjusted bases as of the close of each quarter of such taxable year in specified tangible property—")
+rule S951AD1QbaiAverageOfQuarterEndBases defeasible {
+    for corp: us.irc.core::Corporation;
+    for y: us.irc.core::TaxableYear;
+    for q1: Money;
+    for q2: Money;
+    for q3: Money;
+    for q4: Money;
+    when cfc_quarter_end_specified_tangible_property_basis_951Ad1(corp, y, q1, q2, q3, q4);
+    unless cfc_taxable_year_begins_after_20251231(corp, y)
+     and cfc_quarter_end_specified_tangible_property_basis_951Ad1(corp, y, q1, q2, q3, q4);
+    then qualified_business_asset_investment_951Ad1(corp, y, round((q1 + q2 + q3 + q4) * 0.25, 2, "HALF_UP"));
+}
+pub relation property_gross_income_from_tested_income_share_951Ad2B(asset: Text, tested_gross_income: Money, total_gross_income: Money) kind empirical {
+    label en official "for property used both in producing tested income and other income, the gross income described in section 951A(c)(1)(A) produced with respect to the property, and the total gross income produced with respect to it";
+}
+pub relation dual_use_property_specified_fraction_951Ad2B(asset: Text, fraction: Decimal) kind institutional {
+    label en official "the proportion of dual-use property treated as specified tangible property: the tested-income gross income over the total gross income produced with respect to the property (section 951A(d)(2)(B))";
+}
+@source(IRC_S951A_D, relation = formalizes, coverage = exact, quote = "In the case of property used both in the production of tested income and income which is not tested income, such property shall be treated as specified tangible property in the same proportion that the gross income described in subsection (c)(1)(A) produced with respect to such property bears to the total gross income produced with respect to such property.")
+rule S951AD2BDualUseProportion defeasible {
+    for asset: Text;
+    for tested: Money;
+    for total: Money;
+    when property_gross_income_from_tested_income_share_951Ad2B(asset, tested, total)
+     and total > 0.00 USD;
+    then dual_use_property_specified_fraction_951Ad2B(asset, tested / total);
+}
+pub relation cfc_partnership_distributive_share_of_basis_951Ad3(corp: us.irc.core::Corporation, y: us.irc.core::TaxableYear, partnership_basis: Money, distributive_share: Decimal) kind empirical {
+    label en official "the aggregate adjusted basis, in the hands of a partnership in which the CFC holds an interest at the close of the year, of tangible property used in the partnership's trade or business, of a type depreciable under section 167 and used in the production of tested income, and the CFC's distributive share of income with respect to that property";
+}
+pub relation partnership_basis_taken_into_account_951Ad3(corp: us.irc.core::Corporation, y: us.irc.core::TaxableYear, amount: Money) kind institutional {
+    label en official "the CFC's distributive share of the partnership's adjusted bases taken into account under paragraph (1) (section 951A(d)(3) partnership property)";
+}
+@source(IRC_S951A_D, relation = formalizes, coverage = exact, quote = "For purposes of this paragraph, the controlled foreign corporation's distributive share of the adjusted basis of any property shall be the controlled foreign corporation's distributive share of income with respect to such property.")
+rule S951AD3PartnershipPropertyDistributiveShare defeasible {
+    for corp: us.irc.core::Corporation;
+    for y: us.irc.core::TaxableYear;
+    for basis: Money;
+    for share: Decimal;
+    when cfc_partnership_distributive_share_of_basis_951Ad3(corp, y, basis, share);
+    then partnership_basis_taken_into_account_951Ad3(corp, y, round(basis * share, 2, "HALF_UP"));
+}
+
+// --- §951A(e): pro rata shares, United States shareholder, CFC status -------
+
+pub relation shareholder_owns_stock_on_last_cfc_day_of_cfc_year_951Ae2(shareholder: us.irc.core::Person, corp: us.irc.core::Corporation, y: us.irc.core::TaxableYear) kind empirical {
+    label en official "the person owns (within the meaning of section 958(a)) stock in the foreign corporation on the last day in the taxable year of the foreign corporation on which it is a controlled foreign corporation";
+}
+pub relation us_shareholder_status_for_951A_e2(shareholder: us.irc.core::Person, corp: us.irc.core::Corporation, y: us.irc.core::TaxableYear) kind institutional {
+    label en official "the person is treated as a United States shareholder of the controlled foreign corporation for the taxable year only if it owns stock on the last day of the CFC year on which the corporation is a CFC (section 951A(e)(2), taxable years of foreign corporations beginning before 2026)";
+}
+@source(IRC_S951A_E, relation = formalizes, coverage = exact, quote = "A person shall be treated as a United States shareholder of a controlled foreign corporation for any taxable year of such person only if such person owns (within the meaning of section 958(a)) stock in such foreign corporation on the last day in the taxable year of such foreign corporation on which such foreign corporation is a controlled foreign corporation.")
+rule S951AE2UsShareholderOnlyIfOwnsOnLastCfcDay defeasible {
+    for shareholder: us.irc.core::Person;
+    for corp: us.irc.core::Corporation;
+    for y: us.irc.core::TaxableYear;
+    when shareholder_owns_stock_on_last_cfc_day_of_cfc_year_951Ae2(shareholder, corp, y)
+     and us_shareholder_status(shareholder);
+    unless cfc_taxable_year_begins_after_20251231(corp, y)
+     and shareholder_owns_stock_on_last_cfc_day_of_cfc_year_951Ae2(shareholder, corp, y)
+     and us_shareholder_status(shareholder);
+    then us_shareholder_status_for_951A_e2(shareholder, corp, y);
+}
+pub relation foreign_corp_cfc_at_any_time_during_year_951Ae3(corp: us.irc.core::Corporation, y: us.irc.core::TaxableYear) kind empirical {
+    label en official "the foreign corporation is a controlled foreign corporation at any time during the taxable year";
+}
+pub relation cfc_for_951A_year_e3(corp: us.irc.core::Corporation, y: us.irc.core::TaxableYear) kind institutional {
+    label en official "the foreign corporation is treated as a controlled foreign corporation for the whole taxable year if it is one at any time during the year (section 951A(e)(3))";
+}
+@source(IRC_S951A_E, relation = formalizes, coverage = exact, quote = "A foreign corporation shall be treated as a controlled foreign corporation for any taxable year if such foreign corporation is a controlled foreign corporation at any time during such taxable year.")
+rule S951AE3CfcAtAnyTimeIsCfcForYear defeasible {
+    for corp: us.irc.core::Corporation;
+    for y: us.irc.core::TaxableYear;
+    when foreign_corp_cfc_at_any_time_during_year_951Ae3(corp, y);
+    then cfc_for_951A_year_e3(corp, y);
+}
+
+// --- §951A(f): treatment as subpart F income; allocation to each CFC --------
+
+pub relation gilti_portion_treated_with_respect_to_cfc_951Af2(shareholder: us.irc.core::Person, corp: us.irc.core::Corporation, y: us.irc.core::TaxableYear, amount: Money) kind institutional {
+    label en official "the portion of the shareholder's global intangible low-taxed income treated as being with respect to the controlled foreign corporation: zero for a CFC with no tested income, otherwise GILTI times the ratio of the shareholder's pro rata tested income of the CFC to the aggregate pro rata tested income of all CFCs (section 951A(f)(2))";
+}
+pub relation aggregate_pro_rata_tested_income_951Ac1A(shareholder: us.irc.core::Person, y: us.irc.core::TaxableYear, amount: Money) kind empirical {
+    label en official "the aggregate of the shareholder's pro rata share of the tested income of each CFC (section 951A(c)(1)(A))";
+}
+@source(IRC_S951A_F, relation = formalizes, coverage = exact, quote = "(A) in the case of a controlled foreign corporation with no tested income, zero, and")
+rule S951AF2AZeroForCfcWithoutTestedIncome defeasible {
+    for shareholder: us.irc.core::Person;
+    for corp: us.irc.core::Corporation;
+    for y: us.irc.core::TaxableYear;
+    for gilti: Money;
+    when gilti_inclusion(shareholder, y, gilti)
+     and shareholder_pro_rata_share_of_tested_income(shareholder, corp, y, 0.00 USD);
+    then gilti_portion_treated_with_respect_to_cfc_951Af2(shareholder, corp, y, 0.00 USD);
+}
+@source(IRC_S951A_F, relation = formalizes, coverage = exact, quote = "(B) in the case of a controlled foreign corporation with tested income, the portion of such global intangible low-taxed income which bears the same ratio to such global intangible low-taxed income as—")
+rule S951AF2BAllocationByTestedIncomeRatio defeasible {
+    for shareholder: us.irc.core::Person;
+    for corp: us.irc.core::Corporation;
+    for y: us.irc.core::TaxableYear;
+    for gilti: Money;
+    for cfc_income: Money;
+    for aggregate: Money;
+    when gilti_inclusion(shareholder, y, gilti)
+     and shareholder_pro_rata_share_of_tested_income(shareholder, corp, y, cfc_income)
+     and aggregate_pro_rata_tested_income_951Ac1A(shareholder, y, aggregate)
+     and cfc_income > 0.00 USD
+     and aggregate > 0.00 USD;
+    then gilti_portion_treated_with_respect_to_cfc_951Af2(shareholder, corp, y, round(gilti * (cfc_income / aggregate), 2, "HALF_UP"));
+}
+pub relation gilti_treated_as_951a1A_amount_for_listed_sections_951Af1A(shareholder: us.irc.core::Person, y: us.irc.core::TaxableYear) kind institutional {
+    label en official "the GILTI inclusion is treated in the same manner as an amount included under section 951(a)(1)(A) for the listed sections (168(h)(2)(B), 535(b)(10), 851(b), 904(h)(1), 959, 961, 962, 993(a)(1)(E), 996(f)(1), 1248(b)(1), 1248(d)(1), 6501(e)(1)(C), 6654(d)(2)(D), 6655(e)(4)) — a classification flag; the listed sections read `subpart_f_inclusion`, so module 14 consumes this GILTI flag by the case";
+}
+@source(IRC_S951A_F, relation = formalizes, coverage = partial, quote = "Except as provided in subparagraph (B), any global intangible low-taxed income included in gross income under subsection (a) shall be treated in the same manner as an amount included under section 951(a)(1)(A) for purposes of applying sections 168(h)(2)(B), 535(b)(10), 851(b), 904(h)(1), 959, 961, 962, 993(a)(1)(E), 996(f)(1), 1248(b)(1), 1248(d)(1), 6501(e)(1)(C), 6654(d)(2)(D), and 6655(e)(4).")
+rule S951AF1AGiltiTreatedAsSubpartFInclusionForListedSections defeasible {
+    for shareholder: us.irc.core::Person;
+    for y: us.irc.core::TaxableYear;
+    for gilti: Money;
+    when gilti_inclusion(shareholder, y, gilti);
+    then gilti_treated_as_951a1A_amount_for_listed_sections_951Af1A(shareholder, y);
+}
+
+// --- §960(b): deemed paid credit on previously taxed distributions ----------
+
+pub relation distribution_excluded_under_959a_to_domestic_shareholder_960b1(domestic_corp: us.irc.core::Corporation, corp: us.irc.core::Corporation, y: us.irc.core::TaxableYear, portion_id: Text, foreign_taxes_attributable: Money) kind empirical {
+    label en official "a distribution from a controlled foreign corporation to a domestic corporation that is a United States shareholder is excluded from gross income under section 959(a) as to this portion; the CFC's foreign income taxes properly attributable to the portion";
+}
+pub relation taxes_already_deemed_paid_960b(domestic_corp: us.irc.core::Corporation, corp: us.irc.core::Corporation, portion_id: Text, amount: Money) kind empirical {
+    label en official "foreign income taxes attributable to the portion that have been deemed paid by the domestic corporation under section 960 for the taxable year or any prior taxable year";
+}
+pub relation deemed_paid_credit_960b1(domestic_corp: us.irc.core::Corporation, corp: us.irc.core::Corporation, portion_id: Text, amount: Money) kind institutional {
+    label en official "the domestic corporation is deemed to have paid so much of the CFC's foreign income taxes as are properly attributable to the excluded portion and have not been deemed paid before (section 960(b)(1))";
+}
+@source(IRC_S960_B, relation = formalizes, coverage = partial, quote = "such domestic corporation shall be deemed to have paid so much of such foreign corporation's")
+rule S960B1DeemedPaidOnPreviouslyTaxedDistribution defeasible {
+    for domestic_corp: us.irc.core::Corporation;
+    for corp: us.irc.core::Corporation;
+    for y: us.irc.core::TaxableYear;
+    for portion_id: Text;
+    for attributable: Money;
+    for prior: Money;
+    when distribution_excluded_under_959a_to_domestic_shareholder_960b1(domestic_corp, corp, y, portion_id, attributable)
+     and taxes_already_deemed_paid_960b(domestic_corp, corp, portion_id, prior);
+    then deemed_paid_credit_960b1(domestic_corp, corp, portion_id, max(0.00 USD, attributable - prior));
+}
+pub relation distribution_959b_from_cfc_to_cfc_960b2(payee_cfc: us.irc.core::Corporation, payer_cfc: us.irc.core::Corporation, portion_id: Text, foreign_taxes_attributable: Money) kind empirical {
+    label en official "section 959(b) applies to a portion of a distribution from a controlled foreign corporation to another controlled foreign corporation; the payer's foreign income taxes properly attributable to the portion";
+}
+pub relation deemed_paid_credit_960b2(payee_cfc: us.irc.core::Corporation, payer_cfc: us.irc.core::Corporation, portion_id: Text, amount: Money) kind institutional {
+    label en official "the receiving controlled foreign corporation is deemed to have paid so much of the other CFC's foreign income taxes as are properly attributable to the portion and have not been deemed paid by a domestic corporation under section 960 (section 960(b)(2))";
+}
+@source(IRC_S960_B, relation = formalizes, coverage = partial, quote = "such controlled foreign corporation shall be deemed to have paid so much of such other controlled foreign corporation's foreign income taxes as—")
+rule S960B2DeemedPaidByReceivingCfc defeasible {
+    for payee: us.irc.core::Corporation;
+    for payer: us.irc.core::Corporation;
+    for portion_id: Text;
+    for attributable: Money;
+    for prior: Money;
+    when distribution_959b_from_cfc_to_cfc_960b2(payee, payer, portion_id, attributable)
+     and taxes_already_deemed_paid_960b(payee, payer, portion_id, prior);
+    then deemed_paid_credit_960b2(payee, payer, portion_id, max(0.00 USD, attributable - prior));
+}
+
+// --- §960(c): increase in the §904 limitation in the year of receipt --------
+
+pub relation ftc_benefits_chosen_in_receipt_year_960c1B(p: us.irc.core::Person, y: us.irc.core::TaxableYear) kind empirical {
+    label en official "the taxpayer chooses the benefits of the foreign tax credit subpart for the year in which distributions or amounts excludable under section 959(a) are received";
+}
+pub relation prior_inclusion_year_condition_960c1A(p: us.irc.core::Person) kind empirical {
+    label en official "the taxpayer either chose the credit benefits for a taxable year beginning after September 30, 1993 in which a section 951(a) amount was included, or paid or accrued no foreign taxes for that year (section 960(c)(1)(A))";
+}
+pub relation foreign_taxes_on_distributions_960c1C(p: us.irc.core::Person, y: us.irc.core::TaxableYear, amount: Money) kind empirical {
+    label en official "the income, war profits or excess profits taxes paid, deemed paid or accrued to a foreign country or possession with respect to the distributions or amounts excluded under section 959(a)";
+}
+pub relation excess_limitation_account_balance_960c2(p: us.irc.core::Person, y: us.irc.core::TaxableYear, balance: Money) kind empirical {
+    label en official "the amount in the excess limitation account as of the beginning of the taxable year (opening balance zero; increases and decreases per (c)(2)(B)-(C), the multi-year ledger asserted as an input, TECH-GAPS G1743)";
+}
+pub relation limitation_increase_960c1(p: us.irc.core::Person, y: us.irc.core::TaxableYear, amount: Money) kind institutional {
+    label en official "the section 904 limitation for the year of receipt is increased by the lesser of the foreign taxes paid, deemed paid or accrued with respect to the distributions and the excess limitation account balance at the beginning of the year (section 960(c)(1))";
+}
+@source(IRC_S960_C, relation = formalizes, coverage = exact, quote = "the limitation under section 904 for the taxable year in which such distributions or amounts are received shall be increased by the lesser of the amount of such taxes paid, or deemed paid, or accrued with respect to such distributions or amounts or the amount in the excess limitation account as of the beginning of such taxable year.")
+rule S960C1LimitationIncreaseLesserOfTaxesAndAccount defeasible {
+    for p: us.irc.core::Person;
+    for y: us.irc.core::TaxableYear;
+    for taxes: Money;
+    for balance: Money;
+    when prior_inclusion_year_condition_960c1A(p)
+     and ftc_benefits_chosen_in_receipt_year_960c1B(p, y)
+     and foreign_taxes_on_distributions_960c1C(p, y, taxes)
+     and excess_limitation_account_balance_960c2(p, y, balance);
+    then limitation_increase_960c1(p, y, min(taxes, balance));
+}
+pub relation limitation_increase_from_951a_inclusions_960c2Bi(p: us.irc.core::Person, y: us.irc.core::TaxableYear, amount: Money) kind empirical {
+    label en official "the amount by which the section 904(a) limitation for the year was increased by reason of the total amount of the section 951(a) inclusions for the year";
+}
+pub relation credits_allowable_only_because_of_inclusions_960c2Bii(p: us.irc.core::Person, y: us.irc.core::TaxableYear, amount: Money) kind empirical {
+    label en official "the foreign taxes allowable as a credit for the year that would not have been allowable but for the section 951(a) inclusions";
+}
+pub relation excess_limitation_account_increase_960c2B(p: us.irc.core::Person, y: us.irc.core::TaxableYear, amount: Money) kind institutional {
+    label en official "the yearly increase of the excess limitation account: the excess (if any) of the limitation increase due to section 951(a) inclusions over the taxes allowable only because of those inclusions (section 960(c)(2)(B)); carryback reductions are not modeled (TECH-GAPS G1743)";
+}
+@source(IRC_S960_C, relation = formalizes, coverage = partial, quote = "For each taxable year beginning after September 30, 1993, the taxpayer shall increase the amount in the excess limitation account by the excess (if any) of—")
+rule S960C2BAccountIncrease defeasible {
+    for p: us.irc.core::Person;
+    for y: us.irc.core::TaxableYear;
+    for increase: Money;
+    for taxes: Money;
+    when limitation_increase_from_951a_inclusions_960c2Bi(p, y, increase)
+     and credits_allowable_only_because_of_inclusions_960c2Bii(p, y, taxes);
+    then excess_limitation_account_increase_960c2B(p, y, max(0.00 USD, increase - taxes));
+}
+pub relation excess_limitation_account_decrease_960c2C(p: us.irc.core::Person, y: us.irc.core::TaxableYear, amount: Money) kind institutional {
+    label en official "the yearly decrease of the excess limitation account: the amount of the limitation increase under paragraph (1) (section 960(c)(2)(C))";
+}
+@source(IRC_S960_C, relation = formalizes, coverage = exact, quote = "For each taxable year beginning after September 30, 1993, for which the limitation under section 904 was increased under paragraph (1), the taxpayer shall reduce the amount in the excess limitation account by the amount of such increase.")
+rule S960C2CAccountDecrease defeasible {
+    for p: us.irc.core::Person;
+    for y: us.irc.core::TaxableYear;
+    for amount: Money;
+    when limitation_increase_960c1(p, y, amount);
+    then excess_limitation_account_decrease_960c2C(p, y, amount);
+}
+pub relation taxpayer_elected_credit_in_inclusion_year_960c4A(p: us.irc.core::Person) kind empirical {
+    label en official "the taxpayer chose the benefits of the foreign tax credit subpart for a year in which a section 951(a) amount was included in respect of a CFC";
+}
+pub relation taxpayer_does_not_choose_credit_in_receipt_year_960c4B(p: us.irc.core::Person, y: us.irc.core::TaxableYear) kind empirical {
+    label en official "the taxpayer does not choose the credit benefits for the year of receipt of a distribution excluded under section 959(a) and attributable to earnings and profits included in a year covered by (A)";
+}
+pub relation foreign_tax_on_959a_distribution_960c4(p: us.irc.core::Person, y: us.irc.core::TaxableYear, amount: Money) kind empirical {
+    label en official "income, war profits or excess profits taxes paid or accrued to a foreign country or possession on or with respect to the distribution or amount";
+}
+pub relation section_164_deduction_denied_960c4(p: us.irc.core::Person, y: us.irc.core::TaxableYear, amount: Money) kind institutional {
+    label en official "no deduction is allowed under section 164 for the foreign taxes on the previously-taxed distribution in a year in which the taxpayer does not choose the credit, having chosen it in the inclusion year (section 960(c)(4))";
+}
+@source(IRC_S960_C, relation = formalizes, coverage = exact, quote = "no deduction shall be allowed under section 164 for the taxable year in which such distribution or amount is received for any income, war profits, or excess profits taxes paid or accrued to any foreign country or to any possession of the United States on or with respect to such distribution or amount.")
+rule S960C4NoSection164Deduction defeasible {
+    for p: us.irc.core::Person;
+    for y: us.irc.core::TaxableYear;
+    for amount: Money;
+    when taxpayer_elected_credit_in_inclusion_year_960c4A(p)
+     and taxpayer_does_not_choose_credit_in_receipt_year_960c4B(p, y)
+     and foreign_tax_on_959a_distribution_960c4(p, y, amount);
+    then section_164_deduction_denied_960c4(p, y, amount);
+}
+pub relation increase_in_limitation_960c5(p: us.irc.core::Person, y: us.irc.core::TaxableYear, increase: Money, chapter_1_tax: Money) kind empirical {
+    label en official "an increase in the limitation under section 960(c) for the year, and the tax imposed by chapter 1 for the year";
+}
+pub relation overpayment_from_limitation_increase_960c5(p: us.irc.core::Person, y: us.irc.core::TaxableYear, amount: Money) kind institutional {
+    label en official "the amount by which the increase in the limitation exceeds the chapter 1 tax for the year is deemed an overpayment of tax for that year (section 960(c)(5))";
+}
+@source(IRC_S960_C, relation = formalizes, coverage = exact, quote = "If an increase in the limitation under this subsection exceeds the tax imposed by this chapter for such year, the amount of such excess shall be deemed an overpayment of tax for such year.")
+rule S960C5ExcessIncreaseIsOverpayment defeasible {
+    for p: us.irc.core::Person;
+    for y: us.irc.core::TaxableYear;
+    for increase: Money;
+    for tax: Money;
+    when increase_in_limitation_960c5(p, y, increase, tax)
+     and increase > tax;
+    then overpayment_from_limitation_increase_960c5(p, y, increase - tax);
+}
+
+// --- §960(d)(2), (e) ----------------------------------------------------------
+
+pub relation gilti_over_aggregate_tested_income_960d2(domestic_corp: us.irc.core::Corporation, y: us.irc.core::TaxableYear, gilti: Money, aggregate_tested_income: Money) kind empirical {
+    label en official "the corporation's global intangible low-taxed income, and the aggregate amount described in section 951A(c)(1)(A), for section 960(d)(2)";
+}
+pub relation inclusion_percentage_computed_960d2(domestic_corp: us.irc.core::Corporation, y: us.irc.core::TaxableYear, ratio: Decimal) kind institutional {
+    label en official "the inclusion percentage: GILTI divided by the aggregate section 951A(c)(1)(A) amount (section 960(d)(2)); module 11 reads `inclusion_percentage_960d` as a case input, this relation is its derivation";
+}
+@source(IRC_S960_D, relation = formalizes, coverage = exact, quote = "(B) the aggregate amount described in section 951A(c)(1)(A) with respect to such corporation.")
+rule S960D2InclusionPercentage defeasible {
+    for domestic_corp: us.irc.core::Corporation;
+    for y: us.irc.core::TaxableYear;
+    for gilti: Money;
+    for aggregate: Money;
+    when gilti_over_aggregate_tested_income_960d2(domestic_corp, y, gilti, aggregate)
+     and aggregate > 0.00 USD;
+    then inclusion_percentage_computed_960d2(domestic_corp, y, gilti / aggregate);
+}
+pub relation tax_paid_to_foreign_country_or_possession_960e(item_id: Text) kind empirical {
+    label en official "the tax is an income, war profits or excess profits tax paid or accrued to a foreign country or possession of the United States";
+}
+pub relation foreign_income_tax_960e(item_id: Text) kind institutional {
+    label en official "the term foreign income taxes for section 960: any income, war profits or excess profits tax paid or accrued to any foreign country or possession (section 960(e))";
+}
+@source(IRC_S960_E, relation = formalizes, coverage = exact, quote = "The term \"foreign income taxes\" means any income, war profits, or excess profits taxes paid or accrued to any foreign country or possession of the United States.")
+rule S960EForeignIncomeTaxes defeasible {
+    for item_id: Text;
+    when tax_paid_to_foreign_country_or_possession_960e(item_id);
+    then foreign_income_tax_960e(item_id);
+}

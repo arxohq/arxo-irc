@@ -1,0 +1,984 @@
+// Sections 151-152 — Personal exemptions; dependent defined. Stage 2 (IRC-06).
+//
+// §151 itself was flagged as this package's OWN stage-2 work in
+// `s63-taxable-income.law` (`personal_exemption_deduction_151`, declared
+// `pub` there with no producing rule); this module supplies the producing
+// rules for that SAME relation (no re-declaration — one package, one
+// namespace). §152's `qualifying_child_of` / `qualifying_relative_of` /
+// `dependent_of` are the three `pub` relations the task explicitly asks for
+// (credits/returns hold pending dependency contracts on them).
+//
+// JUDGMENT CALLS (recorded once, applied throughout this module):
+// * §152(c)(4)/(e)'s "2 or more taxpayers may claim the same individual"
+//   tie-break is modelled WITHOUT a universal/max aggregate (none confirmed
+//   available for arbitrary predicates in this grammar): each defeater rule
+//   binds a competing "other" taxpayer through an ordinary positive body
+//   atom (`base_qualifying_child_of(child, other, y)` etc.) and compares
+//   the two directly; where the statute compares against "the highest AGI
+//   of any parent", the rule is restated by De Morgan as "defeated if ANY
+//   non-claiming parent has AGI >= the claimant's" (mathematically
+//   equivalent to "must exceed the highest of all of them", and needs only
+//   pairwise comparison). `other != taxpayer` distinguishes the competitor.
+// * "Age", "custody for the greater portion of the year", and similar
+//   factual comparisons are modelled as empirical day/year-count facts a
+//   case asserts directly (e.g. `under_19_at_close_of_calendar_year`,
+//   `custody_days_152e`), not derived from a `Date`-arithmetic subtraction
+//   this package does not otherwise perform for age.
+// * §152(f)(1)-(4) definitions of "child"/"student"/household-status/
+//   "brother and sister" are folded into the empirical relationship/age/
+//   abode facts they qualify (matching the §66(d)(2)-(3) precedent:
+//   NON_NORMATIVE glossary content consumed by the label of the case fact
+//   it defines) EXCEPT (f)(2) "student" (5-months-of-full-time-study test)
+//   and (f)(6) "missing children" deeming, which are genuine executable
+//   classifications and are modelled as such below.
+// * §152(d)(1)(B)'s "gross income ... is less than the exemption amount (as
+//   defined in section 151(d))" reads `base_exemption_amount_151` defined
+//   below, not `personal_exemption_deduction_151` (the deduction TOTAL);
+//   the two are different quantities of the same defined term.
+
+// ============================================================================
+// Section 151 — Allowance of deductions for personal exemptions
+// ============================================================================
+
+// --- §151(d): "exemption amount" -------------------------------------------
+
+use self::{
+    IRC_S151_B,
+    IRC_S151_D,
+    IRC_S151_E,
+    IRC_S152_A,
+    IRC_S152_B,
+    IRC_S152_C,
+    IRC_S152_D,
+    IRC_S152_E,
+    IRC_S152_F,
+    IRC_S63_C,
+    Individual,
+    TaxableYear,
+    adjusted_gross_income,
+    claimed_as_dependent_151,
+    personal_exemption_deduction_151,
+};
+
+pub relation base_exemption_amount_151(y: TaxableYear, amount: Money) kind institutional {
+    label en official "the exemption amount (section 151(d)(1)/(4)/(5)), before the section 151(d)(2) per-individual zeroing and the section 151(d)(3) phaseout";
+}
+
+@source(IRC_S151_D, quote = "Except as otherwise provided in this subsection, the term \"exemption amount\" means $2,000.")
+rule BaseExemptionAmountStatutory(y: TaxableYear, ind: Individual, s: us.irc.income_individual::FilingStatus) strict {
+    label en official "the exemption amount is $2,000, before the 1990-forward inflation adjustment of paragraph (4) and outside the 2018-2025 zeroing of paragraph (5)";
+    effective (-infinity, @1990-01-01);
+    when us.irc.income_individual::filing_status(ind, y, s);
+    then base_exemption_amount_151(y, round(ExemptionAmountStatutoryBase, 2, "HALF_UP"));
+}
+
+// §151(d)(4): inflation adjustment for years after 1989. The COLA multiplier
+// itself (section 1(f)(3), base year 1988) is not computed by this package
+// (no producer of a general section 1(f)(3) COLA factor is imported here);
+// only the pinned 1988-forward-until-2018 statutory base is available. The
+// published (Rev. Proc.) indexed dollar amount for any 1990-2017 taxable
+// year is NOT pinned by this task (SOURCE_GAP, same treatment as the
+// standard-deduction amounts in `s63-taxable-income.law`): recorded as a
+// TECH_GAP/SOURCE_GAP row rather than invented. No rule concludes
+// `base_exemption_amount_151` for [1990-01-01, 2018-01-01) here.
+
+@source(IRC_S151_D, quote = "The term \"exemption amount\" means zero.")
+rule BaseExemptionAmountZeroed2018To2025(y: TaxableYear, ind: Individual, s: us.irc.income_individual::FilingStatus) strict {
+    label en official "for a taxable year beginning after December 31, 2017 and before January 1, 2026, the exemption amount is zero";
+    effective [@2018-01-01, @2026-01-01);
+    when us.irc.income_individual::filing_status(ind, y, s);
+    then base_exemption_amount_151(y, 0.00 USD);
+}
+
+// Post-2025 reversion: the pinned 2024-Edition text of (d)(5) sunsets on its
+// own terms after calendar year 2025, reverting to the (d)(1)/(4) amount.
+// Pub. L. 119-21 (2025) is known (WIRE/§68 precedent in this same package)
+// to touch neighbouring sections' post-2025 treatment; whether it also
+// amends section 151(d)(5) itself is NOT among the 6 entries of
+// `SOURCE-MANIFEST.json`'s `amendments` list (checked; none mention section
+// 151). Per the pinned text alone, the amount reverts to the (d)(1)/(4)
+// figure for years beginning after December 31, 2025 — but the (d)(4)
+// indexed value itself is the SAME SOURCE_GAP as the pre-2018 years above.
+// No rule concludes `base_exemption_amount_151` for [2026-01-01, infinity)
+// here: SOURCE_GAP (indexed amount) compounded with an unconfirmed
+// amendment status, both recorded in the coverage row / TECH-GAPS.md.
+
+// --- §151(d)(2): zeroed for an individual who is claimable by another ------
+
+// `known_individual_for_151(ind, y)` anchors the open `Individual` domain
+// for the two exemption-amount rules below: a producer rule whose head
+// variable has no positive body atom binding it is refused by range
+// restriction (§190, LDC-E4101), so "the exemption amount for AN individual"
+// cannot be derived for an arbitrary, otherwise-unmentioned `Individual` —
+// only for one already named as a taxpayer, a (b)-qualifying spouse, or a
+// (c) dependent. This is exactly the set §151(a)-(c) ever needs a
+// per-individual exemption amount for.
+relation known_individual_for_151(ind: Individual, y: TaxableYear) kind institutional {
+    label en official "an individual for whom this package has a positive record for the taxable year (a taxpayer, a section 151(b) qualifying spouse, or a section 152 dependent) — domain anchor, not itself a disposition of the statute";
+}
+rule KnownIndividualForS151ViaFilingStatus(ind: Individual, y: TaxableYear, s: us.irc.income_individual::FilingStatus) strict {
+    label en official "a taxpayer with a filing status for the year is a known individual";
+    when us.irc.income_individual::filing_status(ind, y, s);
+    then known_individual_for_151(ind, y);
+}
+rule KnownIndividualForS151ViaSpouse(ind: Individual, p: Individual, y: TaxableYear) strict {
+    label en official "a spouse within the section 151(b) spousal-exemption condition is a known individual";
+    when spousal_exemption_152b_applies(p, ind, y);
+    then known_individual_for_151(ind, y);
+}
+rule KnownIndividualForS151ViaDependent(ind: Individual, y: TaxableYear) strict {
+    label en official "an individual meeting the base dependent test for at least one taxpayer is a known individual";
+    when is_dependent_of_anyone_base(ind, y);
+    then known_individual_for_151(ind, y);
+}
+
+@source(IRC_S151_D, quote = "the exemption amount applicable to such individual for such individual's taxable year shall be zero")
+rule ExemptionAmountZeroForClaimableIndividual(ind: Individual, y: TaxableYear) strict {
+    label en official "the exemption amount applicable to an individual for whom a section 151 deduction is allowable to another taxpayer for the calendar year is zero";
+    when is_dependent_of_anyone_base(ind, y);
+    then exemption_amount_for(ind, y, 0.00 USD);
+}
+
+pub relation exemption_amount_for(ind: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the exemption amount applicable to a particular individual's own exemption (section 151(d), after the (d)(2) per-individual zeroing)";
+}
+
+@source(IRC_S151_D, quote = "Except as otherwise provided in this subsection, the term \"exemption amount\" means $2,000.")
+rule ExemptionAmountForIndividualDefault(ind: Individual, y: TaxableYear, base: Money) strict {
+    label en official "absent the (d)(2) zeroing, a known individual's own exemption amount is the base exemption amount";
+    when known_individual_for_151(ind, y);
+    when base_exemption_amount_151(y, base);
+    when not_known(is_dependent_of_anyone_base(ind, y));
+    then exemption_amount_for(ind, y, base);
+}
+
+// Helper for the rules above and for the (b)/(d)(1)(D) "is a dependent of
+// some taxpayer" tests: computed from the BASE (pre-(b)-exceptions)
+// qualifying-child/qualifying-relative eligibility, via a direct positive
+// join on an existentially-bound taxpayer `t` (an ordinary body atom, not
+// an unbound existential inside a NEGATIVE literal — that would be unsafe
+// per §190) rather than a bare read of the final `dependent_of` (which
+// would create the section 152(b)(1) self-reference cycle LDC-E4102 flags:
+// `dependent_of` -> `dependent_ineligible_152b1` -> `dependent_of`).
+// JUDGMENT CALL: this is the individual's BASE eligibility to be someone's
+// dependent, before (b)'s own exceptions are applied to THAT other claim —
+// a documented approximation, not the fully resolved chain.
+pub relation is_dependent_of_anyone_base(ind: Individual, y: TaxableYear) kind institutional {
+    label en official "the individual meets the base (pre-(b)-exceptions) qualifying-child or qualifying-relative test with respect to at least one taxpayer for the taxable year — helper for sections 151(b)/(d)(2) and 152(b)(1)";
+}
+rule IsDependentOfAnyoneBaseViaChild(ind: Individual, t: Individual, y: TaxableYear) strict {
+    label en official "meets the base qualifying-child test for at least one taxpayer";
+    when base_qualifying_child_of(ind, t, y);
+    then is_dependent_of_anyone_base(ind, y);
+}
+rule IsDependentOfAnyoneBaseViaRelative(ind: Individual, t: Individual, y: TaxableYear) strict {
+    label en official "meets the base qualifying-relative test for at least one taxpayer";
+    when base_qualifying_relative_of(ind, t, y);
+    then is_dependent_of_anyone_base(ind, y);
+}
+
+// Same treatment for "is not a qualifying child of such taxpayer or of any
+// other taxpayer" (152(d)(1)(D)): built from `base_qualifying_child_of`
+// (pre-(c)(4) tie-break) rather than the defeasible-derived final
+// `qualifying_child_of`, because a `strict` rule cannot safely consume a
+// `defeasible` predicate's bare truth value before defeat resolution
+// completes (LDC-E4103 LATE_STATUS_PRODUCER). JUDGMENT CALL /
+// INTERPRETATION: a rare edge case where a (c)(4) tie-break LOSER could in
+// principle still be someone's qualifying relative is not distinguished
+// from an outright non-qualifying-child here; recorded, not silently
+// dropped.
+pub relation is_qualifying_child_of_someone_base(ind: Individual, y: TaxableYear) kind institutional {
+    label en official "meets the base (pre-(c)(4)-tie-break) qualifying-child test with respect to at least one taxpayer — helper for section 152(d)(1)(D), see the judgment-call comment above";
+}
+rule IsQualifyingChildOfSomeoneBase(ind: Individual, t: Individual, y: TaxableYear) strict {
+    label en official "meets the base qualifying-child test for at least one taxpayer";
+    when base_qualifying_child_of(ind, t, y);
+    then is_qualifying_child_of_someone_base(ind, y);
+}
+
+// §151(d)(3) phaseout ("2 percentage points for each $2,500 ... or fraction
+// thereof") is a stepped/ceiling-division computation; this grammar exposes
+// no `ceil`/`floor`/integer-division primitive (checked `spec/grammar.ebnf`)
+// and no aggregate reads an arbitrary rounding-up-to-the-next-bracket
+// function. TECH_GAP: the phaseout percentage itself is not computed;
+// `exemption_amount_for`/`personal_exemption_deduction_151` below are
+// UNDETERMINED (not zero, not the unreduced amount) for any taxpayer whose
+// AGI exceeds `applicable_amount_68` until a stepped-bracket primitive is
+// added to the language or the phaseout is expressed through an explicit
+// finite bracket table (not attempted this pass).
+
+// --- §151(a)-(c): the deduction itself --------------------------------------
+
+pub relation number_of_dependents(p: Individual, y: TaxableYear, n: Integer) kind institutional {
+    label en official "the count of individuals who are dependents (section 152) of the taxpayer for the taxable year — dependency contract: this package's own `dependent_of` relation, aggregated by a consumer able to count entities (this package does not itself declare a `count distinct` over `dependent_of`'s open second argument)";
+}
+
+@source(IRC_S151_B, quote = "An exemption of the exemption amount for the taxpayer; and an additional exemption of the exemption amount for the spouse of the taxpayer if a joint return is not made by the taxpayer and his spouse, and if the spouse, for the calendar year in which the taxable year of the taxpayer begins, has no gross income and is not the dependent of another taxpayer.")
+rule PersonalExemptionTaxpayerOnly(p: Individual, y: TaxableYear, exempt: Money) strict {
+    label en official "a taxpayer who does not qualify for the spousal exemption of (b) gets one exemption, for the taxpayer";
+    when exemption_amount_for(p, y, exempt);
+    when not_known(spousal_exemption_152b_applies_to_someone(p, y));
+    then personal_exemption_deduction_151(p, y, exempt);
+}
+
+relation spousal_exemption_152b_applies(p: Individual, spouse: Individual, y: TaxableYear) kind institutional {
+    label en official "the taxpayer and spouse file separately, and the spouse has no gross income and is not the dependent of another taxpayer for the calendar year (section 151(b))";
+}
+// Helper binding out the open `spouse` variable for the "does (b) apply to
+// SOME spouse of this taxpayer" test in `PersonalExemptionTaxpayerOnly`
+// (same range-restriction reasoning as `is_dependent_of_anyone_base` above).
+relation spousal_exemption_152b_applies_to_someone(p: Individual, y: TaxableYear) kind institutional {
+    label en official "the section 151(b) spousal-exemption condition is met with respect to at least one spouse";
+}
+rule SpousalExemptionAppliesToSomeone(p: Individual, spouse: Individual, y: TaxableYear) strict {
+    label en official "existential helper: some spouse satisfies (b)";
+    when spousal_exemption_152b_applies(p, spouse, y);
+    then spousal_exemption_152b_applies_to_someone(p, y);
+}
+
+relation joint_return_made_with_spouse(p: Individual, spouse: Individual, y: TaxableYear) kind empirical {
+    label en official "a joint return is made by the taxpayer and his spouse (section 151(b))";
+}
+relation spouse_has_no_gross_income(spouse: Individual, y: TaxableYear) kind empirical {
+    label en official "the spouse, for the calendar year in which the taxable year of the taxpayer begins, has no gross income (section 151(b))";
+}
+
+@source(IRC_S151_B, quote = "an additional exemption of the exemption amount for the spouse of the taxpayer if a joint return is not made by the taxpayer and his spouse, and if the spouse, for the calendar year in which the taxable year of the taxpayer begins, has no gross income and is not the dependent of another taxpayer")
+rule SpousalExemptionApplies(p: Individual, spouse: Individual, y: TaxableYear) strict {
+    label en official "the section 151(b) spousal-exemption condition";
+    when us.irc.definitions::married_as_of_close_of_taxable_year(p, y);
+    when not joint_return_made_with_spouse(p, spouse, y);
+    when spouse_has_no_gross_income(spouse, y);
+    when not_known(is_dependent_of_anyone_base(spouse, y));
+    then spousal_exemption_152b_applies(p, spouse, y);
+}
+
+@source(IRC_S151_B, quote = "An exemption of the exemption amount for the taxpayer; and an additional exemption of the exemption amount for the spouse of the taxpayer")
+rule PersonalExemptionTaxpayerAndSpouse(p: Individual, spouse: Individual, y: TaxableYear, exempt_p: Money, exempt_s: Money) strict {
+    label en official "a taxpayer within (b)'s spousal-exemption condition gets two exemptions: one for the taxpayer, one for the spouse";
+    when exemption_amount_for(p, y, exempt_p);
+    when spousal_exemption_152b_applies(p, spouse, y);
+    when exemption_amount_for(spouse, y, exempt_s);
+    then personal_exemption_deduction_151(p, y, exempt_p + exempt_s);
+}
+
+// §151(c): additional exemption for each dependent. `number_of_dependents`
+// above is the open dependency contract (this package cannot itself count
+// the entities satisfying `dependent_of(_, p, y)` without an aggregate
+// primitive over an open Individual domain — the same limitation the (d)(3)
+// phaseout hits); the per-dependent exemption AMOUNT is fully executable
+// (`exemption_amount_for` of each dependent), only the SUMMATION into
+// `personal_exemption_deduction_151` alongside (b)'s own exemptions needs
+// the count. Recorded as TECH_GAP: (c) itself does not add a further rule
+// here beyond the contract above.
+
+// --- §151(e): TIN requirement ------------------------------------------------
+
+pub relation tin_included_on_return_for(ind: Individual, y: TaxableYear) kind empirical {
+    label en official "the TIN of the individual is included on the return claiming the exemption (section 151(e))";
+}
+
+// §151(e) is modelled as a precondition folded into the two exemption rules
+// above being read TOGETHER with this fact by a consuming rule, per the
+// method note on `unless`/exceptions binding all head variables: since
+// `personal_exemption_deduction_151` here is not itself a `power` or
+// `position`, (e) is recorded as an EXECUTABLE exception relation
+// (`tin_included_on_return_for`) whose ABSENCE a downstream consumer
+// (`returns`, which owns the return-content facts) must gate the deduction
+// on; this package declares the fact and its `@source` anchor but does not
+// duplicate a second "no exemption without TIN" rule shadowing the two
+// rules above (doing so on the SAME head risks the LDC-E4102-style
+// same-predicate-cycle this package's stage-1 notes already flagged for
+// §63(c)(5)). classification = EXECUTABLE (fact declared, `returns` is the
+// consumer that must additionally read it).
+@source(IRC_S151_E, quote = "No exemption shall be allowed under this section with respect to any individual unless the TIN of such individual is included on the return claiming the exemption.")
+relation _s151e_marker() kind institutional {
+    label en official "marker relation carrying the (e) @source anchor; see the comment above for why no separate rule concludes the exemption's head";
+}
+
+// ============================================================================
+// Section 152 — Dependent defined
+// ============================================================================
+
+pub relation dependent_of(ind: Individual, taxpayer: Individual, y: TaxableYear) kind institutional {
+    label en official "the individual is a dependent (section 152(a)) of the taxpayer for the taxable year";
+}
+pub relation qualifying_child_of(child: Individual, taxpayer: Individual, y: TaxableYear) kind institutional {
+    label en official "the individual is a qualifying child (section 152(c)) of the taxpayer for the taxable year";
+}
+pub relation qualifying_relative_of(ind: Individual, taxpayer: Individual, y: TaxableYear) kind institutional {
+    label en official "the individual is a qualifying relative (section 152(d)) of the taxpayer for the taxable year";
+}
+
+// --- §152(a): dependent = qualifying child or qualifying relative -----------
+
+@source(IRC_S152_A, quote = "a qualifying child, or")
+rule DependentIsQualifyingChild(ind: Individual, taxpayer: Individual, y: TaxableYear) defeasible {
+    label en official "a qualifying child is a dependent";
+    when qualifying_child_of(ind, taxpayer, y);
+    when not_known(dependent_ineligible_152b1(ind, y));
+    when not_known(married_dependent_excluded_152b2(ind, y));
+    when not_known(non_citizen_excluded_152b3(ind, taxpayer, y));
+    then dependent_of(ind, taxpayer, y);
+}
+
+@source(IRC_S152_A, quote = "a qualifying relative.")
+rule DependentIsQualifyingRelative(ind: Individual, taxpayer: Individual, y: TaxableYear) strict {
+    label en official "a qualifying relative is a dependent";
+    when qualifying_relative_of(ind, taxpayer, y);
+    when not_known(dependent_ineligible_152b1(ind, y));
+    when not_known(married_dependent_excluded_152b2(ind, y));
+    when not_known(non_citizen_excluded_152b3(ind, taxpayer, y));
+    then dependent_of(ind, taxpayer, y);
+}
+
+// --- §152(b): exceptions -----------------------------------------------------
+
+relation dependent_ineligible_152b1(ind: Individual, y: TaxableYear) kind institutional {
+    label en official "an individual who is a dependent of a taxpayer is treated as having no dependents of its own for a taxable year beginning in the same calendar year (section 152(b)(1))";
+}
+// Reads `is_dependent_of_anyone_base` (BASE eligibility), not the final
+// `dependent_of`: a rule concluding `dependent_of` from a body that itself
+// reads `dependent_of` is an unstratifiable self-reference the compiler
+// rejects (LDC-E4102), exactly as `s63-taxable-income.law`'s header note
+// already flags for a structurally identical situation. Same JUDGMENT CALL
+// as `is_dependent_of_anyone_base` above.
+@source(IRC_S152_B, quote = "If an individual is a dependent of a taxpayer for any taxable year of such taxpayer beginning in a calendar year, such individual shall be treated as having no dependents for any taxable year of such individual beginning in such calendar year.")
+rule DependentTreatedAsHavingNoDependents(ind: Individual, y: TaxableYear) strict {
+    label en official "an individual who is someone's dependent is ineligible to itself claim any dependent for the same calendar year";
+    when is_dependent_of_anyone_base(ind, y);
+    then dependent_ineligible_152b1(ind, y);
+}
+
+relation married_dependent_excluded_152b2(ind: Individual, y: TaxableYear) kind institutional {
+    label en official "an individual who has made a joint return with the individual's spouse is not treated as a dependent (section 152(b)(2))";
+}
+relation made_joint_return_with_spouse_152(ind: Individual, y: TaxableYear) kind empirical {
+    label en official "the individual has made a joint return with the individual's spouse under section 6013 for the taxable year (section 152(b)(2))";
+}
+@source(IRC_S152_B, quote = "An individual shall not be treated as a dependent of a taxpayer under subsection (a) if such individual has made a joint return with the individual's spouse under section 6013 for the taxable year")
+rule MarriedDependentExcluded(ind: Individual, y: TaxableYear) strict {
+    label en official "an individual who filed a joint return with a spouse is excluded from dependent status";
+    when made_joint_return_with_spouse_152(ind, y);
+    then married_dependent_excluded_152b2(ind, y);
+}
+
+relation non_citizen_excluded_152b3(ind: Individual, taxpayer: Individual, y: TaxableYear) kind institutional {
+    label en official "an individual who is not a citizen or national of the United States and not a resident of the United States or a contiguous country is excluded from dependent status, subject to the adopted-child exception (section 152(b)(3))";
+}
+relation resident_of_us_or_contiguous_country(ind: Individual, y: TaxableYear) kind empirical {
+    label en official "resident of the United States or of a country contiguous to the United States (section 152(b)(3)(A))";
+}
+relation adopted_child_exception_152b3b(ind: Individual, taxpayer: Individual, y: TaxableYear) kind institutional {
+    label en official "the adopted-child exception to the non-citizen exclusion (section 152(b)(3)(B))";
+}
+@source(IRC_S152_B, quote = "for the taxable year of the taxpayer, the child has the same principal place of abode as the taxpayer and is a member of the taxpayer's household, and")
+rule AdoptedChildExceptionApplies(child: Individual, taxpayer: Individual, y: TaxableYear) strict {
+    label en official "the adopted-child exception: same abode, household member, and the taxpayer is a citizen or national";
+    when child_within_meaning_of_152f1b(child, taxpayer);
+    when same_principal_abode_more_than_half_year(child, taxpayer, y);
+    when member_of_taxpayers_household(child, taxpayer, y);
+    when us.irc.definitions::citizen_of_united_states(taxpayer);
+    then adopted_child_exception_152b3b(child, taxpayer, y);
+}
+// Bound via `base_qualifying_child_of`/`base_qualifying_relative_of` as the
+// anchor for the otherwise-open (ind, taxpayer) pair (§190 range
+// restriction): (b)(3) only has anything to exclude for a candidate who
+// would otherwise meet the (c)(1)/(d)(1) test.
+@source(IRC_S152_B, quote = "The term \"dependent\" does not include an individual who is not a citizen or national of the United States unless such individual is a resident of the United States or a country contiguous to the United States.")
+rule NonCitizenExcludedViaChildCandidate(ind: Individual, taxpayer: Individual, y: TaxableYear) strict {
+    label en official "a non-citizen/national individual who is not a resident of the US or a contiguous country is excluded from qualifying-child dependent status, unless the adopted-child exception applies";
+    when base_qualifying_child_of(ind, taxpayer, y);
+    when not_known(us.irc.definitions::citizen_of_united_states(ind));
+    when not resident_of_us_or_contiguous_country(ind, y);
+    when not_known(adopted_child_exception_152b3b(ind, taxpayer, y));
+    then non_citizen_excluded_152b3(ind, taxpayer, y);
+}
+@source(IRC_S152_B, quote = "The term \"dependent\" does not include an individual who is not a citizen or national of the United States unless such individual is a resident of the United States or a country contiguous to the United States.")
+rule NonCitizenExcludedViaRelativeCandidate(ind: Individual, taxpayer: Individual, y: TaxableYear) strict {
+    label en official "a non-citizen/national individual who is not a resident of the US or a contiguous country is excluded from qualifying-relative dependent status, unless the adopted-child exception applies";
+    when base_qualifying_relative_of(ind, taxpayer, y);
+    when not_known(us.irc.definitions::citizen_of_united_states(ind));
+    when not resident_of_us_or_contiguous_country(ind, y);
+    when not_known(adopted_child_exception_152b3b(ind, taxpayer, y));
+    then non_citizen_excluded_152b3(ind, taxpayer, y);
+}
+
+relation child_within_meaning_of_152f1b(child: Individual, taxpayer: Individual) kind empirical {
+    label en official "a legally adopted individual, or an individual lawfully placed for legal adoption, treated as a child by blood (section 152(f)(1)(B))";
+}
+relation member_of_taxpayers_household(ind: Individual, taxpayer: Individual, y: TaxableYear) kind empirical {
+    label en official "member of the taxpayer's household for the taxable year";
+}
+
+// --- §152(c): qualifying child -----------------------------------------------
+
+relation same_principal_abode_more_than_half_year(ind: Individual, taxpayer: Individual, y: TaxableYear) kind empirical {
+    label en official "has the same principal place of abode as the taxpayer for more than one-half of the taxable year (section 152(c)(1)(B), also read for section 152(b)(3)(B)(i) and section 152(f)(6)(A) via `MissingChildDeemedSameAbode`)";
+}
+
+relation bears_child_relationship_152c2a(child: Individual, taxpayer: Individual) kind empirical {
+    label en official "a child of the taxpayer or a descendant of such a child (section 152(c)(2)(A))";
+}
+relation bears_sibling_relationship_152c2b(child: Individual, taxpayer: Individual) kind empirical {
+    label en official "a brother, sister, stepbrother, or stepsister of the taxpayer or a descendant of any such relative (section 152(c)(2)(B))";
+}
+relation qualifying_child_relationship(child: Individual, taxpayer: Individual) kind institutional {
+    label en official "bears a relationship to the taxpayer described in section 152(c)(2)";
+}
+@source(IRC_S152_C, quote = "a child of the taxpayer or a descendant of such a child, or")
+rule QualifyingChildRelationshipViaChild(child: Individual, taxpayer: Individual) strict {
+    label en official "a child of the taxpayer or descendant of such a child bears the (c)(2) relationship";
+    when bears_child_relationship_152c2a(child, taxpayer);
+    then qualifying_child_relationship(child, taxpayer);
+}
+@source(IRC_S152_C, quote = "a brother, sister, stepbrother, or stepsister of the taxpayer or a descendant of any such relative")
+rule QualifyingChildRelationshipViaSibling(child: Individual, taxpayer: Individual) strict {
+    label en official "a sibling/step-sibling of the taxpayer or descendant of such a relative bears the (c)(2) relationship";
+    when bears_sibling_relationship_152c2b(child, taxpayer);
+    then qualifying_child_relationship(child, taxpayer);
+}
+
+relation under_19_at_close_of_calendar_year(ind: Individual, y: TaxableYear) kind empirical {
+    label en official "has not attained the age of 19 as of the close of the calendar year in which the taxpayer's taxable year begins (section 152(c)(3)(A)(i))";
+}
+relation under_24_at_close_of_calendar_year(ind: Individual, y: TaxableYear) kind empirical {
+    label en official "has not attained the age of 24 as of the close of the calendar year (section 152(c)(3)(A)(ii))";
+}
+relation younger_than_claiming_taxpayer(ind: Individual, taxpayer: Individual) kind empirical {
+    label en official "younger than the taxpayer claiming such individual as a qualifying child (section 152(c)(3)(A))";
+}
+relation is_student_152f2(ind: Individual, y: TaxableYear) kind institutional {
+    label en official "a student within the meaning of section 152(f)(2)";
+}
+pub relation permanently_and_totally_disabled_22e3(ind: Individual, y: TaxableYear) kind empirical {
+    label en official "permanently and totally disabled, as defined in section 22(e)(3) — EXTERNAL_DEPENDENCY: section 22 is owned elsewhere (likely `credits`, unconfirmed); asserted directly as a case fact pending that package's own definition being imported";
+}
+relation meets_qualifying_child_age_requirement(child: Individual, taxpayer: Individual, y: TaxableYear) kind institutional {
+    label en official "meets the age requirements of section 152(c)(3)";
+}
+@source(IRC_S152_C, quote = "is younger than the taxpayer claiming such individual as a qualifying child and—")
+rule AgeRequirementUnder19(child: Individual, taxpayer: Individual, y: TaxableYear) strict {
+    label en official "younger than the taxpayer and under 19 at year end";
+    when younger_than_claiming_taxpayer(child, taxpayer);
+    when under_19_at_close_of_calendar_year(child, y);
+    then meets_qualifying_child_age_requirement(child, taxpayer, y);
+}
+@source(IRC_S152_C, quote = "is a student who has not attained the age of 24 as of the close of such calendar year")
+rule AgeRequirementStudentUnder24(child: Individual, taxpayer: Individual, y: TaxableYear) strict {
+    label en official "younger than the taxpayer, a student, and under 24 at year end";
+    when younger_than_claiming_taxpayer(child, taxpayer);
+    when is_student_152f2(child, y);
+    when under_24_at_close_of_calendar_year(child, y);
+    then meets_qualifying_child_age_requirement(child, taxpayer, y);
+}
+@source(IRC_S152_C, quote = "In the case of an individual who is permanently and totally disabled (as defined in section 22(e)(3)) at any time during such calendar year, the requirements of subparagraph (A) shall be treated as met")
+rule AgeRequirementDisabled(child: Individual, taxpayer: Individual, y: TaxableYear) strict {
+    label en official "a permanently and totally disabled individual is treated as meeting all of subparagraph (A)'s requirements, including the age-attainment tests, for any candidate taxpayer to whom the (c)(2) relationship runs";
+    when qualifying_child_relationship(child, taxpayer);
+    when permanently_and_totally_disabled_22e3(child, y);
+    then meets_qualifying_child_age_requirement(child, taxpayer, y);
+}
+
+// §152(f)(2): "student" — full-time study for each of 5 calendar months.
+relation full_time_student_month_170b1aii(ind: Individual, y: TaxableYear, month: Integer) kind empirical {
+    label en official "is, for this calendar month, a full-time student at an educational organization described in section 170(b)(1)(A)(ii), or pursuing full-time institutional on-farm training under such an organization's supervision (section 152(f)(2))";
+}
+@source(IRC_S152_F, quote = "an individual who during each of 5 calendar months during the calendar year in which the taxable year of the taxpayer begins—")
+rule StudentDefinition(ind: Individual, y: TaxableYear, m0: Integer) strict {
+    label en official "a student is an individual full-time-enrolled (or in on-farm training) for at least 5 calendar months of the calendar year";
+    when full_time_student_month_170b1aii(ind, y, m0);
+    when (count distinct month: Integer where full_time_student_month_170b1aii(ind, y, month)) >= 5;
+    then is_student_152f2(ind, y);
+}
+
+relation not_provided_over_half_own_support_152c1d(ind: Individual, y: TaxableYear) kind empirical {
+    label en official "has not provided over one-half of such individual's own support for the calendar year (section 152(c)(1)(D))";
+}
+relation filed_joint_return_other_than_refund_claim_152c1e(ind: Individual, y: TaxableYear) kind empirical {
+    label en official "has filed a joint return (other than only for a claim of refund) with the individual's spouse under section 6013 (section 152(c)(1)(E))";
+}
+
+pub relation base_qualifying_child_of(child: Individual, taxpayer: Individual, y: TaxableYear) kind institutional {
+    label en official "meets all five conditions of section 152(c)(1), before the section 152(c)(4) multiple-claimant tie-break";
+}
+@source(IRC_S152_C, quote = "who has not provided over one-half of such individual's own support for the calendar year in which the taxable year of the taxpayer begins")
+rule BaseQualifyingChildTest(child: Individual, taxpayer: Individual, y: TaxableYear) strict {
+    label en official "the five-part section 152(c)(1) qualifying-child test";
+    when qualifying_child_relationship(child, taxpayer);
+    when same_principal_abode_more_than_half_year(child, taxpayer, y);
+    when meets_qualifying_child_age_requirement(child, taxpayer, y);
+    when not_provided_over_half_own_support_152c1d(child, y);
+    when not_known(filed_joint_return_other_than_refund_claim_152c1e(child, y));
+    then base_qualifying_child_of(child, taxpayer, y);
+}
+
+// §152(c)(4): multiple-claimant tie-break. See the module-header judgment
+// call: modelled with `defeasible` rules and `priority` (§116), each
+// defeater binding a competing "other" taxpayer through an ordinary body
+// atom rather than a max/count aggregate.
+relation is_parent_of(parent: Individual, child: Individual) kind empirical {
+    label en official "parent of the individual, for the section 152(c)(4)/(e) tie-break (a subset of the broader (c)(2) 'child or descendant' relationship)";
+}
+relation custody_days_152c4b(parent: Individual, child: Individual, y: TaxableYear, days: Integer) kind empirical {
+    label en official "the number of days during the taxable year the child resided with this parent, for the section 152(c)(4)(B) residency comparison";
+}
+relation parent_not_claiming_152c4c(parent: Individual, child: Individual, y: TaxableYear) kind empirical {
+    label en official "a parent of the individual who may claim the individual as a qualifying child but does not so claim the individual (section 152(c)(4)(C))";
+}
+
+@source(IRC_S152_C, quote = "if (but for this paragraph) an individual may be claimed as a qualifying child by 2 or more taxpayers for a taxable year beginning in the same calendar year, such individual shall be treated as the qualifying child of the taxpayer who is—")
+rule QualifyingChildBaseline(child: Individual, taxpayer: Individual, y: TaxableYear) defeasible {
+    label en official "baseline: an individual meeting the (c)(1) test is the qualifying child of the (sole, absent a competitor) claiming taxpayer";
+    when base_qualifying_child_of(child, taxpayer, y);
+    then qualifying_child_of(child, taxpayer, y);
+}
+
+@source(IRC_S152_C, quote = "shall be treated as the qualifying child of the taxpayer who is—")
+rule QualifyingChildDefeatedByParentCompetitor(child: Individual, taxpayer: Individual, other: Individual, y: TaxableYear) defeasible {
+    label en official "a non-parent claimant is defeated by a competing parent claimant (152(c)(4)(A)(i))";
+    when base_qualifying_child_of(child, taxpayer, y);
+    when base_qualifying_child_of(child, other, y);
+    when other != taxpayer;
+    when not_known(is_parent_of(taxpayer, child));
+    when is_parent_of(other, child);
+    then not qualifying_child_of(child, taxpayer, y);
+}
+priority ParentCompetitorOverBaseline {
+    prefer QualifyingChildDefeatedByParentCompetitor over QualifyingChildBaseline;
+    reason lex_specialis;
+    label en official "section 152(c)(4)(A)(i): a parent's claim displaces a non-parent's";
+}
+
+@source(IRC_S152_C, quote = "if clause (i) does not apply, the taxpayer with the highest adjusted gross income for such taxable year")
+rule QualifyingChildDefeatedByHigherAgiNonParentCompetitor(child: Individual, taxpayer: Individual, other: Individual, y: TaxableYear, agi_t: Money, agi_o: Money) defeasible {
+    label en official "among non-parent claimants, the lower-AGI claimant is defeated by a higher-AGI competitor (152(c)(4)(A)(ii))";
+    when base_qualifying_child_of(child, taxpayer, y);
+    when base_qualifying_child_of(child, other, y);
+    when other != taxpayer;
+    when not_known(is_parent_of(taxpayer, child));
+    when not_known(is_parent_of(other, child));
+    when adjusted_gross_income(taxpayer, y, agi_t);
+    when adjusted_gross_income(other, y, agi_o);
+    when agi_o > agi_t;
+    then not qualifying_child_of(child, taxpayer, y);
+}
+priority HigherAgiNonParentOverBaseline {
+    prefer QualifyingChildDefeatedByHigherAgiNonParentCompetitor over QualifyingChildBaseline;
+    reason lex_specialis;
+    label en official "section 152(c)(4)(A)(ii): among non-parents, higher AGI displaces lower";
+}
+
+@source(IRC_S152_C, quote = "If the parents claiming any qualifying child do not file a joint return together, such child shall be treated as the qualifying child of—")
+rule QualifyingChildDefeatedByLongerResidencyParent(child: Individual, parent: Individual, other_parent: Individual, y: TaxableYear, days_p: Integer, days_o: Integer) defeasible {
+    label en official "between two competing parents (not filing jointly together), the shorter-residency parent is defeated (152(c)(4)(B)(i))";
+    when base_qualifying_child_of(child, parent, y);
+    when base_qualifying_child_of(child, other_parent, y);
+    when parent != other_parent;
+    when is_parent_of(parent, child);
+    when is_parent_of(other_parent, child);
+    when custody_days_152c4b(parent, child, y, days_p);
+    when custody_days_152c4b(other_parent, child, y, days_o);
+    when days_o > days_p;
+    then not qualifying_child_of(child, parent, y);
+}
+priority LongerResidencyParentOverBaseline {
+    prefer QualifyingChildDefeatedByLongerResidencyParent over QualifyingChildBaseline;
+    reason lex_specialis;
+    label en official "section 152(c)(4)(B)(i): longer residency between competing parents";
+}
+
+@source(IRC_S152_C, quote = "if the child resides with both parents for the same amount of time during such taxable year, the parent with the highest adjusted gross income")
+rule QualifyingChildDefeatedByHigherAgiParentEqualResidency(child: Individual, parent: Individual, other_parent: Individual, y: TaxableYear, days_p: Integer, days_o: Integer, agi_p: Money, agi_o: Money) defeasible {
+    label en official "when residency is equal between two competing parents, the lower-AGI parent is defeated (152(c)(4)(B)(ii))";
+    when base_qualifying_child_of(child, parent, y);
+    when base_qualifying_child_of(child, other_parent, y);
+    when parent != other_parent;
+    when is_parent_of(parent, child);
+    when is_parent_of(other_parent, child);
+    when custody_days_152c4b(parent, child, y, days_p);
+    when custody_days_152c4b(other_parent, child, y, days_o);
+    when days_o == days_p;
+    when adjusted_gross_income(parent, y, agi_p);
+    when adjusted_gross_income(other_parent, y, agi_o);
+    when agi_o > agi_p;
+    then not qualifying_child_of(child, parent, y);
+}
+priority HigherAgiParentEqualResidencyOverBaseline {
+    prefer QualifyingChildDefeatedByHigherAgiParentEqualResidency over QualifyingChildBaseline;
+    reason lex_specialis;
+    label en official "section 152(c)(4)(B)(ii): equal residency, higher AGI parent prevails";
+}
+
+@source(IRC_S152_C, quote = "If the parents of an individual may claim such individual as a qualifying child but no parent so claims the individual, such individual may be claimed as the qualifying child of another taxpayer but only if the adjusted gross income of such taxpayer is higher than the highest adjusted gross income of any parent of the individual.")
+rule QualifyingChildDefeatedByNonClaimingParentWithHigherOrEqualAgi(child: Individual, taxpayer: Individual, parent: Individual, y: TaxableYear, agi_t: Money, agi_p: Money) defeasible {
+    label en official "a non-parent claimant is defeated whenever ANY non-claiming parent's AGI is not lower than the claimant's — equivalent, by De Morgan, to requiring the claimant's AGI to exceed the highest of all such parents' (152(c)(4)(C))";
+    when base_qualifying_child_of(child, taxpayer, y);
+    when not_known(is_parent_of(taxpayer, child));
+    when parent_not_claiming_152c4c(parent, child, y);
+    when is_parent_of(parent, child);
+    when adjusted_gross_income(taxpayer, y, agi_t);
+    when adjusted_gross_income(parent, y, agi_p);
+    when agi_p >= agi_t;
+    then not qualifying_child_of(child, taxpayer, y);
+}
+priority NonClaimingParentAgiOverBaseline {
+    prefer QualifyingChildDefeatedByNonClaimingParentWithHigherOrEqualAgi over QualifyingChildBaseline;
+    reason lex_specialis;
+    label en official "section 152(c)(4)(C): a non-parent's claim requires AGI above every non-claiming parent's";
+}
+
+// --- §152(d): qualifying relative --------------------------------------------
+
+relation bears_relative_relationship_152d2(ind: Individual, taxpayer: Individual) kind empirical {
+    label en official "bears one of the relationships listed in section 152(d)(2)(A)-(H) to the taxpayer";
+}
+relation gross_income_of_individual(ind: Individual, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the individual's own gross income for the calendar year (section 152(d)(1)(B)) — before the (d)(4) sheltered-workshop exclusion for handicapped dependents";
+}
+relation gross_income_of_individual_after_152d4(ind: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the individual's gross income for purposes of section 152(d)(1)(B), after excluding sheltered-workshop income under section 152(d)(4) where applicable";
+}
+@source(IRC_S152_D, quote = "the gross income of an individual who is permanently and totally disabled (as defined in section 22(e)(3)) at any time during the taxable year shall not include income attributable to services performed by the individual at a sheltered workshop if")
+rule GrossIncomeAfterShelteredWorkshopExclusion(ind: Individual, y: TaxableYear, total: Money, workshop_income: Money) strict {
+    label en official "for a permanently and totally disabled individual, sheltered-workshop income within (d)(4)(A)-(B) is excluded from the (d)(1)(B) gross-income test";
+    when permanently_and_totally_disabled_22e3(ind, y);
+    when gross_income_of_individual(ind, y, total);
+    when sheltered_workshop_income_152d4(ind, y, workshop_income);
+    then gross_income_of_individual_after_152d4(ind, y, total - workshop_income);
+}
+@source(IRC_S152_D, quote = "the gross income of an individual who is permanently and totally disabled")
+rule GrossIncomeAfter152d4NotDisabled(ind: Individual, y: TaxableYear, total: Money) strict {
+    label en official "an individual who is not permanently and totally disabled has no (d)(4) exclusion: the (d)(1)(B) figure is the individual's plain gross income";
+    when not_known(permanently_and_totally_disabled_22e3(ind, y));
+    when gross_income_of_individual(ind, y, total);
+    then gross_income_of_individual_after_152d4(ind, y, total);
+}
+relation sheltered_workshop_income_152d4(ind: Individual, y: TaxableYear, amount: Money) kind empirical {
+    label en official "income arising solely from activities at a sheltered workshop (section 501(c)(3)/State-operated school providing disability-alleviating instruction) incident to medical care that is the principal reason for the individual's presence (section 152(d)(4)(A)-(B))";
+}
+
+relation over_half_support_provided_by_taxpayer_152d1c(taxpayer: Individual, ind: Individual, y: TaxableYear) kind institutional {
+    label en official "the taxpayer provides over one-half of the individual's support for the calendar year (section 152(d)(1)(C)), including via the section 152(d)(3) multiple-support-agreement deeming and the (d)(5) alimony/remarriage support rules";
+}
+relation taxpayer_directly_provides_over_half_support(taxpayer: Individual, ind: Individual, y: TaxableYear) kind empirical {
+    label en official "the taxpayer directly provides over one-half of the individual's support for the calendar year, without resort to a multiple-support agreement";
+}
+@source(IRC_S152_D, quote = "with respect to whom the taxpayer provides over one-half of the individual's support for the calendar year")
+rule DirectSupportSatisfies152d1c(taxpayer: Individual, ind: Individual, y: TaxableYear) strict {
+    label en official "direct majority support satisfies (d)(1)(C)";
+    when taxpayer_directly_provides_over_half_support(taxpayer, ind, y);
+    then over_half_support_provided_by_taxpayer_152d1c(taxpayer, ind, y);
+}
+
+// §152(d)(3): multiple support agreement.
+relation no_one_person_contributed_over_half_support(ind: Individual, y: TaxableYear) kind empirical {
+    label en official "no one person contributed over one-half of the individual's support (section 152(d)(3)(A))";
+}
+relation over_half_support_from_persons_each_would_qualify(ind: Individual, y: TaxableYear) kind empirical {
+    label en official "over one-half of such support was received from 2 or more persons each of whom, but for not contributing over one-half alone, would have been entitled to claim the individual as a dependent (section 152(d)(3)(B))";
+}
+relation taxpayer_contributed_over_10_percent_support(taxpayer: Individual, ind: Individual, y: TaxableYear) kind empirical {
+    label en official "the taxpayer contributed over 10 percent of the individual's support for the calendar year (section 152(d)(3)(C))";
+}
+relation other_contributor_files_written_declaration_152d3d(contributor: Individual, ind: Individual, y: TaxableYear) kind empirical {
+    label en official "a person (other than the taxpayer) who contributed over 10 percent of the individual's support files a written declaration that such person will not claim the individual as a dependent for any taxable year beginning in the calendar year (section 152(d)(3)(D))";
+}
+relation all_other_over_10_percent_contributors_declared_152d3d(taxpayer: Individual, ind: Individual, y: TaxableYear) kind empirical {
+    label en official "every other person (besides the taxpayer) who contributed over 10 percent of the individual's support has filed the (d)(3)(D) written declaration — dependency contract on the specific set of other contributors, asserted directly per case rather than derived from an aggregate over `other_contributor_files_written_declaration_152d3d`";
+}
+@source(IRC_S152_D, quote = "over one-half of the support of an individual for a calendar year shall be treated as received from the taxpayer if—")
+rule MultipleSupportAgreementSatisfies152d1c(taxpayer: Individual, ind: Individual, y: TaxableYear) strict {
+    label en official "a multiple support agreement satisfying all four (d)(3) conditions deems over-half support received from the taxpayer";
+    when no_one_person_contributed_over_half_support(ind, y);
+    when over_half_support_from_persons_each_would_qualify(ind, y);
+    when taxpayer_contributed_over_10_percent_support(taxpayer, ind, y);
+    when all_other_over_10_percent_contributors_declared_152d3d(taxpayer, ind, y);
+    then over_half_support_provided_by_taxpayer_152d1c(taxpayer, ind, y);
+}
+
+// §152(d)(5): alimony/remarriage special support rules — these qualify
+// what counts as support FROM a particular person for (d)(1)(C)/(d)(3)/(e);
+// modelled as exception/attribution facts a consumer (or a case) applies
+// when constructing `taxpayer_directly_provides_over_half_support` /
+// `custody`/support totals, rather than a further rule on the same head
+// (avoiding the same-predicate-cycle risk already flagged for §63(c)(5)).
+relation alimony_or_separate_maintenance_payment_152d5b(payor: Individual, payee: Individual, y: TaxableYear, amount: Money) kind empirical {
+    label en official "a payment meeting the section 152(d)(5)(B) definition of 'alimony or separate maintenance payment' (cash, under a divorce/separation instrument, not members of the same household if legally separated, no post-death liability)";
+}
+// (d)(5)(A)(i): such a payment is NOT treated as support of any dependent
+// by the payor spouse — an EXCLUSION from `taxpayer_directly_provides_
+// over_half_support`'s underlying support computation (this package
+// records the qualifying fact; it does not itself total dollar support,
+// which is a per-case aggregate assembled from empirical contribution
+// facts, consistent with (d)(1)(C)'s own EXECUTABLE-via-empirical-total
+// treatment above).
+// (d)(5)(A)(ii): on remarriage, support received from the new spouse of a
+// parent is treated as received from the parent — recorded as the same
+// kind of attribution fact:
+relation support_from_new_spouse_treated_as_from_parent_152d5aii(new_spouse: Individual, parent: Individual, child: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en official "support of a child received from the remarried parent's new spouse is treated as received from the parent (section 152(d)(5)(A)(ii), also section 152(e)(6))";
+}
+@source(IRC_S152_D, quote = "in the case of the remarriage of a parent, support of a child received from the parent's spouse shall be treated as received from the parent")
+rule SupportFromNewSpouseAttributedToParent(new_spouse: Individual, parent: Individual, child: Individual, y: TaxableYear, amount: Money) strict {
+    label en official "support the child receives from a parent's new spouse is attributed to the parent";
+    when child_of_remarried_parent(child, parent, y);
+    when new_spouse_of_parent(new_spouse, parent, y);
+    when support_amount_from_person(new_spouse, child, y, amount);
+    then support_from_new_spouse_treated_as_from_parent_152d5aii(new_spouse, parent, child, y, amount);
+}
+relation child_of_remarried_parent(child: Individual, parent: Individual, y: TaxableYear) kind empirical {
+    label en official "the parent has remarried during the relevant period (section 152(d)(5)(A)(ii)/(e)(6))";
+}
+relation new_spouse_of_parent(new_spouse: Individual, parent: Individual, y: TaxableYear) kind empirical {
+    label en official "the new spouse of the remarried parent";
+}
+relation support_amount_from_person(contributor: Individual, ind: Individual, y: TaxableYear, amount: Money) kind empirical {
+    label en official "an amount of support contributed by this person toward the individual, for the calendar year";
+}
+
+pub relation base_qualifying_relative_of(ind: Individual, taxpayer: Individual, y: TaxableYear) kind institutional {
+    label en official "meets all four conditions of section 152(d)(1)";
+}
+@source(IRC_S152_D, quote = "whose gross income for the calendar year in which such taxable year begins is less than the exemption amount (as defined in section 151(d))")
+rule BaseQualifyingRelativeTest(ind: Individual, taxpayer: Individual, y: TaxableYear, gross: Money, exempt: Money) strict {
+    label en official "the four-part section 152(d)(1) qualifying-relative test";
+    when bears_relative_relationship_152d2(ind, taxpayer);
+    when gross_income_of_individual_after_152d4(ind, y, gross);
+    when base_exemption_amount_151(y, exempt);
+    when gross < exempt;
+    when over_half_support_provided_by_taxpayer_152d1c(taxpayer, ind, y);
+    when not_known(is_qualifying_child_of_someone_base(ind, y));
+    then base_qualifying_relative_of(ind, taxpayer, y);
+}
+@source(IRC_S152_D, quote = "whose gross income for the calendar year in which such taxable year begins is less than the exemption amount (as defined in section 151(d))")
+rule QualifyingRelativeOfFromBase(ind: Individual, taxpayer: Individual, y: TaxableYear) strict {
+    label en official "an individual meeting the base (d)(1) test is the qualifying relative of the claiming taxpayer (no analogous (c)(4)-style multiple-claimant provision exists for qualifying relatives outside the multiple-support-agreement mechanism, which already resolves to a single deemed contributor under (d)(3))";
+    when base_qualifying_relative_of(ind, taxpayer, y);
+    then qualifying_relative_of(ind, taxpayer, y);
+}
+
+// --- §152(e): special rule for divorced parents, etc -------------------------
+
+relation is_custodial_parent_152e4(parent: Individual, child: Individual, y: TaxableYear, custody_days: Integer, other_days: Integer) kind institutional {
+    label en official "the parent having custody for the greater portion of the calendar year (section 152(e)(4)(A))";
+}
+@source(IRC_S152_E, quote = "The term \"custodial parent\" means the parent having custody for the greater portion of the calendar year.")
+rule CustodialParentDefinition(parent: Individual, other_parent: Individual, child: Individual, y: TaxableYear, custody_days: Integer, other_days: Integer) strict {
+    label en official "the parent with more custody days is the custodial parent";
+    when custody_days_152e(parent, child, y, custody_days);
+    when custody_days_152e(other_parent, child, y, other_days);
+    when parent != other_parent;
+    when custody_days > other_days;
+    then is_custodial_parent_152e4(parent, child, y, custody_days, other_days);
+}
+relation custody_days_152e(parent: Individual, child: Individual, y: TaxableYear, days: Integer) kind empirical {
+    label en official "the number of days during the calendar year the child was in this parent's custody (section 152(e)(4))";
+}
+
+relation child_receives_over_half_support_from_parents_152e1a(child: Individual, parent1: Individual, parent2: Individual, y: TaxableYear) kind empirical {
+    label en official "a child receives over one-half of the child's support during the calendar year from the child's parents (section 152(e)(1)(A))";
+}
+relation parents_divorced_or_legally_separated(parent1: Individual, parent2: Individual, y: TaxableYear) kind empirical {
+    label en official "divorced or legally separated under a decree of divorce or separate maintenance (section 152(e)(1)(A)(i))";
+}
+relation parents_separated_under_written_agreement(parent1: Individual, parent2: Individual, y: TaxableYear) kind empirical {
+    label en official "separated under a written separation agreement (section 152(e)(1)(A)(ii))";
+}
+relation parents_live_apart_last_six_months(parent1: Individual, parent2: Individual, y: TaxableYear) kind empirical {
+    label en official "live apart at all times during the last 6 months of the calendar year (section 152(e)(1)(A)(iii))";
+}
+relation parents_within_152e1a(parent1: Individual, parent2: Individual, y: TaxableYear) kind institutional {
+    label en official "the parents are within one of the three section 152(e)(1)(A) circumstances";
+}
+@source(IRC_S152_E, quote = "who are divorced or legally separated under a decree of divorce or separate maintenance")
+rule ParentsWithinE1aDivorced(parent1: Individual, parent2: Individual, y: TaxableYear) strict {
+    label en official "divorced or legally separated satisfies (e)(1)(A)";
+    when parents_divorced_or_legally_separated(parent1, parent2, y);
+    then parents_within_152e1a(parent1, parent2, y);
+}
+@source(IRC_S152_E, quote = "who are separated under a written separation agreement")
+rule ParentsWithinE1aWrittenAgreement(parent1: Individual, parent2: Individual, y: TaxableYear) strict {
+    label en official "separated under a written separation agreement satisfies (e)(1)(A)";
+    when parents_separated_under_written_agreement(parent1, parent2, y);
+    then parents_within_152e1a(parent1, parent2, y);
+}
+@source(IRC_S152_E, quote = "who live apart at all times during the last 6 months of the calendar year")
+rule ParentsWithinE1aLiveApart(parent1: Individual, parent2: Individual, y: TaxableYear) strict {
+    label en official "living apart the last 6 months of the calendar year satisfies (e)(1)(A)";
+    when parents_live_apart_last_six_months(parent1, parent2, y);
+    then parents_within_152e1a(parent1, parent2, y);
+}
+
+relation child_in_custody_more_than_half_year_152e1b(child: Individual, parent1: Individual, parent2: Individual, y: TaxableYear) kind empirical {
+    label en official "the child is in the custody of 1 or both of the child's parents for more than one-half of the calendar year (section 152(e)(1)(B))";
+}
+
+// §152(e)(2): exception where custodial parent releases claim to exemption.
+relation custodial_parent_signs_written_declaration_152e2a(custodial: Individual, child: Individual, y: TaxableYear) kind empirical {
+    label en official "the custodial parent signs a written declaration that the custodial parent will not claim the child as a dependent (section 152(e)(2)(A))";
+}
+relation noncustodial_parent_attaches_declaration_152e2b(noncustodial: Individual, child: Individual, y: TaxableYear) kind empirical {
+    label en official "the noncustodial parent attaches the written declaration to the noncustodial parent's return for the taxable year (section 152(e)(2)(B))";
+}
+
+// §152(e)(3): exception for certain pre-1985 instruments.
+relation qualified_pre_1985_instrument_provides_noncustodial_entitlement(parent1: Individual, parent2: Individual, y: TaxableYear) kind empirical {
+    label en official "a qualified pre-1985 instrument between the parents provides the noncustodial parent shall be entitled to the section 151 deduction for the child, executed before January 1, 1985 and not later modified to disclaim this paragraph (section 152(e)(3)(A)(i), (B))";
+}
+relation noncustodial_provided_at_least_600_support_152e3aii(noncustodial: Individual, child: Individual, y: TaxableYear) kind empirical {
+    label en official "the noncustodial parent provides at least $600 for the support of the child during the calendar year (section 152(e)(3)(A)(ii))";
+}
+
+pub relation noncustodial_parent_release_152e(child: Individual, noncustodial: Individual, y: TaxableYear) kind institutional {
+    label en official "the child is treated as being the qualifying child or qualifying relative of the noncustodial parent under section 152(e), notwithstanding (c)(1)(B), (c)(4), or (d)(1)(C)";
+}
+
+@source(IRC_S152_E, quote = "the custodial parent signs a written declaration (in such manner and form as the Secretary may by regulations prescribe) that such custodial parent will not claim such child as a dependent for any taxable year beginning in such calendar year")
+rule Section152EReleaseByDeclaration(child: Individual, custodial: Individual, noncustodial: Individual, y: TaxableYear, custody_days_c: Integer, custody_days_n: Integer) strict {
+    label en official "release of claim under the (e)(2) written-declaration exception";
+    when child_receives_over_half_support_from_parents_152e1a(child, custodial, noncustodial, y);
+    when parents_within_152e1a(custodial, noncustodial, y);
+    when child_in_custody_more_than_half_year_152e1b(child, custodial, noncustodial, y);
+    when is_custodial_parent_152e4(custodial, child, y, custody_days_c, custody_days_n);
+    when custodial_parent_signs_written_declaration_152e2a(custodial, child, y);
+    when noncustodial_parent_attaches_declaration_152e2b(noncustodial, child, y);
+    when not_known(multiple_support_agreement_defeats_152e(child, y));
+    then noncustodial_parent_release_152e(child, noncustodial, y);
+}
+
+@source(IRC_S152_E, quote = "a qualified pre-1985 instrument between the parents applicable to the taxable year beginning in such calendar year provides that the noncustodial parent shall be entitled to any deduction allowable under section 151 for such child, and")
+rule Section152EReleaseByPre1985Instrument(child: Individual, custodial: Individual, noncustodial: Individual, y: TaxableYear, custody_days_c: Integer, custody_days_n: Integer) strict {
+    label en official "release of claim under the (e)(3) pre-1985-instrument exception";
+    when child_receives_over_half_support_from_parents_152e1a(child, custodial, noncustodial, y);
+    when parents_within_152e1a(custodial, noncustodial, y);
+    when child_in_custody_more_than_half_year_152e1b(child, custodial, noncustodial, y);
+    when is_custodial_parent_152e4(custodial, child, y, custody_days_c, custody_days_n);
+    when qualified_pre_1985_instrument_provides_noncustodial_entitlement(custodial, noncustodial, y);
+    when noncustodial_provided_at_least_600_support_152e3aii(noncustodial, child, y);
+    when not_known(multiple_support_agreement_defeats_152e(child, y));
+    then noncustodial_parent_release_152e(child, noncustodial, y);
+}
+
+relation multiple_support_agreement_defeats_152e(child: Individual, y: TaxableYear) kind empirical {
+    label en official "over one-half of the child's support is treated as received from a taxpayer under the (d)(3) multiple-support agreement — section 152(e) does not apply in that case (section 152(e)(5))";
+}
+
+@source(IRC_S152_E, quote = "such child shall be treated as being the qualifying child or qualifying relative of the noncustodial parent")
+rule QualifyingChildOfNoncustodialParentUnder152e(child: Individual, noncustodial: Individual, y: TaxableYear) strict {
+    label en official "section 152(e) overrides (c)(1)(B) (abode) and (c)(4) (tie-break): a released child is the noncustodial parent's qualifying child if the remaining (c)(1) conditions are met";
+    when noncustodial_parent_release_152e(child, noncustodial, y);
+    when qualifying_child_relationship(child, noncustodial);
+    when meets_qualifying_child_age_requirement(child, noncustodial, y);
+    when not_provided_over_half_own_support_152c1d(child, y);
+    when not_known(filed_joint_return_other_than_refund_claim_152c1e(child, y));
+    then qualifying_child_of(child, noncustodial, y);
+}
+
+@source(IRC_S152_E, quote = "such child shall be treated as being the qualifying child or qualifying relative of the noncustodial parent")
+rule QualifyingRelativeOfNoncustodialParentUnder152e(child: Individual, noncustodial: Individual, y: TaxableYear, gross: Money, exempt: Money) strict {
+    label en official "section 152(e) overrides (d)(1)(C) (support): a released child is the noncustodial parent's qualifying relative if the remaining (d)(1) conditions are met";
+    when noncustodial_parent_release_152e(child, noncustodial, y);
+    when bears_relative_relationship_152d2(child, noncustodial);
+    when gross_income_of_individual_after_152d4(child, y, gross);
+    when base_exemption_amount_151(y, exempt);
+    when gross < exempt;
+    when not_known(is_qualifying_child_of_someone_base(child, y));
+    then qualifying_relative_of(child, noncustodial, y);
+}
+
+// --- G285 bridge: s63-taxable-income.law's stage-1 claimed_as_dependent_151 --
+//
+// s63-taxable-income.law (stage 1) declared `claimed_as_dependent_151(p, y)`
+// as a producer-unresolved dependency contract for the section 63(c)(5)
+// dependent standard-deduction cap. This stage now HAS the real dependent
+// determination (`dependent_of`); bridge it here (same package, no edit to
+// s63's own file needed) rather than leaving the stage-1 relation dangling.
+// Reads `is_dependent_of_anyone_base` (not the fully resolved `dependent_of`)
+// for the same LDC-E4103/range-restriction reasons documented above for
+// `known_individual_for_151` — `claimed_as_dependent_151` only needs to know
+// THAT some section 151 deduction is allowable to another taxpayer, not
+// which one, so the base predicate is an exact (not approximate) match here.
+@source(IRC_S63_C, quote = "the basic standard deduction applicable to such individual for such individual's taxable year shall not exceed the greater of")
+rule ClaimedAsDependent151ViaBase(p: Individual, y: TaxableYear) strict {
+    label en official "bridges section 63(c)(5)'s claimed_as_dependent_151 to this stage's section 152 dependent determination (G285)";
+    when is_dependent_of_anyone_base(p, y);
+    then claimed_as_dependent_151(p, y);
+}
+
+// --- §152(f): other definitions and rules ------------------------------------
+
+// (f)(1)(A)-(C) "child" defined — folded (per the module-header judgment
+// call) into `bears_child_relationship_152c2a`/`child_within_meaning_of_
+// 152f1b`'s own labels as the case-asserted primitive; classification =
+// NON_NORMATIVE glossary content consumed by those facts' labels (same
+// treatment as section 66(d)(2)-(3) in `s66-community-income.law`).
+
+// (f)(3): household-status exception — folds into `member_of_taxpayers_
+// household`/`same_principal_abode_more_than_half_year` as an exclusion a
+// case must respect when asserting those facts (relationship in violation
+// of local law is not a "household member"); no separate rule head is
+// added (same-predicate-cycle avoidance, as with (e)(5)/(d)(5) above).
+// classification = EXECUTABLE (fact-level exclusion), folded not separately
+// ruled.
+
+// (f)(4): "brother"/"sister" include half-blood — NON_NORMATIVE glossary,
+// folded into `bears_sibling_relationship_152c2b`'s label (the case fact
+// already covers half-blood siblings by its own definition scope).
+
+// (f)(5): scholarship exclusion from the support tests.
+relation scholarship_income_170b1aii_152f5(child: Individual, y: TaxableYear, amount: Money) kind empirical {
+    label en official "amounts received as scholarships for study at an educational organization described in section 170(b)(1)(A)(ii), by a child of the taxpayer who is a student (section 152(f)(5))";
+}
+// This is an EXCLUSION from the (c)(1)(D)/(d)(1)(C) support computations,
+// not a further conclusion on `not_provided_over_half_own_support_152c1d`/
+// `taxpayer_directly_provides_over_half_support` (same-predicate-cycle
+// avoidance): a case computing "own support provided" for a student child
+// of the taxpayer must exclude `scholarship_income_170b1aii_152f5` amounts
+// from the individual's own contribution when asserting
+// `not_provided_over_half_own_support_152c1d`. Declared and anchored here;
+// classification = EXECUTABLE (fact declared, consuming computation is the
+// case/consumer's responsibility, consistent with (d)(5) above).
+
+// (f)(6): treatment of missing (kidnapped) children.
+relation child_presumed_kidnapped_by_non_family_member(child: Individual, taxpayer: Individual) kind empirical {
+    label en official "presumed by law enforcement authorities to have been kidnapped by someone who is not a member of the family of the child or the taxpayer (section 152(f)(6)(A)(i)/(C)(i))";
+}
+relation had_same_abode_before_kidnapping_more_than_half_portion(child: Individual, taxpayer: Individual, y: TaxableYear) kind empirical {
+    label en official "had, for the taxable year of the kidnapping, the same principal place of abode as the taxpayer for more than one-half of the portion of the year before the kidnapping date (section 152(f)(6)(A)(ii))";
+}
+relation was_qualifying_relative_before_kidnapping_152f6c(child: Individual, taxpayer: Individual, y: TaxableYear) kind empirical {
+    label en official "was (without regard to this paragraph) a qualifying relative of the taxpayer for the portion of the taxable year before the kidnapping (section 152(f)(6)(C)(ii))";
+}
+relation kidnapping_treatment_terminated_152f6d(child: Individual, y: TaxableYear) kind empirical {
+    label en official "there is a determination that the child is dead, or the child would have attained age 18, as of the first taxable year beginning after that calendar year — terminates the (f)(6)(A)/(C) deeming (section 152(f)(6)(D))";
+}
+@source(IRC_S152_F, quote = "shall be treated as meeting the requirement of subsection (c)(1)(B) with respect to a taxpayer for all taxable years ending during the period that the child is kidnapped")
+rule MissingChildDeemedSameAbode(child: Individual, taxpayer: Individual, y: TaxableYear) strict {
+    label en official "a kidnapped child who had the pre-kidnapping abode with the taxpayer is deemed to meet the (c)(1)(B) abode test for all taxable years ending during the kidnapping, until termination under (f)(6)(D)";
+    when child_presumed_kidnapped_by_non_family_member(child, taxpayer);
+    when had_same_abode_before_kidnapping_more_than_half_portion(child, taxpayer, y);
+    when not_known(kidnapping_treatment_terminated_152f6d(child, y));
+    then same_principal_abode_more_than_half_year(child, taxpayer, y);
+}
+@source(IRC_S152_F, quote = "was (without regard to this paragraph) a qualifying relative of the taxpayer for the portion of the taxable year before the date of the kidnapping")
+rule MissingChildDeemedQualifyingRelative(child: Individual, taxpayer: Individual, y: TaxableYear) strict {
+    label en official "a kidnapped child who was a qualifying relative before the kidnapping remains one for all taxable years ending during the kidnapping, until termination under (f)(6)(D)";
+    when child_presumed_kidnapped_by_non_family_member(child, taxpayer);
+    when was_qualifying_relative_before_kidnapping_152f6c(child, taxpayer, y);
+    when not_known(kidnapping_treatment_terminated_152f6d(child, y));
+    then qualifying_relative_of(child, taxpayer, y);
+}
+
+// (f)(6)(B): the missing-children deeming applies "solely for the purposes"
+// of section 151(c), the section 24 child tax credit, section 2 filing
+// status, and the section 32 earned income credit — a scope-limiting
+// cross-reference, not itself a separate rule; NON_NORMATIVE (pure scoping
+// text, already respected because `MissingChildDeemedSameAbode` only feeds
+// `same_principal_abode_more_than_half_year`, which this package's own
+// (c)(1)(B) test consumes; sections 24/2/32 are owned elsewhere and must
+// import this package's `qualifying_child_of`/`same_principal_abode_more_
+// than_half_year` directly rather than re-deriving the (f)(6) deeming).
+
+// (f)(7): cross references to sections 105(b), 132(h)(2)(B), 213(d)(5) —
+// NON_NORMATIVE (a "see also" pointer, no independent normative content).

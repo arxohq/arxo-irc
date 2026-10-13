@@ -1,0 +1,609 @@
+// 26 U.S.C. §705(a)(1)(C), (a)(3); §731(c)(4)(B); §732(c)(1)-(3); §732(f)(3)(B), (f)(7); §755(b)
+// (stage 4, DECISION-0379 with deontics, 26.09.2026: the TECH_GAP rows of partnerships).
+//
+// TECHNIQUE.
+//  - Depletion (§705): the depletion figures are read from the published surface of `us.irc.accounting`
+//    (`depletion_deduction`, `is_oil_or_gas_property`), not re-derived. A partner's proportionate share of the
+//    adjusted basis of partnership property is the interest share (`partnership_interest_share`) times the basis
+//    of the property (JUDGMENT CALL: section 613A(c)(7)(D) says "in accordance with his interest in partnership
+//    capital"; the interest share of `us.irc.core::ownership_interest` is the capital share the package uses
+//    elsewhere).
+//  - Allocation among N properties (§732(c), §731(c)(4)(B), §732(f)): no unrolling is needed for the properties
+//    of one bucket: the bucket totals are aggregates over the properties the case lists
+//    (`distributed_property_bucket_732c`), and each property's share is the exact proportion
+//    `div_round(part * (own / 1 USD), total / 1 USD, 2, "HALF_UP")` (the corpus money form of
+//    docs/research/constructs/21-expressions-quantities/). Per-property amounts are rounded to cents: their sum can differ
+//    from the target by cents (JUDGMENT CALL; the statute names no residual rule). The statute orders the layers
+//    (appreciation first, then fair market value; depreciation first, then adjusted basis AS ADJUSTED under the
+//    first layer, which the two-property rules of module 10 approximate by the unadjusted basis).
+//  - Bounded years/properties: the §732(f)(7) chain of controlled corporations is unrolled to the distributed
+//    corporation and TWO controlled tiers (recorded in the coverage row); the §755(b) spillover covers the first
+//    THREE subsequently acquired properties of the class.
+//
+// The two-property rules of module 10 stay as they are: they conclude `distributed_properties_basis` for a pair
+// the case names with `distributed_other_properties_pair`; the rules below conclude `section_732c_property_basis`
+// for any set the case lists with `distributed_property_bucket_732c` (a case that lists both gets both answers,
+// which agree where the pair is the whole bucket).
+
+language "law.core" version "0.2";
+package us.irc.partnerships version "0.1.1";
+namespace "urn:us:irc:partnerships:clir";
+
+use self::{
+    Asset,
+    IRC_S705_A,
+    IRC_S731_C,
+    IRC_S732_C,
+    IRC_S732_F,
+    IRC_S755_B,
+    Partnership,
+    Person,
+    Section755LikeCharacterClass,
+    TaxableYear,
+    Transaction,
+    distributed_property_basis,
+    distributed_property_pre_limitation_basis,
+    distributee_outside_basis_before_distribution,
+    distribution_gain_recognized,
+    marketable_security_distributed_property,
+    money_distributed,
+    outside_basis_start,
+    partnership_interest_share,
+    property_fmv_at_distribution_732,
+    section_731c_money_treated_amount,
+    section_732c_unrealized_appreciation,
+    section_732c_unrealized_depreciation,
+    section_732f_reduction_applied,
+    section_755_allocated_adjustment,
+    section_755_property_class,
+};
+
+// ============================================================================
+// §705(a)(1)(C), (a)(3): depletion and the basis of the partner's interest
+// ============================================================================
+
+pub relation partnership_depletable_property_basis(pship: Partnership, asset: Asset, y: TaxableYear, basis: Money) kind empirical {
+    label en unofficial "the adjusted basis of the partnership property subject to depletion for the year (case-asserted; section 705(a)(1)(C), section 613A(c)(7)(D))";
+}
+pub relation partner_share_of_depletable_property_basis_705(partner: Person, pship: Partnership, y: TaxableYear, asset: Asset, basis_share: Money) kind institutional {
+    label en official "the partner's proportionate share of the adjusted basis of the partnership property subject to depletion (section 613A(c)(7)(D)): the interest share times the basis (JUDGMENT CALL)";
+}
+@source(IRC_S705_A, relation = formalizes, coverage = partial, quote = "the excess of the deductions for depletion over the basis of the property subject to depletion;")
+rule PartnerShareOfDepletableBasis(partner: Person, pship: Partnership, y: TaxableYear, asset: Asset, basis: Money, share: Decimal) defeasible {
+    label en official "section 613A(c)(7)(D): the partner's share of the property basis";
+    when partnership_depletable_property_basis(pship, asset, y, basis);
+    when partnership_interest_share(partner, pship, share);
+    then partner_share_of_depletable_property_basis_705(partner, pship, y, asset, round(basis * share, 2, "HALF_UP"));
+}
+pub relation partner_share_of_partnership_depletion_705a1C(partner: Person, pship: Partnership, y: TaxableYear, asset: Asset, amount: Money) kind institutional {
+    label en official "the partner's distributive share of the partnership's deduction for depletion of the property (a property that is not oil or gas: the partnership computes the depletion), read from the published depletion figure of us.irc.accounting";
+}
+rule PartnerShareOfPartnershipDepletion(partner: Person, pship: Partnership, y: TaxableYear, asset: Asset, total: Money, share: Decimal) defeasible {
+    label en official "section 705(a)(1)(C): the interest share of the partnership's depletion deduction";
+    when us.irc.accounting::depletion_deduction(pship, asset, y, total);
+    when partnership_interest_share(partner, pship, share);
+    when not_known(us.irc.accounting::is_oil_or_gas_property(pship, asset));
+    then partner_share_of_partnership_depletion_705a1C(partner, pship, y, asset, round(total * share, 2, "HALF_UP"));
+}
+pub relation depletion_excess_over_basis_705a1C(partner: Person, pship: Partnership, y: TaxableYear, asset: Asset, excess: Money) kind institutional {
+    label en official "the excess of the deductions for depletion over the basis of the property subject to depletion, for one property (section 705(a)(1)(C))";
+}
+@source(IRC_S705_A, relation = formalizes, coverage = exact, quote = "(C) the excess of the deductions for depletion over the basis of the property subject to depletion;")
+rule DepletionExcessOverBasis(partner: Person, pship: Partnership, y: TaxableYear, asset: Asset, dep: Money, basis: Money) defeasible {
+    label en official "section 705(a)(1)(C)";
+    when partner_share_of_partnership_depletion_705a1C(partner, pship, y, asset, dep);
+    when partner_share_of_depletable_property_basis_705(partner, pship, y, asset, basis);
+    when dep > basis;
+    then depletion_excess_over_basis_705a1C(partner, pship, y, asset, dep - basis);
+}
+pub relation outside_basis_depletion_increase_705a1C(partner: Person, pship: Partnership, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the increase of the basis of the partner's interest under section 705(a)(1)(C): the depletion excess over the properties, zero when there is none";
+}
+@source(IRC_S705_A, relation = formalizes, coverage = exact, quote = "(C) the excess of the deductions for depletion over the basis of the property subject to depletion;")
+rule OutsideBasisDepletionIncrease(partner: Person, pship: Partnership, y: TaxableYear, start: Money) defeasible {
+    label en official "section 705(a)(1)(C): the sum over the partnership properties";
+    when outside_basis_start(partner, pship, y, start);
+    then outside_basis_depletion_increase_705a1C(partner, pship, y,
+        sum(collect all e: Money, a: Asset where depletion_excess_over_basis_705a1C(partner, pship, y, a, e), empty: 0.00 USD));
+}
+pub relation partner_oil_gas_depletion_within_basis_705a3(partner: Person, pship: Partnership, y: TaxableYear, asset: Asset, amount: Money) kind institutional {
+    label en official "the partner's deduction for depletion of a partnership oil and gas property, to the extent it does not exceed the partner's proportionate share of the adjusted basis of the property (section 705(a)(3))";
+}
+@source(IRC_S705_A, relation = formalizes, coverage = exact, quote = "(3) decreased (but not below zero) by the amount of the partner's deduction for depletion for any partnership oil and gas property to the extent such deduction does not exceed the proportionate share of the adjusted basis of such property allocated to such partner under section 613A(c)(7)(D).")
+rule PartnerOilGasDepletionWithinBasis(partner: Person, pship: Partnership, y: TaxableYear, asset: Asset, dep: Money, basis: Money) defeasible {
+    label en official "section 705(a)(3): min(the partner's depletion, the partner's share of the basis)";
+    when us.irc.accounting::is_oil_or_gas_property(partner, asset);
+    when us.irc.accounting::depletion_deduction(partner, asset, y, dep);
+    when partner_share_of_depletable_property_basis_705(partner, pship, y, asset, basis);
+    then partner_oil_gas_depletion_within_basis_705a3(partner, pship, y, asset, min(dep, basis));
+}
+pub relation outside_basis_depletion_decrease_705a3(partner: Person, pship: Partnership, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the decrease of the basis of the partner's interest under section 705(a)(3): the oil and gas depletion within basis over the properties, zero when there is none";
+}
+@source(IRC_S705_A, relation = formalizes, coverage = exact, quote = "(3) decreased (but not below zero) by the amount of the partner's deduction for depletion for any partnership oil and gas property")
+rule OutsideBasisDepletionDecrease(partner: Person, pship: Partnership, y: TaxableYear, start: Money) defeasible {
+    label en official "section 705(a)(3): the sum over the partnership oil and gas properties";
+    when outside_basis_start(partner, pship, y, start);
+    then outside_basis_depletion_decrease_705a3(partner, pship, y,
+        sum(collect all d: Money, a: Asset where partner_oil_gas_depletion_within_basis_705a3(partner, pship, y, a, d), empty: 0.00 USD));
+}
+
+// ============================================================================
+// §731(c)(4)(B): the increase in basis attributable to the gain is allocated among the marketable securities
+// ============================================================================
+
+pub relation marketable_security_fmv_731c4(t: Transaction, prop: Asset, fmv: Money) kind empirical {
+    label en unofficial "the fair market value of the distributed marketable security (case-asserted; section 731(c)(4)(B) input)";
+}
+pub relation marketable_securities_gain_recognized_731c4(t: Transaction, pship: Partnership, partner: Person, gain: Money) kind institutional {
+    label en official "the gain recognized under section 731(c) on the marketable securities treated as money: the gain recognized on the distribution, not above the amounts treated as money (JUDGMENT CALL: money is taken first, so the gain attributable to the securities is the excess over the gain the money alone would give; here bounded by the securities' amounts)";
+}
+@source(IRC_S731_C, relation = formalizes, coverage = partial, quote = "Any increase in basis attributable to the gain described in subparagraph (A)(ii)")
+rule MarketableSecuritiesGainRecognized(t: Transaction, pship: Partnership, partner: Person, gain: Money, s0: Asset, m0: Money) defeasible {
+    label en official "section 731(c)(4)(A)(ii): the recognized gain, up to the total treated as money";
+    when distribution_gain_recognized(t, pship, partner, gain);
+    when section_731c_money_treated_amount(t, pship, partner, s0, m0);
+    then marketable_securities_gain_recognized_731c4(t, pship, partner,
+        min(gain, sum(collect all m: Money, p: Asset where section_731c_money_treated_amount(t, pship, partner, p, m), empty: 0.00 USD)));
+}
+pub relation security_unrealized_appreciation_731c4B(t: Transaction, pship: Partnership, partner: Person, prop: Asset, amount: Money) kind institutional {
+    label en official "the unrealized appreciation of the distributed marketable security before the increase: its fair market value less its section 732 basis, not below zero (section 731(c)(4)(B))";
+}
+rule SecurityUnrealizedAppreciation(t: Transaction, pship: Partnership, partner: Person, prop: Asset, fmv: Money, basis: Money) defeasible {
+    when marketable_security_distributed_property(t, pship, partner, prop);
+    when marketable_security_fmv_731c4(t, prop, fmv);
+    when distributed_property_basis(t, pship, partner, prop, basis);
+    then security_unrealized_appreciation_731c4B(t, pship, partner, prop, max(0 USD, fmv - basis));
+}
+pub relation section_731c4B_basis_increase(t: Transaction, pship: Partnership, partner: Person, prop: Asset, amount: Money) kind institutional {
+    label en official "the part of the basis increase attributable to the gain that is allocated to the security in proportion to the unrealized appreciation of the securities before the increase (section 731(c)(4)(B))";
+}
+@source(IRC_S731_C, relation = formalizes, coverage = exact, quote = "shall be allocated to marketable securities in proportion to their respective amounts of unrealized appreciation before such increase.")
+rule S731c4BAllocation(t: Transaction, pship: Partnership, partner: Person, prop: Asset, gain: Money, app: Money, total_app: Money) defeasible {
+    label en official "section 731(c)(4)(B): gain x (own appreciation / total appreciation), cents HALF_UP (JUDGMENT CALL: a residual of cents is not assigned)";
+    when marketable_securities_gain_recognized_731c4(t, pship, partner, gain);
+    when security_unrealized_appreciation_731c4B(t, pship, partner, prop, app);
+    when total_marketable_security_appreciation_731c4B(t, pship, partner, total_app);
+    when total_app > 0 USD;
+    then section_731c4B_basis_increase(t, pship, partner, prop, div_round(gain * (app / 1.00 USD), total_app / 1.00 USD, 2, "HALF_UP"));
+}
+pub relation total_marketable_security_appreciation_731c4B(t: Transaction, pship: Partnership, partner: Person, total: Money) kind institutional {
+    label en unofficial "the total unrealized appreciation of the distributed marketable securities";
+}
+rule TotalMarketableSecurityAppreciation(t: Transaction, pship: Partnership, partner: Person, p0: Asset, a0: Money) defeasible {
+    when security_unrealized_appreciation_731c4B(t, pship, partner, p0, a0);
+    then total_marketable_security_appreciation_731c4B(t, pship, partner,
+        sum(collect all a: Money, p: Asset where security_unrealized_appreciation_731c4B(t, pship, partner, p, a), empty: 0.00 USD));
+}
+pub relation section_731c4_basis_allocated(t: Transaction, pship: Partnership, partner: Person, prop: Asset, amount: Money) kind institutional {
+    label en official "the basis of a distributed marketable security with the increase for the gain allocated to it by section 731(c)(4)(B): its section 732 basis plus its allocated part";
+}
+@source(IRC_S731_C, relation = formalizes, coverage = exact, quote = "The basis of marketable securities with respect to which gain is recognized by reason of this subsection shall be—")
+rule S731c4BasisAllocated(t: Transaction, pship: Partnership, partner: Person, prop: Asset, basis732: Money, inc: Money) defeasible {
+    label en official "section 731(c)(4)(A) with (B)";
+    when distributed_property_basis(t, pship, partner, prop, basis732);
+    when section_731c4B_basis_increase(t, pship, partner, prop, inc);
+    then section_731c4_basis_allocated(t, pship, partner, prop, basis732 + inc);
+}
+
+// ============================================================================
+// §732(c): allocation of basis among any number of distributed properties
+// ============================================================================
+
+pub enum PropertyBucket732c { HotAssets; OtherProperties; }
+pub relation distributed_property_bucket_732c(t: Transaction, pship: Partnership, partner: Person, prop: Asset, bucket: PropertyBucket732c) kind empirical {
+    label en unofficial "the distributed property and its bucket: unrealized receivables and inventory items (section 732(c)(1)(A), HotAssets) or other distributed property (section 732(c)(1)(B), OtherProperties); one fact per property, any number of properties";
+}
+pub relation section_732c_total_basis_to_allocate(t: Transaction, pship: Partnership, partner: Person, amount: Money) kind institutional {
+    label en official "the basis to be allocated among the distributed properties: the basis of the partner's interest before the distribution less the money distributed in the same transaction, not below zero (section 732(a)(2), (b), (c)(1) chapeau)";
+}
+rule S732cTotalBasisToAllocate(t: Transaction, pship: Partnership, partner: Person, outside: Money, money: Money) defeasible {
+    label en official "section 732(c)(1): outside basis less money";
+    when distributed_property_bucket_732c(t, pship, partner, _, _);
+    when distributee_outside_basis_before_distribution(t, pship, partner, outside);
+    when money_distributed(t, pship, partner, money);
+    then section_732c_total_basis_to_allocate(t, pship, partner, max(0 USD, outside - money));
+}
+relation bucket_basis_total_732c(t: Transaction, pship: Partnership, partner: Person, bucket: PropertyBucket732c, total: Money) kind institutional {
+    label en unofficial "the sum of the partnership's adjusted bases of the distributed properties of the bucket";
+}
+rule BucketBasisTotal(t: Transaction, pship: Partnership, partner: Person, bucket: PropertyBucket732c, p0: Asset) defeasible {
+    when distributed_property_bucket_732c(t, pship, partner, p0, bucket);
+    then bucket_basis_total_732c(t, pship, partner, bucket,
+        sum(collect all b: Money, p: Asset where distributed_property_bucket_732c(t, pship, partner, p, bucket) and distributed_property_pre_limitation_basis(t, pship, p, b), empty: 0.00 USD));
+}
+relation bucket_fmv_total_732c(t: Transaction, pship: Partnership, partner: Person, bucket: PropertyBucket732c, total: Money) kind institutional {
+    label en unofficial "the sum of the fair market values of the distributed properties of the bucket";
+}
+rule BucketFmvTotal(t: Transaction, pship: Partnership, partner: Person, bucket: PropertyBucket732c, p0: Asset) defeasible {
+    when distributed_property_bucket_732c(t, pship, partner, p0, bucket);
+    then bucket_fmv_total_732c(t, pship, partner, bucket,
+        sum(collect all f: Money, p: Asset where distributed_property_bucket_732c(t, pship, partner, p, bucket) and property_fmv_at_distribution_732(t, p, f), empty: 0.00 USD));
+}
+relation bucket_appreciation_total_732c(t: Transaction, pship: Partnership, partner: Person, bucket: PropertyBucket732c, total: Money) kind institutional {
+    label en unofficial "the sum of the unrealized appreciation of the distributed properties of the bucket";
+}
+rule BucketAppreciationTotal(t: Transaction, pship: Partnership, partner: Person, bucket: PropertyBucket732c, p0: Asset) defeasible {
+    when distributed_property_bucket_732c(t, pship, partner, p0, bucket);
+    then bucket_appreciation_total_732c(t, pship, partner, bucket,
+        sum(collect all a: Money, p: Asset where distributed_property_bucket_732c(t, pship, partner, p, bucket) and section_732c_unrealized_appreciation(t, p, a), empty: 0.00 USD));
+}
+relation bucket_depreciation_total_732c(t: Transaction, pship: Partnership, partner: Person, bucket: PropertyBucket732c, total: Money) kind institutional {
+    label en unofficial "the sum of the unrealized depreciation of the distributed properties of the bucket";
+}
+rule BucketDepreciationTotal(t: Transaction, pship: Partnership, partner: Person, bucket: PropertyBucket732c, p0: Asset) defeasible {
+    when distributed_property_bucket_732c(t, pship, partner, p0, bucket);
+    then bucket_depreciation_total_732c(t, pship, partner, bucket,
+        sum(collect all d: Money, p: Asset where distributed_property_bucket_732c(t, pship, partner, p, bucket) and section_732c_unrealized_depreciation(t, p, d), empty: 0.00 USD));
+}
+pub relation bucket_target_basis_732c(t: Transaction, pship: Partnership, partner: Person, bucket: PropertyBucket732c, target: Money) kind institutional {
+    label en official "the basis that the properties of the bucket receive together: the hot assets take the basis to be allocated up to the sum of their adjusted bases (section 732(c)(1)(A)); the other properties take what remains (section 732(c)(1)(B))";
+}
+@source(IRC_S732_C, relation = formalizes, coverage = exact, quote = "(A)(i) first to any unrealized receivables (as defined in section 751(c)) and inventory items (as defined in section 751(d)) in an amount equal to the adjusted basis of each such property to the partnership, and")
+rule HotAssetsTargetBasis(t: Transaction, pship: Partnership, partner: Person, total: Money, hot_sum: Money) defeasible {
+    label en official "section 732(c)(1)(A): the hot assets get the lesser of the basis to allocate and the sum of their adjusted bases (equal bases when the basis suffices, a decrease under (3) when it does not)";
+    when section_732c_total_basis_to_allocate(t, pship, partner, total);
+    when bucket_basis_total_732c(t, pship, partner, HotAssets, hot_sum);
+    then bucket_target_basis_732c(t, pship, partner, HotAssets, min(total, hot_sum));
+}
+@source(IRC_S732_C, relation = formalizes, coverage = exact, quote = "(B) to the extent of any basis remaining after the allocation under subparagraph (A), to other distributed properties—")
+rule OtherPropertiesTargetBasis(t: Transaction, pship: Partnership, partner: Person, total: Money, other_sum: Money) defeasible {
+    label en official "section 732(c)(1)(B): the basis remaining after subparagraph (A), or all of it when there is no hot asset";
+    when section_732c_total_basis_to_allocate(t, pship, partner, total);
+    when bucket_basis_total_732c(t, pship, partner, OtherProperties, other_sum);
+    then bucket_target_basis_732c(t, pship, partner, OtherProperties,
+        max(0 USD, total - sum(collect all b: Money, p: Asset where distributed_property_bucket_732c(t, pship, partner, p, HotAssets) and distributed_property_pre_limitation_basis(t, pship, p, b), empty: 0.00 USD)));
+}
+pub relation section_732c_property_basis(t: Transaction, pship: Partnership, partner: Person, prop: Asset, amount: Money) kind institutional {
+    label en official "the section 732 basis of one distributed property after the allocation among the properties of its bucket (section 732(c)(1)-(3)), for any number of properties";
+}
+@source(IRC_S732_C, relation = formalizes, coverage = exact, quote = "(i) first by assigning to each such other property such other property's adjusted basis to the partnership, and")
+rule S732cPropertyBasisEqual(t: Transaction, pship: Partnership, partner: Person, prop: Asset, bucket: PropertyBucket732c, b: Money, target: Money, total_basis: Money) defeasible {
+    label en official "section 732(c)(1)(B)(i): the basis to allocate equals the sum of the adjusted bases: each property keeps its own";
+    when distributed_property_bucket_732c(t, pship, partner, prop, bucket);
+    when distributed_property_pre_limitation_basis(t, pship, prop, b);
+    when bucket_target_basis_732c(t, pship, partner, bucket, target);
+    when bucket_basis_total_732c(t, pship, partner, bucket, total_basis);
+    when target == total_basis;
+    then section_732c_property_basis(t, pship, partner, prop, b);
+}
+@source(IRC_S732_C, relation = formalizes, coverage = exact, quote = "first to properties with unrealized appreciation in proportion to their respective amounts of unrealized appreciation before such increase (but only to the extent of each property's unrealized appreciation), and")
+rule S732cPropertyBasisIncreaseWithinAppreciation(t: Transaction, pship: Partnership, partner: Person, prop: Asset, bucket: PropertyBucket732c, b: Money, a: Money, target: Money, total_basis: Money, total_app: Money) defeasible {
+    label en official "section 732(c)(2)(A): the increase does not exceed the total unrealized appreciation: it goes to the properties in proportion to their appreciation";
+    when distributed_property_bucket_732c(t, pship, partner, prop, bucket);
+    when distributed_property_pre_limitation_basis(t, pship, prop, b);
+    when section_732c_unrealized_appreciation(t, prop, a);
+    when bucket_target_basis_732c(t, pship, partner, bucket, target);
+    when bucket_basis_total_732c(t, pship, partner, bucket, total_basis);
+    when bucket_appreciation_total_732c(t, pship, partner, bucket, total_app);
+    when target > total_basis;
+    when target - total_basis <= total_app;
+    then section_732c_property_basis(t, pship, partner, prop, b + div_round((target - total_basis) * (a / 1.00 USD), total_app / 1.00 USD, 2, "HALF_UP"));
+}
+@source(IRC_S732_C, relation = formalizes, coverage = exact, quote = "(B) then, to the extent such increase is not allocated under subparagraph (A), in proportion to their respective fair market values.")
+rule S732cPropertyBasisIncreaseBeyondAppreciation(t: Transaction, pship: Partnership, partner: Person, prop: Asset, bucket: PropertyBucket732c, b: Money, a: Money, f: Money, target: Money, total_basis: Money, total_app: Money, total_fmv: Money) defeasible {
+    label en official "section 732(c)(2)(B): each property takes its whole appreciation, and the rest of the increase goes by fair market value (with no appreciation: all of it)";
+    when distributed_property_bucket_732c(t, pship, partner, prop, bucket);
+    when distributed_property_pre_limitation_basis(t, pship, prop, b);
+    when section_732c_unrealized_appreciation(t, prop, a);
+    when property_fmv_at_distribution_732(t, prop, f);
+    when bucket_target_basis_732c(t, pship, partner, bucket, target);
+    when bucket_basis_total_732c(t, pship, partner, bucket, total_basis);
+    when bucket_appreciation_total_732c(t, pship, partner, bucket, total_app);
+    when bucket_fmv_total_732c(t, pship, partner, bucket, total_fmv);
+    when target - total_basis > total_app;
+    when total_fmv > 0 USD;
+    then section_732c_property_basis(t, pship, partner, prop, b + a + div_round((target - total_basis - total_app) * (f / 1.00 USD), total_fmv / 1.00 USD, 2, "HALF_UP"));
+}
+@source(IRC_S732_C, relation = formalizes, coverage = exact, quote = "first to properties with unrealized depreciation in proportion to their respective amounts of unrealized depreciation before such decrease (but only to the extent of each property's unrealized depreciation), and")
+rule S732cPropertyBasisDecreaseWithinDepreciation(t: Transaction, pship: Partnership, partner: Person, prop: Asset, bucket: PropertyBucket732c, b: Money, d: Money, target: Money, total_basis: Money, total_dep: Money) defeasible {
+    label en official "section 732(c)(3)(A): the decrease does not exceed the total unrealized depreciation: it goes to the properties in proportion to their depreciation";
+    when distributed_property_bucket_732c(t, pship, partner, prop, bucket);
+    when distributed_property_pre_limitation_basis(t, pship, prop, b);
+    when section_732c_unrealized_depreciation(t, prop, d);
+    when bucket_target_basis_732c(t, pship, partner, bucket, target);
+    when bucket_basis_total_732c(t, pship, partner, bucket, total_basis);
+    when bucket_depreciation_total_732c(t, pship, partner, bucket, total_dep);
+    when target < total_basis;
+    when total_basis - target <= total_dep;
+    then section_732c_property_basis(t, pship, partner, prop, b - div_round((total_basis - target) * (d / 1.00 USD), total_dep / 1.00 USD, 2, "HALF_UP"));
+}
+@source(IRC_S732_C, relation = formalizes, coverage = exact, quote = "(B) then, to the extent such decrease is not allocated under subparagraph (A), in proportion to their respective adjusted bases (as adjusted under subparagraph (A)).")
+rule S732cPropertyBasisDecreaseBeyondDepreciation(t: Transaction, pship: Partnership, partner: Person, prop: Asset, bucket: PropertyBucket732c, b: Money, d: Money, target: Money, total_basis: Money, total_dep: Money) defeasible {
+    label en official "section 732(c)(3)(B): each property loses its whole depreciation, and the rest of the decrease goes by adjusted basis as adjusted (with no depreciation: by adjusted basis)";
+    when distributed_property_bucket_732c(t, pship, partner, prop, bucket);
+    when distributed_property_pre_limitation_basis(t, pship, prop, b);
+    when section_732c_unrealized_depreciation(t, prop, d);
+    when bucket_target_basis_732c(t, pship, partner, bucket, target);
+    when bucket_basis_total_732c(t, pship, partner, bucket, total_basis);
+    when bucket_depreciation_total_732c(t, pship, partner, bucket, total_dep);
+    when total_basis - target > total_dep;
+    then section_732c_property_basis(t, pship, partner, prop, b - d - div_round((total_basis - target - total_dep) * ((b - d) / 1.00 USD), (total_basis - total_dep) / 1.00 USD, 2, "HALF_UP"));
+}
+
+// ============================================================================
+// §732(f)(3)(B), (f)(7): the reduction of the basis of the property of the distributed corporation
+// ============================================================================
+// The reduction of (f)(1) is applied "in accordance with subsection (c)": to the distributed corporation's
+// properties by the decrease of (c)(3) (unrealized depreciation first, then adjusted basis as adjusted), and by
+// (f)(3)(B) no property loses more than its adjusted basis. (f)(7) reapplies the subsection down a chain of
+// controlled corporations: the reduction of the basis of a property that is stock in a controlled corporation is the
+// amount applied to the property of that corporation. A predicate cannot feed itself (LDC-E4102), so the chain is
+// unrolled to the distributed corporation and TWO controlled tiers (`..._t1`, `..._t2`, `..._t3`). JUDGMENT CALLS:
+// the reduction of a controlled tier is the reduction of the stock property one tier up, without a new limit of (f)(3)(A)
+// (which compares with the stock basis of that tier and is not asserted); a fourth tier is not modelled.
+
+pub relation section_732f_property_of_corporation(t: Transaction, corp: us.irc.core::Corporation, prop: Asset, basis: Money, fmv: Money) kind empirical {
+    label en unofficial "a property held by the distributed corporation, or by a controlled corporation of the chain, with its adjusted basis and fair market value (case-asserted; section 732(f)(1), (7))";
+}
+pub relation section_732f_property_is_stock_of_controlled_corporation(t: Transaction, prop: Asset, controlled: us.irc.core::Corporation) kind empirical {
+    label en unofficial "the property is stock in a corporation that its holder controls (section 732(f)(7))";
+}
+pub relation section_732f_property_depreciation(t: Transaction, corp: us.irc.core::Corporation, prop: Asset, depreciation: Money) kind institutional {
+    label en unofficial "the unrealized depreciation of the property of the corporation: its adjusted basis less its fair market value, not below zero";
+}
+rule S732fPropertyDepreciation(t: Transaction, corp: us.irc.core::Corporation, prop: Asset, basis: Money, fmv: Money) defeasible {
+    when section_732f_property_of_corporation(t, corp, prop, basis, fmv);
+    then section_732f_property_depreciation(t, corp, prop, max(0 USD, basis - fmv));
+}
+relation section_732f_corporation_basis_total(t: Transaction, corp: us.irc.core::Corporation, total: Money) kind institutional {
+    label en unofficial "the aggregate adjusted basis of the properties of the corporation";
+}
+rule S732fCorporationBasisTotal(t: Transaction, corp: us.irc.core::Corporation, p0: Asset, b0: Money, f0: Money) defeasible {
+    when section_732f_property_of_corporation(t, corp, p0, b0, f0);
+    then section_732f_corporation_basis_total(t, corp,
+        sum(collect all b: Money, p: Asset where section_732f_property_of_corporation(t, corp, p, b, _), empty: 0.00 USD));
+}
+relation section_732f_corporation_depreciation_total(t: Transaction, corp: us.irc.core::Corporation, total: Money) kind institutional {
+    label en unofficial "the total unrealized depreciation of the properties of the corporation";
+}
+rule S732fCorporationDepreciationTotal(t: Transaction, corp: us.irc.core::Corporation, p0: Asset, d0: Money) defeasible {
+    when section_732f_property_depreciation(t, corp, p0, d0);
+    then section_732f_corporation_depreciation_total(t, corp,
+        sum(collect all d: Money, p: Asset where section_732f_property_depreciation(t, corp, p, d), empty: 0.00 USD));
+}
+
+relation section_732f_reduction_to_apply_t1(t: Transaction, corp: us.irc.core::Corporation, amount: Money) kind institutional {
+    label en unofficial "the reduction of (f)(1) to apply to the property of the distributed corporation";
+}
+rule S732fReductionToApplyT1(t: Transaction, corporate_partner: us.irc.core::Corporation, corp: us.irc.core::Corporation, on: Date, amount: Money) defeasible {
+    label en official "section 732(f)(1): the reduction applied is the amount to apply to the distributed corporation";
+    when section_732f_reduction_applied(t, corporate_partner, corp, on, amount);
+    then section_732f_reduction_to_apply_t1(t, corp, amount);
+}
+
+pub relation section_732f_property_basis_reduction_t1(t: Transaction, corp: us.irc.core::Corporation, prop: Asset, amount: Money) kind institutional {
+    label en official "the reduction of the basis of the property of the corporation at tier 1 of the chain (section 732(f)(1), (3)(B), (7)), allocated by the decrease of section 732(c)(3) and not above the adjusted basis of the property";
+}
+@source(IRC_S732_F, relation = formalizes, coverage = exact, quote = "No reduction under paragraph (1) in the basis of any property shall exceed the adjusted basis of such property (determined without regard to such reduction).")
+rule S732fReductionFullT1(t: Transaction, corp: us.irc.core::Corporation, prop: Asset, basis: Money, fmv: Money, r: Money, total_basis: Money) defeasible {
+    label en official "section 732(f)(3)(B): a reduction at least the aggregate adjusted basis takes the whole basis of each property (tier 1)";
+    when section_732f_reduction_to_apply_t1(t, corp, r);
+    when section_732f_property_of_corporation(t, corp, prop, basis, fmv);
+    when section_732f_corporation_basis_total(t, corp, total_basis);
+    when r >= total_basis;
+    when r > 0 USD;
+    then section_732f_property_basis_reduction_t1(t, corp, prop, basis);
+}
+@source(IRC_S732_F, relation = formalizes, coverage = exact, quote = "then an amount equal to such excess shall be applied to reduce (in accordance with subsection (c)) the basis of property held by the distributed corporation at such time")
+rule S732fReductionWithinDepreciationT1(t: Transaction, corp: us.irc.core::Corporation, prop: Asset, basis: Money, fmv: Money, d: Money, r: Money, total_basis: Money, total_dep: Money) defeasible {
+    label en official "section 732(f)(1) with 732(c)(3)(A): the reduction does not exceed the total depreciation (tier 1)";
+    when section_732f_reduction_to_apply_t1(t, corp, r);
+    when section_732f_property_of_corporation(t, corp, prop, basis, fmv);
+    when section_732f_property_depreciation(t, corp, prop, d);
+    when section_732f_corporation_basis_total(t, corp, total_basis);
+    when section_732f_corporation_depreciation_total(t, corp, total_dep);
+    when r > 0 USD;
+    when r < total_basis;
+    when r <= total_dep;
+    then section_732f_property_basis_reduction_t1(t, corp, prop, min(basis, div_round(r * (d / 1.00 USD), total_dep / 1.00 USD, 2, "HALF_UP")));
+}
+@source(IRC_S732_F, relation = formalizes, coverage = exact, quote = "then an amount equal to such excess shall be applied to reduce (in accordance with subsection (c)) the basis of property held by the distributed corporation at such time")
+rule S732fReductionBeyondDepreciationT1(t: Transaction, corp: us.irc.core::Corporation, prop: Asset, basis: Money, fmv: Money, d: Money, r: Money, total_basis: Money, total_dep: Money) defeasible {
+    label en official "section 732(f)(1) with 732(c)(3)(B): the depreciation first, the rest by adjusted basis as adjusted (tier 1)";
+    when section_732f_reduction_to_apply_t1(t, corp, r);
+    when section_732f_property_of_corporation(t, corp, prop, basis, fmv);
+    when section_732f_property_depreciation(t, corp, prop, d);
+    when section_732f_corporation_basis_total(t, corp, total_basis);
+    when section_732f_corporation_depreciation_total(t, corp, total_dep);
+    when r > total_dep;
+    when r < total_basis;
+    then section_732f_property_basis_reduction_t1(t, corp, prop, min(basis, d + div_round((r - total_dep) * ((basis - d) / 1.00 USD), (total_basis - total_dep) / 1.00 USD, 2, "HALF_UP")));
+}
+
+relation section_732f_reduction_to_apply_t2(t: Transaction, corp: us.irc.core::Corporation, amount: Money) kind institutional {
+    label en unofficial "the reduction to apply to the property of the controlled corporation of tier 2: the reduction of the basis of the stock in it held one tier up (section 732(f)(7))";
+}
+@source(IRC_S732_F, relation = formalizes, coverage = exact, quote = "If the property held by a distributed corporation is stock in a corporation which the distributed corporation controls, this subsection shall be applied to reduce the basis of the property of such controlled corporation.")
+rule S732fReductionToApplyT2(t: Transaction, holder: us.irc.core::Corporation, prop: Asset, controlled: us.irc.core::Corporation, r: Money) defeasible {
+    label en official "section 732(f)(7): the reduction of the stock property is applied to the property of the controlled corporation (tier 2)";
+    when section_732f_property_basis_reduction_t1(t, holder, prop, r);
+    when section_732f_property_is_stock_of_controlled_corporation(t, prop, controlled);
+    when r > 0 USD;
+    then section_732f_reduction_to_apply_t2(t, controlled, r);
+}
+
+pub relation section_732f_property_basis_reduction_t2(t: Transaction, corp: us.irc.core::Corporation, prop: Asset, amount: Money) kind institutional {
+    label en official "the reduction of the basis of the property of the corporation at tier 2 of the chain (section 732(f)(1), (3)(B), (7)), allocated by the decrease of section 732(c)(3) and not above the adjusted basis of the property";
+}
+@source(IRC_S732_F, relation = formalizes, coverage = exact, quote = "No reduction under paragraph (1) in the basis of any property shall exceed the adjusted basis of such property (determined without regard to such reduction).")
+rule S732fReductionFullT2(t: Transaction, corp: us.irc.core::Corporation, prop: Asset, basis: Money, fmv: Money, r: Money, total_basis: Money) defeasible {
+    label en official "section 732(f)(3)(B): a reduction at least the aggregate adjusted basis takes the whole basis of each property (tier 2)";
+    when section_732f_reduction_to_apply_t2(t, corp, r);
+    when section_732f_property_of_corporation(t, corp, prop, basis, fmv);
+    when section_732f_corporation_basis_total(t, corp, total_basis);
+    when r >= total_basis;
+    when r > 0 USD;
+    then section_732f_property_basis_reduction_t2(t, corp, prop, basis);
+}
+@source(IRC_S732_F, relation = formalizes, coverage = exact, quote = "then an amount equal to such excess shall be applied to reduce (in accordance with subsection (c)) the basis of property held by the distributed corporation at such time")
+rule S732fReductionWithinDepreciationT2(t: Transaction, corp: us.irc.core::Corporation, prop: Asset, basis: Money, fmv: Money, d: Money, r: Money, total_basis: Money, total_dep: Money) defeasible {
+    label en official "section 732(f)(1) with 732(c)(3)(A): the reduction does not exceed the total depreciation (tier 2)";
+    when section_732f_reduction_to_apply_t2(t, corp, r);
+    when section_732f_property_of_corporation(t, corp, prop, basis, fmv);
+    when section_732f_property_depreciation(t, corp, prop, d);
+    when section_732f_corporation_basis_total(t, corp, total_basis);
+    when section_732f_corporation_depreciation_total(t, corp, total_dep);
+    when r > 0 USD;
+    when r < total_basis;
+    when r <= total_dep;
+    then section_732f_property_basis_reduction_t2(t, corp, prop, min(basis, div_round(r * (d / 1.00 USD), total_dep / 1.00 USD, 2, "HALF_UP")));
+}
+@source(IRC_S732_F, relation = formalizes, coverage = exact, quote = "then an amount equal to such excess shall be applied to reduce (in accordance with subsection (c)) the basis of property held by the distributed corporation at such time")
+rule S732fReductionBeyondDepreciationT2(t: Transaction, corp: us.irc.core::Corporation, prop: Asset, basis: Money, fmv: Money, d: Money, r: Money, total_basis: Money, total_dep: Money) defeasible {
+    label en official "section 732(f)(1) with 732(c)(3)(B): the depreciation first, the rest by adjusted basis as adjusted (tier 2)";
+    when section_732f_reduction_to_apply_t2(t, corp, r);
+    when section_732f_property_of_corporation(t, corp, prop, basis, fmv);
+    when section_732f_property_depreciation(t, corp, prop, d);
+    when section_732f_corporation_basis_total(t, corp, total_basis);
+    when section_732f_corporation_depreciation_total(t, corp, total_dep);
+    when r > total_dep;
+    when r < total_basis;
+    then section_732f_property_basis_reduction_t2(t, corp, prop, min(basis, d + div_round((r - total_dep) * ((basis - d) / 1.00 USD), (total_basis - total_dep) / 1.00 USD, 2, "HALF_UP")));
+}
+
+relation section_732f_reduction_to_apply_t3(t: Transaction, corp: us.irc.core::Corporation, amount: Money) kind institutional {
+    label en unofficial "the reduction to apply to the property of the controlled corporation of tier 3: the reduction of the basis of the stock in it held one tier up (section 732(f)(7))";
+}
+@source(IRC_S732_F, relation = formalizes, coverage = exact, quote = "If the property held by a distributed corporation is stock in a corporation which the distributed corporation controls, this subsection shall be applied to reduce the basis of the property of such controlled corporation.")
+rule S732fReductionToApplyT3(t: Transaction, holder: us.irc.core::Corporation, prop: Asset, controlled: us.irc.core::Corporation, r: Money) defeasible {
+    label en official "section 732(f)(7): the reduction of the stock property is applied to the property of the controlled corporation (tier 3)";
+    when section_732f_property_basis_reduction_t2(t, holder, prop, r);
+    when section_732f_property_is_stock_of_controlled_corporation(t, prop, controlled);
+    when r > 0 USD;
+    then section_732f_reduction_to_apply_t3(t, controlled, r);
+}
+
+pub relation section_732f_property_basis_reduction_t3(t: Transaction, corp: us.irc.core::Corporation, prop: Asset, amount: Money) kind institutional {
+    label en official "the reduction of the basis of the property of the corporation at tier 3 of the chain (section 732(f)(1), (3)(B), (7)), allocated by the decrease of section 732(c)(3) and not above the adjusted basis of the property";
+}
+@source(IRC_S732_F, relation = formalizes, coverage = exact, quote = "No reduction under paragraph (1) in the basis of any property shall exceed the adjusted basis of such property (determined without regard to such reduction).")
+rule S732fReductionFullT3(t: Transaction, corp: us.irc.core::Corporation, prop: Asset, basis: Money, fmv: Money, r: Money, total_basis: Money) defeasible {
+    label en official "section 732(f)(3)(B): a reduction at least the aggregate adjusted basis takes the whole basis of each property (tier 3)";
+    when section_732f_reduction_to_apply_t3(t, corp, r);
+    when section_732f_property_of_corporation(t, corp, prop, basis, fmv);
+    when section_732f_corporation_basis_total(t, corp, total_basis);
+    when r >= total_basis;
+    when r > 0 USD;
+    then section_732f_property_basis_reduction_t3(t, corp, prop, basis);
+}
+@source(IRC_S732_F, relation = formalizes, coverage = exact, quote = "then an amount equal to such excess shall be applied to reduce (in accordance with subsection (c)) the basis of property held by the distributed corporation at such time")
+rule S732fReductionWithinDepreciationT3(t: Transaction, corp: us.irc.core::Corporation, prop: Asset, basis: Money, fmv: Money, d: Money, r: Money, total_basis: Money, total_dep: Money) defeasible {
+    label en official "section 732(f)(1) with 732(c)(3)(A): the reduction does not exceed the total depreciation (tier 3)";
+    when section_732f_reduction_to_apply_t3(t, corp, r);
+    when section_732f_property_of_corporation(t, corp, prop, basis, fmv);
+    when section_732f_property_depreciation(t, corp, prop, d);
+    when section_732f_corporation_basis_total(t, corp, total_basis);
+    when section_732f_corporation_depreciation_total(t, corp, total_dep);
+    when r > 0 USD;
+    when r < total_basis;
+    when r <= total_dep;
+    then section_732f_property_basis_reduction_t3(t, corp, prop, min(basis, div_round(r * (d / 1.00 USD), total_dep / 1.00 USD, 2, "HALF_UP")));
+}
+@source(IRC_S732_F, relation = formalizes, coverage = exact, quote = "then an amount equal to such excess shall be applied to reduce (in accordance with subsection (c)) the basis of property held by the distributed corporation at such time")
+rule S732fReductionBeyondDepreciationT3(t: Transaction, corp: us.irc.core::Corporation, prop: Asset, basis: Money, fmv: Money, d: Money, r: Money, total_basis: Money, total_dep: Money) defeasible {
+    label en official "section 732(f)(1) with 732(c)(3)(B): the depreciation first, the rest by adjusted basis as adjusted (tier 3)";
+    when section_732f_reduction_to_apply_t3(t, corp, r);
+    when section_732f_property_of_corporation(t, corp, prop, basis, fmv);
+    when section_732f_property_depreciation(t, corp, prop, d);
+    when section_732f_corporation_basis_total(t, corp, total_basis);
+    when section_732f_corporation_depreciation_total(t, corp, total_dep);
+    when r > total_dep;
+    when r < total_basis;
+    then section_732f_property_basis_reduction_t3(t, corp, prop, min(basis, d + div_round((r - total_dep) * ((basis - d) / 1.00 USD), (total_basis - total_dep) / 1.00 USD, 2, "HALF_UP")));
+}
+
+// ============================================================================
+// §755(b): the adjustment prevented by the absence of property or by insufficient basis
+// ============================================================================
+// "If, in the case of a distribution, the adjustment ... is prevented by the absence of such property or by
+// insufficient adjusted basis for such property, such adjustment shall be applied to subsequently acquired property
+// of a like character in accordance with regulations prescribed by the Secretary." The regulations are not pinned:
+// JUDGMENT CALL (bounded temporal sequence): the unapplied adjustment goes to the subsequently acquired properties of
+// the class in the order of acquisition, an increase whole to the first, a decrease first to the first up to its
+// basis, the rest to the second, then the third (three properties; what still remains stays unapplied and is
+// reported). Properties acquired on the same day share a rank (a tie is not resolved).
+
+pub relation section_755b_class_adjustment(t: Transaction, pship: Partnership, class: Section755LikeCharacterClass, amount: Money) kind empirical {
+    label en unofficial "the increase (positive) or decrease (negative) of basis arising from the distribution that section 755(b) allocates to partnership property of the class (case-asserted)";
+}
+pub relation section_755b_unapplied_adjustment(t: Transaction, pship: Partnership, class: Section755LikeCharacterClass, amount: Money) kind institutional {
+    label en official "the part of the class adjustment that the properties of the class did not take: the adjustment is prevented by the absence of such property or by insufficient adjusted basis (section 755(b), second sentence)";
+}
+@source(IRC_S755_B, relation = formalizes, coverage = exact, quote = "If, in the case of a distribution, the adjustment to basis of property described in paragraph (1) or (2) is prevented by the absence of such property or by insufficient adjusted basis for such property")
+rule S755bUnappliedAdjustment(t: Transaction, pship: Partnership, class: Section755LikeCharacterClass, adjustment: Money) defeasible {
+    label en official "section 755(b): the class adjustment less what was allocated to the properties of the class";
+    when section_755b_class_adjustment(t, pship, class, adjustment);
+    then section_755b_unapplied_adjustment(t, pship, class, adjustment
+        - sum(collect all a: Money, p: Asset where section_755_allocated_adjustment(t, pship, p, a) and section_755_property_class(p, class), empty: 0.00 USD));
+}
+pub relation section_755b_distribution_date(t: Transaction, on: Date) kind empirical {
+    label en unofficial "the date of the distribution (case-asserted)";
+}
+pub relation section_755b_subsequent_property(pship: Partnership, prop: Asset, class: Section755LikeCharacterClass, acquired_on: Date, basis: Money) kind empirical {
+    label en unofficial "a property of the class that the partnership acquires, with its acquisition date and adjusted basis at acquisition (case-asserted)";
+}
+relation section_755b_spill_candidate(t: Transaction, pship: Partnership, class: Section755LikeCharacterClass, prop: Asset, acquired_on: Date, basis: Money) kind institutional {
+    label en unofficial "a subsequently acquired property of the class, acquired after the distribution";
+}
+rule S755bSpillCandidate(t: Transaction, pship: Partnership, class: Section755LikeCharacterClass, prop: Asset, acquired: Date, basis: Money, dist: Date) defeasible {
+    when section_755b_unapplied_adjustment(t, pship, class, _);
+    when section_755b_distribution_date(t, dist);
+    when section_755b_subsequent_property(pship, prop, class, acquired, basis);
+    when acquired > dist;
+    then section_755b_spill_candidate(t, pship, class, prop, acquired, basis);
+}
+relation section_755b_spill_rank(t: Transaction, pship: Partnership, class: Section755LikeCharacterClass, prop: Asset, rank: Integer) kind institutional {
+    label en unofficial "the order of acquisition among the candidates: 1 for the first, one more than the number of candidates acquired earlier";
+}
+rule S755bSpillRank(t: Transaction, pship: Partnership, class: Section755LikeCharacterClass, prop: Asset, acquired: Date, basis: Money) defeasible {
+    when section_755b_spill_candidate(t, pship, class, prop, acquired, basis);
+    then section_755b_spill_rank(t, pship, class, prop,
+        count(collect c: Asset, ac: Date where section_755b_spill_candidate(t, pship, class, c, ac, _) and ac < acquired) + 1);
+}
+pub relation section_755b_applied_to_subsequent_property(t: Transaction, pship: Partnership, class: Section755LikeCharacterClass, prop: Asset, amount: Money) kind institutional {
+    label en official "the part of the unapplied adjustment applied to the subsequently acquired property (section 755(b), second sentence): an increase (positive) or a decrease (negative)";
+}
+@source(IRC_S755_B, relation = formalizes, coverage = exact, quote = "such adjustment shall be applied to subsequently acquired property of a like character in accordance with regulations prescribed by the Secretary.")
+rule S755bIncreaseToFirstProperty(t: Transaction, pship: Partnership, class: Section755LikeCharacterClass, prop: Asset, unapplied: Money, acquired: Date, basis: Money) defeasible {
+    label en official "section 755(b): an unapplied increase goes whole to the first subsequently acquired property";
+    when section_755b_unapplied_adjustment(t, pship, class, unapplied);
+    when unapplied > 0 USD;
+    when section_755b_spill_rank(t, pship, class, prop, 1);
+    then section_755b_applied_to_subsequent_property(t, pship, class, prop, unapplied);
+}
+@source(IRC_S755_B, relation = formalizes, coverage = exact, quote = "such adjustment shall be applied to subsequently acquired property of a like character in accordance with regulations prescribed by the Secretary.")
+rule S755bDecreaseToFirstProperty(t: Transaction, pship: Partnership, class: Section755LikeCharacterClass, prop: Asset, unapplied: Money, acquired: Date, basis: Money) defeasible {
+    label en official "section 755(b): an unapplied decrease reduces the first subsequently acquired property up to its basis";
+    when section_755b_unapplied_adjustment(t, pship, class, unapplied);
+    when unapplied < 0 USD;
+    when section_755b_spill_rank(t, pship, class, prop, 1);
+    when section_755b_spill_candidate(t, pship, class, prop, acquired, basis);
+    then section_755b_applied_to_subsequent_property(t, pship, class, prop, 0 USD - min(basis, 0 USD - unapplied));
+}
+@source(IRC_S755_B, relation = formalizes, coverage = exact, quote = "such adjustment shall be applied to subsequently acquired property of a like character in accordance with regulations prescribed by the Secretary.")
+rule S755bDecreaseToSecondProperty(t: Transaction, pship: Partnership, class: Section755LikeCharacterClass, prop: Asset, first: Asset, unapplied: Money, acquired1: Date, basis1: Money, acquired2: Date, basis2: Money) defeasible {
+    label en official "section 755(b): what the first property could not take reduces the second";
+    when section_755b_unapplied_adjustment(t, pship, class, unapplied);
+    when unapplied < 0 USD;
+    when section_755b_spill_rank(t, pship, class, first, 1);
+    when section_755b_spill_candidate(t, pship, class, first, acquired1, basis1);
+    when section_755b_spill_rank(t, pship, class, prop, 2);
+    when section_755b_spill_candidate(t, pship, class, prop, acquired2, basis2);
+    when (0 USD - unapplied) > basis1;
+    then section_755b_applied_to_subsequent_property(t, pship, class, prop, 0 USD - min(basis2, (0 USD - unapplied) - basis1));
+}
+@source(IRC_S755_B, relation = formalizes, coverage = exact, quote = "such adjustment shall be applied to subsequently acquired property of a like character in accordance with regulations prescribed by the Secretary.")
+rule S755bDecreaseToThirdProperty(t: Transaction, pship: Partnership, class: Section755LikeCharacterClass, prop: Asset, first: Asset, second: Asset, unapplied: Money, acquired1: Date, basis1: Money, acquired2: Date, basis2: Money, acquired3: Date, basis3: Money) defeasible {
+    label en official "section 755(b): what the first two properties could not take reduces the third";
+    when section_755b_unapplied_adjustment(t, pship, class, unapplied);
+    when unapplied < 0 USD;
+    when section_755b_spill_rank(t, pship, class, first, 1);
+    when section_755b_spill_candidate(t, pship, class, first, acquired1, basis1);
+    when section_755b_spill_rank(t, pship, class, second, 2);
+    when section_755b_spill_candidate(t, pship, class, second, acquired2, basis2);
+    when section_755b_spill_rank(t, pship, class, prop, 3);
+    when section_755b_spill_candidate(t, pship, class, prop, acquired3, basis3);
+    when (0 USD - unapplied) > basis1 + basis2;
+    then section_755b_applied_to_subsequent_property(t, pship, class, prop, 0 USD - min(basis3, (0 USD - unapplied) - basis1 - basis2));
+}

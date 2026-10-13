@@ -1,0 +1,170 @@
+// §911(b)(2)(B) daily proration, §911(f) stacking from §1 tables,
+// §911(a)/§901 FTC allocation, §911(c)(4)(C) one-year carryover (stage 4).
+//
+// BOUNDS (stated in the coverage row, not silent).
+//  - Day counts are documentary case facts (travel records); the engine does
+//    the ratio arithmetic, never the calendar enumeration.
+//  - Stacking taxes are computed from the pinned TCJA base tables
+//    (2018 brackets, `bracket_tcja_joint/unmarried`), joint and unmarried
+//    only; 2025-indexed brackets need module-60 index facts (none pinned).
+//    The sidecars are `mode: rules` but lower expands no rows, so the case
+//    reads the applicable row from the pinned sidecar and asserts it as a
+//    case fact (sidecar id + row id + anchor cited at the assert); both
+//    section 1 amounts and their difference stay engine-computed, never
+//    asserted.
+//  - FTC allocation uses the §911(a) flush language; basket tagging reuses
+//    module 04's `income_in_basket`, carryovers reuse module 04/21.
+
+use self::{
+    IRC_S911_B,
+    IRC_S911_C,
+    IRC_S911_D,
+    IRC_S911_F,
+    excluded_amount_for_stacking_911f1,
+    foreign_earned_income_amount,
+    housing_cost_amount_not_employer_provided,
+    housing_cost_deduction_limitation,
+    qualified_individual,
+};
+
+pub relation qualifying_days_in_taxable_year_911(p: us.irc.core::Individual, y: us.irc.core::TaxableYear, days: Integer) kind empirical {
+    label en unofficial "the number of days of the individual's qualifying period (bona fide residence or 12-month physical-presence period) falling within the taxable year, from travel records — section 911(b)(2)(B)/(d)(6)";
+}
+pub relation days_in_taxable_year_911(y: us.irc.core::TaxableYear, days: Integer) kind empirical {
+    label en unofficial "the number of days in the taxable year (365, or 366 in a leap year) — the denominator of the section 911(b)(2)(B) daily ratio";
+}
+
+@source(IRC_S911_B, relation = formalizes, coverage = partial, quote = "computed on a daily basis at an annual rate equal to the exclusion amount")
+pub relation prorated_annual_exclusion_cap_911(p: us.irc.core::Individual, y: us.irc.core::TaxableYear, cap: Money) kind institutional {
+    label en official "the section 911(b)(2)(B) prorated cap: the annual exclusion amount computed on a daily basis times qualifying days in the year";
+}
+rule S911B2BProratedCap(p: us.irc.core::Individual, y: us.irc.core::TaxableYear, days: Integer, year_days: Integer) defeasible {
+    when qualified_individual(p, y)
+     and qualifying_days_in_taxable_year_911(p, y, days)
+     and days_in_taxable_year_911(y, year_days)
+     and days >= 0
+     and year_days > 0;
+    then prorated_annual_exclusion_cap_911(p, y, div_round(ForeignEarnedIncomeExclusionAmount * days, year_days * 1.0, 2, "HALF_UP"));
+}
+
+@source(IRC_S911_B, relation = formalizes, coverage = partial, quote = "The foreign earned income of an individual which may be excluded under subsection (a)(1) for any taxable year shall not exceed the amount of foreign earned income computed on a daily basis at an annual rate equal to the exclusion amount for the calendar year in which such taxable year begins")
+pub relation foreign_earned_income_exclusion_prorated_911(p: us.irc.core::Individual, y: us.irc.core::TaxableYear, excluded: Money) kind institutional {
+    label en official "the excludable amount under section 911(a)(1): the lesser of foreign earned income or the prorated (b)(2)(B) cap";
+}
+rule S911ExclusionProrated(p: us.irc.core::Individual, y: us.irc.core::TaxableYear, income: Money, cap: Money) defeasible {
+    when foreign_earned_income_amount(p, y, income)
+     and prorated_annual_exclusion_cap_911(p, y, cap);
+    then foreign_earned_income_exclusion_prorated_911(p, y, min(income, cap));
+}
+
+// --- §911(f) stacking: both §1 amounts computed from tables --------------
+
+pub relation stacking_taxable_income_including_excluded_911f(p: us.irc.core::Individual, y: us.irc.core::TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the individual's taxable income with the section 911(a) excluded amount added back, for the section 911(f)(1)(A) minuend — income composition is a documentary input, the tax on it is computed";
+}
+pub relation stacking_table_tax_including_excluded_911f(p: us.irc.core::Individual, y: us.irc.core::TaxableYear, tax: Money) kind institutional {
+    label en official "the section 1 tax on taxable income increased by the excluded amount, computed from the pinned rate table (section 911(f)(1)(A) minuend)";
+}
+rule S911fTableTaxIncludingExcludedJoint(p: us.irc.core::Individual, y: us.irc.core::TaxableYear, income: Money, lower: Money, base: Money, rate: Decimal) defeasible {
+    when stacking_taxable_income_including_excluded_911f(p, y, income)
+     and us.irc.income_individual::filing_status(p, y, us.irc.income_individual::Joint)
+     and us.irc.income_individual::bracket_tcja_joint(income, lower, base, rate);
+    then stacking_table_tax_including_excluded_911f(p, y, base + rate * (income - lower));
+}
+rule S911fTableTaxIncludingExcludedUnmarried(p: us.irc.core::Individual, y: us.irc.core::TaxableYear, income: Money, lower: Money, base: Money, rate: Decimal) defeasible {
+    when stacking_taxable_income_including_excluded_911f(p, y, income)
+     and us.irc.income_individual::filing_status(p, y, us.irc.income_individual::Unmarried)
+     and us.irc.income_individual::bracket_tcja_unmarried(income, lower, base, rate);
+    then stacking_table_tax_including_excluded_911f(p, y, base + rate * (income - lower));
+}
+pub relation stacking_table_tax_excluded_alone_911f(p: us.irc.core::Individual, y: us.irc.core::TaxableYear, tax: Money) kind institutional {
+    label en official "the section 1 tax on the excluded amount alone, computed from the pinned rate table (section 911(f)(1)(A) subtrahend)";
+}
+rule S911fTableTaxExcludedAloneJoint(p: us.irc.core::Individual, y: us.irc.core::TaxableYear, excluded: Money, lower: Money, base: Money, rate: Decimal) defeasible {
+    when excluded_amount_for_stacking_911f1(p, y, excluded)
+     and us.irc.income_individual::filing_status(p, y, us.irc.income_individual::Joint)
+     and us.irc.income_individual::bracket_tcja_joint(excluded, lower, base, rate);
+    then stacking_table_tax_excluded_alone_911f(p, y, base + rate * (excluded - lower));
+}
+rule S911fTableTaxExcludedAloneUnmarried(p: us.irc.core::Individual, y: us.irc.core::TaxableYear, excluded: Money, lower: Money, base: Money, rate: Decimal) defeasible {
+    when excluded_amount_for_stacking_911f1(p, y, excluded)
+     and us.irc.income_individual::filing_status(p, y, us.irc.income_individual::Unmarried)
+     and us.irc.income_individual::bracket_tcja_unmarried(excluded, lower, base, rate);
+    then stacking_table_tax_excluded_alone_911f(p, y, base + rate * (excluded - lower));
+}
+@source(IRC_S911_F, relation = formalizes, coverage = partial, quote = "the tax imposed by section 1 for such taxable year shall be equal to the excess (if any) of—\n(i) the tax which would be imposed by section 1 for such taxable year if the taxpayer's taxable income were increased by the amount excluded under subsection (a) for such taxable year, over\n(ii) the tax which would be imposed by section 1 for such taxable year if the taxpayer's taxable income were equal to the amount excluded under subsection (a) for such taxable year, and")
+pub relation section_1_tax_with_exclusion_from_tables_911f(p: us.irc.core::Individual, y: us.irc.core::TaxableYear, tax: Money) kind institutional {
+    label en official "the section 1 tax with the section 911(a) exclusion under stacking: both table amounts computed, never asserted (section 911(f)(1)(A))";
+}
+rule S911fStackingDifferenceFromTables(p: us.irc.core::Individual, y: us.irc.core::TaxableYear, with: Money, alone: Money) defeasible {
+    when stacking_table_tax_including_excluded_911f(p, y, with)
+     and stacking_table_tax_excluded_alone_911f(p, y, alone);
+    then section_1_tax_with_exclusion_from_tables_911f(p, y, max(with - alone, 0.00 USD));
+}
+
+// --- §911(a) flush / §901: no credit for tax on excluded income -----------
+
+pub relation foreign_tax_paid_total_911(p: us.irc.core::Individual, y: us.irc.core::TaxableYear, amount: Money) kind empirical {
+    label en unofficial "total foreign income tax paid or accrued for the year before the section 911(a) allocation (section 901(b))";
+}
+pub relation foreign_source_gross_income_911(p: us.irc.core::Individual, y: us.irc.core::TaxableYear, amount: Money) kind empirical {
+    label en unofficial "foreign-source gross income for the year, the allocation base — income classification is a documentary input";
+}
+pub relation deductions_allocable_to_foreign_source_911(p: us.irc.core::Individual, y: us.irc.core::TaxableYear, amount: Money) kind empirical {
+    label en unofficial "deductions definitely related and apportioned to foreign-source gross income (Reg. 1.861-8 mechanics presupposed, amounts asserted)";
+}
+@source(IRC_S911_D, relation = formalizes, coverage = partial, quote = "No deduction or exclusion from gross income under this subtitle or credit against the tax imposed by this chapter (including any credit or deduction for the amount of taxes paid or accrued to a foreign country or possession of the United States) shall be allowed to the extent such deduction, exclusion, or credit is properly allocable to or chargeable against amounts excluded from gross income under subsection (a)")
+pub relation foreign_tax_allocable_to_excluded_income_911(p: us.irc.core::Individual, y: us.irc.core::TaxableYear, amount: Money) kind institutional {
+    label en official "foreign tax allocable to excluded income: paid tax times excluded over foreign-source gross (section 911(a) flush language)";
+}
+rule S911AAllocableTax(p: us.irc.core::Individual, y: us.irc.core::TaxableYear, paid: Money, excluded: Money, gross: Money) defeasible {
+    when foreign_tax_paid_total_911(p, y, paid)
+     and foreign_earned_income_exclusion_prorated_911(p, y, excluded)
+     and foreign_source_gross_income_911(p, y, gross)
+     and gross > 0.00 USD;
+    then foreign_tax_allocable_to_excluded_income_911(p, y, div_round(paid * (excluded / 1.00 USD), gross / 1.00 USD, 2, "HALF_UP"));
+}
+@source(IRC_S911_D, relation = formalizes, coverage = partial, quote = "No deduction or exclusion from gross income under this subtitle or credit against the tax imposed by this chapter (including any credit or deduction for the amount of taxes paid or accrued to a foreign country or possession of the United States) shall be allowed to the extent such deduction, exclusion, or credit is properly allocable to or chargeable against amounts excluded from gross income under subsection (a)")
+pub relation creditable_foreign_tax_after_911_exclusion(p: us.irc.core::Individual, y: us.irc.core::TaxableYear, amount: Money) kind institutional {
+    label en official "creditable foreign tax after the section 911(a) allocation: paid tax minus the excluded-income share — feeds section 901(b), never the raw paid total";
+}
+rule S911ACreditableTax(p: us.irc.core::Individual, y: us.irc.core::TaxableYear, paid: Money, allocable: Money) defeasible {
+    when foreign_tax_paid_total_911(p, y, paid)
+     and foreign_tax_allocable_to_excluded_income_911(p, y, allocable);
+    then creditable_foreign_tax_after_911_exclusion(p, y, paid - allocable);
+}
+pub relation foreign_source_taxable_income_net_of_exclusion_911(p: us.irc.core::Individual, y: us.irc.core::TaxableYear, amount: Money) kind institutional {
+    label en official "foreign-source taxable income for section 904(a): gross less the section 911(a) excluded amount less allocable deductions — feeds the 904 ratio, never asserted whole";
+}
+rule S911ForeignSourceTaxableNet(p: us.irc.core::Individual, y: us.irc.core::TaxableYear, gross: Money, excluded: Money, deductions: Money) defeasible {
+    when foreign_source_gross_income_911(p, y, gross)
+     and foreign_earned_income_exclusion_prorated_911(p, y, excluded)
+     and deductions_allocable_to_foreign_source_911(p, y, deductions);
+    then foreign_source_taxable_income_net_of_exclusion_911(p, y, gross - excluded - deductions);
+}
+
+// --- §911(c)(4)(C): one-year carryover as an explicit year link ------------
+
+pub relation succeeding_taxable_year_911(p: us.irc.core::Individual, from_y: us.irc.core::TaxableYear, to_y: us.irc.core::TaxableYear) kind empirical {
+    label en unofficial "to_y is the single taxable year succeeding from_y for this individual (section 911(c)(4)(C)) — asserted as an explicit year link, not a successor function";
+}
+pub relation housing_carryover_disallowed_911c4(p: us.irc.core::Individual, from_y: us.irc.core::TaxableYear, amount: Money) kind institutional {
+    label en official "the housing cost amount disallowed by the (4)(B) limitation, carried to the succeeding year (section 911(c)(4)(C))";
+}
+rule S911C4CCarryover(p: us.irc.core::Individual, from_y: us.irc.core::TaxableYear, not_provided: Money, limitation: Money) defeasible {
+    when housing_cost_amount_not_employer_provided(p, from_y, not_provided)
+     and housing_cost_deduction_limitation(p, from_y, limitation)
+     and not_provided > limitation;
+    then housing_carryover_disallowed_911c4(p, from_y, not_provided - limitation);
+}
+@source(IRC_S911_C, relation = formalizes, coverage = partial, quote = "The amount not allowable as a deduction for any taxable year under subparagraph (A) by reason of the limitation of subparagraph (B) shall be treated as a deduction allowable in computing adjusted gross income for the succeeding taxable year (and only for the succeeding taxable year) to the extent of the limitation of clause (ii) for such succeeding taxable year")
+pub relation housing_cost_deduction_with_carryover_911c4(p: us.irc.core::Individual, to_y: us.irc.core::TaxableYear, amount: Money) kind institutional {
+    label en official "the succeeding-year (4)(A) deduction: carried disallowed amount plus the year's own non-employer amount, capped at the year's (4)(B) limitation";
+}
+rule S911C4CCarryoverDeduction(p: us.irc.core::Individual, from_y: us.irc.core::TaxableYear, to_y: us.irc.core::TaxableYear, carry: Money, own: Money, limitation: Money) defeasible {
+    when housing_carryover_disallowed_911c4(p, from_y, carry)
+     and succeeding_taxable_year_911(p, from_y, to_y)
+     and housing_cost_amount_not_employer_provided(p, to_y, own)
+     and housing_cost_deduction_limitation(p, to_y, limitation);
+    then housing_cost_deduction_with_carryover_911c4(p, to_y, min(carry + own, limitation));
+}

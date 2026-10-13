@@ -1,0 +1,276 @@
+// Section 220 — Archer medical savings accounts. Stage 2. Scope: (a) the deduction,
+// (b) the limitations (monthly limitation from the annual deductible, married
+// individuals, compensation cap, coordination with the section 106(b) exclusion,
+// dependents, Medicare), (c)(1) eligible individual, (c)(2) high deductible health
+// plan (statutory amounts indexed by (g), pinned as A3 parameters for 2025 and 2026),
+// (f)(1)-(2),(4) tax treatment of distributions, and (i)(1)-(2) the cut-off year
+// 2007. NOT modelled: (d) the trust requirements beyond the asserted status,
+// (e)(2) account terminations, (f)(3),(5)-(8) excess contribution return,
+// rollovers, divorce transfers and death, (j) numerical limits (the cut-off year is
+// 2007 in practice), (h) reports. Money forms: the monthly limitation is
+// `div_round(deductible * months * percent, 1200.0, 2, "HALF_UP")`, i.e. exactly
+// percent/100 x deductible x months/12 with one rounding (docs/research/constructs/
+// 21-expressions-quantities/ item 7); the statute names no rounding (JUDGMENT CALL).
+
+use self::{
+    DeductionKind,
+    IRC_S220_A,
+    IRC_S220_B,
+    IRC_S220_C,
+    IRC_S220_F,
+    IRC_S220_I,
+    Individual,
+    Person,
+    TaxableYear,
+    coverage_after_cut_off_date_in_earlier_cut_off_year,
+    deduction_allowed,
+    taxable_year_begins_after_earlier_cut_off_year,
+    taxable_year_begins_on,
+};
+
+pub relation covered_by_high_deductible_health_plan_first_day_of_month(p: Individual, y: TaxableYear, month: Integer) kind empirical {
+    label en official "the individual is covered under a high deductible health plan as of the 1st day of the month (section 220(c)(1)(A)(i))";
+}
+pub relation covered_by_other_overlapping_health_plan(p: Individual, y: TaxableYear, month: Integer) kind institutional {
+    label en official "while covered under the high deductible health plan the individual is covered under a health plan that is not a high deductible health plan and covers a benefit covered by it, disregarding permitted insurance and accident, disability, dental, vision or long-term care coverage (section 220(c)(1)(A)(ii),(B))";
+}
+pub relation hdhp_established_by_small_employer_or_self_employed(p: Individual, y: TaxableYear) kind institutional {
+    label en official "the plan is established and maintained by the individual's or spouse's small employer, or the individual is a self-employed person or spouse of one and the plan is not employer-provided (section 220(c)(1)(A)(iii))";
+}
+pub relation active_msa_participant_or_new_participant_of_participating_employer(p: Individual, y: TaxableYear) kind institutional {
+    label en official "the individual was an active MSA participant for a taxable year ending on or before the cut-off year, or first became one by reason of coverage under the plan of an MSA-participating employer (section 220(i)(1))";
+}
+pub relation eligible_individual_for_month_220(p: Individual, y: TaxableYear, month: Integer) kind institutional {
+    label en official "the individual is an eligible individual for the month (section 220(c)(1))";
+}
+@source(IRC_S220_C, quote = "such individual is covered under a high deductible health plan as of the 1st day of such month,")
+rule EligibleIndividualUpToCutOff(p: Individual, y: TaxableYear, month: Integer, begins: Date) strict {
+    label en official "an individual with high deductible health plan coverage on the first day of the month, without disqualifying other coverage and with an eligible plan sponsor, is an eligible individual for a taxable year beginning through the 2007 cut-off year (section 220(c)(1),(i)(2))";
+    when covered_by_high_deductible_health_plan_first_day_of_month(p, y, month);
+    when not_known(covered_by_other_overlapping_health_plan(p, y, month));
+    when hdhp_established_by_small_employer_or_self_employed(p, y);
+    when taxable_year_begins_on(y, begins);
+    when begins <= @2007-12-31;
+    when not_known(taxable_year_begins_after_earlier_cut_off_year(y));
+    when not_known(coverage_after_cut_off_date_in_earlier_cut_off_year(p, y));
+    then eligible_individual_for_month_220(p, y, month);
+}
+@source(IRC_S220_I, quote = "no individual shall be treated as an eligible individual for any taxable year beginning after the cut-off year unless—")
+rule EligibleIndividualAfterCutOff(p: Individual, y: TaxableYear, month: Integer, begins: Date) strict {
+    label en official "for a taxable year beginning after 2007 the individual must in addition be an active MSA participant or a new participant through an MSA-participating employer (section 220(i)(1))";
+    when covered_by_high_deductible_health_plan_first_day_of_month(p, y, month);
+    when not_known(covered_by_other_overlapping_health_plan(p, y, month));
+    when hdhp_established_by_small_employer_or_self_employed(p, y);
+    when active_msa_participant_or_new_participant_of_participating_employer(p, y);
+    when taxable_year_begins_on(y, begins);
+    when begins >= @2008-01-01;
+    then eligible_individual_for_month_220(p, y, month);
+}
+
+// --- (c)(2): high deductible health plan -----------------------------------------------
+
+pub relation health_plan_annual_deductible(plan: Integer, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the annual deductible under the health plan (section 220(c)(2)(A))";
+}
+pub relation health_plan_annual_out_of_pocket(plan: Integer, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the annual out-of-pocket expenses required to be paid under the plan, other than premiums, for covered benefits (section 220(c)(2)(A)(iii))";
+}
+pub relation health_plan_is_self_only(plan: Integer) kind empirical {
+    label en official "the coverage is self-only coverage; any other coverage is family coverage (section 220(c)(5))";
+}
+pub relation health_plan_substantially_all_disregarded_coverage(plan: Integer) kind empirical {
+    label en official "substantially all of the plan's coverage is coverage described in section 220(c)(1)(B) (permitted insurance; accident, disability, dental, vision or long-term care) (section 220(c)(2)(B)(i))";
+}
+pub relation high_deductible_health_plan_220(plan: Integer, y: TaxableYear) kind institutional {
+    label en official "the health plan is a high deductible health plan for the taxable year (section 220(c)(2))";
+}
+@source(IRC_S220_C, quote = "in the case of self-only coverage, which has an annual deductible which is not less than $1,500 and not more than $2,250,")
+rule HighDeductibleHealthPlanSelfOnly(plan: Integer, y: TaxableYear, deductible: Money, oop: Money) strict {
+    label en official "a self-only plan qualifies with an annual deductible within the range and out-of-pocket expenses within the limit (indexed amounts; section 220(c)(2)(A),(g))";
+    when health_plan_is_self_only(plan);
+    when health_plan_annual_deductible(plan, y, deductible);
+    when health_plan_annual_out_of_pocket(plan, y, oop);
+    when deductible >= ArcherHdhpSelfOnlyMinimumDeductible;
+    when deductible <= ArcherHdhpSelfOnlyMaximumDeductible;
+    when oop <= ArcherHdhpSelfOnlyOutOfPocketLimit;
+    when not_known(health_plan_substantially_all_disregarded_coverage(plan));
+    then high_deductible_health_plan_220(plan, y);
+}
+@source(IRC_S220_C, quote = "in the case of family coverage, which has an annual deductible which is not less than $3,000 and not more than $4,500, and")
+rule HighDeductibleHealthPlanFamily(plan: Integer, y: TaxableYear, deductible: Money, oop: Money) strict {
+    label en official "a family plan qualifies with an annual deductible within the range and out-of-pocket expenses within the limit (indexed amounts; section 220(c)(2)(A),(g))";
+    when not_known(health_plan_is_self_only(plan));
+    when health_plan_annual_deductible(plan, y, deductible);
+    when health_plan_annual_out_of_pocket(plan, y, oop);
+    when deductible >= ArcherHdhpFamilyMinimumDeductible;
+    when deductible <= ArcherHdhpFamilyMaximumDeductible;
+    when oop <= ArcherHdhpFamilyOutOfPocketLimit;
+    when not_known(health_plan_substantially_all_disregarded_coverage(plan));
+    then high_deductible_health_plan_220(plan, y);
+}
+
+// --- (b): the limitation -----------------------------------------------------------------
+
+pub relation self_only_coverage_months_and_deductible(p: Individual, y: TaxableYear, months: Integer, deductible: Money) kind empirical {
+    label en official "the number of eligible months in which the individual has self-only coverage as of the first day, and the annual deductible under that coverage (section 220(b)(2)(A)); an asserted count over the per-month eligibility (aggregates over derived predicates are a runtime subset limitation, section 111 — TECH_GAPS G2717)";
+}
+pub relation family_coverage_months_and_deductible(p: Individual, y: TaxableYear, months: Integer, deductible: Money) kind empirical {
+    label en official "the number of eligible months in which the individual has family coverage as of the first day, and the annual deductible under that coverage, applying the section 220(b)(3) rule for married individuals (section 220(b)(2)(B),(3)(A))";
+}
+pub relation archer_msa_self_only_component(p: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the sum of the monthly limitations for months with self-only coverage: 65 percent of the annual deductible times months over 12 (section 220(b)(2)(A))";
+}
+@source(IRC_S220_B, quote = "65 percent of the annual deductible under such coverage")
+rule SelfOnlyMonthlyLimitationComponent(p: Individual, y: TaxableYear, months: Integer, deductible: Money) strict {
+    label en official "65 percent of the annual deductible, one twelfth per eligible month (section 220(b)(2)(A))";
+    when self_only_coverage_months_and_deductible(p, y, months, deductible);
+    then archer_msa_self_only_component(p, y, div_round(deductible * months * 65, 1200.0, 2, "HALF_UP"));
+}
+pub relation archer_msa_family_component(p: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the sum of the monthly limitations for months with family coverage: 75 percent of the annual deductible times months over 12 (section 220(b)(2)(B))";
+}
+@source(IRC_S220_B, quote = "75 percent of the annual deductible under such coverage")
+rule FamilyMonthlyLimitationComponent(p: Individual, y: TaxableYear, months: Integer, deductible: Money) strict {
+    label en official "75 percent of the annual deductible, one twelfth per eligible month (section 220(b)(2)(B))";
+    when family_coverage_months_and_deductible(p, y, months, deductible);
+    then archer_msa_family_component(p, y, div_round(deductible * months * 75, 1200.0, 2, "HALF_UP"));
+}
+pub relation medicare_entitled_from_month(p: Individual, y: TaxableYear, first_month: Integer) kind empirical {
+    label en official "the first month the individual is entitled to benefits under title XVIII of the Social Security Act; the limitation is zero from that month (section 220(b)(7)); the months counted above already exclude those months";
+}
+pub relation has_self_only_component_220(p: Individual, y: TaxableYear) kind institutional {
+    label en official "a self-only monthly limitation component exists for the year (helper of the section 220(b)(1) sum)";
+}
+rule HasSelfOnlyComponentRule(p: Individual, y: TaxableYear) strict {
+    label en official "helper: a self-only component was derived";
+    when archer_msa_self_only_component(p, y, _);
+    then has_self_only_component_220(p, y);
+}
+pub relation has_family_component_220(p: Individual, y: TaxableYear) kind institutional {
+    label en official "a family monthly limitation component exists for the year (helper of the section 220(b)(1) sum)";
+}
+rule HasFamilyComponentRule(p: Individual, y: TaxableYear) strict {
+    label en official "helper: a family component was derived";
+    when archer_msa_family_component(p, y, _);
+    then has_family_component_220(p, y);
+}
+pub relation archer_msa_total_limitation(p: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the sum of the monthly limitations for the taxable year (section 220(b)(1))";
+}
+@source(IRC_S220_B, quote = "shall not exceed the sum of the monthly limitations for months during such taxable year that the individual is an eligible individual.")
+rule TotalLimitationBothKinds(p: Individual, y: TaxableYear, a: Money, b: Money) strict {
+    label en official "the total is the sum of the self-only and family components (section 220(b)(1))";
+    when archer_msa_self_only_component(p, y, a);
+    when archer_msa_family_component(p, y, b);
+    then archer_msa_total_limitation(p, y, a + b);
+}
+@source(IRC_S220_B, quote = "shall not exceed the sum of the monthly limitations for months during such taxable year that the individual is an eligible individual.")
+rule TotalLimitationSelfOnlyOnly(p: Individual, y: TaxableYear, a: Money) strict {
+    label en official "with self-only coverage months only, the total is the self-only component";
+    when archer_msa_self_only_component(p, y, a);
+    when not_known(has_family_component_220(p, y));
+    then archer_msa_total_limitation(p, y, a);
+}
+@source(IRC_S220_B, quote = "shall not exceed the sum of the monthly limitations for months during such taxable year that the individual is an eligible individual.")
+rule TotalLimitationFamilyOnly(p: Individual, y: TaxableYear, b: Money) strict {
+    label en official "with family coverage months only, the total is the family component";
+    when archer_msa_family_component(p, y, b);
+    when not_known(has_self_only_component_220(p, y));
+    then archer_msa_total_limitation(p, y, b);
+}
+
+pub relation amount_paid_in_cash_to_archer_msa(p: Individual, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the aggregate amount paid in cash during the taxable year by the individual to an Archer MSA of the individual (section 220(a))";
+}
+pub relation compensation_cap_for_archer_msa(p: Individual, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the individual's wages, salaries, tips and other compensation from the employer that maintains the plan, or the earned income (section 401(c)(1)) from the trade or business with respect to which the plan is established, determined without regard to community property laws (section 220(b)(4))";
+}
+pub relation section_106b_excludable_contribution_to_archer_msa(p: Individual, y: TaxableYear) kind empirical {
+    label en official "any amount contributed to an Archer MSA of the individual (or of a spouse covered under the same plan) for the year is excludable from gross income under section 106(b) (section 220(b)(5))";
+}
+pub relation deduction_allowable_to_another_taxpayer_under_151(p: Individual, y: TaxableYear) kind empirical {
+    label en official "a deduction under section 151 is allowable to another taxpayer for the calendar year in which the individual's taxable year begins (section 220(b)(6))";
+}
+pub relation archer_msa_deduction_barred(p: Individual, y: TaxableYear) kind institutional {
+    label en official "no section 220 deduction is allowed for the year by reason of section 220(b)(5) or (6)";
+}
+@source(IRC_S220_B, quote = "No deduction shall be allowed under this section for any amount paid for any taxable year to an Archer MSA of an individual if—")
+rule DeductionBarredByEmployerExclusion(p: Individual, y: TaxableYear) strict {
+    label en official "no deduction when amounts were contributed that are excludable under section 106(b) (section 220(b)(5))";
+    when section_106b_excludable_contribution_to_archer_msa(p, y);
+    then archer_msa_deduction_barred(p, y);
+}
+@source(IRC_S220_B, quote = "No deduction shall be allowed under this section to any individual with respect to whom a deduction under section 151 is allowable to another taxpayer")
+rule DeductionBarredForDependent(p: Individual, y: TaxableYear) strict {
+    label en official "no deduction to a person for whom another taxpayer may claim a section 151 deduction (section 220(b)(6))";
+    when deduction_allowable_to_another_taxpayer_under_151(p, y);
+    then archer_msa_deduction_barred(p, y);
+}
+pub relation archer_msa_deduction(p: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the section 220(a) deduction for the year: the cash paid to the Archer MSA, limited by the section 220(b)(1) sum of monthly limitations and the (b)(4) compensation cap";
+}
+@source(IRC_S220_A, quote = "there shall be allowed as a deduction for the taxable year an amount equal to the aggregate amount paid in cash during such taxable year by such individual to an Archer MSA of such individual.")
+rule ArcherMsaDeductionRule(p: Individual, y: TaxableYear, paid: Money, limit: Money, cap: Money) strict {
+    label en official "the deduction is the cash paid, not above the limitation or the compensation cap (section 220(a),(b)(1),(4))";
+    when amount_paid_in_cash_to_archer_msa(p, y, paid);
+    when archer_msa_total_limitation(p, y, limit);
+    when compensation_cap_for_archer_msa(p, y, cap);
+    when not_known(archer_msa_deduction_barred(p, y));
+    then archer_msa_deduction(p, y, min(paid, min(limit, cap)));
+}
+@source(IRC_S220_A, quote = "In the case of an individual who is an eligible individual for any month during the taxable year")
+rule ArcherMsaDeductionAllowed(p: Individual, y: TaxableYear, amount: Money) strict {
+    label en official "the Archer MSA amount is an allowed deduction";
+    when archer_msa_deduction(p, y, amount);
+    then deduction_allowed(p, y, Section220ArcherMsa, amount);
+}
+
+// --- (f): distributions ------------------------------------------------------------------
+
+pub relation archer_msa_distribution(p: Individual, y: TaxableYear, item: Integer, amount: Money) kind empirical {
+    label en official "an amount paid or distributed out of an Archer MSA of the account holder";
+}
+pub relation distribution_used_exclusively_for_qualified_medical_expenses(p: Individual, y: TaxableYear, item: Integer) kind empirical {
+    label en official "the distribution is used exclusively to pay qualified medical expenses of the account holder, spouse or dependents (section 220(d)(2),(f)(1))";
+}
+pub relation distribution_is_rollover_or_excess_contribution_return(p: Individual, y: TaxableYear, item: Integer) kind institutional {
+    label en official "the distribution is a rollover paid into an Archer MSA or health savings account within 60 days, or a timely return of an excess contribution with its net income (section 220(f)(3),(5)); the rules are not decomposed here (TECH_GAPS G2718)";
+}
+pub relation archer_msa_distribution_excluded_from_income(p: Individual, y: TaxableYear, item: Integer) kind institutional {
+    label en official "the distribution is not includible in gross income (section 220(f)(1))";
+}
+@source(IRC_S220_F, quote = "shall not be includible in gross income")
+rule DistributionForQualifiedExpensesExcluded(p: Individual, y: TaxableYear, item: Integer) strict {
+    label en official "a distribution used exclusively for qualified medical expenses is excluded (section 220(f)(1))";
+    when archer_msa_distribution(p, y, item, _);
+    when distribution_used_exclusively_for_qualified_medical_expenses(p, y, item);
+    then archer_msa_distribution_excluded_from_income(p, y, item);
+}
+pub relation archer_msa_distribution_included_in_income(p: Individual, y: TaxableYear, item: Integer, amount: Money) kind institutional {
+    label en official "the distribution is included in the account holder's gross income (section 220(f)(2))";
+}
+@source(IRC_S220_F, quote = "shall be included in the gross income of such holder.")
+rule DistributionNotForQualifiedExpensesIncluded(p: Individual, y: TaxableYear, item: Integer, amount: Money) strict {
+    label en official "a distribution not used exclusively for qualified medical expenses is included in gross income, except for rollovers and returned excess contributions (section 220(f)(2),(3),(5))";
+    when archer_msa_distribution(p, y, item, amount);
+    when not_known(distribution_used_exclusively_for_qualified_medical_expenses(p, y, item));
+    when not_known(distribution_is_rollover_or_excess_contribution_return(p, y, item));
+    then archer_msa_distribution_included_in_income(p, y, item, amount);
+}
+pub relation account_holder_disabled_or_deceased_at_distribution(p: Individual, y: TaxableYear, item: Integer) kind empirical {
+    label en official "the distribution is made after the account holder becomes disabled within section 72(m)(7) or dies (section 220(f)(4)(B))";
+}
+pub relation account_holder_reached_medicare_age_at_distribution(p: Individual, y: TaxableYear, item: Integer) kind empirical {
+    label en official "the distribution is made after the holder attains the age specified in section 1811 of the Social Security Act (section 220(f)(4)(C))";
+}
+pub relation additional_tax_on_archer_msa_distribution(p: Individual, y: TaxableYear, item: Integer, amount: Money) kind institutional {
+    label en official "the tax imposed by chapter 1 is increased by 20 percent of the amount includible under section 220(f)(2) (section 220(f)(4)(A))";
+}
+@source(IRC_S220_F, quote = "shall be increased by 20 percent of the amount which is so includible.")
+rule AdditionalTaxTwentyPercent(p: Individual, y: TaxableYear, item: Integer, amount: Money) strict {
+    label en official "20 percent additional tax on the includible distribution, unless the holder was disabled or has died, or has reached the Medicare age (section 220(f)(4))";
+    when archer_msa_distribution_included_in_income(p, y, item, amount);
+    when not_known(account_holder_disabled_or_deceased_at_distribution(p, y, item));
+    when not_known(account_holder_reached_medicare_age_at_distribution(p, y, item));
+    then additional_tax_on_archer_msa_distribution(p, y, item, round(amount * 0.20, 2, "HALF_UP"));
+}

@@ -1,0 +1,420 @@
+// 26 U.S.C. §2032A — special use valuation ("current use" valuation of
+// qualified farm/closely-held-business real property). Stage-2b module of
+// `us.irc.estate_gift` (B01/IRC-11); scope per the coordinator's priority
+// list: (a)-(e) core (the 50%/25% tests, the aggregate-reduction cap with
+// its SOURCE_GAP inflation adjustment, qualified use, the 10-year recapture
+// with exact dates and the additional-tax computation, the election as a
+// power with the agreement as its validity condition). Publishes
+// `pub special_use_value`.
+//
+// NOT MODELLED this pass (TECH_GAP/NON_NORMATIVE, see the coverage notes and
+// TECH-GAPS.md G478 family): (b)(4) retired/disabled decedent special rule,
+// (b)(5) surviving-spouse active-management rule, (c)(2)(D) partial
+// dispositions, (c)(2)(E) timber, (c)(6)(B) the 3-of-8-year no-material-
+// participation cessation test (same date-aggregation class as this
+// package's other "N years within an M-year window" gaps), (c)(7) the
+// 2-year grace period and eligible-heir exceptions, (c)(8) qualified
+// conservation contributions, (d)(3) the cure-period procedure, and
+// (e)(3)-(5),(7)-(14) (residential-building inclusion, farm/farming-purposes
+// definitions, the (7)/(8) valuation-methodology formulas, community
+// property, the bond-in-lieu-of-liability procedure, active management,
+// woodland elections, like-kind-exchange tacking) — these are genuinely
+// separate, self-contained sub-norms, several with heavy actuarial/
+// valuation-methodology content, not reached within this pass's budget.
+//
+// JUDGMENT CALLS:
+//  - The (c)(1)(A)/(2)(A)(i) "adjusted tax difference with respect to the
+//    estate" (what the section 2001 tax WOULD have been without section
+//    2032A) is read as a case-asserted amount (`estate_tax_without_2032a`),
+//    the same counterfactual-recomputation class already documented as
+//    TECH-GAPS.md G368 for section 2013(c)(1)(B) — no aggregate/rerun
+//    primitive exists to derive it from the ordinary chain a second time.
+//  - The (b)(1)(C) "5 years or more of the preceding 8" and (c)(6)(B) "more
+//    than 3 years of some 8-year window" tests are read as case-asserted
+//    YEAR COUNTS (`ownership_use_participation_years`), following this
+//    package's established convention (`corpus/laws/us/irc/credits/
+//    50-recapture.law`'s `full_years_held`) rather than deriving them from a
+//    raw period ledger.
+//  - "Material participation" (e)(6) is read as a case-asserted empirical
+//    fact per instance, not derived from the section 1402(a) self-employment
+//    test it cross-references (that test itself lives in a different
+//    subtitle A package) — a documented simplification of an evidentiary,
+//    multi-factor question, not an arithmetic guard.
+
+language "law.core" version "0.2";
+package us.irc.estate_gift version "0.1.1";
+namespace "urn:us:irc:estate_gift:clir";
+
+use self::{
+    Asset,
+    Estate,
+    IRC_S2032A_A,
+    IRC_S2032A_B,
+    IRC_S2032A_C,
+    IRC_S2032A_D,
+    IRC_S2032A_E,
+    Individual,
+    Person,
+    Secretary,
+    date_of_death,
+    disposition_of_same_property_recorded_2032ac3,
+    estate_tax,
+    executor_of,
+    gross_estate,
+    heir_death_recorded_2032a,
+    heir_discharged_from_2032a_personal_liability,
+    net_cash_rent_to_family_not_cessation_2032ac7e,
+    qualified_conservation_contribution_2032ac8,
+    qualified_heir_death_date,
+    recapture_window_end_2032a,
+    retired_or_disabled_substitution_applies_2032ab4,
+};
+
+// --- (e)(1)-(2): qualified heir, member of family (feeds (a)-(d)) ----------
+
+@source(IRC_S2032A_E, relation = formalizes, coverage = partial, quote = "The term \"member of the family\" means, with respect to any individual, only")
+pub relation member_of_family_2032a(x: Individual, of: Individual) kind empirical {
+    label en unofficial "x is a member of of's family for section 2032A purposes: an ancestor, spouse, lineal descendant, or spouse of a lineal descendant (section 2032A(e)(2)); asserted directly rather than derived from a genealogy graph";
+}
+
+@source(IRC_S2032A_E, relation = formalizes, coverage = partial, quote = "The term \"qualified heir\" means, with respect to any property, a member of the decedent's family who acquired such property (or to whom such property passed) from the decedent")
+pub relation qualified_heir(heir: Individual, prop: Asset, e: Estate) kind empirical {
+    label en unofficial "heir is a qualified heir with respect to prop: a member of the decedent's family who acquired (or to whom it passed) prop from the decedent (section 2032A(e)(1))";
+}
+
+// --- (b)(2): qualified use ---------------------------------------------------
+
+pub enum QualifiedUseKind {
+    Farming;                 // (b)(2)(A)
+    OtherTradeOrBusiness;    // (b)(2)(B)
+}
+@source(IRC_S2032A_B, relation = formalizes, coverage = exact, quote = "the term \"qualified use\" means the devotion of the property to any of the following")
+pub relation qualified_use(prop: Asset, kind: QualifiedUseKind, by: Person, e: Estate) kind empirical {
+    label en unofficial "prop is devoted to the stated qualified use by the decedent or a member of the decedent's family, on the date of the decedent's death (section 2032A(b)(2))";
+}
+relation has_qualified_use(prop: Asset, e: Estate) kind institutional;
+rule HasQualifiedUseRule(prop: Asset, e: Estate) defeasible {
+    when qualified_use(prop, _, _, e);
+    then has_qualified_use(prop, e);
+}
+
+// --- (b)(3): adjusted value --------------------------------------------------
+
+pub relation section_2053a4_deduction(e: Estate, prop: Asset, amount: Money) kind empirical {
+    label en unofficial "amounts allowable as a deduction under section 2053(a)(4) with respect to prop (unpaid mortgage/indebtedness on the property), reducing its section 2032A(b)(3) adjusted value; zero where none asserted (section 2053(a)(4) itself is not separately modelled in 04-deductions.law's stage-1 scope)";
+}
+relation has_2053a4_deduction(e: Estate, prop: Asset) kind institutional;
+rule Has2053a4DeductionRule(e: Estate, prop: Asset) defeasible {
+    when section_2053a4_deduction(e, prop, _);
+    then has_2053a4_deduction(e, prop);
+}
+pub relation property_fair_market_value(e: Estate, prop: Asset, value: Money) kind empirical {
+    label en unofficial "the fair market value of prop for purposes of chapter 11, determined WITHOUT regard to section 2032A (section 2032A(b)(3)(B))";
+}
+@source(IRC_S2032A_B, relation = formalizes, coverage = partial, quote = "the value of such property for purposes of this chapter (determined without regard to this section), reduced by any amounts allowable as a deduction in respect of such property under paragraph (4) of section 2053(a)")
+pub relation adjusted_value_of_property(e: Estate, prop: Asset, value: Money) kind institutional {
+    label en official "the section 2032A(b)(3)(B) adjusted value of prop: its fair market value (without regard to section 2032A), reduced by any section 2053(a)(4) deduction with respect to it";
+}
+rule AdjustedValueOfPropertyWithDeductionRule(e: Estate, prop: Asset, fmv: Money, ded: Money) defeasible {
+    when property_fair_market_value(e, prop, fmv);
+    when section_2053a4_deduction(e, prop, ded);
+    then adjusted_value_of_property(e, prop, max(0.00 USD, fmv - ded));
+}
+rule AdjustedValueOfPropertyNoDeductionRule(e: Estate, prop: Asset, fmv: Money) defeasible {
+    when property_fair_market_value(e, prop, fmv);
+    when not_known(has_2053a4_deduction(e, prop));
+    then adjusted_value_of_property(e, prop, fmv);
+}
+
+pub relation adjusted_value_of_gross_estate(e: Estate, value: Money) kind institutional {
+    label en official "the section 2032A(b)(3)(A) adjusted value of the gross estate: the gross estate (determined without regard to section 2032A), reduced by section 2053(a)(4) deductions";
+}
+pub relation total_section_2053a4_deduction(e: Estate, amount: Money) kind institutional;
+rule TotalSection2053a4DeductionRule(e: Estate) defeasible {
+    when section_2053a4_deduction(e, _, _);
+    then total_section_2053a4_deduction(e, sum all d: Money for prop: Asset where section_2053a4_deduction(e, prop, d));
+}
+relation has_any_2053a4_deduction(e: Estate) kind institutional;
+rule HasAny2053a4DeductionRule(e: Estate) defeasible {
+    when total_section_2053a4_deduction(e, _);
+    then has_any_2053a4_deduction(e);
+}
+rule AdjustedValueOfGrossEstateWithDeductionRule(e: Estate, gross: Money, ded: Money) defeasible {
+    when gross_estate(e, gross);
+    when total_section_2053a4_deduction(e, ded);
+    then adjusted_value_of_gross_estate(e, max(0.00 USD, gross - ded));
+}
+rule AdjustedValueOfGrossEstateNoDeductionRule(e: Estate, gross: Money) defeasible {
+    when gross_estate(e, gross);
+    when not_known(has_any_2053a4_deduction(e));
+    then adjusted_value_of_gross_estate(e, gross);
+}
+
+// --- (b)(1)(A)-(B): the 50 percent and 25 percent tests ---------------------
+
+pub relation qualified_use_property_adjusted_value_total(e: Estate, value: Money) kind institutional {
+    label en unofficial "the total adjusted value of real or personal property used for a qualified use by the decedent or a family member and acquired by/passing to a qualified heir (section 2032A(b)(1)(A)'s numerator)";
+}
+rule QualifiedUsePropertyAdjustedValueTotalRule(e: Estate) defeasible {
+    when has_qualified_use(_, e);
+    when qualified_heir(_, _, e);
+    then qualified_use_property_adjusted_value_total(e, sum all v: Money for prop: Asset where adjusted_value_of_property(e, prop, v) and has_qualified_use(prop, e));
+}
+
+@source(IRC_S2032A_B, relation = formalizes, coverage = exact, quote = "50 percent or more of the adjusted value of the gross estate consists of the adjusted value of real or personal property which")
+pub relation fifty_percent_test_satisfied(e: Estate) kind institutional {
+    label en official "section 2032A(b)(1)(A): 50 percent or more of the adjusted value of the gross estate consists of qualified-use property acquired by/passing to a qualified heir";
+}
+rule FiftyPercentTestSatisfiedRule(e: Estate, qualifying: Money, gross_adj: Money) defeasible {
+    when qualified_use_property_adjusted_value_total(e, qualifying);
+    when adjusted_value_of_gross_estate(e, gross_adj) and gross_adj > 0.00 USD;
+    when div_round(qualifying, gross_adj, 6, "HALF_UP") >= 0.50;
+    then fifty_percent_test_satisfied(e);
+}
+
+pub relation qualified_real_property_adjusted_value_total(e: Estate, value: Money) kind institutional {
+    label en unofficial "the total adjusted value of REAL property meeting (A)(ii) and (C) (section 2032A(b)(1)(B)'s numerator) — this pass reads it as the real-property subset of the same qualifying set counted for the 50 percent test, since (C)'s own 5-of-8-year test is asserted per-property alongside qualified_use (module header judgment call)";
+}
+rule QualifiedRealPropertyAdjustedValueTotalRule(e: Estate) defeasible {
+    when qualified_use(_, _, _, e);
+    when ownership_use_participation_years(e, _, _);
+    then qualified_real_property_adjusted_value_total(e, sum all v: Money for prop: Asset where adjusted_value_of_property(e, prop, v) and has_qualified_use(prop, e) and meets_five_of_eight_year_test(prop, e));
+}
+pub relation ownership_use_participation_years(e: Estate, prop: Asset, years: Decimal) kind empirical {
+    label en unofficial "the number of years, of the 8-year period ending on the decedent's death, during which prop was owned by the decedent/family AND used for a qualified use AND had material participation (section 2032A(b)(1)(C)); asserted directly, see module header judgment call";
+}
+relation meets_five_of_eight_year_test(prop: Asset, e: Estate) kind institutional;
+rule MeetsFiveOfEightYearTestRule(prop: Asset, e: Estate, years: Decimal) defeasible {
+    when ownership_use_participation_years(e, prop, years) and years >= 5.0;
+    when not_known(retired_or_disabled_substitution_applies_2032ab4(e, prop));
+    then meets_five_of_eight_year_test(prop, e);
+}
+
+@source(IRC_S2032A_B, relation = formalizes, coverage = exact, quote = "25 percent or more of the adjusted value of the gross estate consists of the adjusted value of real property which meets the requirements of subparagraphs (A)(ii) and (C)")
+pub relation twenty_five_percent_test_satisfied(e: Estate) kind institutional {
+    label en official "section 2032A(b)(1)(B): 25 percent or more of the adjusted value of the gross estate consists of qualifying real property meeting (A)(ii) and (C)";
+}
+rule TwentyFivePercentTestSatisfiedRule(e: Estate, qualifying: Money, gross_adj: Money) defeasible {
+    when qualified_real_property_adjusted_value_total(e, qualifying);
+    when adjusted_value_of_gross_estate(e, gross_adj) and gross_adj > 0.00 USD;
+    when div_round(qualifying, gross_adj, 6, "HALF_UP") >= 0.25;
+    then twenty_five_percent_test_satisfied(e);
+}
+
+// --- (b)(1): qualified real property (feeds (a)) ----------------------------
+
+pub relation property_located_in_united_states(prop: Asset) kind empirical {
+    label en unofficial "prop is real property located in the United States (section 2032A(b)(1))";
+}
+pub relation designated_in_agreement(e: Estate, prop: Asset) kind empirical {
+    label en unofficial "prop is designated in the section 2032A(d)(2) agreement (section 2032A(b)(1)(D))";
+}
+
+@source(IRC_S2032A_B, relation = formalizes, coverage = partial, quote = "the term \"qualified real property\" means real property located in the United States which was acquired from or passed from the decedent to a qualified heir of the decedent and which, on the date of the decedent's death, was being used for a qualified use by the decedent or a member of the decedent's family")
+pub relation qualified_real_property(e: Estate, prop: Asset) kind institutional {
+    label en official "prop is qualified real property under section 2032A(b)(1): located in the US, passed to a qualified heir, used for a qualified use, meets the 50/25 percent tests and the 5-of-8-year test, and is designated in the agreement";
+}
+rule QualifiedRealPropertyRule(e: Estate, prop: Asset, heir: Individual) defeasible {
+    when property_located_in_united_states(prop);
+    when qualified_heir(heir, prop, e);
+    when has_qualified_use(prop, e);
+    when fifty_percent_test_satisfied(e);
+    when twenty_five_percent_test_satisfied(e);
+    when meets_five_of_eight_year_test(prop, e);
+    when designated_in_agreement(e, prop);
+    then qualified_real_property(e, prop);
+}
+
+// --- (a): value based on use; the aggregate-reduction cap -------------------
+// (a)(3)'s inflation adjustment is SOURCE_GAP beyond the base year, exactly
+// like `basic-exclusion-amount.lawparam.json`'s own convention: only the
+// statutorily EXACT, not-yet-adjusted figure is pinned.
+
+pub relation qualified_real_property_value_for_use(e: Estate, prop: Asset, value: Money) kind institutional {
+    label en unofficial "the value of qualified real property for the qualified use under which it qualifies (the section 2032A(e)(7)-(8) valuation-methodology result) — asserted directly; the methodology itself is TECH_GAP this pass (module header)";
+}
+
+@source(IRC_S2032A_A, relation = formalizes, coverage = exact, quote = "The aggregate decrease in the value of qualified real property taken into account for purposes of this chapter which results from the application of paragraph (1) with respect to any decedent shall not exceed $750,000")
+pub relation special_use_valuation_reduction_total(e: Estate, amount: Money) kind institutional {
+    label en official "the aggregate decrease in value from applying section 2032A(a)(1): sum, over every qualified real property, of its fair market value less its special-use value";
+}
+rule SpecialUseValuationReductionTotalRule(e: Estate) defeasible {
+    when qualified_real_property(e, _);
+    then special_use_valuation_reduction_total(e, sum all d: Money for prop: Asset where fmv_minus_use_value(e, prop, d) and qualified_real_property(e, prop));
+}
+relation fmv_minus_use_value(e: Estate, prop: Asset, amount: Money) kind institutional;
+rule FmvMinusUseValueRule(e: Estate, prop: Asset, fmv: Money, use_value: Money) defeasible {
+    when property_fair_market_value(e, prop, fmv);
+    when qualified_real_property_value_for_use(e, prop, use_value);
+    then fmv_minus_use_value(e, prop, max(0.00 USD, fmv - use_value));
+}
+
+relation special_use_valuation_cap_amount(e: Estate, cap: Money) kind institutional;
+rule SpecialUseValuationCapAmountRule(e: Estate) defeasible {
+    when date_of_death(e, _);
+    then special_use_valuation_cap_amount(e, SpecialUseValuationCap + 0.00 USD);
+}
+pub relation special_use_valuation_reduction_within_cap(e: Estate) kind institutional {
+    label en official "the aggregate section 2032A(a) reduction does not exceed the applicable cap (section 2032A(a)(2)-(3))";
+}
+rule SpecialUseValuationReductionWithinCapRule(e: Estate, total: Money, cap: Money) defeasible {
+    when special_use_valuation_reduction_total(e, total);
+    when special_use_valuation_cap_amount(e, cap) and total <= cap;
+    then special_use_valuation_reduction_within_cap(e);
+}
+
+@source(IRC_S2032A_A, relation = formalizes, coverage = exact, quote = "the value of qualified real property shall be its value for the use under which it qualifies, under subsection (b), as qualified real property")
+pub relation special_use_value(e: Estate, prop: Asset, value: Money) kind institutional {
+    label en official "the section 2032A(a) special-use value of qualified real property, when the executor has elected this section, filed the agreement, and the aggregate reduction is within the section 2032A(a)(2) cap";
+}
+rule SpecialUseValueRule(e: Estate, prop: Asset, use_value: Money) defeasible {
+    when special_use_valuation_election_valid(e);
+    when qualified_real_property(e, prop);
+    when qualified_real_property_value_for_use(e, prop, use_value);
+    when special_use_valuation_reduction_within_cap(e);
+    then special_use_value(e, prop, use_value);
+}
+// Aggregate-over-cap apportionment (reducing each property's benefit pro
+// rata down to the cap) is NOT modelled — TECH-GAPS.md G478, same class as
+// section 2013(c)(2)'s multiple-transferor apportionment (G369): the common
+// case (aggregate reduction within the cap) is exact.
+
+// --- (d): election and agreement --------------------------------------------
+
+pub relation special_use_valuation_election_made(e: Estate, x: Person, w: Interval<Instant>) kind empirical {
+    label en unofficial "the executor elected the application of section 2032A on the return of the tax imposed by section 2001 (section 2032A(d)(1))";
+}
+
+@source(IRC_S2032A_D, relation = formalizes, coverage = partial, quote = "The agreement referred to in this paragraph is a written agreement signed by each person in being who has an interest (whether or not in possession) in any property designated in such agreement consenting to the application of subsection (c) with respect to such property")
+pub relation special_use_valuation_agreement_signed_by_all_interested_persons(e: Estate) kind empirical {
+    label en unofficial "the section 2032A(d)(2) agreement has been signed by every person with an interest in the designated property, consenting to subsection (c)'s recapture rule";
+}
+
+relation special_use_valuation_election_valid(e: Estate) kind institutional {
+    label en unofficial "the section 2032A(d) election is validly exercised: made on the return and accompanied by the fully-signed agreement";
+}
+
+@source(IRC_S2032A_A, relation = formalizes, coverage = partial, quote = "the executor elects the application of this section and files the agreement referred to in subsection (d)(2)")
+rule SpecialUseValuationElectionPower(e: Estate, x: Person, w: Interval<Instant>) strict {
+    label en official "the executor may elect the application of section 2032A by filing the agreement referred to in subsection (d)(2) (section 2032A(a)(1)(B), (d)(1)-(2))";
+    when executor_of(e, x, w)
+        and special_use_valuation_election_made(e, x, w);
+    then power SpecialUseValuationElection {
+        holder x;
+        over e;
+        exercise special_use_valuation_election_made(e, x, w);
+        valid_when special_use_valuation_agreement_signed_by_all_interested_persons(e);
+        effect special_use_valuation_election_valid(e);
+        window w;
+    };
+}
+
+// --- (c): recapture: disposition or cessation of qualified use -------------
+
+pub relation qualified_heir_disposes_of_interest(e: Estate, prop: Asset, heir: Individual, to: Individual, on: Date) kind empirical {
+    label en unofficial "the qualified heir disposed of an interest in the qualified real property to the stated person on the stated date (section 2032A(c)(1)(A))";
+}
+pub relation qualified_heir_ceases_qualified_use(e: Estate, prop: Asset, heir: Individual, on: Date) kind empirical {
+    label en unofficial "the qualified heir ceased to use the property for the qualified use, on the stated date (section 2032A(c)(1)(B), read via (c)(6)(A) — the (c)(6)(B) 3-of-8-year no-participation branch is TECH_GAP, see module header)";
+}
+
+relation disposition_or_cessation_event(e: Estate, prop: Asset, heir: Individual, on: Date) kind institutional;
+rule DispositionEventRule(e: Estate, prop: Asset, heir: Individual, to: Individual, on: Date) defeasible {
+    when qualified_heir_disposes_of_interest(e, prop, heir, to, on);
+    when not_known(member_of_family_2032a(to, heir));
+    when not_known(qualified_conservation_contribution_2032ac8(e, prop, heir, on));
+    then disposition_or_cessation_event(e, prop, heir, on);
+}
+rule CessationEventRule(e: Estate, prop: Asset, heir: Individual, on: Date) defeasible {
+    when qualified_heir_ceases_qualified_use(e, prop, heir, on);
+    when not_known(net_cash_rent_to_family_not_cessation_2032ac7e(e, prop, heir));
+    when not_known(disposition_of_same_property_recorded_2032ac3(e, prop));
+    then disposition_or_cessation_event(e, prop, heir, on);
+}
+
+@source(IRC_S2032A_C, relation = formalizes, coverage = exact, quote = "If, within 10 years after the decedent's death and before the death of the qualified heir")
+pub relation recapture_event_within_window(e: Estate, prop: Asset, heir: Individual, on: Date) kind institutional {
+    label en official "the disposition or cessation occurred within 10 years after the decedent's death (section 2032A(c)(1); the 'and before the death of the qualified heir' branch is read as always satisfied absent a contrary case fact — no separate heir-death relation exists in this package)";
+}
+rule RecaptureEventWithinWindowRule(e: Estate, prop: Asset, heir: Individual, on: Date, end: Date) defeasible {
+    label en official "the event occurs within the 10-year period (as extended by section 2032A(c)(7)(A)(ii)) and before the death of the qualified heir (section 2032A(c)(1))";
+    when disposition_or_cessation_event(e, prop, heir, on);
+    when recapture_window_end_2032a(e, prop, end) and on <= end;
+    when not_known(heir_death_recorded_2032a(heir));
+    then recapture_event_within_window(e, prop, heir, on);
+}
+rule RecaptureEventWithinWindowHeirDeathRule(e: Estate, prop: Asset, heir: Individual, on: Date, end: Date, died: Date) defeasible {
+    when disposition_or_cessation_event(e, prop, heir, on);
+    when recapture_window_end_2032a(e, prop, end) and on <= end;
+    when qualified_heir_death_date(heir, died) and on < died;
+    then recapture_event_within_window(e, prop, heir, on);
+}
+
+pub relation estate_tax_without_2032a(e: Estate, amount: Money) kind empirical {
+    label en unofficial "what the section 2001 tax liability (reduced by allowable credits) would have been WITHOUT section 2032A (section 2032A(c)(2)(C)'s 'adjusted tax difference with respect to the estate') — asserted directly, see module header (same counterfactual-recomputation class as TECH-GAPS.md G368)";
+}
+pub relation adjusted_tax_difference_with_respect_to_estate(e: Estate, amount: Money) kind institutional {
+    label en official "section 2032A(c)(2)(C): the excess of the hypothetical tax without section 2032A over the actual estate tax liability";
+}
+rule AdjustedTaxDifferenceWithRespectToEstateRule(e: Estate, without: Money, with_: Money) defeasible {
+    when estate_tax_without_2032a(e, without);
+    when estate_tax(e, with_);
+    then adjusted_tax_difference_with_respect_to_estate(e, max(0.00 USD, without - with_));
+}
+
+pub relation interest_value_for_2032a_purposes_without_use(e: Estate, prop: Asset, value: Money) kind institutional {
+    label en unofficial "the value of the interest for purposes of chapter 11, determined WITHOUT regard to subsection (a) (section 2032A(c)(2)(B)(i)'s minuend) — read from `property_fair_market_value` (the same figure the (a) reduction itself compares against)";
+}
+rule InterestValueWithoutUseRule(e: Estate, prop: Asset, fmv: Money) defeasible {
+    when property_fair_market_value(e, prop, fmv);
+    then interest_value_for_2032a_purposes_without_use(e, prop, fmv);
+}
+pub relation total_excess_for_all_qualified_real_property(e: Estate, amount: Money) kind institutional;
+rule TotalExcessForAllQualifiedRealPropertyRule(e: Estate) defeasible {
+    when qualified_real_property(e, _);
+    then total_excess_for_all_qualified_real_property(e, sum all d: Money for prop: Asset where fmv_minus_use_value(e, prop, d) and qualified_real_property(e, prop));
+}
+
+@source(IRC_S2032A_C, relation = formalizes, coverage = exact, quote = "the adjusted tax difference attributable to an interest is the amount which bears the same ratio to the adjusted tax difference with respect to the estate (determined under subparagraph (C))")
+pub relation adjusted_tax_difference_attributable_to_interest(e: Estate, prop: Asset, amount: Money) kind institutional {
+    label en official "section 2032A(c)(2)(B): the estate-wide adjusted tax difference, apportioned to this interest by its share of the total excess-over-use-value across all qualified real property";
+}
+rule AdjustedTaxDifferenceAttributableToInterestRule(e: Estate, prop: Asset, estate_diff: Money, this_excess: Money, total_excess: Money) defeasible {
+    when adjusted_tax_difference_with_respect_to_estate(e, estate_diff);
+    when fmv_minus_use_value(e, prop, this_excess);
+    when total_excess_for_all_qualified_real_property(e, total_excess) and total_excess > 0.00 USD;
+    // One proportion, one rounding (TECH-GAPS G499, 26.09.2026).
+    then adjusted_tax_difference_attributable_to_interest(e, prop, div_round(estate_diff * (this_excess / 1.00 USD), total_excess / 1.00 USD, 2, "HALF_UP"));
+}
+
+pub relation amount_realized_on_disposition(e: Estate, prop: Asset, amount: Money) kind empirical {
+    label en unofficial "the amount realized on the disposition (or, absent an arm's-length sale/exchange, the fair market value) of the interest (section 2032A(c)(2)(A)(ii))";
+}
+
+@source(IRC_S2032A_C, relation = formalizes, coverage = exact, quote = "The amount of the additional tax imposed by paragraph (1) with respect to any interest shall be the amount equal to the lesser of")
+pub relation section_2032a_additional_tax(e: Estate, prop: Asset, amount: Money) kind institutional {
+    label en official "the section 2032A(c) additional estate tax: the lesser of the adjusted tax difference attributable to the interest and the excess of the amount realized over its section 2032A(a) value";
+}
+rule Section2032aAdditionalTaxRule(e: Estate, prop: Asset, heir: Individual, on: Date, diff: Money, realized: Money, use_value: Money) defeasible {
+    when recapture_event_within_window(e, prop, heir, on);
+    when adjusted_tax_difference_attributable_to_interest(e, prop, diff);
+    when amount_realized_on_disposition(e, prop, realized);
+    when special_use_value(e, prop, use_value);
+    then section_2032a_additional_tax(e, prop, min(diff, max(0.00 USD, realized - use_value)));
+}
+
+@source(IRC_S2032A_C, relation = formalizes, coverage = exact, quote = "The additional tax imposed by this subsection shall become due and payable on the day which is 6 months after the date of the disposition or cessation referred to in paragraph (1)")
+rule QualifiedHeirAdditionalTaxPaymentDuty(e: Estate, prop: Asset, heir: Individual, on: Date) defeasible {
+    label en official "the additional tax imposed by section 2032A(c) shall become due and payable 6 months after the disposition or cessation (section 2032A(c)(4)); the heir is personally liable absent a qualifying bond (section 2032A(c)(5), bond itself not modelled — TECH_GAP)";
+    when recapture_event_within_window(e, prop, heir, on)
+        and section_2032a_additional_tax(e, prop, _);
+    then duty QualifiedHeirAdditionalTaxDuty {
+        bearer heir;
+        beneficiary Secretary;
+        achieve section_2032a_additional_tax_paid(e, prop, heir) during [on, add_calendar_period(on, 6 calendar_month)];
+    };
+    unless heir_discharged_from_2032a_personal_liability(e, prop, heir) and recapture_event_within_window(e, prop, heir, on);
+}
+pub relation section_2032a_additional_tax_paid(e: Estate, prop: Asset, heir: Individual) kind empirical {
+    label en unofficial "the qualified heir paid the section 2032A(c) additional tax with respect to prop";
+}

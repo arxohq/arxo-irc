@@ -1,0 +1,903 @@
+// §6511(b)(2)(C), (c)(2)-(3), (d)(2)(B)-(8); §6513(b)(1), (b)(3); §6532(a)(4);
+// §6205(a)(2)-(5); §6213(e), (f)(2); the §6501(j)(2) / §6511(d)(4)(C) definition
+// (stage 4, 26.09.2026, DECISION-0379, implemented_unverified).
+//
+// METHOD.
+//  - Periods and amount limits follow module 08: a special period is a further
+//    `refund_claim_period_ends` tuple (the no-max-over-derived caveat of module 04
+//    applies), an amount limit is a Money relation next to the look-back ones.
+//  - The look-back of (c)(2) and (b)(2)(C) uses the plain 3-year / 2-year windows of
+//    module 08 (the filing-extension addend is the PL 119-64 revision of module 14).
+//  - "The last day of the second year after the calendar year in which X" ((d)(5),
+//    (d)(7)) needs a calendar-year decomposition the language does not have
+//    (TECH-GAPS G9/G10 date terms): the case supplies that date
+//    (`second_year_end_after_...`); every comparison with it is executable.
+//  - "Prevented by the operation of any law or rule of law other than section 7122"
+//    is the case fact `refund_barred_by_other_law_than_7122`; the rules say what
+//    the special provisions do about it (they lift the bar when the claim is
+//    filed within their period).
+//
+// JUDGMENT CALLS.
+//  - (c)(2)-(3): a claim filed on the very day the agreement is executed is not
+//    "prior to" it ((c)(3)(A)), so the special rules apply to it; (c)(2)'s "after
+//    the execution" is read with that exclusion. Payments counted in the post-
+//    agreement portion are those strictly after the execution and strictly before
+//    the filing (the text).
+//  - (d)(8)(A): "the 1-year period beginning on the date of such determination"
+//    ends the day before the first anniversary.
+//  - §6513(b)(1): "the 15th day of the fourth month following the close" is the
+//    first day of the month after the close plus 3 months plus 14 days (exact for
+//    every month length).
+//  - (d)(4)(A) and (d)(2)(A) read the due date WITHOUT extensions (module 08's
+//    simplification for (d)(2)); the "including extensions" of the text is the
+//    revision of module 14 for the general period only.
+
+language "law.core" version "0.2";
+package us.irc.assessment version "0.1.1";
+namespace "urn:us:irc:assessment:clir";
+
+use self::{
+    IRC_S6205_A,
+    IRC_S6213_E,
+    IRC_S6213_F,
+    IRC_S6511_B,
+    IRC_S6511_C,
+    IRC_S6511_D,
+    IRC_S6512_B,
+    IRC_S6513_B,
+    IRC_S6532_A,
+    Notice,
+    Person,
+    Proceeding,
+    Secretary,
+    TaxKind,
+    TaxableYear,
+    amount_paid_as_tax,
+    employer_for_6205_purposes,
+    exists_filing_extension_for_lookback,
+    notice_of_claim_disallowance_mailed,
+    refund_claim_agreement_within_original_period,
+    refund_claim_attributable_to_carryback,
+    refund_claim_filed,
+    refund_claim_period_ends,
+    refund_claim_period_ends_via_carryback,
+    refund_claim_three_year_end,
+    refund_suit_begun,
+    refund_suit_period_ends,
+    tax_court_notice_mailed_on,
+};
+
+// ============================================================================
+// §6511(b)(2)(C) — amount limit when no claim was filed
+// ============================================================================
+
+pub relation credit_or_refund_allowed_without_claim(p: Person, y: TaxableYear, k: TaxKind, allowedOn: Date) kind empirical {
+    label en official "a credit or refund is allowed or made although no claim was filed, on the date it is allowed";
+}
+pub relation refund_amount_limit_no_claim(p: Person, y: TaxableYear, k: TaxKind, limit: Money) kind institutional {
+    label en official "§6511(b)(2)(C): if no claim was filed, the credit or refund shall not exceed the amount allowable under (A) or (B) as if a claim were filed on the date the credit or refund is allowed";
+}
+@source(IRC_S6511_B, relation = formalizes, coverage = exact, quote = "If no claim was filed, the credit or refund shall not exceed the amount which would be allowable under subparagraph (A) or (B), as the case may be, if claim was filed on the date the credit or refund is allowed.")
+rule S6511b2CNoClaimWithinThreeYearsUsesThreeYearLookback defeasible {
+    label en official "with no claim, when the allowance date is within 3 years of the return, the limit is the tax paid in the 3 years before the allowance";
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for allowedOn: Date;
+    for threeYearEnd: Date;
+    for calendar_before_1: Date;
+    when credit_or_refund_allowed_without_claim(p, y, k, allowedOn)
+        and refund_claim_three_year_end(p, y, k, threeYearEnd)
+        and allowedOn <= threeYearEnd
+        and not_known(exists_filing_extension_for_lookback(p, y, k))
+        and us.irc.core::civil_calendar_boundary_before(allowedOn, 3, us.irc.core::CalendarYear, calendar_before_1);
+    then refund_amount_limit_no_claim(p, y, k,
+        sum all amount: Money for paidOn: Date
+            where amount_paid_as_tax(p, y, k, amount, paidOn)
+                and paidOn <= allowedOn
+                and paidOn >= calendar_before_1);
+}
+@source(IRC_S6511_B, relation = formalizes, coverage = exact, quote = "If no claim was filed, the credit or refund shall not exceed the amount which would be allowable under subparagraph (A) or (B), as the case may be, if claim was filed on the date the credit or refund is allowed.")
+rule S6511b2CNoClaimAfterThreeYearsUsesTwoYearLookback defeasible {
+    label en official "with no claim, when the allowance date is after the 3-year period, the limit is the tax paid in the 2 years before the allowance";
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for allowedOn: Date;
+    for threeYearEnd: Date;
+    for calendar_before_1: Date;
+    when credit_or_refund_allowed_without_claim(p, y, k, allowedOn)
+        and refund_claim_three_year_end(p, y, k, threeYearEnd)
+        and allowedOn > threeYearEnd
+        and us.irc.core::civil_calendar_boundary_before(allowedOn, 2, us.irc.core::CalendarYear, calendar_before_1);
+    then refund_amount_limit_no_claim(p, y, k,
+        sum all amount: Money for paidOn: Date
+            where amount_paid_as_tax(p, y, k, amount, paidOn)
+                and paidOn <= allowedOn
+                and paidOn >= calendar_before_1);
+}
+
+// ============================================================================
+// §6511(c)(2), (c)(3) — agreement to extend assessment: amount limit and exclusions
+// ============================================================================
+
+pub relation refund_action_date(p: Person, y: TaxableYear, k: TaxKind, actionOn: Date) kind institutional {
+    label en unofficial "the date a claim is filed, or a credit or refund is allowed when no claim was filed";
+}
+rule S6511cActionDateFromClaim defeasible {
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for filedOn: Date;
+    when refund_claim_filed(p, y, k, filedOn);
+    then refund_action_date(p, y, k, filedOn);
+}
+rule S6511cActionDateFromAllowanceWithoutClaim defeasible {
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for allowedOn: Date;
+    when credit_or_refund_allowed_without_claim(p, y, k, allowedOn);
+    then refund_action_date(p, y, k, allowedOn);
+}
+pub relation agreement_special_rules_excluded_before_execution(p: Person, y: TaxableYear, k: TaxKind, actionOn: Date) kind institutional {
+    label en unofficial "section 6511(c)(3)(A): the claim was filed (or the credit or refund allowed) prior to the execution of the agreement";
+}
+@source(IRC_S6511_C, relation = formalizes, coverage = exact, quote = "(A) prior to the execution of the agreement or")
+rule S6511c3AClaimBeforeAgreementExcluded defeasible {
+    label en official "subsection (c) does not apply to a claim filed, or credit or refund allowed, prior to the execution of the agreement";
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for until: Date;
+    for consentedOn: Date;
+    for actionOn: Date;
+    when refund_claim_agreement_within_original_period(p, y, k, until, consentedOn)
+        and refund_action_date(p, y, k, actionOn)
+        and actionOn < consentedOn;
+    then agreement_special_rules_excluded_before_execution(p, y, k, actionOn);
+}
+pub relation agreement_special_rules_excluded_after_six_months(p: Person, y: TaxableYear, k: TaxKind, actionOn: Date) kind institutional {
+    label en unofficial "section 6511(c)(3)(B): the claim was filed (or the credit or refund allowed) more than 6 months after the expiration of the period within which an assessment may be made pursuant to the agreement";
+}
+@source(IRC_S6511_C, relation = formalizes, coverage = exact, quote = "(B) more than 6 months after the expiration of the period within which an assessment may be made pursuant to the agreement or any extension thereof.")
+rule S6511c3BClaimMoreThanSixMonthsAfterAgreementPeriodExcluded defeasible {
+    label en official "subsection (c) does not apply to a claim filed, or credit or refund allowed, more than 6 months after the agreed assessment period expires";
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for until: Date;
+    for consentedOn: Date;
+    for actionOn: Date;
+    when refund_claim_agreement_within_original_period(p, y, k, until, consentedOn)
+        and refund_action_date(p, y, k, actionOn)
+        and actionOn > add_calendar_period(until, 6 calendar_month);
+    then agreement_special_rules_excluded_after_six_months(p, y, k, actionOn);
+}
+pub relation agreement_special_rules_apply(p: Person, y: TaxableYear, k: TaxKind, actionOn: Date) kind institutional {
+    label en unofficial "the special rules of section 6511(c) apply to the claim or allowance: an agreement within the (a) period exists and neither (c)(3) exclusion holds";
+}
+rule S6511cSpecialRulesApplyToClaim defeasible {
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for until: Date;
+    for consentedOn: Date;
+    for actionOn: Date;
+    when refund_claim_agreement_within_original_period(p, y, k, until, consentedOn)
+        and refund_action_date(p, y, k, actionOn)
+        and not_known(agreement_special_rules_excluded_before_execution(p, y, k, actionOn))
+        and not_known(agreement_special_rules_excluded_after_six_months(p, y, k, actionOn));
+    then agreement_special_rules_apply(p, y, k, actionOn);
+}
+pub relation agreement_lookback_portion(p: Person, y: TaxableYear, k: TaxKind, actionOn: Date, amount: Money) kind institutional {
+    label en unofficial "the tax paid within the period which would be applicable under (b)(2) if a claim had been filed on the date the agreement was executed";
+}
+rule S6511c2LookbackAsOfAgreementThreeYears defeasible {
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for until: Date;
+    for consentedOn: Date;
+    for actionOn: Date;
+    for threeYearEnd: Date;
+    for calendar_before_1: Date;
+    when agreement_special_rules_apply(p, y, k, actionOn)
+        and refund_claim_agreement_within_original_period(p, y, k, until, consentedOn)
+        and refund_claim_three_year_end(p, y, k, threeYearEnd)
+        and consentedOn <= threeYearEnd
+        and us.irc.core::civil_calendar_boundary_before(consentedOn, 3, us.irc.core::CalendarYear, calendar_before_1);
+    then agreement_lookback_portion(p, y, k, actionOn,
+        sum all amount: Money for paidOn: Date
+            where amount_paid_as_tax(p, y, k, amount, paidOn)
+                and paidOn <= consentedOn
+                and paidOn >= calendar_before_1);
+}
+rule S6511c2LookbackAsOfAgreementTwoYears defeasible {
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for until: Date;
+    for consentedOn: Date;
+    for actionOn: Date;
+    for threeYearEnd: Date;
+    for calendar_before_1: Date;
+    when agreement_special_rules_apply(p, y, k, actionOn)
+        and refund_claim_agreement_within_original_period(p, y, k, until, consentedOn)
+        and refund_claim_three_year_end(p, y, k, threeYearEnd)
+        and consentedOn > threeYearEnd
+        and us.irc.core::civil_calendar_boundary_before(consentedOn, 2, us.irc.core::CalendarYear, calendar_before_1);
+    then agreement_lookback_portion(p, y, k, actionOn,
+        sum all amount: Money for paidOn: Date
+            where amount_paid_as_tax(p, y, k, amount, paidOn)
+                and paidOn <= consentedOn
+                and paidOn >= calendar_before_1);
+}
+pub relation post_agreement_paid_portion(p: Person, y: TaxableYear, k: TaxKind, actionOn: Date, amount: Money) kind institutional {
+    label en unofficial "the tax paid after the execution of the agreement and before the filing of the claim or the making of the credit or refund";
+}
+rule S6511c2PaidAfterAgreementBeforeAction defeasible {
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for until: Date;
+    for consentedOn: Date;
+    for actionOn: Date;
+    when agreement_special_rules_apply(p, y, k, actionOn)
+        and refund_claim_agreement_within_original_period(p, y, k, until, consentedOn);
+    then post_agreement_paid_portion(p, y, k, actionOn,
+        sum all amount: Money for paidOn: Date
+            where amount_paid_as_tax(p, y, k, amount, paidOn)
+                and paidOn > consentedOn
+                and paidOn < actionOn);
+}
+pub relation refund_amount_limit_after_agreement(p: Person, y: TaxableYear, k: TaxKind, actionOn: Date, limit: Money) kind institutional {
+    label en official "§6511(c)(2): the credit or refund shall not exceed the tax paid after the agreement and before the action, plus the tax paid within the (b)(2) period as of the agreement date";
+}
+@source(IRC_S6511_C, relation = formalizes, coverage = exact, quote = "the amount of the credit or refund shall not exceed the portion of the tax paid after the execution of the agreement and before the filing of the claim or the making of the credit or refund, as the case may be, plus the portion of the tax paid within the period which would be applicable under subsection (b)(2) if a claim had been filed on the date the agreement was executed.")
+rule S6511c2LimitAfterAgreement defeasible {
+    label en official "after an agreement the credit or refund is limited to the post-agreement payments plus the look-back portion as of the agreement date";
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for actionOn: Date;
+    for postAmount: Money;
+    for lookbackAmount: Money;
+    when post_agreement_paid_portion(p, y, k, actionOn, postAmount)
+        and agreement_lookback_portion(p, y, k, actionOn, lookbackAmount);
+    then refund_amount_limit_after_agreement(p, y, k, actionOn, postAmount + lookbackAmount);
+}
+
+// ============================================================================
+// §6511(d) — special rules, remainder
+// ============================================================================
+
+pub relation refund_barred_by_other_law_than_7122(p: Person, y: TaxableYear, k: TaxKind) kind empirical {
+    label en official "the allowance of the credit or refund is otherwise prevented by the operation of any law or rule of law other than section 7122 (relating to compromises)";
+}
+pub enum SpecialRefundBasis {
+    BadDebtOrWorthlessSecurity;   // (d)(1)
+    NolOrCapitalLossCarryback;    // (d)(2)(A)
+    ForeignTaxCredit;             // (d)(3)
+    CreditCarryback;              // (d)(4)
+    label en unofficial "the basis of a special refund period of section 6511(d) that also lifts the look-back amount limit";
+}
+pub relation overpayment_attributable_to_special_basis(p: Person, y: TaxableYear, k: TaxKind, basis: SpecialRefundBasis, amount: Money) kind empirical {
+    label en official "the amount of the overpayment attributable to the special basis (deductibility of items, carryback, foreign tax credit)";
+}
+pub relation refund_amount_limit_raised_by(p: Person, y: TaxableYear, k: TaxKind, basis: SpecialRefundBasis, amount: Money) kind institutional {
+    label en unofficial "the credit or refund may exceed the portion of the tax paid within the (b)(2) or (c) period by this amount attributable to the special basis";
+}
+
+// --- (d)(2)(B) — applicable rules for carrybacks ---------------------------
+
+pub relation refund_prevented_barrier_lifted(p: Person, y: TaxableYear, k: TaxKind) kind institutional {
+    label en unofficial "the credit or refund, otherwise prevented by a law other than section 7122, may be allowed or made because the claim was filed within the special carryback period";
+}
+@source(IRC_S6511_D, relation = formalizes, coverage = exact, quote = "such credit or refund may be allowed or made, if claim therefor is filed within the period provided in subparagraph (A) of this paragraph.")
+rule S6511d2BiCarrybackBarLiftedWhenClaimInPeriod defeasible {
+    label en official "a carryback overpayment barred by another law may still be allowed if the claim is filed within the (d)(2)(A) period";
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for lossYear: TaxableYear;
+    for filedOn: Date;
+    for periodEnd: Date;
+    when refund_barred_by_other_law_than_7122(p, y, k)
+        and refund_claim_attributable_to_carryback(p, y, k, lossYear)
+        and refund_claim_filed(p, y, k, filedOn)
+        and refund_claim_period_ends_via_carryback(p, y, k, lossYear, periodEnd)
+        and filedOn <= periodEnd;
+    then refund_prevented_barrier_lifted(p, y, k);
+}
+pub relation tentative_carryback_application_made_on(p: Person, y: TaxableYear, appliedOn: Date) kind empirical {
+    label en official "an application for a tentative carryback adjustment is made";
+}
+pub relation tentative_adjustment_period_ends_6411a(p: Person, y: TaxableYear, d: Date) kind empirical {
+    label en unofficial "the last day of the period provided in section 6411(a) for the application (case-supplied; section 6411 is not this package's norm)";
+}
+pub relation tentative_adjustment_prevented_by_other_law(p: Person, y: TaxableYear) kind empirical {
+    label en official "the allowance of an application, credit, or refund of a decrease in tax determined under section 6411(b) is otherwise prevented by the operation of any law or rule of law other than section 7122";
+}
+pub relation tentative_adjustment_barrier_lifted(p: Person, y: TaxableYear) kind institutional {
+    label en unofficial "the application, credit or refund may be allowed or made because the application was made within the section 6411(a) period";
+}
+@source(IRC_S6511_D, relation = formalizes, coverage = exact, quote = "such application, credit, or refund may be allowed or made if application for a tentative carryback adjustment is made within the period provided in section 6411(a).")
+rule S6511d2BiiTentativeAdjustmentBarLifted defeasible {
+    label en official "a tentative carryback adjustment barred by another law may still be allowed if the application is made within the section 6411(a) period";
+    for p: Person;
+    for y: TaxableYear;
+    for appliedOn: Date;
+    for periodEnd: Date;
+    when tentative_adjustment_prevented_by_other_law(p, y)
+        and tentative_carryback_application_made_on(p, y, appliedOn)
+        and tentative_adjustment_period_ends_6411a(p, y, periodEnd)
+        and appliedOn <= periodEnd;
+    then tentative_adjustment_barrier_lifted(p, y);
+}
+pub enum CarrybackConclusiveIssue {
+    NetOperatingLossDeduction;   // (d)(2)(B)(iii)(I)
+    ShortTermCapitalLoss;        // (d)(2)(B)(iii)(II)
+    CreditAndItsEffect;          // (d)(4)(B), credit carryback claims
+    AnyOtherIssue;
+    label en unofficial "the matters a final court determination in the carryback claim proceeding may or may not conclude";
+}
+pub relation final_court_determination_in_carryback_proceeding(p: Person, y: TaxableYear) kind empirical {
+    label en official "a determination by any court, including the Tax Court, in a proceeding in which the decision has become final";
+}
+pub relation issue_affected_by_carryback_not_in_issue(p: Person, y: TaxableYear, issue: CarrybackConclusiveIssue) kind empirical {
+    label en official "the deduction or short-term capital loss is affected by a carryback which was not an issue in the proceeding";
+}
+pub relation court_determination_conclusive_on(p: Person, y: TaxableYear, issue: CarrybackConclusiveIssue) kind institutional {
+    label en official "the final court determination is conclusive as to the issue in a carryback claim or application (except the net operating loss deduction and short-term capital loss to the extent affected by a carryback not in issue)";
+}
+@source(IRC_S6511_D, relation = formalizes, coverage = exact, quote = "the determination by any court, including the Tax Court, in any proceeding in which the decision of the court has become final, shall be conclusive except with respect to—")
+rule S6511d2BiiiConclusiveOnOtherIssues defeasible {
+    label en official "a final court determination in a carryback claim is conclusive on every issue other than the two excepted ones";
+    for p: Person;
+    for y: TaxableYear;
+    when final_court_determination_in_carryback_proceeding(p, y);
+    then court_determination_conclusive_on(p, y, AnyOtherIssue);
+}
+@source(IRC_S6511_D, relation = formalizes, coverage = exact, quote = "(I) the net operating loss deduction and the effect of such deduction, and")
+rule S6511d2BiiiINolDeductionConclusiveUnlessAffectedByOtherCarryback defeasible {
+    label en official "a final court determination is conclusive as to the net operating loss deduction except to the extent affected by a carryback not in issue";
+    for p: Person;
+    for y: TaxableYear;
+    when final_court_determination_in_carryback_proceeding(p, y)
+        and not_known(issue_affected_by_carryback_not_in_issue(p, y, NetOperatingLossDeduction));
+    then court_determination_conclusive_on(p, y, NetOperatingLossDeduction);
+}
+@source(IRC_S6511_D, relation = formalizes, coverage = exact, quote = "(II) the determination of a short-term capital loss and the effect of such short-term capital loss, to the extent that such deduction or short-term capital loss is affected by a carryback which was not an issue in such proceeding.")
+rule S6511d2BiiiIIShortTermCapitalLossConclusiveUnlessAffectedByOtherCarryback defeasible {
+    label en official "a final court determination is conclusive as to a short-term capital loss except to the extent affected by a carryback not in issue";
+    for p: Person;
+    for y: TaxableYear;
+    when final_court_determination_in_carryback_proceeding(p, y)
+        and not_known(issue_affected_by_carryback_not_in_issue(p, y, ShortTermCapitalLoss));
+    then court_determination_conclusive_on(p, y, ShortTermCapitalLoss);
+}
+
+// --- (d)(3) — foreign tax credit: 10-year period ---------------------------
+
+pub relation refund_claim_attributable_to_foreign_taxes(p: Person, y: TaxableYear, k: TaxKind, taxYear: TaxableYear) kind empirical {
+    label en official "the claim relates to an overpayment attributable to taxes paid or accrued to a foreign country or possession for which credit is allowed under section 901 or a treaty, in the year `taxYear`";
+}
+@source(IRC_S6511_D, relation = formalizes, coverage = exact, quote = "the period shall be 10 years from the date prescribed by law for filing the return for the year in which such taxes were actually paid or accrued.")
+rule S6511d3ATenYearPeriodForForeignTaxCredit defeasible {
+    label en official "the claim period for an overpayment from a foreign tax credit is 10 years from the due date of the return for the year the taxes were paid or accrued";
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for taxYear: TaxableYear;
+    for dueOn: Date;
+    when refund_claim_attributable_to_foreign_taxes(p, y, k, taxYear)
+        and us.irc.returns::statutory_due_date(p, taxYear, k, dueOn);
+    then refund_claim_period_ends(p, y, k, add_calendar_period(dueOn, 10 calendar_year));
+}
+@source(IRC_S6511_D, relation = formalizes, coverage = exact, quote = "the amount of the credit or refund may exceed the portion of the tax paid within the period provided in subsection (b) or (c), whichever is applicable, to the extent of the amount of the overpayment attributable to the allowance of a credit for the taxes described in subparagraph (A).")
+rule S6511d3BForeignTaxCreditRaisesAmountLimit defeasible {
+    label en official "the refund may exceed the look-back limit to the extent the overpayment is attributable to the foreign tax credit";
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for taxYear: TaxableYear;
+    for amount: Money;
+    when refund_claim_attributable_to_foreign_taxes(p, y, k, taxYear)
+        and overpayment_attributable_to_special_basis(p, y, k, ForeignTaxCredit, amount);
+    then refund_amount_limit_raised_by(p, y, k, ForeignTaxCredit, amount);
+}
+
+// --- (d)(4) — credit carrybacks ---------------------------------------------
+
+pub relation business_carryback_under_section_39(p: Person, toYear: TaxableYear, fromYear: TaxableYear) kind empirical {
+    label en official "a business credit carryback under section 39 from `fromYear` to `toYear`";
+}
+pub relation is_credit_carryback(p: Person, toYear: TaxableYear, fromYear: TaxableYear) kind institutional {
+    label en official "the term \"credit carryback\": any business carryback under section 39 (section 6511(d)(4)(C); the same term is used by section 6501(j))";
+}
+@source(IRC_S6511_D, relation = formalizes, coverage = exact, quote = "For purposes of this paragraph, the term \"credit carryback\" means any business carryback under section 39.")
+rule S6511d4CCreditCarrybackIsBusinessCarryback defeasible {
+    label en official "a credit carryback is a business carryback under section 39";
+    for p: Person;
+    for toYear: TaxableYear;
+    for fromYear: TaxableYear;
+    when business_carryback_under_section_39(p, toYear, fromYear);
+    then is_credit_carryback(p, toYear, fromYear);
+}
+pub relation refund_claim_attributable_to_credit_carryback(p: Person, y: TaxableYear, k: TaxKind, creditYear: TaxableYear) kind empirical {
+    label en official "the claim relates to an overpayment attributable to a credit carryback; `creditYear` is the taxable year of the unused credit which results in the carryback";
+}
+pub relation refund_claim_attributable_to_credit_carryback_via_later_year(p: Person, y: TaxableYear, k: TaxKind, subsequentYear: TaxableYear) kind empirical {
+    label en official "the claim relates to a portion of a credit carryback from a taxable year attributable to a net operating loss carryback, capital loss carryback, or other credit carryback from the subsequent taxable year";
+}
+@source(IRC_S6511_D, relation = formalizes, coverage = exact, quote = "in lieu of the 3-year period of limitation prescribed in subsection (a), the period shall be that period which ends 3 years after the time prescribed by law for filing the return (including extensions thereof) for the taxable year of the unused credit which results in such carryback")
+rule S6511d4ACreditCarrybackPeriodFromCreditYear defeasible {
+    label en official "the claim period for a credit carryback ends 3 years after the due date of the return for the year of the unused credit";
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for creditYear: TaxableYear;
+    for dueOn: Date;
+    when refund_claim_attributable_to_credit_carryback(p, y, k, creditYear)
+        and is_credit_carryback(p, y, creditYear)
+        and us.irc.returns::statutory_due_date(p, creditYear, k, dueOn);
+    then refund_claim_period_ends(p, y, k, add_calendar_period(dueOn, 3 calendar_year));
+}
+@source(IRC_S6511_D, relation = formalizes, coverage = exact, quote = "with respect to any portion of a credit carryback from a taxable year attributable to a net operating loss carryback, capital loss carryback, or other credit carryback from a subsequent taxable year, the period shall be that period which ends 3 years after the time prescribed by law for filing the return, including extensions thereof, for such subsequent taxable year")
+rule S6511d4ACreditCarrybackPortionPeriodFromSubsequentYear defeasible {
+    label en official "for the portion of a credit carryback caused by a later year's carryback, the period ends 3 years after the due date of the later year's return";
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for subsequentYear: TaxableYear;
+    for dueOn: Date;
+    when refund_claim_attributable_to_credit_carryback_via_later_year(p, y, k, subsequentYear)
+        and us.irc.returns::statutory_due_date(p, subsequentYear, k, dueOn);
+    then refund_claim_period_ends(p, y, k, add_calendar_period(dueOn, 3 calendar_year));
+}
+@source(IRC_S6511_D, relation = formalizes, coverage = exact, quote = "In the case of such a claim, the amount of the credit or refund may exceed the portion of the tax paid within the period provided in subsection (b)(2) or (c), whichever is applicable, to the extent of the amount of the overpayment attributable to such carryback.")
+rule S6511d4ACreditCarrybackRaisesAmountLimit defeasible {
+    label en official "the refund may exceed the look-back limit to the extent the overpayment is attributable to the credit carryback";
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for creditYear: TaxableYear;
+    for amount: Money;
+    when refund_claim_attributable_to_credit_carryback(p, y, k, creditYear)
+        and overpayment_attributable_to_special_basis(p, y, k, CreditCarryback, amount);
+    then refund_amount_limit_raised_by(p, y, k, CreditCarryback, amount);
+}
+@source(IRC_S6511_D, relation = formalizes, coverage = exact, quote = "such credit or refund may be allowed or made, if claim therefor is filed within the period provided in subparagraph (A) of this paragraph.")
+rule S6511d4BCreditCarrybackBarLiftedWhenClaimInPeriod defeasible {
+    label en official "a credit carryback overpayment barred by another law may still be allowed if the claim is filed within the (d)(4)(A) period";
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for creditYear: TaxableYear;
+    for filedOn: Date;
+    for dueOn: Date;
+    when refund_barred_by_other_law_than_7122(p, y, k)
+        and refund_claim_attributable_to_credit_carryback(p, y, k, creditYear)
+        and refund_claim_filed(p, y, k, filedOn)
+        and us.irc.returns::statutory_due_date(p, creditYear, k, dueOn)
+        and filedOn <= add_calendar_period(dueOn, 3 calendar_year);
+    then refund_prevented_barrier_lifted(p, y, k);
+}
+@source(IRC_S6511_D, relation = formalizes, coverage = exact, quote = "In the case of any such claim for credit or refund, the determination by any court, including the Tax Court, in any proceeding in which the decision of the court has become final, shall not be conclusive with respect to any credit, and the effect of such credit, to the extent that such credit is affected by a credit carryback which was not in issue in such proceeding.")
+rule S6511d4BCourtDeterminationNotConclusiveOnCreditAffectedByOtherCarryback defeasible {
+    label en official "in a credit carryback claim a final court determination is not conclusive on a credit affected by a carryback not in issue";
+    for p: Person;
+    for y: TaxableYear;
+    when final_court_determination_in_carryback_proceeding(p, y)
+        and not_known(issue_affected_by_carryback_not_in_issue(p, y, CreditAndItsEffect));
+    then court_determination_conclusive_on(p, y, CreditAndItsEffect);
+}
+
+// --- (d)(5), (d)(7) — self-employment tax: second year after the calendar year ---
+
+pub relation ssa_218_agreement_reached_on(p: Person, y: TaxableYear, agreedOn: Date) kind empirical {
+    label en official "an agreement, or modification of an agreement, made pursuant to section 218 of the Social Security Act is agreed to by the State and the Commissioner of Social Security";
+}
+pub relation second_year_end_after_calendar_year_of(anchorOn: Date, lastDay: Date) kind empirical {
+    label en unofficial "the last day of the second calendar year after the calendar year in which `anchorOn` falls (case-supplied: the language has no calendar-year decomposition of a date, TECH-GAPS G9/G10)";
+}
+pub relation refund_claim_relates_to_ch2_tax_from_ssa_218_agreement(p: Person, y: TaxableYear) kind empirical {
+    label en official "the claim relates to an overpayment of the chapter 2 tax attributable to an agreement, or modification of an agreement, made pursuant to section 218 of the Social Security Act";
+}
+@source(IRC_S6511_D, relation = formalizes, coverage = exact, quote = "such credit or refund may be allowed or made if claim therefor is filed on or before the last day of the second year after the calendar year in which such agreement (or modification) is agreed to by the State and the Commissioner of Social Security.")
+rule S6511d5SsaAgreementPeriod defeasible {
+    label en official "a chapter 2 overpayment from a section 218 agreement barred by another law may be allowed if the claim is filed by the last day of the second year after the agreement year";
+    for p: Person;
+    for y: TaxableYear;
+    for agreedOn: Date;
+    for lastDay: Date;
+    when refund_claim_relates_to_ch2_tax_from_ssa_218_agreement(p, y)
+        and refund_barred_by_other_law_than_7122(p, y, us.irc.core::SelfEmploymentCh2)
+        and ssa_218_agreement_reached_on(p, y, agreedOn)
+        and second_year_end_after_calendar_year_of(agreedOn, lastDay);
+    then refund_claim_period_ends(p, y, us.irc.core::SelfEmploymentCh2, lastDay);
+}
+pub relation tax_court_7436_determination_final_on(p: Person, y: TaxableYear, finalOn: Date) kind empirical {
+    label en official "a Tax Court determination in a proceeding under section 7436 becomes final";
+}
+pub relation refund_claim_relates_to_ch2_overpayment_from_7436_determination(p: Person, y: TaxableYear) kind empirical {
+    label en official "the claim relates to an overpayment of the chapter 2 tax attributable to a Tax Court determination in a proceeding under section 7436";
+}
+@source(IRC_S6511_D, relation = formalizes, coverage = exact, quote = "such credit or refund may be allowed or made if claim therefor is filed on or before the last day of the second year after the calendar year in which such determination becomes final.")
+rule S6511d7Section7436DeterminationPeriod defeasible {
+    label en official "a chapter 2 overpayment from a section 7436 determination barred by another law may be allowed if the claim is filed by the last day of the second year after the determination year";
+    for p: Person;
+    for y: TaxableYear;
+    for finalOn: Date;
+    for lastDay: Date;
+    when refund_claim_relates_to_ch2_overpayment_from_7436_determination(p, y)
+        and refund_barred_by_other_law_than_7122(p, y, us.irc.core::SelfEmploymentCh2)
+        and tax_court_7436_determination_final_on(p, y, finalOn)
+        and second_year_end_after_calendar_year_of(finalOn, lastDay);
+    then refund_claim_period_ends(p, y, us.irc.core::SelfEmploymentCh2, lastDay);
+}
+
+// --- (d)(6) — ERISA recapture ----------------------------------------------
+
+pub relation overpayment_from_erisa_4045_recapture(p: Person, y: TaxableYear) kind empirical {
+    label en official "the claim relates to an overpayment of tax imposed by subtitle A on account of the recapture, under section 4045 of ERISA, of amounts included in income for a prior taxable year";
+}
+pub relation recaptured_amount_paid_by_taxpayer_on(p: Person, y: TaxableYear, paidOn: Date) kind empirical {
+    label en official "the recaptured amount is paid by the taxpayer";
+}
+@source(IRC_S6511_D, relation = formalizes, coverage = exact, quote = "the 3-year period of limitation prescribed in subsection (a) shall be extended, for purposes of permitting a credit or refund of the amount of the recapture, until the date which occurs one year after the date on which such recaptured amount is paid by the taxpayer.")
+rule S6511d6ErisaRecapturePeriodOneYearAfterPayment defeasible {
+    label en official "the period for a refund of an ERISA recapture overpayment runs until one year after the recaptured amount is paid";
+    for p: Person;
+    for y: TaxableYear;
+    for paidOn: Date;
+    when overpayment_from_erisa_4045_recapture(p, y)
+        and recaptured_amount_paid_by_taxpayer_on(p, y, paidOn);
+    then refund_claim_period_ends(p, y, us.irc.core::IncomeCh1, add_calendar_period(paidOn, 1 calendar_year));
+}
+
+// --- (d)(8) — uniformed services retired pay ------------------------------
+
+pub relation overpayment_from_retired_pay_reduction_or_waiver(p: Person, y: TaxableYear) kind empirical {
+    label en official "the claim relates to an overpayment of tax imposed by subtitle A on account of the reduction of uniformed services retired pay under section 1406 or 1407 of title 10, or its waiver under section 5305 of title 38, as a result of an award of compensation under title 38";
+}
+pub relation va_determination_on(p: Person, determinedOn: Date) kind empirical {
+    label en official "the determination by the Secretary of Veterans Affairs on the award of compensation";
+}
+pub relation retired_pay_period_within_five_years(p: Person, y: TaxableYear, determinedOn: Date) kind institutional {
+    label en unofficial "section 6511(d)(8)(B): the taxable year did not begin more than 5 years before the date of the determination";
+}
+@source(IRC_S6511_D, relation = formalizes, coverage = exact, quote = "Subparagraph (A) shall not apply with respect to any taxable year which began more than 5 years before the date of such determination.")
+rule S6511d8BFiveTaxableYearLimit defeasible {
+    label en official "the retired pay extension applies only to a taxable year that began no more than 5 years before the determination";
+    for p: Person;
+    for y: TaxableYear;
+    for determinedOn: Date;
+    for beganOn: Date;
+    for calendar_before_1: Date;
+    when va_determination_on(p, determinedOn)
+        and us.irc.core::begins(y, beganOn)
+        and beganOn >= calendar_before_1
+        and us.irc.core::civil_calendar_boundary_before(determinedOn, 5, us.irc.core::CalendarYear, calendar_before_1);
+    then retired_pay_period_within_five_years(p, y, determinedOn);
+}
+@source(IRC_S6511_D, relation = formalizes, coverage = exact, quote = "the 3-year period of limitation prescribed in subsection (a) shall be extended, for purposes of permitting a credit or refund based upon the amount of such reduction or waiver, until the end of the 1-year period beginning on the date of such determination.")
+rule S6511d8ARetiredPayPeriodOneYearFromDetermination defeasible {
+    label en official "the period for a refund based on a retired pay reduction or waiver runs to the end of the 1-year period beginning on the date of the VA determination";
+    for p: Person;
+    for y: TaxableYear;
+    for determinedOn: Date;
+    for calendar_before_1: Date;
+    when overpayment_from_retired_pay_reduction_or_waiver(p, y)
+        and va_determination_on(p, determinedOn)
+        and retired_pay_period_within_five_years(p, y, determinedOn)
+        and us.irc.core::civil_calendar_boundary_before(add_calendar_period(determinedOn, 1 calendar_year), 1, us.irc.core::CalendarDay, calendar_before_1);
+    then refund_claim_period_ends(p, y, us.irc.core::IncomeCh1, calendar_before_1);
+}
+
+// ============================================================================
+// §6513(b)(1), (b)(3) — withholding deemed paid
+// ============================================================================
+
+pub relation tax_withheld_chapter_24(p: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "tax actually deducted and withheld at the source during a calendar year under chapter 24, allowable as a credit under section 31 for the taxable year";
+}
+@source(IRC_S6513_B, relation = formalizes, coverage = exact, quote = "shall, in respect of the recipient of the income, be deemed to have been paid by him on the 15th day of the fourth month following the close of his taxable year with respect to which such tax is allowable as a credit under section 31.")
+rule S6513b1Chapter24WithholdingDeemedPaid strict {
+    label en official "chapter 24 withholding is deemed paid on the 15th day of the fourth month after the close of the taxable year";
+    for p: Person;
+    for y: TaxableYear;
+    for amount: Money;
+    for closeOn: Date;
+    when tax_withheld_chapter_24(p, y, amount) and us.irc.core::ends(y, closeOn);
+    then amount_paid_as_tax(p, y, us.irc.core::IncomeCh1, amount,
+        add_calendar_period(add_calendar_period(add_calendar_period(closeOn, 1 calendar_day), 3 calendar_month), 14 calendar_day));
+}
+pub relation tax_withheld_chapter_3_or_4(p: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "tax withheld at the source under chapter 3 or 4, allowable as a credit under section 1462 or 1474(b) for the taxable year";
+}
+@source(IRC_S6513_B, relation = formalizes, coverage = exact, quote = "be deemed to have been paid by such recipient on the last day prescribed for filing the return under section 6012 for the taxable year (determined without regard to any extension of time for filing) with respect to which such tax is allowable as a credit under section 1462 or 1474(b).")
+rule S6513b3Chapter3Or4WithholdingDeemedPaid strict {
+    label en official "chapter 3 or 4 withholding is deemed paid on the last day prescribed for filing the section 6012 return, without extension and disregarding any exemption from filing";
+    for p: Person;
+    for y: TaxableYear;
+    for amount: Money;
+    for dueOn: Date;
+    when tax_withheld_chapter_3_or_4(p, y, amount)
+        and us.irc.returns::statutory_due_date(p, y, us.irc.core::IncomeCh1, dueOn);
+    then amount_paid_as_tax(p, y, us.irc.core::IncomeCh1, amount, dueOn);
+}
+
+// ============================================================================
+// §6532(a)(4) — reconsideration does not extend the suit period
+// ============================================================================
+
+pub relation secretary_reconsidered_claim_after_disallowance_notice(p: Person, y: TaxableYear, k: TaxKind, reconsideredOn: Date) kind empirical {
+    label en official "the Secretary considers, reconsiders or acts on the claim following the mailing of a notice of disallowance by certified or registered mail";
+}
+pub relation refund_suit_period_not_extended_by_reconsideration(p: Person, y: TaxableYear, k: TaxKind) kind institutional {
+    label en unofficial "the 2-year suit period of section 6532(a)(1) is not extended by the Secretary's reconsideration; only a written agreement ((a)(2)) or a waiver ((a)(3)) moves it";
+}
+@source(IRC_S6532_A, relation = formalizes, coverage = exact, quote = "shall not operate to extend the period within which suit may be begun.")
+rule S6532a4ReconsiderationDoesNotExtendSuitPeriod defeasible {
+    label en official "consideration or reconsideration after the disallowance notice does not extend the period within which suit may be begun";
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for mailedOn: Date;
+    for reconsideredOn: Date;
+    when notice_of_claim_disallowance_mailed(p, y, k, mailedOn)
+        and secretary_reconsidered_claim_after_disallowance_notice(p, y, k, reconsideredOn)
+        and reconsideredOn > mailedOn;
+    then refund_suit_period_not_extended_by_reconsideration(p, y, k);
+}
+
+// ============================================================================
+// §6205(a)(2)-(5) — deemed separate employers
+// ============================================================================
+
+pub relation head_or_designated_agent_of_federal_agency(p: Person) kind empirical {
+    label en official "a head of a Federal agency or instrumentality, or an agent designated by such head";
+}
+pub relation remuneration_from_united_states_or_wholly_owned_instrumentality(p: Person, calendarYear: TaxableYear) kind empirical {
+    label en official "remuneration received from the United States or a wholly-owned instrumentality thereof during the calendar year";
+}
+pub relation makes_return_pursuant_to_section_3122(p: Person, calendarYear: TaxableYear) kind empirical {
+    label en official "the person makes a return pursuant to section 3122";
+}
+@source(IRC_S6205_A, relation = formalizes, coverage = exact, quote = "each head of a Federal agency or instrumentality who makes a return pursuant to section 3122 and each agent, designated by the head of a Federal agency or instrumentality, who makes a return pursuant to such section shall be deemed a separate employer.")
+rule S6205a2UnitedStatesAgencyHeadIsSeparateEmployer defeasible {
+    label en official "a Federal agency head or designated agent making a section 3122 return is deemed a separate employer";
+    for p: Person;
+    for cy: TaxableYear;
+    when head_or_designated_agent_of_federal_agency(p)
+        and remuneration_from_united_states_or_wholly_owned_instrumentality(p, cy)
+        and makes_return_pursuant_to_section_3122(p, cy);
+    then employer_for_6205_purposes(p);
+}
+pub relation governor_or_designated_agent_of_guam_or_american_samoa(p: Person) kind empirical {
+    label en official "the Governor of Guam, the Governor of American Samoa, or an agent designated by either";
+}
+pub relation remuneration_from_guam_or_american_samoa_government(p: Person, calendarYear: TaxableYear) kind empirical {
+    label en official "remuneration received during the calendar year from the Government of Guam, the Government of American Samoa, a political subdivision of either, or a wholly owned instrumentality of any of them";
+}
+pub relation makes_return_pursuant_to_section_3125(p: Person, calendarYear: TaxableYear) kind empirical {
+    label en official "the person makes a return pursuant to section 3125";
+}
+@source(IRC_S6205_A, relation = formalizes, coverage = exact, quote = "the Governor of Guam, the Governor of American Samoa, and each agent designated by either who makes a return pursuant to section 3125 shall be deemed a separate employer.")
+rule S6205a3GuamOrAmericanSamoaGovernorIsSeparateEmployer defeasible {
+    label en official "the Governor of Guam or American Samoa, or a designated agent, making a section 3125 return is deemed a separate employer";
+    for p: Person;
+    for cy: TaxableYear;
+    when governor_or_designated_agent_of_guam_or_american_samoa(p)
+        and remuneration_from_guam_or_american_samoa_government(p, cy)
+        and makes_return_pursuant_to_section_3125(p, cy);
+    then employer_for_6205_purposes(p);
+}
+pub relation mayor_or_designated_agent_of_district_of_columbia(p: Person) kind empirical {
+    label en official "the Mayor of the District of Columbia or an agent designated by him";
+}
+pub relation remuneration_from_district_of_columbia(p: Person, calendarYear: TaxableYear) kind empirical {
+    label en official "remuneration received during the calendar year from the District of Columbia or a wholly owned instrumentality thereof";
+}
+@source(IRC_S6205_A, relation = formalizes, coverage = exact, quote = "the Mayor of the District of Columbia and each agent designated by him who makes a return pursuant to section 3125 shall be deemed a separate employer.")
+rule S6205a4DistrictOfColumbiaMayorIsSeparateEmployer defeasible {
+    label en official "the Mayor of the District of Columbia or a designated agent making a section 3125 return is deemed a separate employer";
+    for p: Person;
+    for cy: TaxableYear;
+    when mayor_or_designated_agent_of_district_of_columbia(p)
+        and remuneration_from_district_of_columbia(p, cy)
+        and makes_return_pursuant_to_section_3125(p, cy);
+    then employer_for_6205_purposes(p);
+}
+pub relation head_or_designated_agent_of_state_or_political_subdivision_agency(p: Person) kind empirical {
+    label en official "each head of an agency or instrumentality of a State or political subdivision (or a wholly owned instrumentality of either), or an agent designated by either";
+}
+pub relation remuneration_from_state_or_political_subdivision(p: Person, calendarYear: TaxableYear) kind empirical {
+    label en official "remuneration received during the calendar year from a State or any political subdivision thereof (or a wholly owned instrumentality of any of them)";
+}
+@source(IRC_S6205_A, relation = formalizes, coverage = exact, quote = "each head of an agency or instrumentality, and each agent designated by either, who makes a return pursuant to section 3125 shall be deemed a separate employer.")
+rule S6205a5StateAgencyHeadIsSeparateEmployer defeasible {
+    label en official "a State or political subdivision agency head or designated agent making a section 3125 return is deemed a separate employer";
+    for p: Person;
+    for cy: TaxableYear;
+    when head_or_designated_agent_of_state_or_political_subdivision_agency(p)
+        and remuneration_from_state_or_political_subdivision(p, cy)
+        and makes_return_pursuant_to_section_3125(p, cy);
+    then employer_for_6205_purposes(p);
+}
+
+// ============================================================================
+// §6213(e), (f)(2)
+// ============================================================================
+
+pub relation tax_under_4941_to_4945_4951_4952_4955_4958_4971_or_4975(n: Notice, p: Person) kind empirical {
+    label en official "the notice of deficiency concerns a tax imposed by section 4941, 4942, 4943, 4944, 4945, 4951, 4952, 4955, 4958, 4971 or 4975";
+}
+pub relation correction_time_extended_under_4963e(p: Person, start: Date, end: Date) kind empirical {
+    label en official "the period during which the Secretary has extended the time allowed for making correction under section 4963(e)";
+}
+pub relation petition_window_suspended_by_correction_extension(n: Notice, p: Person, start: Date, end: Date) kind institutional {
+    label en unofficial "the running of the section 6213(a) petition period is suspended for this interval; the extended deadline is the original one moved by the days of the interval that fall within the running period (a variable number of days, so no date is computed here)";
+}
+@source(IRC_S6213_E, relation = formalizes, coverage = exact, quote = "shall be suspended for any period during which the Secretary has extended the time allowed for making correction under section 4963(e).")
+rule S6213ECorrectionExtensionSuspendsPetitionPeriod defeasible {
+    label en official "the petition period for the listed private foundation and plan excise taxes is suspended while the Secretary has extended the time for correction";
+    for n: Notice;
+    for p: Person;
+    for start: Date;
+    for end: Date;
+    when tax_under_4941_to_4945_4951_4952_4955_4958_4971_or_4975(n, p)
+        and correction_time_extended_under_4963e(p, start, end);
+    then petition_window_suspended_by_correction_extension(n, p, start, end);
+}
+pub relation secretary_files_proof_of_claim_in_title_11_case(p: Person) kind empirical {
+    label en official "the Secretary files a proof of claim or request for payment (or takes any other action) in a case under title 11";
+}
+@source(IRC_S6213_F, relation = formalizes, coverage = exact, quote = "the filing of a proof of claim or request for payment (or the taking of any other action) in a case under title 11 of the United States Code shall not be treated as action prohibited by such second sentence.")
+rule S6213F2ProofOfClaimIsNotProhibitedAction defeasible {
+    label en official "filing a proof of claim or taking other action in a title 11 case is not action prohibited by the second sentence of section 6213(a)";
+    for p: Person;
+    when secretary_files_proof_of_claim_in_title_11_case(p);
+    then liberty S6213FProofOfClaimNotProhibitedLiberty {
+        holder Secretary;
+        against p;
+        action secretary_files_proof_of_claim_in_title_11_case(p);
+        window [-infinity, infinity];
+    };
+}
+
+// ============================================================================
+// §6512(b)(3)(C) — payments within the period of a claim filed before the notice
+// ============================================================================
+//
+// The amount of a Tax Court credit or refund may also cover payments made within the
+// period that would apply under section 6511(b)(2) in respect of a claim filed within the
+// section 6511 period and before the notice of deficiency was mailed, in three statuses of
+// that claim. The look-back of the claim (3 years, or 2 years when the claim was filed after
+// the 3-year period) is measured from the claim's filing date, so it reaches back further
+// than the (A)/(B) limit measured from the notice; the limit of (b)(3) as a whole is the
+// GREATER of `tax_court_credit_refund_limit` and this relation (the union of the two sets
+// of payments); the window for (c) and (d) periods is read as in module 08.
+
+pub relation prior_claim_status_qualifies_under_6512b3c(pr: Proceeding, p: Person, y: TaxableYear, k: TaxKind, claimedOn: Date) kind institutional {
+    label en official "a claim for refund filed within the section 6511 period and before the notice of deficiency was mailed, which was (i) not disallowed before that date, (ii) disallowed before that date with a timely suit still possible, or (iii) the subject of a suit commenced before that date within the section 6532 period";
+}
+pub relation prior_claim_disallowed_before_notice(pr: Proceeding, p: Person, y: TaxableYear, k: TaxKind) kind institutional {
+    label en unofficial "a notice of disallowance of the prior claim was mailed before the notice of deficiency";
+}
+rule S6512b3CDisallowedBeforeNotice defeasible {
+    for pr: Proceeding;
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for noticeOn: Date;
+    for disallowedOn: Date;
+    when tax_court_notice_mailed_on(pr, p, y, k, noticeOn)
+        and notice_of_claim_disallowance_mailed(p, y, k, disallowedOn)
+        and disallowedOn < noticeOn;
+    then prior_claim_disallowed_before_notice(pr, p, y, k);
+}
+@source(IRC_S6512_B, relation = formalizes, coverage = exact, quote = "(i) which had not been disallowed before that date,")
+rule S6512b3CiClaimNotDisallowedBeforeNotice defeasible {
+    label en official "a timely claim filed before the notice and not yet disallowed qualifies";
+    for pr: Proceeding;
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for noticeOn: Date;
+    for claimedOn: Date;
+    for periodEnd: Date;
+    when tax_court_notice_mailed_on(pr, p, y, k, noticeOn)
+        and refund_claim_filed(p, y, k, claimedOn)
+        and refund_claim_period_ends(p, y, k, periodEnd)
+        and claimedOn <= periodEnd
+        and claimedOn < noticeOn
+        and not_known(prior_claim_disallowed_before_notice(pr, p, y, k));
+    then prior_claim_status_qualifies_under_6512b3c(pr, p, y, k, claimedOn);
+}
+@source(IRC_S6512_B, relation = formalizes, coverage = exact, quote = "(ii) which had been disallowed before that date and in respect of which a timely suit for refund could have been commenced as of that date, or")
+rule S6512b3CiiClaimDisallowedButSuitStillTimely defeasible {
+    label en official "a timely claim disallowed before the notice qualifies if a timely refund suit could still be commenced on the notice date";
+    for pr: Proceeding;
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for noticeOn: Date;
+    for claimedOn: Date;
+    for periodEnd: Date;
+    for suitEnd: Date;
+    when tax_court_notice_mailed_on(pr, p, y, k, noticeOn)
+        and refund_claim_filed(p, y, k, claimedOn)
+        and refund_claim_period_ends(p, y, k, periodEnd)
+        and claimedOn <= periodEnd
+        and claimedOn < noticeOn
+        and prior_claim_disallowed_before_notice(pr, p, y, k)
+        and refund_suit_period_ends(p, y, k, suitEnd)
+        and noticeOn <= suitEnd;
+    then prior_claim_status_qualifies_under_6512b3c(pr, p, y, k, claimedOn);
+}
+@source(IRC_S6512_B, relation = formalizes, coverage = exact, quote = "(iii) in respect of which a suit for refund had been commenced before that date and within the period specified in section 6532.")
+rule S6512b3CiiiSuitCommencedBeforeNotice defeasible {
+    label en official "a timely claim on which a refund suit was commenced before the notice, within the section 6532 period, qualifies";
+    for pr: Proceeding;
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for noticeOn: Date;
+    for claimedOn: Date;
+    for periodEnd: Date;
+    for beganOn: Date;
+    for suitEnd: Date;
+    when tax_court_notice_mailed_on(pr, p, y, k, noticeOn)
+        and refund_claim_filed(p, y, k, claimedOn)
+        and refund_claim_period_ends(p, y, k, periodEnd)
+        and claimedOn <= periodEnd
+        and claimedOn < noticeOn
+        and refund_suit_begun(p, y, k, beganOn)
+        and beganOn < noticeOn
+        and refund_suit_period_ends(p, y, k, suitEnd)
+        and beganOn <= suitEnd;
+    then prior_claim_status_qualifies_under_6512b3c(pr, p, y, k, claimedOn);
+}
+pub relation tax_court_credit_refund_limit_via_prior_claim(pr: Proceeding, p: Person, y: TaxableYear, k: TaxKind, limit: Money) kind institutional {
+    label en official "§6512(b)(3)(C): the payments made within the period that would apply under section 6511(b)(2) in respect of the prior claim (3 years before the claim when it was filed within the 3-year period, 2 years otherwise); the limit of the paragraph is the greater of this and the (A)/(B) limit";
+}
+@source(IRC_S6512_B, relation = formalizes, coverage = exact, quote = "(C) within the period which would be applicable under section 6511(b)(2), (c), or (d), in respect of any claim for refund filed within the applicable period specified in section 6511 and before the date of the mailing of the notice of deficiency—")
+rule S6512b3CLimitFromClaimWithinThreeYears defeasible {
+    label en official "the payments within 3 years before a prior claim filed within the 3-year period count";
+    for pr: Proceeding;
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for claimedOn: Date;
+    for threeYearEnd: Date;
+    for calendar_before_1: Date;
+    when prior_claim_status_qualifies_under_6512b3c(pr, p, y, k, claimedOn)
+        and refund_claim_three_year_end(p, y, k, threeYearEnd)
+        and claimedOn <= threeYearEnd
+        and us.irc.core::civil_calendar_boundary_before(claimedOn, 3, us.irc.core::CalendarYear, calendar_before_1);
+    then tax_court_credit_refund_limit_via_prior_claim(pr, p, y, k,
+        sum all amount: Money for paidOn: Date
+            where amount_paid_as_tax(p, y, k, amount, paidOn)
+                and paidOn >= calendar_before_1);
+}
+rule S6512b3CLimitFromClaimAfterThreeYears defeasible {
+    label en official "the payments within 2 years before a prior claim filed after the 3-year period count";
+    for pr: Proceeding;
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for claimedOn: Date;
+    for threeYearEnd: Date;
+    for calendar_before_1: Date;
+    when prior_claim_status_qualifies_under_6512b3c(pr, p, y, k, claimedOn)
+        and refund_claim_three_year_end(p, y, k, threeYearEnd)
+        and claimedOn > threeYearEnd
+        and us.irc.core::civil_calendar_boundary_before(claimedOn, 2, us.irc.core::CalendarYear, calendar_before_1);
+    then tax_court_credit_refund_limit_via_prior_claim(pr, p, y, k,
+        sum all amount: Money for paidOn: Date
+            where amount_paid_as_tax(p, y, k, amount, paidOn)
+                and paidOn >= calendar_before_1);
+}

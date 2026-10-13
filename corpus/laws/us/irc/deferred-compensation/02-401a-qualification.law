@@ -1,0 +1,783 @@
+// Section 401(a) — qualification requirements for a trust forming part of a
+// stock bonus, pension, or profit-sharing plan. Stage 1 (IRC-09),
+// DECISION-0379. Priority paragraphs modelled FULLY: (9) required
+// distributions (RMD), (13) assignment and alienation, (17) compensation
+// limit. Modelled to the extent PLAN family 8 requires: (3)/(4)
+// nondiscrimination (as a regulatory/EVALUATIVE contract to section 410(b)
+// and to the Secretary's "found ... not to be discriminatory" judgment),
+// (11) survivor annuity (cross-reference to section 417, formalized there),
+// (30) elective deferral limit (cross-reference to section 402(g)),
+// (31) direct rollover (a power). Every other paragraph of (a) — (1),(2),
+// (5)-(8),(10),(12),(14)-(16),(18)-(29),(32)-(38) — is NOT modelled in this
+// stage; see coverage rows (classification NON_NORMATIVE for headers,
+// otherwise "unreviewed, stage 2").
+//
+// `qualified_plan` below is DELIBERATELY PARTIAL: it conjuncts only the
+// requirements this stage models. It is not the full section 401(a)
+// qualified-trust test (which needs all ~30 paragraphs plus sections 410,
+// 411, 415, 416 in full). Treating a plan as "qualified" on this relation
+// alone would overstate what is checked; the doc comment and the coverage
+// row make the scope explicit per the task's classification method.
+
+
+
+// =====================================================================
+// (a)(9) Required distributions (required minimum distributions, "RMD")
+// =====================================================================
+
+use self::{
+    DefinedBenefitPlan,
+    DefinedContributionPlan,
+    Distribution,
+    IRC_S401_A,
+    Individual,
+    Person,
+    Plan,
+    TaxableYear,
+    age_on,
+    aggregate_elective_deferrals,
+    distribution,
+    eligible_rollover_distribution,
+    life_payout_exception_applies,
+    meets_410a_participation,
+    meets_410b_coverage,
+    nonforfeitable_accrued_benefit_present_value,
+    participates_in,
+    plan_is_individual_retirement_plan,
+    plan_year_ends,
+    qjsa_provided,
+    valid_waiver_of_survivor_annuity,
+};
+
+// -- Applicable age (v), as amended by SECURE 2.0 / Pub. L. 117-328 -----
+// The pinned text gives the boundary by the calendar year in which the
+// individual ATTAINS a given age, not by birth year; no birthdate-to-age
+// standard term exists (core-surfaces.md), so the case asserts the exact
+// date on which the individual attains each named age.
+pub relation attains_age_on(who: Individual, age: Integer, on: Date) kind empirical {
+    label en unofficial "the date on which this individual attains this age, case-asserted (no birthdate-to-age standard term; see TECH-GAPS G5x)";
+}
+
+pub relation applicable_age(who: Individual, age: Integer) kind institutional {
+    label en official "the \"applicable age\" of section 401(a)(9)(C)(v) for required-beginning-date purposes";
+}
+
+@source(IRC_S401_A, relation = formalizes, coverage = exact, quote = "In the case of an individual who attains age 72 after December 31, 2022, and age 73 before January 1, 2033, the applicable age is 73.")
+rule ApplicableAge73(who: Individual, d72: Date, d73: Date) strict {
+    label en official "applicable age is 73 for an individual attaining 72 after 2022 and 73 before 2033";
+    when attains_age_on(who, 72, d72) and d72 > @2022-12-31
+        and attains_age_on(who, 73, d73) and d73 < @2033-01-01;
+    then applicable_age(who, 73);
+}
+
+@source(IRC_S401_A, relation = formalizes, coverage = exact, quote = "In the case of an individual who attains age 74 after December 31, 2032, the applicable age is 75.")
+rule ApplicableAge75(who: Individual, d74: Date) strict {
+    label en official "applicable age is 75 for an individual attaining 74 after 2032";
+    when attains_age_on(who, 74, d74) and d74 > @2032-12-31;
+    then applicable_age(who, 75);
+}
+// SOURCE_GAP: an individual who attained age 72 on or before December 31,
+// 2022 is governed by the PRIOR (pre-SECURE 2.0) text of section
+// 401(a)(9)(C)(v) (applicable age 72, and before the SECURE Act, age
+// 70 1/2), which this 2024-edition pin does not carry as an `edition`/
+// `revision` pair. Not modelled; see docs/foundations/us-irc/TECH-GAPS.md.
+
+// -- 5-percent owner (required beginning date exception (C)(ii)(I)) ----
+pub relation five_percent_owner(who: Individual, plan: Plan, y: TaxableYear) kind empirical {
+    label en unofficial "this individual is a 5-percent owner (section 416) with respect to the plan year ending in the calendar year the individual attains the applicable age (case-asserted; section 416(i)(1) 5-percent-owner test is not separately formalized in this stage)";
+}
+
+pub relation is_five_percent_owner(who: Individual, plan: Plan) kind institutional {
+    label en unofficial "boolean helper: this individual is a 5-percent owner with respect to the plan for some year (avoids a free variable inside a negative literal, LDC-E0207)";
+}
+
+@source(IRC_S401_A, relation = formalizes, coverage = contextual, quote = "in the case of an employee who is a 5-percent owner (as defined in section 416) with respect to the plan year ending in the calendar year in which the employee attains the applicable age")
+rule IsFivePercentOwner(who: Individual, plan: Plan, y: TaxableYear) strict {
+    label en unofficial "derives the boolean helper from any five_percent_owner fact";
+    when five_percent_owner(who, plan, y);
+    then is_five_percent_owner(who, plan);
+}
+
+pub relation governmental_or_church_plan(plan: Plan) kind empirical {
+    label en unofficial "the plan is a governmental plan or church plan (section 401(a)(9)(C)(iv) removes the retirement-based required beginning date and the 5-percent-owner exception)";
+}
+
+// -- Required beginning date: YEAR determination is executable; the final
+// year -> "April 1 of that year" DATE construction is a TECH_GAP (no
+// year-to-date constructor or date-to-year extractor in the standard term
+// library, core-surfaces.md "Computed terms and deadlines"). The case
+// asserts `retires_in_year`/`attains_applicable_age_in_year` as the Code's
+// own unit (a calendar year), and this module computes the CONTROLLING
+// YEAR; `required_beginning_date` itself remains a case-asserted fact the
+// scenario must supply consistently with that year (documented, not
+// invented) until the date-construction primitive exists.
+pub relation attains_applicable_age_in_year(who: Individual, plan: Plan, y: Integer) kind empirical {
+    label en unofficial "the calendar year in which the individual attains the applicable age, case-asserted";
+}
+
+pub relation retires_in_year(who: Individual, plan: Plan, y: Integer) kind empirical {
+    label en unofficial "the calendar year in which the individual retires, case-asserted";
+}
+
+pub relation required_beginning_date_year(who: Individual, plan: Plan, y: Integer) kind institutional {
+    label en official "the calendar year of section 401(a)(9)(C)(i): the later of the year the employee attains the applicable age or the year of retirement (subject to the 5-percent-owner and governmental/church-plan exceptions)";
+}
+
+pub relation retirement_branch_disabled(who: Individual, plan: Plan) kind institutional {
+    label en official "section 401(a)(9)(C)(ii)/(iv): the later-of retirement-year branch does not apply to a 5-percent owner (except in a governmental or church plan, clause (iv)) or for an individual retirement plan (section 408(a)(6)/(b)(3))";
+}
+
+@source(IRC_S401_A, relation = formalizes, coverage = exact, quote = "except as provided in section 409(d), in the case of an employee who is a 5-percent owner (as defined in section 416)")
+rule RetirementBranchDisabledFivePercentOwner(who: Individual, plan: Plan) strict {
+    label en official "5-percent owner of a plan that is neither governmental nor church (stage 2e fix: clause (iv) turns the exception OFF for those plans, so a governmental or church plan keeps the retirement-year branch)";
+    when is_five_percent_owner(who, plan) and not_known(governmental_or_church_plan(plan));
+    then retirement_branch_disabled(who, plan);
+}
+
+@source(IRC_S401_A, relation = formalizes, coverage = exact, quote = "for purposes of section 408(a)(6) or (b)(3)")
+rule RetirementBranchDisabledIra(who: Individual, plan: Plan) strict {
+    label en official "individual retirement plans use the attainment year only (clause (ii)(II))";
+    when plan_is_individual_retirement_plan(plan) and participates_in(who, plan);
+    then retirement_branch_disabled(who, plan);
+}
+
+@source(IRC_S401_A, relation = formalizes, coverage = partial, quote = "The term \"required beginning date\" means April 1 of the calendar year following the later of")
+rule RequiredBeginningDateYearGeneral(who: Individual, plan: Plan, aage: Integer, ayear: Integer, ryear: Integer) strict {
+    label en official "general rule: later of attainment year and retirement year, for non-5-percent-owners under non-governmental, non-church plans";
+    when applicable_age(who, aage)
+        and attains_applicable_age_in_year(who, plan, ayear)
+        and retires_in_year(who, plan, ryear)
+        and not_known(retirement_branch_disabled(who, plan))
+        and ryear >= ayear;
+    then required_beginning_date_year(who, plan, ryear);
+}
+
+@source(IRC_S401_A, relation = formalizes, coverage = partial, quote = "the calendar year in which the employee attains the applicable age, or")
+rule RequiredBeginningDateYearRetiresEarlier(who: Individual, plan: Plan, aage: Integer, ayear: Integer, ryear: Integer) strict {
+    label en official "later-of rule when the employee's retirement year precedes the attainment year";
+    when applicable_age(who, aage)
+        and attains_applicable_age_in_year(who, plan, ayear)
+        and retires_in_year(who, plan, ryear)
+        and not_known(retirement_branch_disabled(who, plan))
+        and ryear < ayear;
+    then required_beginning_date_year(who, plan, ayear);
+}
+
+@source(IRC_S401_A, relation = formalizes, coverage = exact, quote = "except as provided in section 409(d), in the case of an employee who is a 5-percent owner (as defined in section 416) with respect to the plan year ending in the calendar year in which the employee attains the applicable age")
+rule RequiredBeginningDateYearFivePercentOwner(who: Individual, plan: Plan, aage: Integer, ayear: Integer) strict {
+    label en official "a 5-percent owner's required beginning date ignores the retirement-year branch: the controlling year is always the attainment year";
+    when applicable_age(who, aage)
+        and attains_applicable_age_in_year(who, plan, ayear)
+        and retirement_branch_disabled(who, plan);
+    then required_beginning_date_year(who, plan, ayear);
+}
+
+// -- Designated beneficiary / eligible designated beneficiary ------------
+
+pub relation designated_beneficiary(employee: Individual, plan: Plan, beneficiary: Person) kind empirical {
+    label en unofficial "a beneficiary designated by the employee under the plan (section 401(a)(9)(E)(i)), case-asserted";
+}
+
+pub enum EligibleDesignatedBeneficiaryGround {
+    SurvivingSpouse;
+    MinorChild;
+    Disabled;
+    ChronicallyIll;
+    NotMoreThanTenYearsYounger;
+}
+
+pub relation eligible_designated_beneficiary_ground(employee: Individual, beneficiary: Person, ground: EligibleDesignatedBeneficiaryGround) kind empirical {
+    label en unofficial "a fact supporting eligible-designated-beneficiary status under one of the five (E)(ii) grounds, case-asserted (disability/chronic-illness are section 72(m)(7)/7702B(c)(2) determinations this package treats as case facts, not reformalized here)";
+}
+
+pub relation eligible_designated_beneficiary(employee: Individual, plan: Plan, beneficiary: Person) kind institutional {
+    label en official "an eligible designated beneficiary under section 401(a)(9)(E)(ii)";
+}
+
+@source(IRC_S401_A, relation = formalizes, coverage = exact, quote = "The term \"eligible designated beneficiary\" means, with respect to any employee, any designated beneficiary who is—")
+rule EligibleDesignatedBeneficiaryRule(employee: Individual, plan: Plan, beneficiary: Person, ground: EligibleDesignatedBeneficiaryGround) strict {
+    label en official "a designated beneficiary with at least one (E)(ii) ground is an eligible designated beneficiary";
+    when designated_beneficiary(employee, plan, beneficiary)
+        and eligible_designated_beneficiary_ground(employee, beneficiary, ground);
+    then eligible_designated_beneficiary(employee, plan, beneficiary);
+}
+
+// -- Post-death distribution period: 5-year rule / 10-year rule ----------
+// (B)(ii) (5-year, non-DC or pre-SECURE) and (H)(i) (10-year, DC plans,
+// non-eligible-designated-beneficiaries) per the task's explicit priority
+// on "the 10-year rule for designated beneficiaries".
+
+pub relation distribution_began_before_death(employee: Individual, plan: Plan) kind empirical {
+    label en unofficial "distributions to the employee had begun under (A)(ii) before the employee's death, case-asserted";
+}
+
+pub relation employee_died_on(employee: Individual, plan: Plan, on: Date) kind empirical {
+    label en unofficial "the date of the employee's death, case-asserted";
+}
+
+pub relation post_death_distribution_deadline(employee: Individual, plan: Plan, beneficiary: Person, deadline: Date) kind institutional {
+    label en official "the date by which the employee's entire remaining interest must be distributed after death (section 401(a)(9)(B)(ii)/(H)(i))";
+}
+
+@source(IRC_S401_A, relation = formalizes, coverage = exact, quote = "if an employee dies before the distribution of the employee's interest has begun in accordance with subparagraph (A)(ii), the entire interest of the employee will be distributed within 5 years after the death of such employee")
+rule PostDeathFiveYearRule(employee: Individual, plan: DefinedBenefitPlan, beneficiary: Person, died: Date) defeasible {
+    label en official "5-year rule: distribution had not begun, not a defined contribution plan, no eligible designated beneficiary — distribute within 5 years of death";
+    when employee_died_on(employee, plan, died)
+        and not distribution_began_before_death(employee, plan)
+        and designated_beneficiary(employee, plan, beneficiary)
+        and not_known(life_payout_exception_applies(employee, plan, beneficiary));
+    then post_death_distribution_deadline(employee, plan, beneficiary, add_calendar_period(died, 5 calendar_year));
+}
+
+@source(IRC_S401_A, relation = formalizes, coverage = exact, quote = "beneficiary who is not a designated beneficiary, subparagraph (B)(ii)—")
+rule PostDeathTenYearRuleDefinedContribution(employee: Individual, plan: DefinedContributionPlan, beneficiary: Person, died: Date) defeasible {
+    label en official "10-year rule: defined contribution plan, designated beneficiary who is not an eligible designated beneficiary";
+    when employee_died_on(employee, plan, died)
+        and designated_beneficiary(employee, plan, beneficiary)
+        and not_known(eligible_designated_beneficiary(employee, plan, beneficiary));
+    then post_death_distribution_deadline(employee, plan, beneficiary, add_calendar_period(died, 10 calendar_year));
+}
+// TECH_GAP: the "life expectancy" distribution branch for an eligible
+// designated beneficiary ((B)(iii), (H)(ii)) computes a distribution period
+// over the beneficiary's life expectancy from a regulatory mortality table
+// (26 CFR 1.401(a)(9)-9) — an EXTERNAL_DEPENDENCY, not pinned in Title 26
+// text this package owns; see `required_minimum_distribution_amount` below,
+// which takes the distribution period as an asserted divisor rather than
+// computing it from a table.
+
+// -- Required minimum distribution amount --------------------------------
+// "amount = account balance / distribution period" (task method); the
+// life-expectancy divisor is an EXTERNAL_DEPENDENCY (regulatory table), so
+// the rule reads it as a case-asserted `distribution_period` rather than
+// computing it.
+
+pub relation account_balance(who: Individual, plan: Plan, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the account balance used for the RMD computation (as of the close of the preceding calendar year), case-asserted";
+}
+
+pub relation distribution_period(who: Individual, plan: Plan, y: TaxableYear, years: Decimal) kind empirical {
+    label en unofficial "the applicable distribution period in years, from the regulatory life-expectancy table (EXTERNAL_DEPENDENCY, case-asserted)";
+}
+
+pub relation required_minimum_distribution(who: Individual, plan: Plan, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the required minimum distribution amount for this taxable year: account balance divided by the applicable distribution period";
+}
+
+@source(IRC_S401_A, relation = formalizes, coverage = contextual, quote = "will be distributed, beginning not later than the required beginning date, in accordance with regulations, over the life of such employee or over the lives of such employee and a designated beneficiary (or over a period not extending beyond the life expectancy of such employee or the life expectancy of such employee and a designated beneficiary)")
+rule RequiredMinimumDistributionAmount(who: Individual, plan: Plan, y: TaxableYear, balance: Money, period: Decimal) strict {
+    label en official "RMD amount = account balance / distribution period (division by the regulatory-table divisor asserted by the case)";
+    when account_balance(who, plan, y, balance)
+        and distribution_period(who, plan, y, period);
+    then required_minimum_distribution(who, plan, y, div_round(balance, period, 2, "HALF_UP"));
+}
+
+// =====================================================================
+// (a)(13) Assignment and alienation — IMMUNITY
+// =====================================================================
+// Method: benefits protected from assignment/alienation are a protection
+// from a legal act by another (creditor, assignee), not the participant's
+// own liberty; modelled as an `immunity` per rights-positions.md, with the
+// two statutory carve-outs (voluntary revocable <=10% assignment for
+// administration costs; loans secured by the accrued benefit under
+// section 4975(d)(1)) as defeaters and the QDRO/criminal-judgment/PBGC-
+// settlement carve-outs of (B)/(C) as separate `unless` grounds.
+
+pub relation benefit_payable(plan: Plan, participant: Person, amount: Money) kind institutional {
+    label en unofficial "a benefit payable under the plan to this participant, case-asserted or derived elsewhere";
+}
+
+pub relation attempted_assignment(plan: Plan, participant: Person, assignee: Person, amount: Money, on: Date) kind empirical {
+    label en unofficial "an attempted assignment or alienation of plan benefits, case-asserted";
+}
+
+pub relation voluntary_revocable_assignment_for_administration_costs(plan: Plan, participant: Person, amount: Money, benefit_payment: Money) kind empirical {
+    label en unofficial "a voluntary, revocable assignment not exceeding 10 percent of a benefit payment, made to defray plan administration costs (section 401(a)(13)(A) second sentence)";
+}
+
+pub relation participant_loan_secured_by_accrued_benefit_exempt_4975(plan: Plan, participant: Person, amount: Money) kind empirical {
+    label en unofficial "a loan to the participant secured by the accrued nonforfeitable benefit and exempt from section 4975 tax by reason of section 4975(d)(1)";
+}
+
+pub relation qualified_domestic_relations_order(plan: Plan, participant: Person, order_amount: Money) kind empirical {
+    label en unofficial "a qualified domestic relations order recognizing a right to plan benefits (section 401(a)(13)(B)), case-asserted (the QDRO qualification test itself is not reformalized in this stage)";
+}
+
+pub relation benefit_reduced_by_assignment(plan: Plan, participant: Person, amount: Money) kind institutional {
+    label en unofficial "an assignment or alienation would take effect against this participant's plan benefit (absent an exception)";
+}
+
+pub relation assignment_exception_applies(plan: Plan, participant: Person, assignee: Person, amount: Money, on: Date) kind institutional {
+    label en unofficial "one of the section 401(a)(13) statutory exceptions (administration-costs assignment, section 4975(d)(1)-exempt secured loan, or QDRO) applies to this attempted assignment";
+}
+
+@source(IRC_S401_A, relation = formalizes, coverage = exact, quote = "there shall not be taken into account any voluntary and revocable assignment of not to exceed 10 percent of any benefit payment made by any participant who is receiving benefits under the plan unless the assignment or alienation is made for purposes of defraying plan administration costs")
+rule AssignmentExceptionAdministrationCosts(plan: Plan, participant: Person, assignee: Person, amount: Money, on: Date, benefit_payment: Money) strict {
+    label en official "a voluntary, revocable assignment of at most 10 percent of a benefit payment for administration costs is not taken into account";
+    when attempted_assignment(plan, participant, assignee, amount, on)
+        and voluntary_revocable_assignment_for_administration_costs(plan, participant, amount, benefit_payment);
+    then assignment_exception_applies(plan, participant, assignee, amount, on);
+}
+
+@source(IRC_S401_A, relation = formalizes, coverage = exact, quote = "a loan made to a participant or beneficiary shall not be treated as an assignment or alienation if such loan is secured by the participant's accrued nonforfeitable benefit and is exempt from the tax imposed by section 4975")
+rule AssignmentExceptionSecuredLoan(plan: Plan, participant: Person, assignee: Person, amount: Money, on: Date) strict {
+    label en official "a loan secured by the accrued nonforfeitable benefit and exempt under section 4975(d)(1) is not an assignment or alienation";
+    when attempted_assignment(plan, participant, assignee, amount, on)
+        and participant_loan_secured_by_accrued_benefit_exempt_4975(plan, participant, amount);
+    then assignment_exception_applies(plan, participant, assignee, amount, on);
+}
+
+@source(IRC_S401_A, relation = formalizes, coverage = exact, quote = "Subparagraph (A) shall apply to the creation, assignment, or recognition of a right to any benefit payable with respect to a participant pursuant to a domestic relations order, except that subparagraph (A) shall not apply if the order is determined to be a qualified domestic relations order")
+rule AssignmentExceptionQDRO(plan: Plan, participant: Person, assignee: Person, amount: Money, on: Date, order_amount: Money) strict {
+    label en official "a qualified domestic relations order is not blocked by the anti-alienation immunity";
+    when attempted_assignment(plan, participant, assignee, amount, on)
+        and qualified_domestic_relations_order(plan, participant, order_amount);
+    then assignment_exception_applies(plan, participant, assignee, amount, on);
+}
+
+@source(IRC_S401_A, relation = formalizes, coverage = exact, quote = "benefits provided under the plan may not be assigned or alienated")
+rule AttemptedAssignmentTakesEffect(plan: Plan, participant: Person, assignee: Person, amount: Money, on: Date) strict {
+    label en official "an attempted assignment or alienation, absent a statutory exception, takes effect against the benefit";
+    when attempted_assignment(plan, participant, assignee, amount, on)
+        and not_known(assignment_exception_applies(plan, participant, assignee, amount, on));
+    then benefit_reduced_by_assignment(plan, participant, amount);
+}
+
+@source(IRC_S401_A, relation = formalizes, coverage = exact, quote = "benefits provided under the plan may not be assigned or alienated")
+rule BenefitAntiAlienationImmunity(plan: Plan, participant: Person, assignee: Person, amount: Money, on: Date) strict {
+    label en official "section 401(a)(13)(A): the participant is protected from the benefit being reduced by an unexcepted assignment or alienation";
+    when attempted_assignment(plan, participant, assignee, amount, on);
+    then immunity BenefitAntiAlienation {
+        holder participant;
+        against assignee;
+        protected_effect benefit_reduced_by_assignment(plan, participant, amount);
+        window [-infinity, infinity];
+    };
+}
+// NOTE on modelling choice (human judgment recorded, task instruction
+// "STOP_MODELING"): the three exception rules above produce a shared
+// `assignment_exception_applies` fact that `AttemptedAssignmentTakesEffect`
+// reads with `not_known(...)` (not closed-world `not`, since
+// `assignment_exception_applies` is a rule-derived predicate without a
+// completeness closure — LDC-E4113) rather than a `priority`/`unless`
+// defeater pair; this keeps exactly one head (`benefit_reduced_by_
+// assignment`) and lets a scenario without any exception fact still block
+// the general rule only once an exception becomes KNOWN true, matching the
+// open-world default (absence of an asserted exception is not proof one
+// does not exist, but for this package's closed scenarios it behaves as
+// intended). (C) (offset for plan-related judgments/settlements) and (D)
+// (its survivor-annuity valuation) are NOT modelled in this stage
+// (TECH_GAP: needs the QJSA actuarial-equivalence machinery of section
+// 417(e) at the same time) — see coverage note.
+
+// =====================================================================
+// (a)(17) Compensation limit
+// =====================================================================
+
+pub relation compensation_taken_into_account(plan: Plan, employee: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the employee's annual compensation the plan proposes to take into account for this year, case-asserted (pre-cap)";
+}
+
+pub relation compensation_limit_exceeded(plan: Plan, employee: Person, y: TaxableYear) kind institutional {
+    label en official "the plan takes into account compensation exceeding the section 401(a)(17) annual limit for this employee and year";
+}
+
+@source(IRC_S401_A, relation = formalizes, coverage = exact, quote = "the annual compensation of each employee taken into account under the plan for any year does not exceed $200,000")
+rule CompensationLimitExceeded(plan: Plan, employee: Person, y: TaxableYear, amount: Money) strict {
+    label en official "compensation taken into account above the indexed section 401(a)(17)(A) limit disqualifies the plan's treatment of that excess";
+    when compensation_taken_into_account(plan, employee, y, amount)
+        and amount > SECTION401A17_COMPENSATION_LIMIT;
+    then compensation_limit_exceeded(plan, employee, y);
+}
+// SECTION401A17_COMPENSATION_LIMIT is an A3 parameter
+// (section-401a17-compensation-limit.lawparam.json): statutory base
+// $200,000 (2002 base year, cost-of-living-adjusted per (17)(B) "at the
+// same time and in the same manner as adjustments under section 415(d)").
+// Only the statutory BASE value is pinned in this package's text; annual
+// indexed dollar amounts are published by IRS revenue procedures, not in
+// Title 26 — SOURCE_GAP rows in the parameter dataset name the missing IRB
+// sources rather than inventing indexed figures.
+
+// =====================================================================
+// (a)(3)/(a)(4) Nondiscrimination — EVALUATIVE / regulatory contract
+// =====================================================================
+// DECISION-0194 channel: "found by the Secretary not to be discriminatory"
+// (subsection (l)/(5)(A) contexts) and the general (a)(4) test are
+// evaluative determinations the Code assigns to the Secretary's regulations
+// and to the section 410(b) ratio/average-benefit tests (formalized fully
+// in `10-410-participation.law`). This module records (a)(3)/(a)(4) as an
+// `external judgment relation` contract plus a direct dependency on section
+// 410(b)'s executable coverage test — NOT as a flat case fact.
+
+external judgment relation meets_401a4_nondiscrimination(plan: Plan, y: TaxableYear) {
+    authority Secretary;
+    label en official "the contributions or benefits under the plan do not discriminate in favor of highly compensated employees (section 401(a)(4)) — an evaluative determination under Treasury regulations, not computed by this package";
+}
+
+pub relation meets_401a3_participation(plan: Plan, y: TaxableYear) kind institutional {
+    label en official "the plan satisfies section 401(a)(3) (minimum participation standards of section 410)";
+}
+
+@source(IRC_S401_A, relation = formalizes, coverage = exact, quote = "if the plan of which such trust is a part satisfies the requirements of section 410 (relating to minimum participation standards)")
+rule Meets401a3ViaSection410(plan: Plan, y: TaxableYear) strict {
+    label en official "section 401(a)(3) is satisfied when the plan meets section 410(a) age/service and section 410(b) coverage";
+    when meets_410a_participation(plan, y) and meets_410b_coverage(plan, y);
+    then meets_401a3_participation(plan, y);
+}
+
+// =====================================================================
+// (a)(11) Survivor annuity requirement — cross-reference to section 417
+// =====================================================================
+pub relation meets_401a11_survivor_annuity(plan: Plan, participant: Person) kind institutional {
+    label en official "section 401(a)(11): the plan provides the qualified joint and survivor annuity / qualified preretirement survivor annuity required by section 417, or the participant validly waived it under section 417(a)";
+}
+
+@source(IRC_S401_A, relation = formalizes, coverage = partial, quote = "except as provided in section 417, a trust forming part of such plan shall not constitute a qualified trust under this section unless—")
+rule Meets401a11ViaSection417(plan: Plan, participant: Person) strict {
+    label en official "satisfied when the plan provides the section 417 QJSA/QPSA, or the participant's section 417(a) waiver is validly exercised";
+    when qjsa_provided(plan, participant) or valid_waiver_of_survivor_annuity(plan, participant);
+    then meets_401a11_survivor_annuity(plan, participant);
+}
+// `qjsa_provided`/`valid_waiver_of_survivor_annuity` are declared and
+// formalized in `15-417-qjsa.law` (this module only wires the
+// cross-reference, per the task's "cross-references are imports of REAL
+// implementations" instruction — both relations live in THIS package, so
+// no cross-package import is needed, just ordinary same-package reference).
+
+// =====================================================================
+// (a)(30) Elective deferral limit — cross-reference to section 402(g)
+// =====================================================================
+pub relation meets_401a30_deferral_limit(plan: Plan, participant: Person, y: TaxableYear) kind institutional {
+    label en official "section 401(a)(30): the plan's elective deferrals for this individual and calendar year do not exceed the section 402(g)(1)(A) limitation";
+}
+
+@source(IRC_S401_A, relation = formalizes, coverage = exact, quote = "such trust shall not constitute a qualified trust under this subsection unless the plan provides that the amount of such deferrals under such plan and all other plans, contracts, or arrangements of an employer maintaining such plan may not exceed the amount of the limitation in effect under section 402(g)(1)(A) for taxable years beginning in such calendar year")
+rule Meets401a30ViaSection402g(plan: Plan, participant: Person, y: TaxableYear, total: Money) strict {
+    label en official "satisfied when the individual's aggregate elective deferrals under this and all other employer plans do not exceed the section 402(g)(1)(A) applicable dollar amount";
+    when participates_in(participant, plan)
+        and aggregate_elective_deferrals(participant, y, total)
+        and total <= ELECTIVE_DEFERRAL_LIMIT;
+    then meets_401a30_deferral_limit(plan, participant, y);
+}
+// `aggregate_elective_deferrals`/`ELECTIVE_DEFERRAL_LIMIT` are declared in
+// `04-402-distributions.law` (section 402(g)); referenced here by name.
+
+// =====================================================================
+// (a)(31) Direct transfer of eligible rollover distributions — POWER
+// =====================================================================
+// Method: the distributee's election to have an eligible rollover
+// distribution paid directly to an eligible retirement plan changes the
+// legal form of the payment (direct trustee-to-trustee transfer instead of
+// a distribution to the distributee) — a `power` held by the distributee,
+// exercised by specifying the eligible retirement plan, valid whenever the
+// underlying amount is an eligible rollover distribution (section
+// 402(c)(4), formalized in `04-402-distributions.law`).
+
+pub relation specifies_eligible_retirement_plan(distributee: Person, d: Distribution, target: Plan) kind empirical {
+    label en unofficial "the distributee's election specifying the eligible retirement plan to receive a direct trustee-to-trustee transfer (case-asserted)";
+}
+
+pub relation direct_trustee_to_trustee_transfer_required(distribution: Distribution, target: Plan) kind institutional {
+    label en unofficial "the plan must make the distribution as a direct trustee-to-trustee transfer to the specified eligible retirement plan";
+}
+
+@source(IRC_S401_A, relation = formalizes, coverage = exact, quote = "if the distributee of any eligible rollover distribution—")
+rule DirectRolloverElectionPower(distributee: Person, d: Distribution, trust_plan: Plan, target: Plan) strict {
+    label en official "section 401(a)(31)(A): a distributee's election to have an eligible rollover distribution paid directly to a specified eligible retirement plan";
+    when eligible_rollover_distribution(d) and distribution(d, trust_plan, distributee, _, _) and specifies_eligible_retirement_plan(distributee, d, target);
+    then power DirectRolloverElection {
+        holder distributee;
+        over d;
+        exercise specifies_eligible_retirement_plan(distributee, d, target);
+        valid_when eligible_rollover_distribution(d);
+        effect direct_trustee_to_trustee_transfer_required(d, target);
+    };
+}
+// `eligible_rollover_distribution` is declared in `04-402-distributions.law`
+// (section 402(c)(4)/(f)(2)(A), which section 401(a)(31)(D) cross-references
+// verbatim).
+
+// =====================================================================
+// (a)(31)(B)/(C) Mandatory automatic-rollover distributions + notice duty
+// — stage 2d
+// =====================================================================
+// Method: reuses the section 411(a)(11) mandatory-distribution PV
+// threshold constant (MANDATORY_DISTRIBUTION_CONSENT_THRESHOLD, $7,000
+// statutory current value) for the (B)(ii) "eligible plan" definition,
+// since the statute cross-references the identical figure via section
+// 411(a)(11) rather than setting an independent number.
+
+pub relation eligible_plan_401a31b(plan: Plan) kind institutional {
+    label en official "section 401(a)(31)(B)(ii): a plan providing that any nonforfeitable accrued benefit with a present value not exceeding the section 411(a)(11) threshold is immediately distributed";
+}
+
+@source(IRC_S401_A, relation = formalizes, coverage = exact, quote = "a plan which provides that any nonforfeitable accrued benefit for which the present value (as determined under section 411(a)(11)) does not exceed $7,000 shall be immediately distributed to the participant")
+rule EligiblePlan401a31b(plan: Plan, participant: Person, pv: Money) strict {
+    label en official "eligible when the plan's own immediate-distribution PV ceiling matches the section 411(a)(11) threshold — reuses 11-411-vesting.law's own nonforfeitable_accrued_benefit_present_value relation (same statutory cross-reference, not a copy)";
+    when nonforfeitable_accrued_benefit_present_value(participant, plan, pv)
+        and pv <= MANDATORY_DISTRIBUTION_CONSENT_THRESHOLD;
+    then eligible_plan_401a31b(plan);
+}
+
+pub relation distribution_exceeds_1000(d: Distribution) kind institutional {
+    label en official "section 401(a)(31)(B)(i)(I): the distribution exceeds $1,000";
+}
+
+@source(IRC_S401_A, relation = formalizes, coverage = exact, quote = "a distribution described in clause (ii) in excess of $1,000 is made")
+rule DistributionExceeds1000(d: Distribution, plan: Plan, distributee: Person, amount: Money, on: Date) strict {
+    label en official "a distribution from an eligible plan strictly greater than $1,000";
+    when distribution(d, plan, distributee, amount, on)
+        and eligible_plan_401a31b(plan)
+        and amount > 1000.00 USD;
+    then distribution_exceeds_1000(d);
+}
+
+pub relation distributee_elects_direct_payment_or_transfer(distributee: Person, d: Distribution) kind empirical {
+    label en unofficial "the distributee elects a direct rollover under (A) or elects to receive the distribution directly, case-asserted";
+}
+
+pub relation mandatory_automatic_rollover_required(d: Distribution, plan: Plan, distributee: Person) kind institutional {
+    label en official "section 401(a)(31)(B)(i): the plan administrator must transfer the distribution to a designated IRA trustee/issuer";
+}
+
+@source(IRC_S401_A, relation = formalizes, coverage = exact, quote = "the plan administrator shall make such transfer to an individual retirement plan of a designated trustee or issuer and shall notify the distributee in writing")
+rule MandatoryAutomaticRolloverRequired(d: Distribution, plan: Plan, distributee: Person) strict {
+    label en official "required when the distribution exceeds $1,000 and the distributee made no (A)/direct-payment election";
+    when distribution_exceeds_1000(d)
+        and distribution(d, plan, distributee, _, _)
+        and not_known(distributee_elects_direct_payment_or_transfer(distributee, d));
+    then mandatory_automatic_rollover_required(d, plan, distributee);
+}
+
+pub relation mandatory_rollover_notice_given(d: Distribution, distributee: Person) kind empirical {
+    label en unofficial "the plan administrator notified the distributee in writing that the distribution may be transferred to another individual retirement plan, case-asserted";
+}
+
+pub relation mandatory_rollover_notice_duty_breached(d: Distribution, plan: Plan, distributee: Person) kind institutional {
+    label en official "section 401(a)(31)(B)(i): the plan administrator failed to notify the distributee as required";
+}
+
+@source(IRC_S401_A, relation = formalizes, coverage = exact, quote = "shall notify the distributee in writing (either separately or as part of the notice under section 402(f)) that the distribution may be transferred to another individual retirement plan")
+rule MandatoryRolloverNoticeDutyBreached(d: Distribution, plan: Plan, distributee: Person) strict {
+    label en official "breach: mandatory rollover required but no notice asserted as given";
+    when mandatory_automatic_rollover_required(d, plan, distributee)
+        and not_known(mandatory_rollover_notice_given(d, distributee));
+    then mandatory_rollover_notice_duty_breached(d, plan, distributee);
+}
+
+pub relation eligible_rollover_distribution_includible_if_not_transferred(d: Distribution) kind empirical {
+    label en unofficial "the eligible rollover distribution would be includible in gross income if not transferred as provided in (A), determined without regard to sections 402(c)/403(a)(4)/403(b)(8)/457(e)(16), case-asserted";
+}
+
+pub relation section401a31_applies(d: Distribution) kind institutional {
+    label en official "section 401(a)(31)(C): (A) and (B) apply only to the extent the distribution would be includible in gross income if not transferred";
+}
+
+@source(IRC_S401_A, relation = formalizes, coverage = exact, quote = "Subparagraphs (A) and (B) shall apply only to the extent that the eligible rollover distribution would be includible in gross income if not transferred as provided in subparagraph (A)")
+rule Section401a31Applies(d: Distribution) strict {
+    label en official "restates the (C) limitation as a gating classification";
+    when eligible_rollover_distribution_includible_if_not_transferred(d);
+    then section401a31_applies(d);
+}
+// The (C) second-sentence carve-out (distributions to a plan/IRA that
+// separately accounts for the includible/non-includible portions) is NOT
+// modelled (TECH_GAP).
+
+// =====================================================================
+// (a)(28) ESOP diversification election — stage 2d
+// =====================================================================
+// Method: the 90-day annual election to direct investment of at least 25%
+// (50% in the last election year) of the qualified participant's account
+// is a POWER; the (ii) "meets requirement" alternative satisfaction
+// (in-kind distribution or actual reinvestment within the 90-day-plus-90-
+// day window) is modelled as the power's effect. The (iii)/(iv) qualified-
+// participant/election-period definitions are exact arithmetic; the (v)
+// applicable-defined-contribution-plan exception and (C) independent-
+// appraiser requirement are NOT modelled (TECH_GAP).
+
+pub relation completed_10_years_of_participation(participant: Individual, plan: Plan) kind empirical {
+    label en unofficial "the employee has completed at least 10 years of participation under the plan, case-asserted";
+}
+
+pub relation qualified_participant_401a28(participant: Individual, plan: Plan) kind institutional {
+    label en official "section 401(a)(28)(B)(iii): an employee who has completed at least 10 years of participation and attained age 55";
+}
+
+@source(IRC_S401_A, relation = formalizes, coverage = exact, quote = "the term \"qualified participant\" means any employee who has completed at least 10 years of participation under the plan and has attained age 55")
+rule QualifiedParticipant401a28(participant: Individual, plan: Plan, on: Date, age: Integer) strict {
+    label en official "10 years of participation AND age >= 55";
+    when completed_10_years_of_participation(participant, plan)
+        and age_on(participant, on, age)
+        and age >= 55;
+    then qualified_participant_401a28(participant, plan);
+}
+
+pub relation diversification_election_made_on(participant: Individual, plan: Plan, on: Date, pct: Decimal) kind empirical {
+    label en unofficial "the qualified participant's election to direct investment of this percentage of the account, made on this date, case-asserted";
+}
+
+pub relation account_covered_by_diversification_election(participant: Individual, plan: Plan, on: Date, amount: Money) kind institutional {
+    label en unofficial "section 401(a)(28)(B)(i): the portion of the account covered by a diversification election";
+}
+
+@source(IRC_S401_A, relation = formalizes, coverage = exact, quote = "each qualified participant in the plan may elect within 90 days after the close of each plan year in the qualified election period to direct the plan as to the investment of at least 25 percent of the participant's account in the plan")
+rule DiversificationElectionPower(participant: Individual, plan: Plan, y: TaxableYear, plan_year_end: Date, on: Date, pct: Decimal) strict {
+    label en official "section 401(a)(28)(B)(i): the qualified participant's power to direct investment of at least 25 percent of the account, exercisable within 90 days after the close of a plan year in the qualified election period";
+    when qualified_participant_401a28(participant, plan)
+        and diversification_election_made_on(participant, plan, on, pct)
+        and plan_year_ends(plan, y, plan_year_end)
+        and on <= add_calendar_period(plan_year_end, 90 calendar_day)
+        and pct >= 0.25;
+    then power ExerciseDiversificationElection {
+        holder participant;
+        over plan;
+        exercise diversification_election_made_on(participant, plan, on, pct);
+        valid_when qualified_participant_401a28(participant, plan);
+        effect account_covered_by_diversification_election(participant, plan, on, 0.00 USD);
+    };
+}
+// (the `effect` amount is a placeholder: the actual dollar amount covered
+// depends on the account balance at election, a case-supplied figure this
+// stage does not thread through — TECH_GAP, disclosed rather than
+// invented) (B)(ii) method-of-satisfaction (distribution within 90 days,
+// or >= 3 investment options), (iv) qualified-election-period 6-plan-year
+// definition, (v) applicable-DC-plan exception, and (C) independent-
+// appraiser requirement are NOT modelled this pass (TECH_GAP).
+
+// =====================================================================
+// (a)(14) Commencement of benefits — DECISION-0379 stage 2c priority item
+// =====================================================================
+// Method: the required commencement date is the 60th day after the close
+// of the plan year in which the LATEST of three events occurs (age 65/
+// normal retirement age, the 10th anniversary of participation, or
+// termination of service) — exact date arithmetic (task instruction), not
+// a rounded/approximate rule. "Latest of" is modelled with the TECH-GAPS.md
+// G136 candidates-plus-no-strictly-later-candidate idiom (as in
+// `us.irc.excise-entities`'s `EarlierCandidateExists`/
+// `TaxablePeriodEndsAtMinimalCandidate`, reversed for a maximum). The
+// early-retirement-benefit continuation sentence ((a)(14) second sentence)
+// is NOT modelled this pass (TECH_GAP: needs the plan's own early-
+// retirement benefit formula, out of this package's current scope). The
+// plan-year-close-to-60-days step itself needs the CLOSE OF THE PLAN YEAR
+// containing the latest event date, which this package has no "plan year"
+// calendar entity for (TaxableYear is the participant's own tax year, not
+// necessarily the plan's) — modelled here with a case-asserted plan-year-
+// end date keyed to the event date, disclosed as a further simplification.
+
+pub relation attains_age_65_or_normal_retirement_age_on(employee: Person, plan: Plan, on: Date) kind empirical {
+    label en unofficial "the date the participant attains the earlier of age 65 or the plan's normal retirement age, case-asserted";
+}
+
+pub relation tenth_anniversary_of_participation_on(employee: Person, plan: Plan, on: Date) kind empirical {
+    label en unofficial "the date of the 10th anniversary of the year in which the participant commenced participation in the plan, case-asserted";
+}
+
+pub relation terminates_service_on(employee: Person, plan: Plan, on: Date) kind empirical {
+    label en unofficial "the date the participant terminates service with the employer, case-asserted";
+}
+
+pub relation section401a14_candidate_date(employee: Person, plan: Plan, on: Date) kind institutional {
+    label en unofficial "one of the three section 401(a)(14) candidate event dates for this employee and plan";
+}
+
+@source(IRC_S401_A, relation = formalizes, coverage = exact, quote = "the date on which the participant attains the earlier of age 65 or the normal retirement age specified under the plan")
+rule Section401a14CandidateAge(employee: Person, plan: Plan, on: Date) strict {
+    label en unofficial "restates the age-65/normal-retirement-age date as a candidate";
+    when attains_age_65_or_normal_retirement_age_on(employee, plan, on);
+    then section401a14_candidate_date(employee, plan, on);
+}
+
+@source(IRC_S401_A, relation = formalizes, coverage = exact, quote = "occurs the 10th anniversary of the year in which the participant commenced participation in the plan")
+rule Section401a14CandidateTenthAnniversary(employee: Person, plan: Plan, on: Date) strict {
+    label en unofficial "restates the 10th-anniversary-of-participation date as a candidate";
+    when tenth_anniversary_of_participation_on(employee, plan, on);
+    then section401a14_candidate_date(employee, plan, on);
+}
+
+@source(IRC_S401_A, relation = formalizes, coverage = exact, quote = "the participant terminates his service with the employer")
+rule Section401a14CandidateTermination(employee: Person, plan: Plan, on: Date) strict {
+    label en unofficial "restates the termination-of-service date as a candidate";
+    when terminates_service_on(employee, plan, on);
+    then section401a14_candidate_date(employee, plan, on);
+}
+
+pub relation section401a14_later_candidate_exists(employee: Person, plan: Plan, on: Date) kind institutional {
+    label en unofficial "some OTHER section 401(a)(14) candidate date for this employee/plan is strictly later than `on` — used to pick the maximum without a max-over-derived aggregate (TECH-GAPS G136 idiom)";
+}
+
+rule Section401a14LaterCandidateExists(employee: Person, plan: Plan, on: Date, on2: Date) strict {
+    label en unofficial "a candidate is disqualified from being the latest event date if a strictly later candidate exists";
+    when section401a14_candidate_date(employee, plan, on);
+    when section401a14_candidate_date(employee, plan, on2);
+    when on2 > on;
+    then section401a14_later_candidate_exists(employee, plan, on);
+}
+
+pub relation section401a14_latest_event_date(employee: Person, plan: Plan, on: Date) kind institutional {
+    label en official "section 401(a)(14): the latest of the age-65/normal-retirement-age, 10th-anniversary, and termination-of-service dates";
+}
+
+@source(IRC_S401_A, relation = formalizes, coverage = exact, quote = "the payment of benefits under the plan to the participant will begin not later than the 60th day after the latest of the close of the plan year in which")
+rule Section401a14LatestEventDate(employee: Person, plan: Plan, on: Date) defeasible {
+    label en official "the latest known candidate event date";
+    when section401a14_candidate_date(employee, plan, on);
+    unless section401a14_later_candidate_exists(employee, plan, on);
+    then section401a14_latest_event_date(employee, plan, on);
+}
+
+pub relation plan_year_ending_after(employee: Person, plan: Plan, event_on: Date, plan_year_end: Date) kind empirical {
+    label en unofficial "the close of the plan year in which `event_on` falls, case-asserted (this package has no separate plan-year calendar entity; the case supplies the plan-year end directly)";
+}
+
+pub relation section401a14_commencement_deadline(employee: Person, plan: Plan, on: Date) kind institutional {
+    label en official "section 401(a)(14): benefit payments must begin not later than the 60th day after the close of the plan year containing the latest event date";
+}
+
+@source(IRC_S401_A, relation = formalizes, coverage = exact, quote = "the payment of benefits under the plan to the participant will begin not later than the 60th day after the latest of the close of the plan year in which")
+rule Section401a14CommencementDeadline(employee: Person, plan: Plan, latest_event: Date, plan_year_end: Date) defeasible {
+    label en official "deadline = plan-year end + 60 days (exact date arithmetic, no month/year rounding)";
+    when section401a14_latest_event_date(employee, plan, latest_event)
+        and plan_year_ending_after(employee, plan, latest_event, plan_year_end);
+    then section401a14_commencement_deadline(employee, plan, add_calendar_period(plan_year_end, 60 calendar_day));
+}
+
+pub relation benefit_payment_commenced_on(employee: Person, plan: Plan, on: Date) kind empirical {
+    label en unofficial "the date benefit payments to the participant actually began, case-asserted";
+}
+
+pub relation participant_elects_later_commencement(employee: Person, plan: Plan) kind empirical {
+    label en unofficial "the participant elected a later commencement date than the section 401(a)(14) deadline (\"unless the participant otherwise elects\"), case-asserted";
+}
+
+pub relation section401a14_commencement_duty_breached(employee: Person, plan: Plan, deadline: Date, commenced_on: Date) kind institutional {
+    label en official "the plan failed to begin benefit payments by the section 401(a)(14) deadline, and the participant did not elect a later date";
+}
+
+@source(IRC_S401_A, relation = formalizes, coverage = exact, quote = "unless the participant otherwise elects, the payment of benefits under the plan to the participant will begin not later than the 60th day after the latest of")
+rule Section401a14CommencementDutyBreached(employee: Person, plan: Plan, deadline: Date, commenced_on: Date) defeasible {
+    label en official "breach: actual commencement strictly after the deadline, absent a participant election otherwise";
+    when section401a14_commencement_deadline(employee, plan, deadline)
+        and benefit_payment_commenced_on(employee, plan, commenced_on)
+        and commenced_on > deadline
+        and not_known(participant_elects_later_commencement(employee, plan));
+    then section401a14_commencement_duty_breached(employee, plan, deadline, commenced_on);
+}
+// The early-retirement-benefit continuation sentence (a trust otherwise
+// providing an early retirement benefit must let a participant who
+// satisfied its service requirement but separated before satisfying its
+// age requirement receive that benefit on reaching the age requirement)
+// is NOT modelled (TECH_GAP: needs the plan's own early-retirement benefit
+// formula).
+
+// =====================================================================
+// Partial qualified-plan classification (documented scope; see file header)
+// =====================================================================
+pub relation qualified_plan(plan: Plan, y: TaxableYear) kind institutional {
+    label en unofficial "PARTIAL: holds only when the two plan/year-scoped requirements this stage models (section 401(a)(3) via section 410, and the section 401(a)(4) nondiscrimination judgment) hold. NOT the full section 401(a) qualified-trust test — see file header for the full list of requirements NOT conjuncted here (RMD, anti-alienation, compensation limit and the other participant-scoped requirements are tested per participant by their own relations, not aggregated into this one, because this runtime's aggregate-over-derived-predicate limitation (section 111) blocks a sound \"for all participants\" universal check). Do not treat `qualified_plan` as a complete qualification determination.";
+}
+
+@source(IRC_S401_A, relation = formalizes, coverage = partial, quote = "A trust created or organized in the United States and forming part of a stock bonus, pension, or profit-sharing plan of an employer for the exclusive benefit of his employees or their beneficiaries shall constitute a qualified trust under this section")
+rule QualifiedPlanPartial(plan: Plan, y: TaxableYear) strict {
+    label en official "partial qualification: the two plan/year-scoped stage-1 requirements hold (see relation doc comment for what is NOT included)";
+    when meets_401a3_participation(plan, y) and meets_401a4_nondiscrimination(plan, y);
+    then qualified_plan(plan, y);
+}

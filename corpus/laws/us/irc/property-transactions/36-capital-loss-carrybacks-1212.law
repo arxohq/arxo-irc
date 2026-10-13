@@ -1,0 +1,975 @@
+// Stage 3 (IRC-07, A05). Section 1212(a) (a corporation's net capital loss: the
+// 3-year carryback, the 5-year (10-year for a foreign expropriation loss) carryover,
+// the earliest-year-first absorption, regulated investment companies, the RIC/REIT
+// carryback bar) and section 1212(c) (the section 1256 contracts loss carryback).
+//
+// Method. The years to which a loss may be carried are the "slots" -3, -2, -1 (the three
+// preceding years, earliest first) and 1..5 (or 1..10 for the expropriation portion). The
+// entire loss goes to the earliest slot; the portion carried to a later slot is the loss
+// less the total of the capital gain net income of the earlier slots (paragraph (1),
+// second sentence), so the cumulative sums are derived by unrolled rules (the language has
+// no recursion). A slot's capital gain net income is computed by the case without the net
+// capital loss of the loss year or later years; for a carryback slot it is also cut back to
+// the amount that can be carried back without producing a net operating loss. The regular
+// portion and the expropriation portion are separate losses (paragraph (2)(C)); their
+// predicate families are kept apart (reg_*, exp_*) so that the expropriation portion reads
+// what the regular portion absorbs without a dependency cycle.
+
+use self::{
+    IRC_S1212_A,
+    IRC_S1212_C,
+    Person,
+    TaxableYear,
+    net_long_term_capital_gain,
+    net_long_term_capital_loss,
+    net_short_term_capital_gain,
+    net_short_term_capital_loss,
+};
+
+pub relation corporate_loss_year_net_capital_loss(p: Person, ly: TaxableYear, amount: Money) kind empirical {
+    label en official "section 1212(a)(1): the net capital loss of the corporation for the loss year";
+}
+pub relation foreign_expropriation_capital_loss_for_year(p: Person, ly: TaxableYear, amount: Money) kind empirical {
+    label en official "section 1212(a)(2)(A): the sum of the losses taken into account in computing the net capital loss that are (i) losses sustained directly by reason of an expropriation, intervention, seizure or similar taking by a foreign government or (ii) section 165(g)(1) losses from securities that become worthless by reason of such a taking";
+}
+pub relation loss_year_is_ric_year(p: Person, ly: TaxableYear) kind empirical {
+    label en official "section 1212(a)(3): the corporation is a regulated investment company for the loss year";
+}
+pub relation expropriation_portion_1212a2B(p: Person, ly: TaxableYear, amount: Money) kind institutional {
+    label en official "section 1212(a)(2)(B): the portion of the net capital loss attributable to a foreign expropriation capital loss - the loss, not above the net capital loss";
+}
+@source(IRC_S1212_A, relation = formalizes, coverage = exact, quote = "For purposes of paragraph (1), the portion of any net capital loss for any taxable year attributable to a foreign expropriation capital loss is the amount of the foreign expropriation capital loss for such year (but not in excess of the net capital loss for such year).")
+rule ExpropriationPortionWithinRule(p: Person, ly: TaxableYear, net: Money, fe: Money) defeasible {
+    label en official "section 1212(a)(2)(B): the expropriation loss does not exceed the net capital loss";
+    when corporate_loss_year_net_capital_loss(p, ly, net);
+    when foreign_expropriation_capital_loss_for_year(p, ly, fe);
+    when fe <= net;
+    then expropriation_portion_1212a2B(p, ly, fe);
+}
+rule ExpropriationPortionCappedRule(p: Person, ly: TaxableYear, net: Money, fe: Money) defeasible {
+    label en official "section 1212(a)(2)(B): the portion is cut to the net capital loss";
+    when corporate_loss_year_net_capital_loss(p, ly, net);
+    when foreign_expropriation_capital_loss_for_year(p, ly, fe);
+    when fe > net;
+    then expropriation_portion_1212a2B(p, ly, net);
+}
+rule ExpropriationPortionNoneRule(p: Person, ly: TaxableYear, net: Money) defeasible {
+    label en official "section 1212(a)(2)(B): no foreign expropriation capital loss";
+    when corporate_loss_year_net_capital_loss(p, ly, net);
+    when not_known(expropriation_loss_recorded(p, ly));
+    then expropriation_portion_1212a2B(p, ly, 0.00 USD);
+}
+pub relation expropriation_loss_recorded(p: Person, ly: TaxableYear) kind institutional {
+    label en unofficial "a foreign expropriation capital loss is recorded for the year";
+}
+rule ExpropriationLossRecordedRule(p: Person, ly: TaxableYear, fe: Money) defeasible {
+    label en unofficial "helper";
+    when foreign_expropriation_capital_loss_for_year(p, ly, fe);
+    then expropriation_loss_recorded(p, ly);
+}
+pub relation reg_loss(p: Person, ly: TaxableYear, amount: Money) kind institutional {
+    label en official "section 1212(a)(1), (2)(C): the net capital loss other than the expropriation portion";
+}
+@source(IRC_S1212_A, relation = formalizes, coverage = exact, quote = "(B) except as provided in subparagraph (C), a capital loss carryover to each of the 5 taxable years succeeding the loss year; and")
+rule RegLossRule(p: Person, ly: TaxableYear, net: Money, fe: Money) defeasible {
+    label en official "section 1212(a)(1)(B), (2)(C)";
+    when corporate_loss_year_net_capital_loss(p, ly, net);
+    when expropriation_portion_1212a2B(p, ly, fe);
+    when not_known(loss_year_is_ric_year(p, ly));
+    then reg_loss(p, ly, net - fe);
+}
+pub relation exp_loss(p: Person, ly: TaxableYear, amount: Money) kind institutional {
+    label en official "section 1212(a)(1)(C), (2)(C): the expropriation portion, a separate net capital loss applied after the other portion";
+}
+@source(IRC_S1212_A, relation = formalizes, coverage = exact, quote = "(C) a capital loss carryover to each of the 10 taxable years succeeding the loss year, but only to the extent such loss is attributable to a foreign expropriation loss,")
+rule ExpLossRule(p: Person, ly: TaxableYear, fe: Money) defeasible {
+    label en official "section 1212(a)(1)(C), (2)(C)";
+    when expropriation_portion_1212a2B(p, ly, fe);
+    when not_known(loss_year_is_ric_year(p, ly));
+    then exp_loss(p, ly, fe);
+}
+pub relation slot_cgni(p: Person, ly: TaxableYear, slot: Integer, amount: Money) kind empirical {
+    label en official "section 1212(a)(1): the capital gain net income of the year of the slot (-3, -2, -1: the preceding years, earliest first; 1..10: the succeeding years), computed without regard to the net capital loss for the loss year or any later year";
+}
+pub relation slot_max_carryback_without_nol(p: Person, ly: TaxableYear, slot: Integer, amount: Money) kind empirical {
+    label en official "section 1212(a)(1)(A)(ii), last sentence: the amount of the loss that can be carried back to the preceding year without increasing or producing a net operating loss (section 172(c))";
+}
+pub relation carryback_year_is_ric_or_reit_year(p: Person, ly: TaxableYear, slot: Integer) kind empirical {
+    label en official "section 1212(a)(4): the preceding taxable year is one for which the corporation is a regulated investment company (section 851) or a real estate investment trust (section 856)";
+}
+pub relation slot_effective_cgni(p: Person, ly: TaxableYear, slot: Integer, amount: Money) kind institutional {
+    label en official "section 1212(a)(1): the capital gain net income of the slot that counts for the cumulative test - for a carryback slot not above the amount that can be carried back without a net operating loss, and zero for a RIC or REIT year (paragraph (4))";
+}
+rule EffectiveCgniBarred3Rule(p: Person, ly: TaxableYear, cgni: Money) defeasible {
+    label en official "section 1212(a)(4): slot -3 is a RIC or REIT year, so no carryback";
+    when slot_cgni(p, ly, -3, cgni);
+    when carryback_year_is_ric_or_reit_year(p, ly, -3);
+    then slot_effective_cgni(p, ly, -3, 0.00 USD);
+}
+rule EffectiveCgniWithinCap3Rule(p: Person, ly: TaxableYear, cgni: Money, cap: Money) defeasible {
+    label en official "section 1212(a)(1)(A)(ii): slot -3, the gain is within what can be carried back";
+    when slot_cgni(p, ly, -3, cgni);
+    when slot_max_carryback_without_nol(p, ly, -3, cap);
+    when not_known(carryback_year_is_ric_or_reit_year(p, ly, -3));
+    when cgni <= cap;
+    then slot_effective_cgni(p, ly, -3, cgni);
+}
+rule EffectiveCgniAboveCap3Rule(p: Person, ly: TaxableYear, cgni: Money, cap: Money) defeasible {
+    label en official "section 1212(a)(1), last sentence: slot -3, the gain is cut to the amount that can be carried back";
+    when slot_cgni(p, ly, -3, cgni);
+    when slot_max_carryback_without_nol(p, ly, -3, cap);
+    when not_known(carryback_year_is_ric_or_reit_year(p, ly, -3));
+    when cgni > cap;
+    then slot_effective_cgni(p, ly, -3, cap);
+}
+rule EffectiveCgniBarred2Rule(p: Person, ly: TaxableYear, cgni: Money) defeasible {
+    label en official "section 1212(a)(4): slot -2 is a RIC or REIT year, so no carryback";
+    when slot_cgni(p, ly, -2, cgni);
+    when carryback_year_is_ric_or_reit_year(p, ly, -2);
+    then slot_effective_cgni(p, ly, -2, 0.00 USD);
+}
+rule EffectiveCgniWithinCap2Rule(p: Person, ly: TaxableYear, cgni: Money, cap: Money) defeasible {
+    label en official "section 1212(a)(1)(A)(ii): slot -2, the gain is within what can be carried back";
+    when slot_cgni(p, ly, -2, cgni);
+    when slot_max_carryback_without_nol(p, ly, -2, cap);
+    when not_known(carryback_year_is_ric_or_reit_year(p, ly, -2));
+    when cgni <= cap;
+    then slot_effective_cgni(p, ly, -2, cgni);
+}
+rule EffectiveCgniAboveCap2Rule(p: Person, ly: TaxableYear, cgni: Money, cap: Money) defeasible {
+    label en official "section 1212(a)(1), last sentence: slot -2, the gain is cut to the amount that can be carried back";
+    when slot_cgni(p, ly, -2, cgni);
+    when slot_max_carryback_without_nol(p, ly, -2, cap);
+    when not_known(carryback_year_is_ric_or_reit_year(p, ly, -2));
+    when cgni > cap;
+    then slot_effective_cgni(p, ly, -2, cap);
+}
+rule EffectiveCgniBarred1Rule(p: Person, ly: TaxableYear, cgni: Money) defeasible {
+    label en official "section 1212(a)(4): slot -1 is a RIC or REIT year, so no carryback";
+    when slot_cgni(p, ly, -1, cgni);
+    when carryback_year_is_ric_or_reit_year(p, ly, -1);
+    then slot_effective_cgni(p, ly, -1, 0.00 USD);
+}
+rule EffectiveCgniWithinCap1Rule(p: Person, ly: TaxableYear, cgni: Money, cap: Money) defeasible {
+    label en official "section 1212(a)(1)(A)(ii): slot -1, the gain is within what can be carried back";
+    when slot_cgni(p, ly, -1, cgni);
+    when slot_max_carryback_without_nol(p, ly, -1, cap);
+    when not_known(carryback_year_is_ric_or_reit_year(p, ly, -1));
+    when cgni <= cap;
+    then slot_effective_cgni(p, ly, -1, cgni);
+}
+rule EffectiveCgniAboveCap1Rule(p: Person, ly: TaxableYear, cgni: Money, cap: Money) defeasible {
+    label en official "section 1212(a)(1), last sentence: slot -1, the gain is cut to the amount that can be carried back";
+    when slot_cgni(p, ly, -1, cgni);
+    when slot_max_carryback_without_nol(p, ly, -1, cap);
+    when not_known(carryback_year_is_ric_or_reit_year(p, ly, -1));
+    when cgni > cap;
+    then slot_effective_cgni(p, ly, -1, cap);
+}
+rule EffectiveCgniForward1Rule(p: Person, ly: TaxableYear, cgni: Money) defeasible {
+    label en official "section 1212(a)(1): slot 1 (a succeeding year) counts at its capital gain net income";
+    when slot_cgni(p, ly, 1, cgni);
+    then slot_effective_cgni(p, ly, 1, cgni);
+}
+rule EffectiveCgniForward2Rule(p: Person, ly: TaxableYear, cgni: Money) defeasible {
+    label en official "section 1212(a)(1): slot 2 (a succeeding year) counts at its capital gain net income";
+    when slot_cgni(p, ly, 2, cgni);
+    then slot_effective_cgni(p, ly, 2, cgni);
+}
+rule EffectiveCgniForward3Rule(p: Person, ly: TaxableYear, cgni: Money) defeasible {
+    label en official "section 1212(a)(1): slot 3 (a succeeding year) counts at its capital gain net income";
+    when slot_cgni(p, ly, 3, cgni);
+    then slot_effective_cgni(p, ly, 3, cgni);
+}
+rule EffectiveCgniForward4Rule(p: Person, ly: TaxableYear, cgni: Money) defeasible {
+    label en official "section 1212(a)(1): slot 4 (a succeeding year) counts at its capital gain net income";
+    when slot_cgni(p, ly, 4, cgni);
+    then slot_effective_cgni(p, ly, 4, cgni);
+}
+rule EffectiveCgniForward5Rule(p: Person, ly: TaxableYear, cgni: Money) defeasible {
+    label en official "section 1212(a)(1): slot 5 (a succeeding year) counts at its capital gain net income";
+    when slot_cgni(p, ly, 5, cgni);
+    then slot_effective_cgni(p, ly, 5, cgni);
+}
+rule EffectiveCgniForward6Rule(p: Person, ly: TaxableYear, cgni: Money) defeasible {
+    label en official "section 1212(a)(1): slot 6 (a succeeding year) counts at its capital gain net income";
+    when slot_cgni(p, ly, 6, cgni);
+    then slot_effective_cgni(p, ly, 6, cgni);
+}
+rule EffectiveCgniForward7Rule(p: Person, ly: TaxableYear, cgni: Money) defeasible {
+    label en official "section 1212(a)(1): slot 7 (a succeeding year) counts at its capital gain net income";
+    when slot_cgni(p, ly, 7, cgni);
+    then slot_effective_cgni(p, ly, 7, cgni);
+}
+rule EffectiveCgniForward8Rule(p: Person, ly: TaxableYear, cgni: Money) defeasible {
+    label en official "section 1212(a)(1): slot 8 (a succeeding year) counts at its capital gain net income";
+    when slot_cgni(p, ly, 8, cgni);
+    then slot_effective_cgni(p, ly, 8, cgni);
+}
+rule EffectiveCgniForward9Rule(p: Person, ly: TaxableYear, cgni: Money) defeasible {
+    label en official "section 1212(a)(1): slot 9 (a succeeding year) counts at its capital gain net income";
+    when slot_cgni(p, ly, 9, cgni);
+    then slot_effective_cgni(p, ly, 9, cgni);
+}
+rule EffectiveCgniForward10Rule(p: Person, ly: TaxableYear, cgni: Money) defeasible {
+    label en official "section 1212(a)(1): slot 10 (a succeeding year) counts at its capital gain net income";
+    when slot_cgni(p, ly, 10, cgni);
+    then slot_effective_cgni(p, ly, 10, cgni);
+}
+pub relation reg_cumulative_before(p: Person, ly: TaxableYear, slot: Integer, total: Money) kind institutional {
+    label en official "section 1212(a)(1), second sentence (the portion that is not a foreign expropriation loss): the total of the capital gain net income of the years before the slot to which the loss may be carried";
+}
+pub relation reg_slot_available_cgni(p: Person, ly: TaxableYear, slot: Integer, amount: Money) kind institutional {
+    label en official "(the portion that is not a foreign expropriation loss) the capital gain net income of the slot available to the portion";
+}
+rule RegCumulativeFirstRule(p: Person, ly: TaxableYear, loss: Money) defeasible {
+    label en official "section 1212(a)(1): the earliest slot sees no earlier year, so the entire loss goes to it";
+    when reg_loss(p, ly, loss);
+    then reg_cumulative_before(p, ly, -3, 0.00 USD);
+}
+rule RegCumulativeSlotM2Rule(p: Person, ly: TaxableYear, c0: Money) defeasible {
+    label en official "section 1212(a)(1), second sentence: the sum of the capital gain net income of the slots before slot -2";
+    when reg_slot_available_cgni(p, ly, -3, c0);
+    then reg_cumulative_before(p, ly, -2, c0);
+}
+rule RegCumulativeSlotM1Rule(p: Person, ly: TaxableYear, c0: Money, c1: Money) defeasible {
+    label en official "section 1212(a)(1), second sentence: the sum of the capital gain net income of the slots before slot -1";
+    when reg_slot_available_cgni(p, ly, -3, c0);
+    when reg_slot_available_cgni(p, ly, -2, c1);
+    then reg_cumulative_before(p, ly, -1, c0 + c1);
+}
+rule RegCumulativeSlot1Rule(p: Person, ly: TaxableYear, c0: Money, c1: Money, c2: Money) defeasible {
+    label en official "section 1212(a)(1), second sentence: the sum of the capital gain net income of the slots before slot 1";
+    when reg_slot_available_cgni(p, ly, -3, c0);
+    when reg_slot_available_cgni(p, ly, -2, c1);
+    when reg_slot_available_cgni(p, ly, -1, c2);
+    then reg_cumulative_before(p, ly, 1, c0 + c1 + c2);
+}
+rule RegCumulativeSlot2Rule(p: Person, ly: TaxableYear, c0: Money, c1: Money, c2: Money, c3: Money) defeasible {
+    label en official "section 1212(a)(1), second sentence: the sum of the capital gain net income of the slots before slot 2";
+    when reg_slot_available_cgni(p, ly, -3, c0);
+    when reg_slot_available_cgni(p, ly, -2, c1);
+    when reg_slot_available_cgni(p, ly, -1, c2);
+    when reg_slot_available_cgni(p, ly, 1, c3);
+    then reg_cumulative_before(p, ly, 2, c0 + c1 + c2 + c3);
+}
+rule RegCumulativeSlot3Rule(p: Person, ly: TaxableYear, c0: Money, c1: Money, c2: Money, c3: Money, c4: Money) defeasible {
+    label en official "section 1212(a)(1), second sentence: the sum of the capital gain net income of the slots before slot 3";
+    when reg_slot_available_cgni(p, ly, -3, c0);
+    when reg_slot_available_cgni(p, ly, -2, c1);
+    when reg_slot_available_cgni(p, ly, -1, c2);
+    when reg_slot_available_cgni(p, ly, 1, c3);
+    when reg_slot_available_cgni(p, ly, 2, c4);
+    then reg_cumulative_before(p, ly, 3, c0 + c1 + c2 + c3 + c4);
+}
+rule RegCumulativeSlot4Rule(p: Person, ly: TaxableYear, c0: Money, c1: Money, c2: Money, c3: Money, c4: Money, c5: Money) defeasible {
+    label en official "section 1212(a)(1), second sentence: the sum of the capital gain net income of the slots before slot 4";
+    when reg_slot_available_cgni(p, ly, -3, c0);
+    when reg_slot_available_cgni(p, ly, -2, c1);
+    when reg_slot_available_cgni(p, ly, -1, c2);
+    when reg_slot_available_cgni(p, ly, 1, c3);
+    when reg_slot_available_cgni(p, ly, 2, c4);
+    when reg_slot_available_cgni(p, ly, 3, c5);
+    then reg_cumulative_before(p, ly, 4, c0 + c1 + c2 + c3 + c4 + c5);
+}
+rule RegCumulativeSlot5Rule(p: Person, ly: TaxableYear, c0: Money, c1: Money, c2: Money, c3: Money, c4: Money, c5: Money, c6: Money) defeasible {
+    label en official "section 1212(a)(1), second sentence: the sum of the capital gain net income of the slots before slot 5";
+    when reg_slot_available_cgni(p, ly, -3, c0);
+    when reg_slot_available_cgni(p, ly, -2, c1);
+    when reg_slot_available_cgni(p, ly, -1, c2);
+    when reg_slot_available_cgni(p, ly, 1, c3);
+    when reg_slot_available_cgni(p, ly, 2, c4);
+    when reg_slot_available_cgni(p, ly, 3, c5);
+    when reg_slot_available_cgni(p, ly, 4, c6);
+    then reg_cumulative_before(p, ly, 5, c0 + c1 + c2 + c3 + c4 + c5 + c6);
+}
+pub relation reg_carried_to_slot(p: Person, ly: TaxableYear, slot: Integer, amount: Money) kind institutional {
+    label en official "section 1212(a)(1) (the portion that is not a foreign expropriation loss): the amount of the loss carried to the slot - the loss less the total of the capital gain net income of the earlier slots";
+}
+rule RegCarriedPositiveRule(p: Person, ly: TaxableYear, slot: Integer, loss: Money, before: Money) defeasible {
+    label en official "section 1212(a)(1): the loss exceeds the earlier gains";
+    when reg_loss(p, ly, loss);
+    when reg_cumulative_before(p, ly, slot, before);
+    when loss > before;
+    then reg_carried_to_slot(p, ly, slot, loss - before);
+}
+rule RegCarriedNothingRule(p: Person, ly: TaxableYear, slot: Integer, loss: Money, before: Money) defeasible {
+    label en official "section 1212(a)(1): the earlier gains exhaust the loss";
+    when reg_loss(p, ly, loss);
+    when reg_cumulative_before(p, ly, slot, before);
+    when loss <= before;
+    then reg_carried_to_slot(p, ly, slot, 0.00 USD);
+}
+pub relation reg_absorbed_in_slot(p: Person, ly: TaxableYear, slot: Integer, amount: Money) kind institutional {
+    label en official "section 1212(a)(1) (the portion that is not a foreign expropriation loss): the part of the carried loss that offsets the slot's capital gain net income, treated as a short-term capital loss of that year";
+}
+rule RegAbsorbedWholeRule(p: Person, ly: TaxableYear, slot: Integer, carried: Money, cgni: Money) defeasible {
+    label en official "section 1212(a)(1): the carried loss is within the gain";
+    when reg_carried_to_slot(p, ly, slot, carried);
+    when reg_slot_available_cgni(p, ly, slot, cgni);
+    when carried <= cgni;
+    then reg_absorbed_in_slot(p, ly, slot, carried);
+}
+rule RegAbsorbedLimitedRule(p: Person, ly: TaxableYear, slot: Integer, carried: Money, cgni: Money) defeasible {
+    label en official "section 1212(a)(1): the carried loss exceeds the gain";
+    when reg_carried_to_slot(p, ly, slot, carried);
+    when reg_slot_available_cgni(p, ly, slot, cgni);
+    when carried > cgni;
+    then reg_absorbed_in_slot(p, ly, slot, cgni);
+}
+pub relation reg_short_term_character(p: Person, ly: TaxableYear, slot: Integer, amount: Money) kind institutional {
+    label en official "section 1212(a)(1): the carryback and carryover amount is treated as a short-term capital loss in each such taxable year";
+}
+rule RegShortTermRule(p: Person, ly: TaxableYear, slot: Integer, amount: Money) defeasible {
+    label en official "section 1212(a)(1)";
+    when reg_absorbed_in_slot(p, ly, slot, amount);
+    then reg_short_term_character(p, ly, slot, amount);
+}
+pub relation exp_cumulative_before(p: Person, ly: TaxableYear, slot: Integer, total: Money) kind institutional {
+    label en official "section 1212(a)(1), second sentence (the foreign expropriation portion): the total of the capital gain net income of the years before the slot to which the loss may be carried";
+}
+pub relation exp_slot_available_cgni(p: Person, ly: TaxableYear, slot: Integer, amount: Money) kind institutional {
+    label en official "(the foreign expropriation portion) the capital gain net income of the slot available to the portion";
+}
+rule ExpCumulativeFirstRule(p: Person, ly: TaxableYear, loss: Money) defeasible {
+    label en official "section 1212(a)(1): the earliest slot sees no earlier year, so the entire loss goes to it";
+    when exp_loss(p, ly, loss);
+    then exp_cumulative_before(p, ly, 1, 0.00 USD);
+}
+rule ExpCumulativeSlot2Rule(p: Person, ly: TaxableYear, c0: Money) defeasible {
+    label en official "section 1212(a)(1), second sentence: the sum of the capital gain net income of the slots before slot 2";
+    when exp_slot_available_cgni(p, ly, 1, c0);
+    then exp_cumulative_before(p, ly, 2, c0);
+}
+rule ExpCumulativeSlot3Rule(p: Person, ly: TaxableYear, c0: Money, c1: Money) defeasible {
+    label en official "section 1212(a)(1), second sentence: the sum of the capital gain net income of the slots before slot 3";
+    when exp_slot_available_cgni(p, ly, 1, c0);
+    when exp_slot_available_cgni(p, ly, 2, c1);
+    then exp_cumulative_before(p, ly, 3, c0 + c1);
+}
+rule ExpCumulativeSlot4Rule(p: Person, ly: TaxableYear, c0: Money, c1: Money, c2: Money) defeasible {
+    label en official "section 1212(a)(1), second sentence: the sum of the capital gain net income of the slots before slot 4";
+    when exp_slot_available_cgni(p, ly, 1, c0);
+    when exp_slot_available_cgni(p, ly, 2, c1);
+    when exp_slot_available_cgni(p, ly, 3, c2);
+    then exp_cumulative_before(p, ly, 4, c0 + c1 + c2);
+}
+rule ExpCumulativeSlot5Rule(p: Person, ly: TaxableYear, c0: Money, c1: Money, c2: Money, c3: Money) defeasible {
+    label en official "section 1212(a)(1), second sentence: the sum of the capital gain net income of the slots before slot 5";
+    when exp_slot_available_cgni(p, ly, 1, c0);
+    when exp_slot_available_cgni(p, ly, 2, c1);
+    when exp_slot_available_cgni(p, ly, 3, c2);
+    when exp_slot_available_cgni(p, ly, 4, c3);
+    then exp_cumulative_before(p, ly, 5, c0 + c1 + c2 + c3);
+}
+rule ExpCumulativeSlot6Rule(p: Person, ly: TaxableYear, c0: Money, c1: Money, c2: Money, c3: Money, c4: Money) defeasible {
+    label en official "section 1212(a)(1), second sentence: the sum of the capital gain net income of the slots before slot 6";
+    when exp_slot_available_cgni(p, ly, 1, c0);
+    when exp_slot_available_cgni(p, ly, 2, c1);
+    when exp_slot_available_cgni(p, ly, 3, c2);
+    when exp_slot_available_cgni(p, ly, 4, c3);
+    when exp_slot_available_cgni(p, ly, 5, c4);
+    then exp_cumulative_before(p, ly, 6, c0 + c1 + c2 + c3 + c4);
+}
+rule ExpCumulativeSlot7Rule(p: Person, ly: TaxableYear, c0: Money, c1: Money, c2: Money, c3: Money, c4: Money, c5: Money) defeasible {
+    label en official "section 1212(a)(1), second sentence: the sum of the capital gain net income of the slots before slot 7";
+    when exp_slot_available_cgni(p, ly, 1, c0);
+    when exp_slot_available_cgni(p, ly, 2, c1);
+    when exp_slot_available_cgni(p, ly, 3, c2);
+    when exp_slot_available_cgni(p, ly, 4, c3);
+    when exp_slot_available_cgni(p, ly, 5, c4);
+    when exp_slot_available_cgni(p, ly, 6, c5);
+    then exp_cumulative_before(p, ly, 7, c0 + c1 + c2 + c3 + c4 + c5);
+}
+rule ExpCumulativeSlot8Rule(p: Person, ly: TaxableYear, c0: Money, c1: Money, c2: Money, c3: Money, c4: Money, c5: Money, c6: Money) defeasible {
+    label en official "section 1212(a)(1), second sentence: the sum of the capital gain net income of the slots before slot 8";
+    when exp_slot_available_cgni(p, ly, 1, c0);
+    when exp_slot_available_cgni(p, ly, 2, c1);
+    when exp_slot_available_cgni(p, ly, 3, c2);
+    when exp_slot_available_cgni(p, ly, 4, c3);
+    when exp_slot_available_cgni(p, ly, 5, c4);
+    when exp_slot_available_cgni(p, ly, 6, c5);
+    when exp_slot_available_cgni(p, ly, 7, c6);
+    then exp_cumulative_before(p, ly, 8, c0 + c1 + c2 + c3 + c4 + c5 + c6);
+}
+rule ExpCumulativeSlot9Rule(p: Person, ly: TaxableYear, c0: Money, c1: Money, c2: Money, c3: Money, c4: Money, c5: Money, c6: Money, c7: Money) defeasible {
+    label en official "section 1212(a)(1), second sentence: the sum of the capital gain net income of the slots before slot 9";
+    when exp_slot_available_cgni(p, ly, 1, c0);
+    when exp_slot_available_cgni(p, ly, 2, c1);
+    when exp_slot_available_cgni(p, ly, 3, c2);
+    when exp_slot_available_cgni(p, ly, 4, c3);
+    when exp_slot_available_cgni(p, ly, 5, c4);
+    when exp_slot_available_cgni(p, ly, 6, c5);
+    when exp_slot_available_cgni(p, ly, 7, c6);
+    when exp_slot_available_cgni(p, ly, 8, c7);
+    then exp_cumulative_before(p, ly, 9, c0 + c1 + c2 + c3 + c4 + c5 + c6 + c7);
+}
+rule ExpCumulativeSlot10Rule(p: Person, ly: TaxableYear, c0: Money, c1: Money, c2: Money, c3: Money, c4: Money, c5: Money, c6: Money, c7: Money, c8: Money) defeasible {
+    label en official "section 1212(a)(1), second sentence: the sum of the capital gain net income of the slots before slot 10";
+    when exp_slot_available_cgni(p, ly, 1, c0);
+    when exp_slot_available_cgni(p, ly, 2, c1);
+    when exp_slot_available_cgni(p, ly, 3, c2);
+    when exp_slot_available_cgni(p, ly, 4, c3);
+    when exp_slot_available_cgni(p, ly, 5, c4);
+    when exp_slot_available_cgni(p, ly, 6, c5);
+    when exp_slot_available_cgni(p, ly, 7, c6);
+    when exp_slot_available_cgni(p, ly, 8, c7);
+    when exp_slot_available_cgni(p, ly, 9, c8);
+    then exp_cumulative_before(p, ly, 10, c0 + c1 + c2 + c3 + c4 + c5 + c6 + c7 + c8);
+}
+pub relation exp_carried_to_slot(p: Person, ly: TaxableYear, slot: Integer, amount: Money) kind institutional {
+    label en official "section 1212(a)(1) (the foreign expropriation portion): the amount of the loss carried to the slot - the loss less the total of the capital gain net income of the earlier slots";
+}
+rule ExpCarriedPositiveRule(p: Person, ly: TaxableYear, slot: Integer, loss: Money, before: Money) defeasible {
+    label en official "section 1212(a)(1): the loss exceeds the earlier gains";
+    when exp_loss(p, ly, loss);
+    when exp_cumulative_before(p, ly, slot, before);
+    when loss > before;
+    then exp_carried_to_slot(p, ly, slot, loss - before);
+}
+rule ExpCarriedNothingRule(p: Person, ly: TaxableYear, slot: Integer, loss: Money, before: Money) defeasible {
+    label en official "section 1212(a)(1): the earlier gains exhaust the loss";
+    when exp_loss(p, ly, loss);
+    when exp_cumulative_before(p, ly, slot, before);
+    when loss <= before;
+    then exp_carried_to_slot(p, ly, slot, 0.00 USD);
+}
+pub relation exp_absorbed_in_slot(p: Person, ly: TaxableYear, slot: Integer, amount: Money) kind institutional {
+    label en official "section 1212(a)(1) (the foreign expropriation portion): the part of the carried loss that offsets the slot's capital gain net income, treated as a short-term capital loss of that year";
+}
+rule ExpAbsorbedWholeRule(p: Person, ly: TaxableYear, slot: Integer, carried: Money, cgni: Money) defeasible {
+    label en official "section 1212(a)(1): the carried loss is within the gain";
+    when exp_carried_to_slot(p, ly, slot, carried);
+    when exp_slot_available_cgni(p, ly, slot, cgni);
+    when carried <= cgni;
+    then exp_absorbed_in_slot(p, ly, slot, carried);
+}
+rule ExpAbsorbedLimitedRule(p: Person, ly: TaxableYear, slot: Integer, carried: Money, cgni: Money) defeasible {
+    label en official "section 1212(a)(1): the carried loss exceeds the gain";
+    when exp_carried_to_slot(p, ly, slot, carried);
+    when exp_slot_available_cgni(p, ly, slot, cgni);
+    when carried > cgni;
+    then exp_absorbed_in_slot(p, ly, slot, cgni);
+}
+pub relation exp_short_term_character(p: Person, ly: TaxableYear, slot: Integer, amount: Money) kind institutional {
+    label en official "section 1212(a)(1): the carryback and carryover amount is treated as a short-term capital loss in each such taxable year";
+}
+rule ExpShortTermRule(p: Person, ly: TaxableYear, slot: Integer, amount: Money) defeasible {
+    label en official "section 1212(a)(1)";
+    when exp_absorbed_in_slot(p, ly, slot, amount);
+    then exp_short_term_character(p, ly, slot, amount);
+}
+rule RegAvailableM3Rule(p: Person, ly: TaxableYear, cgni: Money) defeasible {
+    label en official "section 1212(a)(1): the regular portion sees the whole slot gain";
+    when slot_effective_cgni(p, ly, -3, cgni);
+    then reg_slot_available_cgni(p, ly, -3, cgni);
+}
+rule RegAvailableM2Rule(p: Person, ly: TaxableYear, cgni: Money) defeasible {
+    label en official "section 1212(a)(1): the regular portion sees the whole slot gain";
+    when slot_effective_cgni(p, ly, -2, cgni);
+    then reg_slot_available_cgni(p, ly, -2, cgni);
+}
+rule RegAvailableM1Rule(p: Person, ly: TaxableYear, cgni: Money) defeasible {
+    label en official "section 1212(a)(1): the regular portion sees the whole slot gain";
+    when slot_effective_cgni(p, ly, -1, cgni);
+    then reg_slot_available_cgni(p, ly, -1, cgni);
+}
+rule RegAvailable1Rule(p: Person, ly: TaxableYear, cgni: Money) defeasible {
+    label en official "section 1212(a)(1): the regular portion sees the whole slot gain";
+    when slot_effective_cgni(p, ly, 1, cgni);
+    then reg_slot_available_cgni(p, ly, 1, cgni);
+}
+rule RegAvailable2Rule(p: Person, ly: TaxableYear, cgni: Money) defeasible {
+    label en official "section 1212(a)(1): the regular portion sees the whole slot gain";
+    when slot_effective_cgni(p, ly, 2, cgni);
+    then reg_slot_available_cgni(p, ly, 2, cgni);
+}
+rule RegAvailable3Rule(p: Person, ly: TaxableYear, cgni: Money) defeasible {
+    label en official "section 1212(a)(1): the regular portion sees the whole slot gain";
+    when slot_effective_cgni(p, ly, 3, cgni);
+    then reg_slot_available_cgni(p, ly, 3, cgni);
+}
+rule RegAvailable4Rule(p: Person, ly: TaxableYear, cgni: Money) defeasible {
+    label en official "section 1212(a)(1): the regular portion sees the whole slot gain";
+    when slot_effective_cgni(p, ly, 4, cgni);
+    then reg_slot_available_cgni(p, ly, 4, cgni);
+}
+rule RegAvailable5Rule(p: Person, ly: TaxableYear, cgni: Money) defeasible {
+    label en official "section 1212(a)(1): the regular portion sees the whole slot gain";
+    when slot_effective_cgni(p, ly, 5, cgni);
+    then reg_slot_available_cgni(p, ly, 5, cgni);
+}
+rule ExpAvailable1Rule(p: Person, ly: TaxableYear, cgni: Money, absorbed: Money) defeasible {
+    label en official "section 1212(a)(2)(C): slot 1, the expropriation portion is applied after the regular portion";
+    when slot_effective_cgni(p, ly, 1, cgni);
+    when reg_absorbed_in_slot(p, ly, 1, absorbed);
+    when cgni > absorbed;
+    then exp_slot_available_cgni(p, ly, 1, cgni - absorbed);
+}
+rule ExpAvailableNone1Rule(p: Person, ly: TaxableYear, cgni: Money, absorbed: Money) defeasible {
+    label en official "section 1212(a)(2)(C): slot 1, the regular portion takes the whole gain";
+    when slot_effective_cgni(p, ly, 1, cgni);
+    when reg_absorbed_in_slot(p, ly, 1, absorbed);
+    when cgni <= absorbed;
+    then exp_slot_available_cgni(p, ly, 1, 0.00 USD);
+}
+rule ExpAvailable2Rule(p: Person, ly: TaxableYear, cgni: Money, absorbed: Money) defeasible {
+    label en official "section 1212(a)(2)(C): slot 2, the expropriation portion is applied after the regular portion";
+    when slot_effective_cgni(p, ly, 2, cgni);
+    when reg_absorbed_in_slot(p, ly, 2, absorbed);
+    when cgni > absorbed;
+    then exp_slot_available_cgni(p, ly, 2, cgni - absorbed);
+}
+rule ExpAvailableNone2Rule(p: Person, ly: TaxableYear, cgni: Money, absorbed: Money) defeasible {
+    label en official "section 1212(a)(2)(C): slot 2, the regular portion takes the whole gain";
+    when slot_effective_cgni(p, ly, 2, cgni);
+    when reg_absorbed_in_slot(p, ly, 2, absorbed);
+    when cgni <= absorbed;
+    then exp_slot_available_cgni(p, ly, 2, 0.00 USD);
+}
+rule ExpAvailable3Rule(p: Person, ly: TaxableYear, cgni: Money, absorbed: Money) defeasible {
+    label en official "section 1212(a)(2)(C): slot 3, the expropriation portion is applied after the regular portion";
+    when slot_effective_cgni(p, ly, 3, cgni);
+    when reg_absorbed_in_slot(p, ly, 3, absorbed);
+    when cgni > absorbed;
+    then exp_slot_available_cgni(p, ly, 3, cgni - absorbed);
+}
+rule ExpAvailableNone3Rule(p: Person, ly: TaxableYear, cgni: Money, absorbed: Money) defeasible {
+    label en official "section 1212(a)(2)(C): slot 3, the regular portion takes the whole gain";
+    when slot_effective_cgni(p, ly, 3, cgni);
+    when reg_absorbed_in_slot(p, ly, 3, absorbed);
+    when cgni <= absorbed;
+    then exp_slot_available_cgni(p, ly, 3, 0.00 USD);
+}
+rule ExpAvailable4Rule(p: Person, ly: TaxableYear, cgni: Money, absorbed: Money) defeasible {
+    label en official "section 1212(a)(2)(C): slot 4, the expropriation portion is applied after the regular portion";
+    when slot_effective_cgni(p, ly, 4, cgni);
+    when reg_absorbed_in_slot(p, ly, 4, absorbed);
+    when cgni > absorbed;
+    then exp_slot_available_cgni(p, ly, 4, cgni - absorbed);
+}
+rule ExpAvailableNone4Rule(p: Person, ly: TaxableYear, cgni: Money, absorbed: Money) defeasible {
+    label en official "section 1212(a)(2)(C): slot 4, the regular portion takes the whole gain";
+    when slot_effective_cgni(p, ly, 4, cgni);
+    when reg_absorbed_in_slot(p, ly, 4, absorbed);
+    when cgni <= absorbed;
+    then exp_slot_available_cgni(p, ly, 4, 0.00 USD);
+}
+rule ExpAvailable5Rule(p: Person, ly: TaxableYear, cgni: Money, absorbed: Money) defeasible {
+    label en official "section 1212(a)(2)(C): slot 5, the expropriation portion is applied after the regular portion";
+    when slot_effective_cgni(p, ly, 5, cgni);
+    when reg_absorbed_in_slot(p, ly, 5, absorbed);
+    when cgni > absorbed;
+    then exp_slot_available_cgni(p, ly, 5, cgni - absorbed);
+}
+rule ExpAvailableNone5Rule(p: Person, ly: TaxableYear, cgni: Money, absorbed: Money) defeasible {
+    label en official "section 1212(a)(2)(C): slot 5, the regular portion takes the whole gain";
+    when slot_effective_cgni(p, ly, 5, cgni);
+    when reg_absorbed_in_slot(p, ly, 5, absorbed);
+    when cgni <= absorbed;
+    then exp_slot_available_cgni(p, ly, 5, 0.00 USD);
+}
+rule ExpAvailable6Rule(p: Person, ly: TaxableYear, cgni: Money) defeasible {
+    label en official "section 1212(a)(1)(C): slot 6, beyond the 5 years of the regular portion";
+    when slot_effective_cgni(p, ly, 6, cgni);
+    then exp_slot_available_cgni(p, ly, 6, cgni);
+}
+rule ExpAvailable7Rule(p: Person, ly: TaxableYear, cgni: Money) defeasible {
+    label en official "section 1212(a)(1)(C): slot 7, beyond the 5 years of the regular portion";
+    when slot_effective_cgni(p, ly, 7, cgni);
+    then exp_slot_available_cgni(p, ly, 7, cgni);
+}
+rule ExpAvailable8Rule(p: Person, ly: TaxableYear, cgni: Money) defeasible {
+    label en official "section 1212(a)(1)(C): slot 8, beyond the 5 years of the regular portion";
+    when slot_effective_cgni(p, ly, 8, cgni);
+    then exp_slot_available_cgni(p, ly, 8, cgni);
+}
+rule ExpAvailable9Rule(p: Person, ly: TaxableYear, cgni: Money) defeasible {
+    label en official "section 1212(a)(1)(C): slot 9, beyond the 5 years of the regular portion";
+    when slot_effective_cgni(p, ly, 9, cgni);
+    then exp_slot_available_cgni(p, ly, 9, cgni);
+}
+rule ExpAvailable10Rule(p: Person, ly: TaxableYear, cgni: Money) defeasible {
+    label en official "section 1212(a)(1)(C): slot 10, beyond the 5 years of the regular portion";
+    when slot_effective_cgni(p, ly, 10, cgni);
+    then exp_slot_available_cgni(p, ly, 10, cgni);
+}
+
+// =============================================================================
+// (a)(3): regulated investment companies
+// =============================================================================
+
+pub relation st_loss_treated_under_paragraph_1(p: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "section 1212(a)(3)(B)(i): an amount carried to the RIC's year that is treated as a short-term capital loss under paragraph (1)";
+}
+pub relation ric_st_loss_base(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 1212(a)(3)(A)(ii), (B)(i): the net short-term capital loss, without regard to any amount treated as a short-term capital loss under paragraph (1)";
+}
+rule RicStBaseWithCarriedRule(p: Person, y: TaxableYear, net: Money, carried: Money) defeasible {
+    label en official "section 1212(a)(3)(B)(i): the carried amount is set aside";
+    when net_short_term_capital_loss(p, y, net);
+    when st_loss_treated_under_paragraph_1(p, y, carried);
+    when net > carried;
+    then ric_st_loss_base(p, y, net - carried);
+}
+rule RicStBaseExhaustedRule(p: Person, y: TaxableYear, net: Money, carried: Money) defeasible {
+    label en official "section 1212(a)(3)(B)(i): the carried amount covers the loss";
+    when net_short_term_capital_loss(p, y, net);
+    when st_loss_treated_under_paragraph_1(p, y, carried);
+    when net <= carried;
+    then ric_st_loss_base(p, y, 0.00 USD);
+}
+rule RicStBasePlainRule(p: Person, y: TaxableYear, net: Money) defeasible {
+    label en official "section 1212(a)(3)(A)(ii): no paragraph (1) amount";
+    when net_short_term_capital_loss(p, y, net);
+    when not_known(st_loss_carried_recorded(p, y));
+    then ric_st_loss_base(p, y, net);
+}
+pub relation st_loss_carried_recorded(p: Person, y: TaxableYear) kind institutional {
+    label en unofficial "a paragraph (1) short-term amount is recorded";
+}
+rule StLossCarriedRecordedRule(p: Person, y: TaxableYear, a: Money) defeasible {
+    label en unofficial "helper";
+    when st_loss_treated_under_paragraph_1(p, y, a);
+    then st_loss_carried_recorded(p, y);
+}
+pub relation ric_short_term_loss_next_year(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 1212(a)(3)(A)(ii): the excess of the net short-term capital loss over the net long-term capital gain is a short-term capital loss arising on the first day of the next taxable year";
+}
+@source(IRC_S1212_A, relation = formalizes, coverage = exact, quote = "(ii) the excess of the net short-term capital loss over the net long-term capital gain for such year shall be a short-term capital loss arising on the first day of the next taxable year, and")
+rule RicShortTermLossRule(p: Person, y: TaxableYear, base: Money, gain: Money) defeasible {
+    label en official "section 1212(a)(3)(A)(ii)";
+    when loss_year_is_ric_year(p, y);
+    when ric_st_loss_base(p, y, base);
+    when net_long_term_capital_gain(p, y, gain);
+    when base > gain;
+    then ric_short_term_loss_next_year(p, y, base - gain);
+}
+rule RicShortTermLossNoneRule(p: Person, y: TaxableYear, base: Money, gain: Money) defeasible {
+    label en official "section 1212(a)(3)(A)(ii): the long-term gain covers the short-term loss";
+    when loss_year_is_ric_year(p, y);
+    when ric_st_loss_base(p, y, base);
+    when net_long_term_capital_gain(p, y, gain);
+    when base <= gain;
+    then ric_short_term_loss_next_year(p, y, 0.00 USD);
+}
+pub relation ric_long_term_loss_next_year(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 1212(a)(3)(A)(iii): the excess of the net long-term capital loss over the net short-term capital gain is a long-term capital loss arising on the first day of the next taxable year";
+}
+@source(IRC_S1212_A, relation = formalizes, coverage = exact, quote = "(iii) the excess of the net long-term capital loss over the net short-term capital gain for such year shall be a long-term capital loss arising on the first day of the next taxable year.")
+rule RicLongTermLossRule(p: Person, y: TaxableYear, loss: Money, gain: Money) defeasible {
+    label en official "section 1212(a)(3)(A)(iii)";
+    when loss_year_is_ric_year(p, y);
+    when net_long_term_capital_loss(p, y, loss);
+    when net_short_term_capital_gain(p, y, gain);
+    when loss > gain;
+    then ric_long_term_loss_next_year(p, y, loss - gain);
+}
+rule RicLongTermLossNoneRule(p: Person, y: TaxableYear, loss: Money, gain: Money) defeasible {
+    label en official "section 1212(a)(3)(A)(iii): the short-term gain covers the long-term loss";
+    when loss_year_is_ric_year(p, y);
+    when net_long_term_capital_loss(p, y, loss);
+    when net_short_term_capital_gain(p, y, gain);
+    when loss <= gain;
+    then ric_long_term_loss_next_year(p, y, 0.00 USD);
+}
+pub relation paragraph_1_inapplicable_to_ric_loss(p: Person, y: TaxableYear) kind institutional {
+    label en official "section 1212(a)(3)(A)(i), (B)(ii): paragraph (1) does not apply to the RIC's net capital loss (it is left out of the paragraph (1) carryover computation)";
+}
+@source(IRC_S1212_A, relation = formalizes, coverage = exact, quote = "(i) paragraph (1) shall not apply to such loss,")
+rule Paragraph1InapplicableRule(p: Person, y: TaxableYear) defeasible {
+    label en official "section 1212(a)(3)(A)(i)";
+    when loss_year_is_ric_year(p, y);
+    then paragraph_1_inapplicable_to_ric_loss(p, y);
+}
+
+// =============================================================================
+// (c): the section 1256 contracts loss carryback
+// =============================================================================
+
+pub relation taxpayer_is_corporation_1212c(p: Person) kind empirical {
+    label en official "section 1212(c)(1): the taxpayer is a corporation (subsection (c) applies to a taxpayer other than a corporation)";
+}
+pub relation taxpayer_is_estate_or_trust_1212c(p: Person) kind empirical {
+    label en official "section 1212(c)(7)(B): the taxpayer is an estate or trust";
+}
+pub relation elects_1256_loss_carryback(p: Person, y: TaxableYear) kind empirical {
+    label en official "section 1212(c)(1): the taxpayer elects to have the subsection apply to the taxable year";
+}
+pub relation carryback_election_in_effect_1212c(p: Person, y: TaxableYear) kind institutional {
+    label en official "section 1212(c)(1): the election is in effect for the taxable year";
+}
+pub relation carryback_election_available_1212c(p: Person, y: TaxableYear) kind institutional {
+    label en unofficial "single-atom helper for valid_when: the taxpayer is neither a corporation nor an estate or trust";
+}
+rule ElectionAvailableRule(p: Person, y: TaxableYear) defeasible {
+    label en official "section 1212(c)(1), (7)(B)";
+    when elects_1256_loss_carryback(p, y);
+    when not_known(taxpayer_is_corporation_1212c(p));
+    when not_known(taxpayer_is_estate_or_trust_1212c(p));
+    then carryback_election_available_1212c(p, y);
+}
+@source(IRC_S1212_C, relation = formalizes, coverage = exact, quote = "If a taxpayer (other than a corporation) has a net section 1256 contracts loss for the taxable year and elects to have this subsection apply to such taxable year, the amount of such net section 1256 contracts loss—")
+rule Section1212cElectionPower(p: Person, y: TaxableYear) strict {
+    label en official "section 1212(c)(1): the election is a power of the taxpayer over the taxable year; not available to a corporation, or (subsection (c)(7)(B)) to an estate or trust";
+    when elects_1256_loss_carryback(p, y);
+    then power Section1212cCarrybackElection {
+        holder p;
+        over y;
+        exercise elects_1256_loss_carryback(p, y);
+        valid_when carryback_election_available_1212c(p, y);
+        effect create(carryback_election_in_effect_1212c(p, y));
+        window [@1981-01-01, infinity);
+    };
+}
+pub relation net_capital_loss_from_1256_only(p: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "section 1212(c)(4)(A): the net capital loss for the year determined by taking into account only gains and losses from section 1256 contracts";
+}
+pub relation carryforward_amount_but_for_c6A(p: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "section 1212(c)(4)(B): the sum of the amounts which, but for paragraph (6)(A), would be treated as capital losses in the succeeding year under subparagraphs (A) and (B) of subsection (b)(1)";
+}
+pub relation net_1256_contracts_loss(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 1212(c)(4): the net section 1256 contracts loss - the lesser of (A) and (B)";
+}
+@source(IRC_S1212_C, relation = formalizes, coverage = exact, quote = "For purposes of paragraph (1), the term \"net section 1256 contracts loss\" means the lesser of—")
+rule NetLossFromOnlyRule(p: Person, y: TaxableYear, a: Money, b: Money) defeasible {
+    label en official "section 1212(c)(4): (A) is the lesser";
+    when net_capital_loss_from_1256_only(p, y, a);
+    when carryforward_amount_but_for_c6A(p, y, b);
+    when a <= b;
+    then net_1256_contracts_loss(p, y, a);
+}
+rule NetLossFromCarryforwardRule(p: Person, y: TaxableYear, a: Money, b: Money) defeasible {
+    label en official "section 1212(c)(4): (B) is the lesser";
+    when net_capital_loss_from_1256_only(p, y, a);
+    when carryforward_amount_but_for_c6A(p, y, b);
+    when b < a;
+    then net_1256_contracts_loss(p, y, b);
+}
+pub relation cgni_from_1256_only(p: Person, y: TaxableYear, slot: Integer, amount: Money) kind empirical {
+    label en official "section 1212(c)(5)(A)(i): the capital gain net income of the preceding year determined by taking into account only gains and losses from section 1256 contracts (computed without regard to the net section 1256 contracts loss for the loss year or later years, (5)(B))";
+}
+pub relation cgni_total_for_slot(p: Person, y: TaxableYear, slot: Integer, amount: Money) kind empirical {
+    label en official "section 1212(c)(5)(A)(ii): the capital gain net income of the preceding year";
+}
+pub relation carryback_cap_without_nol_1212c3B(p: Person, y: TaxableYear, slot: Integer, amount: Money) kind empirical {
+    label en official "section 1212(c)(3)(B): the amount that can be carried back to the year without increasing or producing a net operating loss (section 172(c))";
+}
+pub relation net_1256_contract_gain_1212c5(p: Person, y: TaxableYear, slot: Integer, amount: Money) kind institutional {
+    label en official "section 1212(c)(5)(A): the net section 1256 contract gain of the preceding year - the lesser of the two capital gain net income figures";
+}
+@source(IRC_S1212_C, relation = formalizes, coverage = exact, quote = "The term \"net section 1256 contract gain\" means the lesser of—")
+rule NetGainOnlyRule(p: Person, y: TaxableYear, slot: Integer, only: Money, total: Money) defeasible {
+    label en official "section 1212(c)(5)(A): the section 1256 only figure is the lesser";
+    when cgni_from_1256_only(p, y, slot, only);
+    when cgni_total_for_slot(p, y, slot, total);
+    when only <= total;
+    then net_1256_contract_gain_1212c5(p, y, slot, only);
+}
+rule NetGainTotalRule(p: Person, y: TaxableYear, slot: Integer, only: Money, total: Money) defeasible {
+    label en official "section 1212(c)(5)(A): the total figure is the lesser";
+    when cgni_from_1256_only(p, y, slot, only);
+    when cgni_total_for_slot(p, y, slot, total);
+    when total < only;
+    then net_1256_contract_gain_1212c5(p, y, slot, total);
+}
+pub relation carryback_slot_room(p: Person, y: TaxableYear, slot: Integer, amount: Money) kind institutional {
+    label en official "section 1212(c)(3): the amount that may be allowed as a carryback to the slot - not above the net section 1256 contract gain and without a net operating loss";
+}
+rule RoomGainLessRule(p: Person, y: TaxableYear, slot: Integer, gain: Money, cap: Money) defeasible {
+    label en official "section 1212(c)(3)(A)-(B): the gain is the smaller limit";
+    when net_1256_contract_gain_1212c5(p, y, slot, gain);
+    when carryback_cap_without_nol_1212c3B(p, y, slot, cap);
+    when gain <= cap;
+    then carryback_slot_room(p, y, slot, gain);
+}
+rule RoomCapLessRule(p: Person, y: TaxableYear, slot: Integer, gain: Money, cap: Money) defeasible {
+    label en official "section 1212(c)(3)(A)-(B): the net operating loss cap is the smaller limit";
+    when net_1256_contract_gain_1212c5(p, y, slot, gain);
+    when carryback_cap_without_nol_1212c3B(p, y, slot, cap);
+    when cap < gain;
+    then carryback_slot_room(p, y, slot, cap);
+}
+pub relation carried_1256_loss_slot1(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 1212(c)(2): the whole net section 1256 contracts loss goes to the earliest of the three preceding years (slot 1)";
+}
+pub relation carried_1256_loss_slot2(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 1212(c)(2): slot 2 gets the loss less what slot 1 allowed as a carryback";
+}
+pub relation carried_1256_loss_slot3(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 1212(c)(2): slot 3 gets the loss less what slots 1 and 2 allowed as a carryback";
+}
+pub relation allowed_1256_carryback_slot1(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 1212(c)(3): the amount allowed as a carryback to slot 1 - the carried loss, not above the room";
+}
+pub relation allowed_1256_carryback_slot2(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 1212(c)(3): the amount allowed as a carryback to slot 2";
+}
+pub relation allowed_1256_carryback_slot3(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 1212(c)(3): the amount allowed as a carryback to slot 3";
+}
+@source(IRC_S1212_C, relation = formalizes, coverage = exact, quote = "The entire amount of the net section 1256 contracts loss for any taxable year shall be carried to the earliest of the taxable years to which such loss may be carried back under paragraph (1).")
+rule Carried1Rule(p: Person, y: TaxableYear, n: Money) defeasible {
+    label en official "section 1212(c)(2)";
+    when carryback_election_in_effect_1212c(p, y);
+    when net_1256_contracts_loss(p, y, n);
+    then carried_1256_loss_slot1(p, y, n);
+}
+rule Allowed1WholeRule(p: Person, y: TaxableYear, carried: Money, room: Money) defeasible {
+    label en official "section 1212(c)(3): slot 1, the carried loss fits in the room";
+    when carried_1256_loss_slot1(p, y, carried);
+    when carryback_slot_room(p, y, 1, room);
+    when carried <= room;
+    then allowed_1256_carryback_slot1(p, y, carried);
+}
+rule Allowed1LimitedRule(p: Person, y: TaxableYear, carried: Money, room: Money) defeasible {
+    label en official "section 1212(c)(3): slot 1, the carried loss exceeds the room";
+    when carried_1256_loss_slot1(p, y, carried);
+    when carryback_slot_room(p, y, 1, room);
+    when carried > room;
+    then allowed_1256_carryback_slot1(p, y, room);
+}
+rule Carried2Rule(p: Person, y: TaxableYear, n: Money, a1: Money) defeasible {
+    label en official "section 1212(c)(2): slot 2";
+    when net_1256_contracts_loss(p, y, n);
+    when carryback_election_in_effect_1212c(p, y);
+    when allowed_1256_carryback_slot1(p, y, a1);
+    when n > a1;
+    then carried_1256_loss_slot2(p, y, n - a1);
+}
+rule Carried2NothingRule(p: Person, y: TaxableYear, n: Money, a1: Money) defeasible {
+    label en official "section 1212(c)(2): slot 1 allowed the whole loss";
+    when net_1256_contracts_loss(p, y, n);
+    when carryback_election_in_effect_1212c(p, y);
+    when allowed_1256_carryback_slot1(p, y, a1);
+    when n <= a1;
+    then carried_1256_loss_slot2(p, y, 0.00 USD);
+}
+rule Allowed2WholeRule(p: Person, y: TaxableYear, carried: Money, room: Money) defeasible {
+    label en official "section 1212(c)(3): slot 2, the carried loss fits in the room";
+    when carried_1256_loss_slot2(p, y, carried);
+    when carryback_slot_room(p, y, 2, room);
+    when carried <= room;
+    then allowed_1256_carryback_slot2(p, y, carried);
+}
+rule Allowed2LimitedRule(p: Person, y: TaxableYear, carried: Money, room: Money) defeasible {
+    label en official "section 1212(c)(3): slot 2, the carried loss exceeds the room";
+    when carried_1256_loss_slot2(p, y, carried);
+    when carryback_slot_room(p, y, 2, room);
+    when carried > room;
+    then allowed_1256_carryback_slot2(p, y, room);
+}
+rule Carried3Rule(p: Person, y: TaxableYear, n: Money, a1: Money, a2: Money) defeasible {
+    label en official "section 1212(c)(2): slot 3";
+    when net_1256_contracts_loss(p, y, n);
+    when carryback_election_in_effect_1212c(p, y);
+    when allowed_1256_carryback_slot1(p, y, a1);
+    when allowed_1256_carryback_slot2(p, y, a2);
+    when n > a1 + a2;
+    then carried_1256_loss_slot3(p, y, n - a1 - a2);
+}
+rule Carried3NothingRule(p: Person, y: TaxableYear, n: Money, a1: Money, a2: Money) defeasible {
+    label en official "section 1212(c)(2): slots 1 and 2 allowed the whole loss";
+    when net_1256_contracts_loss(p, y, n);
+    when carryback_election_in_effect_1212c(p, y);
+    when allowed_1256_carryback_slot1(p, y, a1);
+    when allowed_1256_carryback_slot2(p, y, a2);
+    when n <= a1 + a2;
+    then carried_1256_loss_slot3(p, y, 0.00 USD);
+}
+rule Allowed3WholeRule(p: Person, y: TaxableYear, carried: Money, room: Money) defeasible {
+    label en official "section 1212(c)(3): slot 3, the carried loss fits in the room";
+    when carried_1256_loss_slot3(p, y, carried);
+    when carryback_slot_room(p, y, 3, room);
+    when carried <= room;
+    then allowed_1256_carryback_slot3(p, y, carried);
+}
+rule Allowed3LimitedRule(p: Person, y: TaxableYear, carried: Money, room: Money) defeasible {
+    label en official "section 1212(c)(3): slot 3, the carried loss exceeds the room";
+    when carried_1256_loss_slot3(p, y, carried);
+    when carryback_slot_room(p, y, 3, room);
+    when carried > room;
+    then allowed_1256_carryback_slot3(p, y, room);
+}
+pub relation carryback_short_term_1256_loss(p: Person, y: TaxableYear, slot: Integer, amount: Money) kind institutional {
+    label en official "section 1212(c)(1)(B)(i): 40 percent of the amount allowed is a short-term capital loss from section 1256 contracts";
+}
+pub relation carryback_long_term_1256_loss(p: Person, y: TaxableYear, slot: Integer, amount: Money) kind institutional {
+    label en official "section 1212(c)(1)(B)(ii): 60 percent of the amount allowed is a long-term capital loss from section 1256 contracts";
+}
+@source(IRC_S1212_C, relation = formalizes, coverage = exact, quote = "(i) 40 percent of the amount so allowed shall be treated as a short-term capital loss from section 1256 contracts, and")
+rule CarrybackShortTerm1Rule(p: Person, y: TaxableYear, allowed: Money) defeasible {
+    label en official "section 1212(c)(1)(B)(i), slot 1";
+    when allowed_1256_carryback_slot1(p, y, allowed);
+    then carryback_short_term_1256_loss(p, y, 1, allowed * 40 percent);
+}
+@source(IRC_S1212_C, relation = formalizes, coverage = exact, quote = "(ii) 60 percent of the amount so allowed shall be treated as a long-term capital loss from section 1256 contracts.")
+rule CarrybackLongTerm1Rule(p: Person, y: TaxableYear, allowed: Money) defeasible {
+    label en official "section 1212(c)(1)(B)(ii), slot 1";
+    when allowed_1256_carryback_slot1(p, y, allowed);
+    then carryback_long_term_1256_loss(p, y, 1, allowed * 60 percent);
+}
+@source(IRC_S1212_C, relation = formalizes, coverage = exact, quote = "(i) 40 percent of the amount so allowed shall be treated as a short-term capital loss from section 1256 contracts, and")
+rule CarrybackShortTerm2Rule(p: Person, y: TaxableYear, allowed: Money) defeasible {
+    label en official "section 1212(c)(1)(B)(i), slot 2";
+    when allowed_1256_carryback_slot2(p, y, allowed);
+    then carryback_short_term_1256_loss(p, y, 2, allowed * 40 percent);
+}
+@source(IRC_S1212_C, relation = formalizes, coverage = exact, quote = "(ii) 60 percent of the amount so allowed shall be treated as a long-term capital loss from section 1256 contracts.")
+rule CarrybackLongTerm2Rule(p: Person, y: TaxableYear, allowed: Money) defeasible {
+    label en official "section 1212(c)(1)(B)(ii), slot 2";
+    when allowed_1256_carryback_slot2(p, y, allowed);
+    then carryback_long_term_1256_loss(p, y, 2, allowed * 60 percent);
+}
+@source(IRC_S1212_C, relation = formalizes, coverage = exact, quote = "(i) 40 percent of the amount so allowed shall be treated as a short-term capital loss from section 1256 contracts, and")
+rule CarrybackShortTerm3Rule(p: Person, y: TaxableYear, allowed: Money) defeasible {
+    label en official "section 1212(c)(1)(B)(i), slot 3";
+    when allowed_1256_carryback_slot3(p, y, allowed);
+    then carryback_short_term_1256_loss(p, y, 3, allowed * 40 percent);
+}
+@source(IRC_S1212_C, relation = formalizes, coverage = exact, quote = "(ii) 60 percent of the amount so allowed shall be treated as a long-term capital loss from section 1256 contracts.")
+rule CarrybackLongTerm3Rule(p: Person, y: TaxableYear, allowed: Money) defeasible {
+    label en official "section 1212(c)(1)(B)(ii), slot 3";
+    when allowed_1256_carryback_slot3(p, y, allowed);
+    then carryback_long_term_1256_loss(p, y, 3, allowed * 60 percent);
+}
+pub relation total_allowed_1256_carryback(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 1212(c)(6)(A): the portion of the net section 1256 contracts loss allowed as a carryback to the preceding years";
+}
+rule TotalAllowedRule(p: Person, y: TaxableYear, a1: Money, a2: Money, a3: Money) defeasible {
+    label en official "section 1212(c)(6)(A)";
+    when allowed_1256_carryback_slot1(p, y, a1);
+    when allowed_1256_carryback_slot2(p, y, a2);
+    when allowed_1256_carryback_slot3(p, y, a3);
+    then total_allowed_1256_carryback(p, y, a1 + a2 + a3);
+}
+pub relation loss_year_short_term_gain_from_carryback_1212c6A(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 1212(c)(6)(A)(i): 40 percent of the amount allowed as a carryback is treated as a short-term capital gain for the loss year (for applying subsection (b)(1))";
+}
+@source(IRC_S1212_C, relation = formalizes, coverage = exact, quote = "(i) 40 percent of the amount allowed as a carryback shall be treated as a short-term capital gain for the loss year, and")
+rule LossYearShortTermGainRule(p: Person, y: TaxableYear, total: Money) defeasible {
+    label en official "section 1212(c)(6)(A)(i)";
+    when total_allowed_1256_carryback(p, y, total);
+    then loss_year_short_term_gain_from_carryback_1212c6A(p, y, total * 40 percent);
+}
+pub relation loss_year_long_term_gain_from_carryback_1212c6A(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 1212(c)(6)(A)(ii): 60 percent of the amount allowed as a carryback is treated as a long-term capital gain for the loss year";
+}
+@source(IRC_S1212_C, relation = formalizes, coverage = exact, quote = "(ii) 60 percent of the amount allowed as a carryback shall be treated as a long-term capital gain for the loss year.")
+rule LossYearLongTermGainRule(p: Person, y: TaxableYear, total: Money) defeasible {
+    label en official "section 1212(c)(6)(A)(ii)";
+    when total_allowed_1256_carryback(p, y, total);
+    then loss_year_long_term_gain_from_carryback_1212c6A(p, y, total * 60 percent);
+}
+pub relation carryforward_loss_attributable_to_1256_contracts(p: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "section 1212(c)(6)(B): the part of the amount carried forward as a short-term or long-term capital loss that is attributable to losses from section 1256 contracts";
+}
+pub relation carryforward_treated_as_section_1256_loss(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 1212(c)(6)(B): that part is treated as loss from section 1256 contracts for the year to which it is carried";
+}
+@source(IRC_S1212_C, relation = formalizes, coverage = exact, quote = "Any amount carried forward as a short-term or long-term capital loss to any taxable year under subsection (b)(1) (after the application of subparagraph (A)) shall, to the extent attributable to losses from section 1256 contracts, be treated as loss from section 1256 contracts for such taxable year.")
+rule CarryforwardKeepsCharacterRule(p: Person, y: TaxableYear, amount: Money) defeasible {
+    label en official "section 1212(c)(6)(B)";
+    when carryforward_loss_attributable_to_1256_contracts(p, y, amount);
+    then carryforward_treated_as_section_1256_loss(p, y, amount);
+}

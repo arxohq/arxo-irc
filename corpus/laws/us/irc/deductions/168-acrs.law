@@ -1,0 +1,311 @@
+// Section 168 — Accelerated Cost Recovery System (MACRS). Stage 2 (IRC-06),
+// top priority. Scope of this module:
+//   (a) general rule — the depreciation deduction is determined by method,
+//       recovery period and convention;
+//   (b)(1)-(3) applicable depreciation method (200% declining balance,
+//       150% declining balance, straight line) and which property gets
+//       which by default, plus the (b)(2)(C)/(b)(3)(D) elections;
+//   (c) applicable recovery period per property class, table T1;
+//   (d)(1),(2),(3),(4) applicable convention — half-year default, the
+//       mid-quarter 40%-of-last-quarter test, and the mid-month convention
+//       for real property (named but not computed — see the note below);
+//   the FIRST-YEAR (placed-in-service-year) depreciation AMOUNT for
+//       personal property (3/5/7/10/15/20-year classes) under the
+//       half-year convention, per the task's scope ("do year 1 ... as
+//       separate rules and file the rest").
+//
+// Deliberately NOT attempted here (recorded honestly, not silently
+// simplified):
+//   - a full multi-year declining-balance-with-switch-to-straight-line
+//     SCHEDULE: each year's allowance depends on the prior year's adjusted
+//     basis, which is self-recursive arithmetic over an unbounded number of
+//     years (LDC-E4102) — see TECH-GAPS.md;
+//   - the mid-quarter convention's actual first-year AMOUNT (only the
+//     applicability test, `mid_quarter_convention_applies`, is modelled) —
+//     TECH_GAP, same self-recursion concern once fractional-quarter tables
+//     are added;
+//   - the mid-month convention and any AMOUNT for real property (27.5/39
+//     year classes) and the 25-year/50-year classes — TECH_GAP;
+//   - (e) classification of property: this module takes the taxpayer's
+//     class as the empirical fact `property_classified_as`; deriving that
+//     class from the underlying asset facts and Rev. Proc. 87-56 class
+//     lives (subsection (e)(1) table T2 keyed to "class life") is an
+//     EXTERNAL_DEPENDENCY on Treasury guidance not pinned in this package;
+//   - (f) special rules, (g) ADS, (h) tax-exempt use, (i) definitions,
+//     (j) Indian reservation property, (k) bonus depreciation, (l)-(n) —
+//     NOT DONE this session; TECH_GAP/EXTERNAL_DEPENDENCY, see the report.
+
+// --- (e)/(c): property classification and recovery period ------------------
+
+use self::{
+    Asset,
+    IRC_S168_A,
+    IRC_S168_B,
+    IRC_S168_D,
+    IRC_S168_TABLE_1,
+    Person,
+    TaxableYear,
+    mandatory_straight_line_property,
+    property_is_qualified_smart_electric_meter_or_grid_system,
+    year1_depreciable_basis,
+};
+
+pub enum RecoveryPropertyClass {
+    ThreeYearProperty;
+    FiveYearProperty;
+    SevenYearProperty;
+    TenYearProperty;
+    FifteenYearProperty;
+    TwentyYearProperty;
+    WaterUtilityPropertyClass;
+    ResidentialRentalPropertyClass;
+    NonresidentialRealPropertyClass;
+    RailroadGradingOrTunnelBoreClass;
+}
+
+pub relation property_classified_as(p: Person, a: Asset, class: RecoveryPropertyClass) kind empirical {
+    label en official "the classification of the tangible property under the section 168(e) table, for purposes of the section 168(c) recovery period; this module takes the classification as given (deriving it from the underlying facts and Rev. Proc. 87-56 class lives is an external dependency not modelled here)";
+}
+
+pub relation applicable_recovery_period_years(p: Person, a: Asset, years: Decimal) kind institutional {
+    label en official "the applicable recovery period for the property under section 168(c), table T1";
+}
+
+@source(IRC_S168_TABLE_1, quote = "3-year property / 3 years")
+rule RecoveryPeriodThreeYear(p: Person, a: Asset) strict {
+    label en official "3-year property has a 3-year applicable recovery period (section 168(c), table T1)";
+    when property_classified_as(p, a, ThreeYearProperty);
+    then applicable_recovery_period_years(p, a, 3.0);
+}
+@source(IRC_S168_TABLE_1, quote = "5-year property / 5 years")
+rule RecoveryPeriodFiveYear(p: Person, a: Asset) strict {
+    label en official "5-year property has a 5-year applicable recovery period (section 168(c), table T1)";
+    when property_classified_as(p, a, FiveYearProperty);
+    then applicable_recovery_period_years(p, a, 5.0);
+}
+@source(IRC_S168_TABLE_1, quote = "7-year property / 7 years")
+rule RecoveryPeriodSevenYear(p: Person, a: Asset) strict {
+    label en official "7-year property has a 7-year applicable recovery period (section 168(c), table T1)";
+    when property_classified_as(p, a, SevenYearProperty);
+    then applicable_recovery_period_years(p, a, 7.0);
+}
+@source(IRC_S168_TABLE_1, quote = "10-year property / 10 years")
+rule RecoveryPeriodTenYear(p: Person, a: Asset) strict {
+    label en official "10-year property has a 10-year applicable recovery period (section 168(c), table T1)";
+    when property_classified_as(p, a, TenYearProperty);
+    then applicable_recovery_period_years(p, a, 10.0);
+}
+@source(IRC_S168_TABLE_1, quote = "15-year property / 15 years")
+rule RecoveryPeriodFifteenYear(p: Person, a: Asset) strict {
+    label en official "15-year property has a 15-year applicable recovery period (section 168(c), table T1)";
+    when property_classified_as(p, a, FifteenYearProperty);
+    then applicable_recovery_period_years(p, a, 15.0);
+}
+@source(IRC_S168_TABLE_1, quote = "20-year property / 20 years")
+rule RecoveryPeriodTwentyYear(p: Person, a: Asset) strict {
+    label en official "20-year property has a 20-year applicable recovery period (section 168(c), table T1)";
+    when property_classified_as(p, a, TwentyYearProperty);
+    then applicable_recovery_period_years(p, a, 20.0);
+}
+// Water utility property (25 years), residential rental property
+// (27.5 years), nonresidential real property (39 years) and railroad
+// grading or tunnel bore (50 years) are TECH_GAP for the year-1 AMOUNT
+// (mid-month convention, not modelled) — see the module note above and
+// coverage row 26/168/c.
+
+// --- (b): applicable depreciation method ------------------------------------
+
+pub enum ApplicableDepreciationMethod {
+    DoubleDecliningBalance200;
+    DecliningBalance150;
+    StraightLineMethod;
+}
+
+pub relation elects_150_percent_declining_balance(p: Person, a: Asset) kind empirical {
+    label en official "the taxpayer elects under section 168(b)(2)(C)/(5) to apply the 150 percent declining balance method to the class of property that includes this asset";
+}
+pub relation elects_straight_line_method_168b(p: Person, a: Asset) kind empirical {
+    label en official "the taxpayer elects under section 168(b)(3)(D)/(5) to apply the straight line method to the class of property that includes this asset";
+}
+
+pub relation applicable_depreciation_method(p: Person, a: Asset, method: ApplicableDepreciationMethod) kind institutional {
+    label en official "the applicable depreciation method for the asset under section 168(b)";
+}
+
+@source(IRC_S168_B, quote = "the applicable depreciation method is—")
+rule ApplicableMethodDefault200Db(p: Person, a: Asset) defeasible {
+    label en official "the 200 percent declining balance method applies by default to 3-, 5-, 7- and 10-year property (section 168(b)(1))";
+    when property_classified_as(p, a, ThreeYearProperty)
+        or property_classified_as(p, a, FiveYearProperty)
+        or property_classified_as(p, a, SevenYearProperty)
+        or property_classified_as(p, a, TenYearProperty);
+    unless elects_150_percent_declining_balance(p, a);
+    unless elects_straight_line_method_168b(p, a);
+    unless mandatory_straight_line_property(p, a);
+    unless property_is_qualified_smart_electric_meter_or_grid_system(p, a);
+    then applicable_depreciation_method(p, a, DoubleDecliningBalance200);
+}
+@source(IRC_S168_B, quote = "any 15-year or 20-year property not referred to in paragraph (3)")
+rule ApplicableMethodDefault150DbFifteenTwenty(p: Person, a: Asset) defeasible {
+    label en official "the 150 percent declining balance method applies by default to 15- and 20-year property (section 168(b)(2)(A))";
+    when property_classified_as(p, a, FifteenYearProperty)
+        or property_classified_as(p, a, TwentyYearProperty);
+    unless elects_straight_line_method_168b(p, a);
+    unless mandatory_straight_line_property(p, a);
+    then applicable_depreciation_method(p, a, DecliningBalance150);
+}
+@source(IRC_S168_B, quote = "with respect to which the taxpayer elects under paragraph (5) to have the provisions of this paragraph apply")
+rule ApplicableMethodElected150Db(p: Person, a: Asset) strict {
+    label en official "the 150 percent declining balance method applies where the taxpayer so elects for the class (section 168(b)(2)(C))";
+    when elects_150_percent_declining_balance(p, a);
+    when not_known(mandatory_straight_line_property(p, a));
+    then applicable_depreciation_method(p, a, DecliningBalance150);
+}
+@source(IRC_S168_B, quote = "with respect to which the taxpayer elects under paragraph (5) to have the provisions of this paragraph apply")
+rule ApplicableMethodElectedStraightLine(p: Person, a: Asset) strict {
+    label en official "the straight line method applies where the taxpayer so elects for the class (section 168(b)(3)(D))";
+    when elects_straight_line_method_168b(p, a);
+    then applicable_depreciation_method(p, a, StraightLineMethod);
+}
+// (b)(3)(A)-(C),(E)-(G): nonresidential real property, residential rental
+// property, railroad grading/tunnel bore, and the other mandatory-SL
+// classes are out of scope with the classes above (TECH_GAP, same reason
+// as the recovery-period gap).
+
+// --- (d): applicable convention ---------------------------------------------
+
+pub enum ApplicableConvention {
+    HalfYearConvention;
+    MidQuarterConvention;
+}
+
+pub relation aggregate_basis_placed_in_service_last_quarter(p: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the aggregate bases of section 168 property placed in service during the last 3 months of the taxable year (section 168(d)(3)(A)(i))";
+}
+pub relation aggregate_basis_placed_in_service_year(p: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the aggregate bases of section 168 property placed in service during the taxable year, excluding property described in section 168(d)(3)(B) (section 168(d)(3)(A)(ii))";
+}
+
+pub relation mid_quarter_convention_applies(p: Person, y: TaxableYear) kind institutional {
+    label en official "the mid-quarter convention applies for the taxable year because the last-quarter basis exceeds 40 percent of the year's aggregate basis (section 168(d)(3)(A))";
+}
+@source(IRC_S168_D, quote = "the aggregate bases of property to which this section applies placed in service during the last 3 months of the taxable year, exceed")
+rule MidQuarterConventionAppliesRule(p: Person, y: TaxableYear, last_quarter: Money, total: Money) strict {
+    label en official "the mid-quarter convention applies for the year when the last-quarter basis exceeds 40 percent of the year's total (section 168(d)(3)(A))";
+    when aggregate_basis_placed_in_service_last_quarter(p, y, last_quarter);
+    when aggregate_basis_placed_in_service_year(p, y, total);
+    when last_quarter > round(0.40 * total, 2, "HALF_UP");
+    then mid_quarter_convention_applies(p, y);
+}
+
+pub relation applicable_convention_for_year(p: Person, y: TaxableYear, convention: ApplicableConvention) kind institutional {
+    label en official "the applicable convention for section 168 property placed in service by the taxpayer during the taxable year (section 168(d))";
+}
+@source(IRC_S168_D, quote = "Except as otherwise provided in this subsection, the applicable convention is the half-year convention")
+rule ApplicableConventionDefaultHalfYear(p: Person, y: TaxableYear, total: Money) defeasible {
+    label en official "the half-year convention applies unless the mid-quarter test of section 168(d)(3) is met (section 168(d)(1))";
+    when aggregate_basis_placed_in_service_year(p, y, total);
+    unless mid_quarter_convention_applies(p, y);
+    then applicable_convention_for_year(p, y, HalfYearConvention);
+}
+@source(IRC_S168_D, quote = "the applicable convention for all property to which this section applies placed in service during such taxable year shall be the mid-quarter convention")
+rule ApplicableConventionMidQuarter(p: Person, y: TaxableYear) strict {
+    label en official "the mid-quarter convention applies to all such property placed in service during the year once the 40 percent test is met (section 168(d)(3)(A))";
+    when mid_quarter_convention_applies(p, y);
+    then applicable_convention_for_year(p, y, MidQuarterConvention);
+}
+// The mid-month convention for real property (section 168(d)(2)) is named
+// (the enum omits it deliberately) but no first-year AMOUNT is computed for
+// real property in this module — TECH_GAP, see the module note.
+
+// --- (a): the year-1 (placed-in-service-year) depreciation AMOUNT ----------
+//
+// Only the half-year convention, only the six personal-property classes
+// above. The rate literals below are 1/N (200% DB), 0.75/N (150% DB) and
+// 0.5/N (straight line) for each class's recovery period N, each already
+// halved for the half-year convention's first-year rule (section
+// 168(d)(4)(A)); they happen to match the published MACRS half-year Table
+// 1/Table 2 first-year percentages (33.33% / 20% / 14.29% / 10% / 5% /
+// 3.75%), which corroborates the arithmetic but is not itself the source —
+// the source is section 168(a)-(d) plus the arithmetic of a declining-
+// balance rate applied over half of the first year. The classes whose rate
+// is not a terminating decimal (3-year 1/3, 7-year 1/7) use
+// `div_round(basis, N, 2, "HALF_UP")` — exact fraction, one rounding (stage 2
+// correction of a 6-place decimal approximation, consultation 26.09.2026);
+// rounding to cents is a judgment call (the statute fixes no precision here).
+
+pub relation unadjusted_depreciable_basis(p: Person, a: Asset, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the unadjusted depreciable basis of the asset for the taxable year it is placed in service (section 168(a), read with section 167(c))";
+}
+pub relation placed_in_service_year(p: Person, a: Asset, y: TaxableYear) kind empirical {
+    label en official "the taxable year during which the asset was placed in service";
+}
+
+pub relation depreciation_deduction(p: Person, a: Asset, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the depreciation deduction allowed under section 168(a) for the asset for the taxable year";
+}
+
+@source(IRC_S168_A, quote = "the depreciation deduction provided by section 167(a) for any tangible property shall be determined by using")
+rule Year1DepreciationThreeYear200Db(p: Person, a: Asset, y: TaxableYear, basis: Money) defeasible {
+    label en official "year-1 depreciation for 3-year property under the 200% declining balance method with the half-year convention: 1/3 of basis, halved for the half-year convention (33.3333%)";
+    when placed_in_service_year(p, a, y);
+    when year1_depreciable_basis(p, a, y, basis);
+    when property_classified_as(p, a, ThreeYearProperty);
+    when applicable_depreciation_method(p, a, DoubleDecliningBalance200);
+    when applicable_convention_for_year(p, y, HalfYearConvention);
+    then depreciation_deduction(p, a, y, div_round(basis, 3.0, 2, "HALF_UP"));
+}
+@source(IRC_S168_A, quote = "the depreciation deduction provided by section 167(a) for any tangible property shall be determined by using")
+rule Year1DepreciationFiveYear200Db(p: Person, a: Asset, y: TaxableYear, basis: Money) defeasible {
+    label en official "year-1 depreciation for 5-year property under the 200% declining balance method with the half-year convention (20%)";
+    when placed_in_service_year(p, a, y);
+    when year1_depreciable_basis(p, a, y, basis);
+    when property_classified_as(p, a, FiveYearProperty);
+    when applicable_depreciation_method(p, a, DoubleDecliningBalance200);
+    when applicable_convention_for_year(p, y, HalfYearConvention);
+    then depreciation_deduction(p, a, y, round(0.20 * basis, 2, "HALF_UP"));
+}
+@source(IRC_S168_A, quote = "the depreciation deduction provided by section 167(a) for any tangible property shall be determined by using")
+rule Year1DepreciationSevenYear200Db(p: Person, a: Asset, y: TaxableYear, basis: Money) defeasible {
+    label en official "year-1 depreciation for 7-year property under the 200% declining balance method with the half-year convention (14.2857%)";
+    when placed_in_service_year(p, a, y);
+    when year1_depreciable_basis(p, a, y, basis);
+    when property_classified_as(p, a, SevenYearProperty);
+    when applicable_depreciation_method(p, a, DoubleDecliningBalance200);
+    when applicable_convention_for_year(p, y, HalfYearConvention);
+    then depreciation_deduction(p, a, y, div_round(basis, 7.0, 2, "HALF_UP"));
+}
+@source(IRC_S168_A, quote = "the depreciation deduction provided by section 167(a) for any tangible property shall be determined by using")
+rule Year1DepreciationTenYear200Db(p: Person, a: Asset, y: TaxableYear, basis: Money) defeasible {
+    label en official "year-1 depreciation for 10-year property under the 200% declining balance method with the half-year convention (10%)";
+    when placed_in_service_year(p, a, y);
+    when year1_depreciable_basis(p, a, y, basis);
+    when property_classified_as(p, a, TenYearProperty);
+    when applicable_depreciation_method(p, a, DoubleDecliningBalance200);
+    when applicable_convention_for_year(p, y, HalfYearConvention);
+    then depreciation_deduction(p, a, y, round(0.10 * basis, 2, "HALF_UP"));
+}
+@source(IRC_S168_A, quote = "the depreciation deduction provided by section 167(a) for any tangible property shall be determined by using")
+rule Year1DepreciationFifteenYear150Db(p: Person, a: Asset, y: TaxableYear, basis: Money) defeasible {
+    label en official "year-1 depreciation for 15-year property under the 150% declining balance method with the half-year convention (5%)";
+    when placed_in_service_year(p, a, y);
+    when year1_depreciable_basis(p, a, y, basis);
+    when property_classified_as(p, a, FifteenYearProperty);
+    when applicable_depreciation_method(p, a, DecliningBalance150);
+    when applicable_convention_for_year(p, y, HalfYearConvention);
+    then depreciation_deduction(p, a, y, round(0.05 * basis, 2, "HALF_UP"));
+}
+@source(IRC_S168_A, quote = "the depreciation deduction provided by section 167(a) for any tangible property shall be determined by using")
+rule Year1DepreciationTwentyYear150Db(p: Person, a: Asset, y: TaxableYear, basis: Money) defeasible {
+    label en official "year-1 depreciation for 20-year property under the 150% declining balance method with the half-year convention (3.75%)";
+    when placed_in_service_year(p, a, y);
+    when year1_depreciable_basis(p, a, y, basis);
+    when property_classified_as(p, a, TwentyYearProperty);
+    when applicable_depreciation_method(p, a, DecliningBalance150);
+    when applicable_convention_for_year(p, y, HalfYearConvention);
+    then depreciation_deduction(p, a, y, round(0.0375 * basis, 2, "HALF_UP"));
+}
+// Straight-line-elected year-1 amounts (0.5/N per class), and every
+// second-and-later year of every method, are NOT done this session
+// (TECH_GAP: a multi-year schedule is self-recursive arithmetic,
+// LDC-E4102 — see TECH-GAPS.md).

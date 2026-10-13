@@ -1,0 +1,847 @@
+// Stage 3 (IRC-07, A05). Section 1250 remainder (module 07 carries additional
+// depreciation for the general 100-percent case, the gift and death exceptions, the
+// section 332/351/361/721/731 cap and the (C) candidate of (d)(4)):
+//   * (a)(1)(B) the federal-housing and rehabilitation phase-down percentages that the
+//     stage 2 rows hid behind a "TECH_GAP" note (corrected here);
+//   * (a)(2), (a)(3) the 1970-75 and pre-1970 tiers;
+//   * (b)(2) lessee renewal periods and (b)(4) rehabilitation additional depreciation;
+//   * (d)(4) the "greater of" cap, (d)(4)(E), (d)(5)-(7);
+//   * (e) the holding period and (f) separate elements.
+//
+// Method. Months are counted by the case ("full months held"); the dates that start
+// the holding period are derived by (e). Percentages are exact Decimals (one percentage
+// point per full month is 0.01); dollar results are rounded to cents HALF_UP (JUDGMENT
+// CALL, the text names no rounding). Two known limits are recorded in the coverage
+// notes: the split of a property's additional depreciation between the section 167(k)
+// rehabilitation piece and other pieces under one percentage, and (d)(4)(D) ordering.
+
+// =============================================================================
+// (e): the holding period for the applicable percentage
+// =============================================================================
+
+use self::{
+    Asset,
+    IRC_S1250_A,
+    IRC_S1250_B,
+    IRC_S1250_D,
+    IRC_S1250_E,
+    IRC_S1250_F,
+    Person,
+    Transaction,
+    additional_depreciation,
+    amount_realized,
+    applicable_percentage_general_case,
+    has_b4_piece_1970_to_1975,
+    sale_or_disposition,
+    section_1250_property,
+};
+
+pub relation acquired_by_taxpayer_on(a: Asset, on: Date) kind empirical {
+    label en official "section 1250(e)(1)(A): the date the taxpayer acquired the property";
+}
+pub relation constructed_by_taxpayer_placed_in_service_month_begins(a: Asset, on: Date) kind empirical {
+    label en official "section 1250(e)(1)(B): the first day of the month during which the constructed, reconstructed or erected property was placed in service";
+}
+pub relation holding_period_start_1250e(a: Asset, on: Date) kind institutional {
+    label en official "section 1250(e)(1): the holding period of section 1250 property begins the day after acquisition, or for constructed property on the first day of the month it is placed in service";
+}
+@source(IRC_S1250_E, relation = formalizes, coverage = exact, quote = "(A) in the case of property acquired by the taxpayer, on the day after the date of acquisition, or")
+rule HoldingStartAcquiredRule(a: Asset, acquired: Date) defeasible {
+    label en official "section 1250(e)(1)(A)";
+    when acquired_by_taxpayer_on(a, acquired);
+    then holding_period_start_1250e(a, add_calendar_period(acquired, 1 calendar_day));
+}
+@source(IRC_S1250_E, relation = formalizes, coverage = exact, quote = "(B) in the case of property constructed, reconstructed, or erected by the taxpayer, on the first day of the month during which the property is placed in service.")
+rule HoldingStartConstructedRule(a: Asset, on: Date) defeasible {
+    label en official "section 1250(e)(1)(B)";
+    when constructed_by_taxpayer_placed_in_service_month_begins(a, on);
+    then holding_period_start_1250e(a, on);
+}
+pub relation transferee_basis_by_reference_to_transferor_1250d(new_prop: Asset, old_prop: Asset) kind empirical {
+    label en official "section 1250(e)(2): the basis of the property acquired in a transaction described in paragraph (1), (2) or (3) of subsection (d) is determined by reference to its basis in the transferor's hands";
+}
+pub relation holding_period_start_including_transferor_1250e2(new_prop: Asset, on: Date) kind institutional {
+    label en official "section 1250(e)(2): the transferee's holding period includes the transferor's holding period";
+}
+@source(IRC_S1250_E, relation = formalizes, coverage = partial, quote = "If the basis of property acquired in a transaction described in paragraph (1), (2), or (3) of subsection (d) is determined by reference to its basis in the hands of the transferor, then the holding period of the property in the hands of the transferee shall include the holding period of the property")
+rule TackedHoldingStartRule(new_prop: Asset, old_prop: Asset, on: Date) defeasible {
+    label en official "section 1250(e)(2)";
+    when transferee_basis_by_reference_to_transferor_1250d(new_prop, old_prop);
+    when holding_period_start_1250e(old_prop, on);
+    then holding_period_start_including_transferor_1250e2(new_prop, on);
+}
+// (d)(7): foreclosure
+pub relation disposed_at_foreclosure_or_by_process_of_law(a: Asset) kind empirical {
+    label en official "section 1250(d)(7): the property is disposed of pursuant to a bid at foreclosure or by operation of an agreement or process of law after a default on secured indebtedness";
+}
+pub relation foreclosure_proceedings_began_on(a: Asset, on: Date) kind empirical {
+    label en official "section 1250(d)(7): the date of the beginning of the proceedings pursuant to which the disposition occurred";
+}
+pub relation regulation_determined_beginning_date_1250d7(a: Asset, on: Date) kind empirical {
+    label en official "section 1250(d)(7): where there are no proceedings, the date determined under regulations on which the operation of an agreement or process of law began";
+}
+pub relation full_months_held_at_disposition(a: Asset, n: Integer) kind empirical {
+    label en official "the number of full months the property was held at the disposition (counted from the holding period start of subsection (e))";
+}
+pub relation full_months_held_as_of_date(a: Asset, on: Date, n: Integer) kind empirical {
+    label en official "the number of full months the property was held as of the date";
+}
+pub relation foreclosure_holding_end_date(a: Asset, on: Date) kind institutional {
+    label en official "section 1250(d)(7): the applicable percentage is determined as if the taxpayer ceased to hold the property on the date the proceedings began (or the date determined under regulations)";
+}
+@source(IRC_S1250_D, relation = formalizes, coverage = exact, quote = "If any section 1250 property is disposed of by the taxpayer pursuant to a bid for such property at foreclosure or by operation of an agreement or of process of law after there was a default on indebtedness which such property secured, the applicable percentage referred to in paragraph (1)(B), (2)(B), or (3)(B) of subsection (a), as the case may be, shall be determined as if the taxpayer ceased to hold such property on the date of the beginning of the proceedings pursuant to which the disposition occurred, or, in the event there are no proceedings, such percentage shall be determined as if the taxpayer ceased to hold such property on the date, determined under regulations prescribed by the Secretary, on which such operation of an agreement or process of law, pursuant to which the disposition occurred, began.")
+rule ForeclosureEndProceedingsRule(a: Asset, on: Date) defeasible {
+    label en official "section 1250(d)(7): with proceedings";
+    when disposed_at_foreclosure_or_by_process_of_law(a);
+    when foreclosure_proceedings_began_on(a, on);
+    then foreclosure_holding_end_date(a, on);
+}
+rule ForeclosureEndRegulationRule(a: Asset, on: Date) defeasible {
+    label en official "section 1250(d)(7): without proceedings, the date determined under regulations (EXTERNAL_DEPENDENCY)";
+    when disposed_at_foreclosure_or_by_process_of_law(a);
+    when not_known(foreclosure_proceedings_recorded(a));
+    when regulation_determined_beginning_date_1250d7(a, on);
+    then foreclosure_holding_end_date(a, on);
+}
+pub relation foreclosure_proceedings_recorded(a: Asset) kind institutional {
+    label en unofficial "proceedings are recorded for the foreclosure disposition";
+}
+rule ForeclosureProceedingsRecordedRule(a: Asset, on: Date) defeasible {
+    label en unofficial "helper";
+    when foreclosure_proceedings_began_on(a, on);
+    then foreclosure_proceedings_recorded(a);
+}
+pub relation full_months_for_percentage(a: Asset, n: Integer) kind institutional {
+    label en official "sections 1250(a)(1)(B), (2)(B), (3)(B), (d)(7): the full months counted for the applicable percentage";
+}
+rule MonthsAtDispositionRule(a: Asset, n: Integer) defeasible {
+    label en official "the months held at the disposition when the property was not disposed of at foreclosure";
+    when full_months_held_at_disposition(a, n);
+    when not_known(disposed_at_foreclosure_or_by_process_of_law(a));
+    then full_months_for_percentage(a, n);
+}
+rule MonthsAtForeclosureRule(a: Asset, on: Date, n: Integer) defeasible {
+    label en official "section 1250(d)(7): the months held as of the date the holding is deemed to end";
+    when foreclosure_holding_end_date(a, on);
+    when full_months_held_as_of_date(a, on, n);
+    then full_months_for_percentage(a, n);
+}
+
+// =============================================================================
+// Phase-down percentages
+// =============================================================================
+
+pub enum PhaseDownSchedule1250 {
+    After20FullMonths;
+    After100FullMonths;
+    label en official "the schedule of 100 percent minus 1 percentage point for each full month held after 20 (or 100) full months";
+}
+pub relation phase_down_percentage(a: Asset, schedule: PhaseDownSchedule1250, n: Integer, pct: Decimal) kind institutional {
+    label en official "section 1250(a)(1)(B), (2)(B), (3)(B): the applicable percentage for the months held";
+}
+rule PhaseDown20FullRule(a: Asset, n: Integer) defeasible {
+    label en official "after 20 full months: not more than 20 months, 100 percent";
+    when full_months_for_percentage(a, n);
+    when n <= 20;
+    then phase_down_percentage(a, After20FullMonths, n, 1.00);
+}
+rule PhaseDown20PartialRule(a: Asset, n: Integer) defeasible {
+    label en official "after 20 full months: 100 percent minus 1 point per month above 20";
+    when full_months_for_percentage(a, n);
+    when n > 20;
+    when n < 120;
+    then phase_down_percentage(a, After20FullMonths, n, 1.00 - (n - 20) * 0.01);
+}
+rule PhaseDown20ZeroRule(a: Asset, n: Integer) defeasible {
+    label en official "after 20 full months: 120 months or more, nothing";
+    when full_months_for_percentage(a, n);
+    when n >= 120;
+    then phase_down_percentage(a, After20FullMonths, n, 0.00);
+}
+rule PhaseDown100FullRule(a: Asset, n: Integer) defeasible {
+    label en official "after 100 full months: not more than 100 months, 100 percent";
+    when full_months_for_percentage(a, n);
+    when n <= 100;
+    then phase_down_percentage(a, After100FullMonths, n, 1.00);
+}
+rule PhaseDown100PartialRule(a: Asset, n: Integer) defeasible {
+    label en official "after 100 full months: 100 percent minus 1 point per month above 100";
+    when full_months_for_percentage(a, n);
+    when n > 100;
+    when n < 200;
+    then phase_down_percentage(a, After100FullMonths, n, 1.00 - (n - 100) * 0.01);
+}
+rule PhaseDown100ZeroRule(a: Asset, n: Integer) defeasible {
+    label en official "after 100 full months: 200 months or more, nothing";
+    when full_months_for_percentage(a, n);
+    when n >= 200;
+    then phase_down_percentage(a, After100FullMonths, n, 0.00);
+}
+// the 167(k) schedule counts months since placed in service
+pub relation full_months_since_placed_in_service(a: Asset, n: Integer) kind empirical {
+    label en official "section 1250(a)(1)(B)(iii): the number of full months after the date the property was placed in service";
+}
+pub relation rehabilitation_percentage_1250(a: Asset, pct: Decimal) kind institutional {
+    label en official "section 1250(a)(1)(B)(iii), (a)(2)(B)(iv): 100 percent minus 1 percentage point for each full month in excess of 100 full months after placement in service";
+}
+rule RehabWithin100Rule(a: Asset, n: Integer) defeasible {
+    label en official "section 1250(a)(1)(B)(iii): up to 100 months";
+    when full_months_since_placed_in_service(a, n);
+    when n <= 100;
+    then rehabilitation_percentage_1250(a, 1.00);
+}
+rule RehabPartialRule(a: Asset, n: Integer) defeasible {
+    label en official "section 1250(a)(1)(B)(iii): above 100 months";
+    when full_months_since_placed_in_service(a, n);
+    when n > 100;
+    when n < 200;
+    then rehabilitation_percentage_1250(a, 1.00 - (n - 100) * 0.01);
+}
+rule RehabZeroRule(a: Asset, n: Integer) defeasible {
+    label en official "section 1250(a)(1)(B)(iii): 200 months or more";
+    when full_months_since_placed_in_service(a, n);
+    when n >= 200;
+    then rehabilitation_percentage_1250(a, 0.00);
+}
+
+// =============================================================================
+// (a)(1)(B): the categories
+// =============================================================================
+
+pub relation hud_insured_or_assisted_housing_with_1039b1B_restrictions(a: Asset) kind empirical {
+    label en official "section 1250(a)(1)(B)(i): a mortgage insured under section 221(d)(3) or 236 of the National Housing Act, or housing financed or assisted by direct loan or tax abatement under similar State or local provisions, with the owner subject to the section 1039(b)(1)(B) restrictions";
+}
+pub relation share_of_dwelling_units_section_8_eligible(a: Asset, share: Decimal) kind empirical {
+    label en official "section 1250(a)(1)(B)(ii): the average share of the dwelling units held for occupancy by families or individuals eligible for section 8 (or similar State or local) subsidies";
+}
+pub relation dwelling_units_section_8_held_for_occupancy(a: Asset) kind empirical {
+    label en official "section 1250(a)(1)(B)(ii): the dwelling units, on the average, were held for occupancy by families or individuals eligible to receive subsidies under section 8 or similar State or local law";
+}
+pub relation section_8_category_1250(a: Asset) kind institutional {
+    label en official "section 1250(a)(1)(B)(ii): dwelling units held for section 8 occupancy - a building (or portion) with 85 percent or more such units is treated as such property";
+}
+@source(IRC_S1250_A, relation = formalizes, coverage = exact, quote = "In the case of a building (or a portion of a building devoted to dwelling units), if, on the average, 85 percent or more of the dwelling units contained in such building (or portion thereof) are units described in clause (ii), such building (or portion thereof) shall be treated as property described in clause (ii).")
+rule Section8By85PercentRule(a: Asset, share: Decimal) defeasible {
+    label en official "section 1250(a)(1)(B), 85-percent rule";
+    when share_of_dwelling_units_section_8_eligible(a, share);
+    when share >= 0.85;
+    then section_8_category_1250(a);
+}
+rule Section8ByHoldingRule(a: Asset) defeasible {
+    label en official "section 1250(a)(1)(B)(ii)";
+    when dwelling_units_section_8_held_for_occupancy(a);
+    then section_8_category_1250(a);
+}
+pub relation depreciation_deduction_for_rehabilitation_167k_allowed(a: Asset) kind empirical {
+    label en official "section 1250(a)(1)(B)(iii): a depreciation deduction for rehabilitation expenditures was allowed under section 167(k)";
+}
+pub relation loan_made_or_insured_under_title_v_housing_act_1949(a: Asset) kind empirical {
+    label en official "section 1250(a)(1)(B)(iv): a loan is made or insured under title V of the Housing Act of 1949";
+}
+pub relation phase_down_category_1250a1(a: Asset) kind institutional {
+    label en official "section 1250(a)(1)(B)(i), (ii), (iv): property on the after-100-months schedule";
+}
+rule CategoryHudRule(a: Asset) defeasible {
+    label en official "section 1250(a)(1)(B)(i)";
+    when hud_insured_or_assisted_housing_with_1039b1B_restrictions(a);
+    then phase_down_category_1250a1(a);
+}
+rule CategorySection8Rule(a: Asset) defeasible {
+    label en official "section 1250(a)(1)(B)(ii)";
+    when section_8_category_1250(a);
+    then phase_down_category_1250a1(a);
+}
+rule CategoryTitleVRule(a: Asset) defeasible {
+    label en official "section 1250(a)(1)(B)(iv)";
+    when loan_made_or_insured_under_title_v_housing_act_1949(a);
+    then phase_down_category_1250a1(a);
+}
+pub relation applicable_percentage_1250a1(a: Asset, pct: Decimal) kind institutional {
+    label en official "section 1250(a)(1)(B): the applicable percentage of the property";
+}
+@source(IRC_S1250_A, relation = formalizes, coverage = exact, quote = "(i) in the case of section 1250 property with respect to which a mortgage is insured under section 221(d)(3) or 236 of the National Housing Act, or housing financed or assisted by direct loan or tax abatement under similar provisions of State or local laws and with respect to which the owner is subject to the restrictions described in section 1039(b)(1)(B) (as in effect on the day before the date of the enactment of the Revenue Reconciliation Act of 1990), 100 percent minus 1 percentage point for each full month the property was held after the date the property was held 100 full months;")
+rule ApplicablePercentageHousingRule(a: Asset, n: Integer, pct: Decimal) defeasible {
+    label en official "section 1250(a)(1)(B)(i), (ii), (iv): the after-100-months schedule (unless section 167(k) rehabilitation deductions were allowed: clause (iii) governs)";
+    when phase_down_category_1250a1(a);
+    when not_known(depreciation_deduction_for_rehabilitation_167k_allowed(a));
+    when full_months_for_percentage(a, n);
+    when phase_down_percentage(a, After100FullMonths, n, pct);
+    then applicable_percentage_1250a1(a, pct);
+}
+@source(IRC_S1250_A, relation = formalizes, coverage = exact, quote = "(iii) in the case of section 1250 property with respect to which a depreciation deduction for rehabilitation expenditures was allowed under section 167(k), 100 percent minus 1 percentage point for each full month in excess of 100 full months after the date on which such property was placed in service;")
+rule ApplicablePercentageRehabRule(a: Asset, pct: Decimal) defeasible {
+    label en official "section 1250(a)(1)(B)(iii)";
+    when depreciation_deduction_for_rehabilitation_167k_allowed(a);
+    when rehabilitation_percentage_1250(a, pct);
+    then applicable_percentage_1250a1(a, pct);
+}
+pub relation category_property_1250(a: Asset) kind institutional {
+    label en unofficial "the property is in one of the (a)(1)(B)(i)-(iv) categories";
+}
+rule CategoryPropertyHousingRule(a: Asset) defeasible {
+    label en unofficial "helper";
+    when phase_down_category_1250a1(a);
+    then category_property_1250(a);
+}
+rule CategoryPropertyRehabRule(a: Asset) defeasible {
+    label en unofficial "helper";
+    when depreciation_deduction_for_rehabilitation_167k_allowed(a);
+    then category_property_1250(a);
+}
+pub relation section_1250a1_category_ordinary_income(p: Person, t: Transaction, amount: Money) kind institutional {
+    label en official "section 1250(a)(1)(A) for a property in a phase-down category: the applicable percentage of the lower of the additional depreciation and the excess of the amount realized over the adjusted basis (cents HALF_UP: JUDGMENT CALL)";
+}
+@source(IRC_S1250_A, relation = formalizes, coverage = partial, quote = "(v) in the case of all other section 1250 property, 100 percent.")
+rule CategoryRecaptureRule(p: Person, t: Transaction, a: Asset, on: Date, pct: Decimal, additional_dep: Money, realized: Money, basis: Money) defeasible {
+    label en official "section 1250(a)(1)(A)-(B) for the categories (i)-(iv)";
+    when section_1250_property(a);
+    when applicable_percentage_1250a1(a, pct);
+    when sale_or_disposition(t, p, a, on);
+    when additional_depreciation(p, a, on, additional_dep);
+    when amount_realized(p, t, realized);
+    when us.irc.core::adjusted_basis(p, a, on, basis);
+    when realized > basis;
+    then section_1250a1_category_ordinary_income(p, t, round(min(additional_dep, realized - basis) * pct, 2, "HALF_UP"));
+}
+
+// =============================================================================
+// (a)(2), (a)(3): the 1970-75 and pre-1970 tiers
+// =============================================================================
+
+pub relation additional_depreciation_after_1975(p: Person, a: Asset, amount: Money) kind empirical {
+    label en official "section 1250(a)(1)(A)(i): the additional depreciation attributable to periods after December 31, 1975";
+}
+pub relation additional_depreciation_1970_to_1975(p: Person, a: Asset, amount: Money) kind empirical {
+    label en official "section 1250(a)(2)(A)(i): the additional depreciation attributable to periods after December 31, 1969, and before January 1, 1976";
+}
+pub relation additional_depreciation_before_1970(p: Person, a: Asset, amount: Money) kind empirical {
+    label en official "section 1250(a)(3)(A)(i): the additional depreciation attributable to periods before January 1, 1970";
+}
+pub relation excess_of_realized_over_basis_1250(p: Person, t: Transaction, amount: Money) kind empirical {
+    label en official "section 1250(a)(1)(A)(ii): the excess of the amount realized (or fair market value) over the adjusted basis";
+}
+pub relation disposition_on_or_after_1970_1_1(t: Transaction) kind empirical {
+    label en official "section 1250(a)(2)(A): the property is disposed of after December 31, 1969";
+}
+pub relation disposition_after_1963_12_31(t: Transaction) kind empirical {
+    label en official "section 1250(a)(3)(A): the property is disposed of after December 31, 1963";
+}
+pub relation binding_contract_july_24_1969(a: Asset) kind empirical {
+    label en official "section 1250(a)(2)(B)(i): disposed of pursuant to a written contract which was, on July 24, 1969, and at all times thereafter, binding on the owner";
+}
+pub relation residential_rental_property_167j2B(a: Asset) kind empirical {
+    label en official "section 1250(a)(2)(B)(iii): residential rental property (section 167(j)(2)(B)) other than that covered by clauses (i) and (ii)";
+}
+pub relation applicable_percentage_1250a2(a: Asset, pct: Decimal) kind institutional {
+    label en official "section 1250(a)(2)(B): the applicable percentage for the 1970-75 additional depreciation";
+}
+@source(IRC_S1250_A, relation = formalizes, coverage = exact, quote = "(i) in the case of section 1250 property disposed of pursuant to a written contract which was, on July 24, 1969, and at all times thereafter, binding on the owner of the property, 100 percent minus 1 percentage point for each full month the property was held after the date the property was held 20 full months;")
+rule A2PercentageContractRule(a: Asset, n: Integer, pct: Decimal) defeasible {
+    label en official "section 1250(a)(2)(B)(i)";
+    when binding_contract_july_24_1969(a);
+    when full_months_for_percentage(a, n);
+    when phase_down_percentage(a, After20FullMonths, n, pct);
+    then applicable_percentage_1250a2(a, pct);
+}
+rule A2PercentageHousingRule(a: Asset, n: Integer, pct: Decimal) defeasible {
+    label en official "section 1250(a)(2)(B)(ii): federally assisted housing, the after-20-months schedule";
+    when hud_insured_or_assisted_housing_with_1039b1B_restrictions(a);
+    when not_known(binding_contract_july_24_1969(a));
+    when full_months_for_percentage(a, n);
+    when phase_down_percentage(a, After20FullMonths, n, pct);
+    then applicable_percentage_1250a2(a, pct);
+}
+rule A2PercentageResidentialRule(a: Asset, n: Integer, pct: Decimal) defeasible {
+    label en official "section 1250(a)(2)(B)(iii): residential rental property, the after-100-months schedule";
+    when residential_rental_property_167j2B(a);
+    when not_known(binding_contract_july_24_1969(a));
+    when not_known(hud_insured_or_assisted_housing_with_1039b1B_restrictions(a));
+    when full_months_for_percentage(a, n);
+    when phase_down_percentage(a, After100FullMonths, n, pct);
+    then applicable_percentage_1250a2(a, pct);
+}
+rule A2PercentageRehabRule(a: Asset, pct: Decimal) defeasible {
+    label en official "section 1250(a)(2)(B)(iv): section 167(k) rehabilitation property";
+    when depreciation_deduction_for_rehabilitation_167k_allowed(a);
+    when rehabilitation_percentage_1250(a, pct);
+    then applicable_percentage_1250a2(a, pct);
+}
+rule A2PercentageOtherRule(a: Asset) defeasible {
+    label en official "section 1250(a)(2)(B)(v): all other section 1250 property, 100 percent";
+    when section_1250_property(a);
+    when not_known(binding_contract_july_24_1969(a));
+    when not_known(hud_insured_or_assisted_housing_with_1039b1B_restrictions(a));
+    when not_known(residential_rental_property_167j2B(a));
+    when not_known(depreciation_deduction_for_rehabilitation_167k_allowed(a));
+    then applicable_percentage_1250a2(a, 1.00);
+}
+pub relation applicable_percentage_1250a3(a: Asset, pct: Decimal) kind institutional {
+    label en official "section 1250(a)(3)(B): 100 percent minus 1 percentage point for each full month held after 20 full months";
+}
+@source(IRC_S1250_A, relation = formalizes, coverage = exact, quote = "For purposes of subparagraph (A), the term \"applicable percentage\" means 100 percent minus 1 percentage point for each full month the property was held after the date on which the property was held for 20 full months.")
+rule A3PercentageRule(a: Asset, n: Integer, pct: Decimal) defeasible {
+    label en official "section 1250(a)(3)(B)";
+    when full_months_for_percentage(a, n);
+    when phase_down_percentage(a, After20FullMonths, n, pct);
+    then applicable_percentage_1250a3(a, pct);
+}
+pub relation section_1250a1_tier_ordinary_income(p: Person, t: Transaction, amount: Money) kind institutional {
+    label en official "section 1250(a)(1): the applicable percentage of the lower of the post-1975 additional depreciation and the excess";
+}
+rule TierOneRule(p: Person, t: Transaction, a: Asset, pct: Decimal, d1: Money, e: Money) defeasible {
+    label en official "section 1250(a)(1)(A)";
+    when applicable_percentage_1250a1(a, pct);
+    when additional_depreciation_after_1975(p, a, d1);
+    when excess_of_realized_over_basis_1250(p, t, e);
+    then section_1250a1_tier_ordinary_income(p, t, round(min(d1, e) * pct, 2, "HALF_UP"));
+}
+rule TierOneGeneralRule(p: Person, t: Transaction, a: Asset, d1: Money, e: Money) defeasible {
+    label en official "section 1250(a)(1)(A) with the 100-percent general category";
+    when applicable_percentage_general_case(a);
+    when additional_depreciation_after_1975(p, a, d1);
+    when excess_of_realized_over_basis_1250(p, t, e);
+    then section_1250a1_tier_ordinary_income(p, t, min(d1, e));
+}
+pub relation section_1250a2_ordinary_income(p: Person, t: Transaction, amount: Money) kind institutional {
+    label en official "section 1250(a)(2)(A): the applicable percentage of the lower of the 1970-75 additional depreciation and the excess over the (1)(A)(i) amount";
+}
+@source(IRC_S1250_A, relation = formalizes, coverage = exact, quote = "If section 1250 property is disposed of after December 31, 1969, and the amount determined under paragraph (1)(A)(ii) exceeds the amount determined under paragraph (1)(A)(i), then the applicable percentage of the lower of—")
+rule TierTwoRule(p: Person, t: Transaction, a: Asset, pct: Decimal, d1: Money, d2: Money, e: Money) defeasible {
+    label en official "section 1250(a)(2)(A)";
+    when disposition_on_or_after_1970_1_1(t);
+    when applicable_percentage_1250a2(a, pct);
+    when additional_depreciation_after_1975(p, a, d1);
+    when additional_depreciation_1970_to_1975(p, a, d2);
+    when excess_of_realized_over_basis_1250(p, t, e);
+    when e > d1;
+    when not_known(has_b4_piece_1970_to_1975(p, a));
+    then section_1250a2_ordinary_income(p, t, round(min(d2, e - d1) * pct, 2, "HALF_UP"));
+}
+rule TierTwoNothingLeftRule(p: Person, t: Transaction, a: Asset, d1: Money, e: Money) defeasible {
+    label en official "section 1250(a)(2)(A): the excess does not exceed the (1)(A)(i) amount";
+    when disposition_on_or_after_1970_1_1(t);
+    when additional_depreciation_after_1975(p, a, d1);
+    when excess_of_realized_over_basis_1250(p, t, e);
+    when e <= d1;
+    then section_1250a2_ordinary_income(p, t, 0.00 USD);
+}
+pub relation section_1250a3_ordinary_income(p: Person, t: Transaction, amount: Money) kind institutional {
+    label en official "section 1250(a)(3)(A): the applicable percentage of the lower of the pre-1970 additional depreciation and the excess over the (1)(A)(i) and (2)(A)(i) amounts";
+}
+@source(IRC_S1250_A, relation = formalizes, coverage = exact, quote = "If section 1250 property is disposed of after December 31, 1963, and the amount determined under paragraph (1)(A)(ii) exceeds the sum of the amounts determined under paragraphs (1)(A)(i) and (2)(A)(i), then the applicable percentage of the lower of—")
+rule TierThreeRule(p: Person, t: Transaction, a: Asset, pct: Decimal, d1: Money, d2: Money, d3: Money, e: Money) defeasible {
+    label en official "section 1250(a)(3)(A)";
+    when disposition_after_1963_12_31(t);
+    when applicable_percentage_1250a3(a, pct);
+    when additional_depreciation_after_1975(p, a, d1);
+    when additional_depreciation_1970_to_1975(p, a, d2);
+    when additional_depreciation_before_1970(p, a, d3);
+    when excess_of_realized_over_basis_1250(p, t, e);
+    when e > d1 + d2;
+    then section_1250a3_ordinary_income(p, t, round(min(d3, e - d1 - d2) * pct, 2, "HALF_UP"));
+}
+rule TierThreeNothingLeftRule(p: Person, t: Transaction, a: Asset, d1: Money, d2: Money, e: Money) defeasible {
+    label en official "section 1250(a)(3)(A): the excess does not exceed the earlier tiers";
+    when disposition_after_1963_12_31(t);
+    when additional_depreciation_after_1975(p, a, d1);
+    when additional_depreciation_1970_to_1975(p, a, d2);
+    when excess_of_realized_over_basis_1250(p, t, e);
+    when e <= d1 + d2;
+    then section_1250a3_ordinary_income(p, t, 0.00 USD);
+}
+pub relation section_1250_ordinary_income_all_tiers(p: Person, t: Transaction, amount: Money) kind institutional {
+    label en official "section 1250(a)(1)-(3): the ordinary income of all three tiers";
+}
+rule AllTiersRule(p: Person, t: Transaction, one: Money, two: Money, three: Money) defeasible {
+    label en official "section 1250(a)(1)-(3)";
+    when section_1250a1_tier_ordinary_income(p, t, one);
+    when section_1250a2_ordinary_income(p, t, two);
+    when section_1250a3_ordinary_income(p, t, three);
+    then section_1250_ordinary_income_all_tiers(p, t, one + two + three);
+}
+
+// =============================================================================
+// (b)(2), (b)(4)
+// =============================================================================
+
+pub relation lease_base_period_months(lease: Asset, n: Integer) kind empirical {
+    label en official "section 1250(b)(2)(B): the period on the basis of which the depreciation adjustments were allowed, in months";
+}
+pub relation lease_renewal_period_months(lease: Asset, n: Integer) kind empirical {
+    label en official "section 1250(b)(2)(A): the renewal periods - any period for which the lease may be renewed, extended or continued pursuant to an option exercisable by the lessee - in months";
+}
+pub relation lease_period_with_renewals_months(lease: Asset, months: Decimal) kind institutional {
+    label en official "section 1250(b)(2): for a lessee the lease period includes all renewal periods, but the extension is at most two thirds of the period on which the adjustments were allowed (two thirds rounded to 4 places HALF_UP: JUDGMENT CALL)";
+}
+@source(IRC_S1250_B, relation = formalizes, coverage = exact, quote = "(B) the inclusion of renewal periods shall not extend the period taken into account by more than 2/3 of the period on the basis of which the depreciation adjustments were allowed.")
+rule LeasePeriodWithinTwoThirdsRule(lease: Asset, base: Integer, renewal: Integer) defeasible {
+    label en official "section 1250(b)(2): the renewals fit within two thirds";
+    when lease_base_period_months(lease, base);
+    when lease_renewal_period_months(lease, renewal);
+    when renewal * 3 <= base * 2;
+    then lease_period_with_renewals_months(lease, (base + renewal) * 1.0);
+}
+rule LeasePeriodCappedRule(lease: Asset, base: Integer, renewal: Integer) defeasible {
+    label en official "section 1250(b)(2)(B): the renewals are cut back to two thirds of the base period";
+    when lease_base_period_months(lease, base);
+    when lease_renewal_period_months(lease, renewal);
+    when renewal * 3 > base * 2;
+    then lease_period_with_renewals_months(lease, base * 1.0 + div_round(base * 2.0, 3.0, 4, "HALF_UP"));
+}
+pub relation rehabilitation_adjustments_allowed_167k_or_191(p: Person, a: Asset, amount: Money) kind empirical {
+    label en official "section 1250(b)(4): the depreciation or amortization adjustments allowed under section 167(k) (as in effect before the 1990 Act) or 191 (as in effect before its repeal) attributable to the property";
+}
+pub relation held_more_than_one_year_after_rehabilitation_expenditures(a: Asset) kind empirical {
+    label en official "section 1250(b)(4): the property was held for more than one year after the rehabilitation expenditures were incurred";
+}
+pub relation straight_line_adjustments_without_167k_life(p: Person, a: Asset, amount: Money) kind empirical {
+    label en official "section 1250(b)(4): the adjustments that would have resulted under the straight line method without regard to the useful life permitted under section 167(k) or 191";
+}
+pub relation additional_depreciation_rehabilitation_1250b4(p: Person, a: Asset, amount: Money) kind institutional {
+    label en official "section 1250(b)(4): additional depreciation attributable to rehabilitation expenditures";
+}
+@source(IRC_S1250_B, relation = formalizes, coverage = exact, quote = "The term \"additional depreciation\" also means, in the case of section 1250 property with respect to which a depreciation or amortization deduction for rehabilitation expenditures was allowed under section 167(k) (as in effect on the day before the date of the enactment of the Revenue Reconciliation Act of 1990) or 191 (as in effect before its repeal by the Economic Recovery Tax Act of 1981), the depreciation or amortization adjustments allowed under such section to the extent attributable to such property, except that, in the case of such property held for more than one year after the rehabilitation expenditures so allowed were incurred, it means such adjustments only to the extent that they exceed the amount of the depreciation adjustments which would have resulted if such adjustments had been determined under the straight line method of adjustment without regard to the useful life permitted under section 167(k) (as in effect on the day before the date of the enactment of the Revenue Reconciliation Act of 1990) or 191 (as in effect before its repeal by the Economic Recovery Tax Act of 1981).")
+rule RehabAdditionalWithinYearRule(p: Person, a: Asset, allowed: Money) defeasible {
+    label en official "section 1250(b)(4): all the adjustments where the property is held one year or less after the expenditures";
+    when rehabilitation_adjustments_allowed_167k_or_191(p, a, allowed);
+    when not_known(held_more_than_one_year_after_rehabilitation_expenditures(a));
+    then additional_depreciation_rehabilitation_1250b4(p, a, allowed);
+}
+rule RehabAdditionalExcessRule(p: Person, a: Asset, allowed: Money, sl: Money) defeasible {
+    label en official "section 1250(b)(4): the excess over the straight line adjustments where the property is held more than one year";
+    when rehabilitation_adjustments_allowed_167k_or_191(p, a, allowed);
+    when held_more_than_one_year_after_rehabilitation_expenditures(a);
+    when straight_line_adjustments_without_167k_life(p, a, sl);
+    when allowed > sl;
+    then additional_depreciation_rehabilitation_1250b4(p, a, allowed - sl);
+}
+rule RehabAdditionalNoneRule(p: Person, a: Asset, allowed: Money, sl: Money) defeasible {
+    label en official "section 1250(b)(4): the adjustments do not exceed the straight line adjustments";
+    when rehabilitation_adjustments_allowed_167k_or_191(p, a, allowed);
+    when held_more_than_one_year_after_rehabilitation_expenditures(a);
+    when straight_line_adjustments_without_167k_life(p, a, sl);
+    when allowed <= sl;
+    then additional_depreciation_rehabilitation_1250b4(p, a, 0.00 USD);
+}
+
+// =============================================================================
+// (d)(4)-(6)
+// =============================================================================
+
+pub relation gain_recognized_on_1031_1033_disposition(t: Transaction, amount: Money) kind empirical {
+    label en official "section 1250(d)(4)(A)(i): the amount of gain recognized on the disposition (determined without regard to section 1250)";
+}
+pub relation fair_market_value_of_stock_purchased_1033a2A(t: Transaction, amount: Money) kind empirical {
+    label en official "section 1250(d)(4)(B): the fair market value of any stock purchased in a corporation which (but for the paragraph) would result in nonrecognition of gain under section 1033(a)(2)(A)";
+}
+pub relation cap_candidate_recognized_gain_1250d4(t: Transaction, amount: Money) kind institutional {
+    label en official "section 1250(d)(4)(A)(i): the recognized gain increased by the (B) stock amount";
+}
+@source(IRC_S1250_D, relation = formalizes, coverage = exact, quote = "(i) the amount of gain recognized on the disposition (determined without regard to this section), increased as provided in subparagraph (B), or")
+rule CandidateRecognizedPlusStockRule(t: Transaction, recognized: Money, stock: Money) defeasible {
+    label en official "section 1250(d)(4)(A)(i), (B)";
+    when gain_recognized_on_1031_1033_disposition(t, recognized);
+    when fair_market_value_of_stock_purchased_1033a2A(t, stock);
+    then cap_candidate_recognized_gain_1250d4(t, recognized + stock);
+}
+rule CandidateRecognizedNoStockRule(t: Transaction, recognized: Money) defeasible {
+    label en official "section 1250(d)(4)(A)(i): no stock purchased";
+    when gain_recognized_on_1031_1033_disposition(t, recognized);
+    when not_known(stock_purchased_recorded_1250d4(t));
+    then cap_candidate_recognized_gain_1250d4(t, recognized);
+}
+pub relation stock_purchased_recorded_1250d4(t: Transaction) kind institutional {
+    label en unofficial "a stock-purchase amount is recorded";
+}
+rule StockPurchasedRecordedRule(t: Transaction, amount: Money) defeasible {
+    label en unofficial "helper";
+    when fair_market_value_of_stock_purchased_1033a2A(t, amount);
+    then stock_purchased_recorded_1250d4(t);
+}
+pub relation section_1250_recapture_would_be_gain(p: Person, t: Transaction, amount: Money) kind empirical {
+    label en official "section 1250(d)(4)(C)(i): the amount of gain which would (but for the paragraph) be taken into account under subsection (a)";
+}
+pub relation fair_market_value_or_cost_of_1250_property_acquired(t: Transaction, amount: Money) kind empirical {
+    label en official "section 1250(d)(4)(C)(ii): the fair market value (or cost in the case of a section 1033(a)(2) transaction) of the section 1250 property acquired";
+}
+pub relation cap_candidate_insufficient_property_1250d4(t: Transaction, amount: Money) kind institutional {
+    label en official "section 1250(d)(4)(A)(ii), (C): the excess of the would-be gain over the value or cost of the section 1250 property acquired";
+}
+rule CandidateInsufficientRule(p: Person, t: Transaction, would: Money, acquired: Money) defeasible {
+    label en official "section 1250(d)(4)(C)";
+    when section_1250_recapture_would_be_gain(p, t, would);
+    when fair_market_value_or_cost_of_1250_property_acquired(t, acquired);
+    when would > acquired;
+    then cap_candidate_insufficient_property_1250d4(t, would - acquired);
+}
+rule CandidateInsufficientZeroRule(p: Person, t: Transaction, would: Money, acquired: Money) defeasible {
+    label en official "section 1250(d)(4)(C): the acquired property covers the would-be gain";
+    when section_1250_recapture_would_be_gain(p, t, would);
+    when fair_market_value_or_cost_of_1250_property_acquired(t, acquired);
+    when would <= acquired;
+    then cap_candidate_insufficient_property_1250d4(t, 0.00 USD);
+}
+pub relation greater_cap_candidate_exists_1250d4(t: Transaction, amount: Money) kind institutional {
+    label en unofficial "a strictly greater cap candidate exists (the greater-of pattern)";
+}
+rule GreaterCandidate1Rule(t: Transaction, one: Money, two: Money) defeasible {
+    label en unofficial "helper: the insufficient-property candidate is greater than the recognized-gain candidate";
+    when cap_candidate_recognized_gain_1250d4(t, one);
+    when cap_candidate_insufficient_property_1250d4(t, two);
+    when two > one;
+    then greater_cap_candidate_exists_1250d4(t, one);
+}
+rule GreaterCandidate2Rule(t: Transaction, one: Money, two: Money) defeasible {
+    label en unofficial "helper: the recognized-gain candidate is greater than the insufficient-property candidate";
+    when cap_candidate_recognized_gain_1250d4(t, one);
+    when cap_candidate_insufficient_property_1250d4(t, two);
+    when one > two;
+    then greater_cap_candidate_exists_1250d4(t, two);
+}
+pub relation recognition_limit_1250d4(t: Transaction, amount: Money) kind institutional {
+    label en official "section 1250(d)(4)(A): the amount taken into account under subsection (a) shall not exceed the greater of the two candidates";
+}
+@source(IRC_S1250_D, relation = formalizes, coverage = exact, quote = "If property is disposed of and gain (determined without regard to this section) is not recognized in whole or in part under section 1031 or 1033, then the amount of gain taken into account by the transferor under subsection (a) shall not exceed the greater of the following:")
+rule RecognitionLimitFromRecognizedRule(t: Transaction, one: Money) defeasible {
+    label en official "section 1250(d)(4)(A): the recognized-gain candidate is the greater (or equal)";
+    when cap_candidate_recognized_gain_1250d4(t, one);
+    when not_known(greater_cap_candidate_exists_1250d4(t, one));
+    then recognition_limit_1250d4(t, one);
+}
+rule RecognitionLimitFromPropertyRule(t: Transaction, two: Money) defeasible {
+    label en official "section 1250(d)(4)(A): the insufficient-property candidate is the greater (or equal)";
+    when cap_candidate_insufficient_property_1250d4(t, two);
+    when not_known(greater_cap_candidate_exists_1250d4(t, two));
+    then recognition_limit_1250d4(t, two);
+}
+pub relation section_1250_recapture_after_d4(p: Person, t: Transaction, amount: Money) kind institutional {
+    label en official "section 1250(d)(4)(A): the amount taken into account under (a) after the cap";
+}
+rule RecaptureAfterCapWithinRule(p: Person, t: Transaction, would: Money, limit: Money) defeasible {
+    label en official "section 1250(d)(4)(A): the would-be amount does not exceed the limit";
+    when section_1250_recapture_would_be_gain(p, t, would);
+    when recognition_limit_1250d4(t, limit);
+    when would <= limit;
+    then section_1250_recapture_after_d4(p, t, would);
+}
+rule RecaptureAfterCapLimitedRule(p: Person, t: Transaction, would: Money, limit: Money) defeasible {
+    label en official "section 1250(d)(4)(A): the would-be amount is cut to the limit";
+    when section_1250_recapture_would_be_gain(p, t, would);
+    when recognition_limit_1250d4(t, limit);
+    when would > limit;
+    then section_1250_recapture_after_d4(p, t, limit);
+}
+pub relation additional_depreciation_of_acquired_property_1250d4E(t: Transaction, amount: Money) kind institutional {
+    label en official "section 1250(d)(4)(E): the additional depreciation of the section 1250 property acquired that is attributable to the property disposed of is the gain not taken into account under subsection (a) by reason of the paragraph";
+}
+@source(IRC_S1250_D, relation = formalizes, coverage = partial, quote = "(E) Additional depreciation with respect to property disposed of")
+rule AcquiredAdditionalDepreciationRule(p: Person, t: Transaction, would: Money, taken: Money) defeasible {
+    label en official "section 1250(d)(4)(E): the would-be gain less the amount taken into account";
+    when section_1250_recapture_would_be_gain(p, t, would);
+    when section_1250_recapture_after_d4(p, t, taken);
+    when would > taken;
+    then additional_depreciation_of_acquired_property_1250d4E(t, would - taken);
+}
+// (d)(5)
+pub relation gain_under_a_if_sold_at_fmv_with_100_percent(dist: Transaction, amount: Money) kind empirical {
+    label en official "section 1250(d)(5)(B)(i): the gain to which subsection (a) would have applied if the property had been sold by the partnership immediately before the distribution at its fair market value with an applicable percentage of 100 percent";
+}
+pub relation section_751b_portion_of_that_gain(dist: Transaction, amount: Money) kind empirical {
+    label en official "section 1250(d)(5)(B)(ii): the amount of that gain to which section 751(b) would have applied with an applicable percentage of 100 percent";
+}
+pub relation additional_depreciation_before_partnership_distribution(dist: Transaction, amount: Money) kind institutional {
+    label en official "section 1250(d)(5)(B): the additional depreciation attributable to periods before the distribution - the (i) gain reduced by the (ii) portion";
+}
+@source(IRC_S1250_D, relation = formalizes, coverage = exact, quote = "In respect of any property described in subparagraph (A), the additional depreciation attributable to periods before the distribution by the partnership shall be—")
+rule PartnershipDistributionAdditionalWith751Rule(dist: Transaction, gain: Money, part: Money) defeasible {
+    label en official "section 1250(d)(5)(B)(i)-(ii)";
+    when gain_under_a_if_sold_at_fmv_with_100_percent(dist, gain);
+    when section_751b_portion_of_that_gain(dist, part);
+    when gain > part;
+    then additional_depreciation_before_partnership_distribution(dist, gain - part);
+}
+rule PartnershipDistributionAdditionalWithout751Rule(dist: Transaction, gain: Money) defeasible {
+    label en official "section 1250(d)(5)(B)(i): section 751(b) does not apply";
+    when gain_under_a_if_sold_at_fmv_with_100_percent(dist, gain);
+    when not_known(section_751b_applied_to_part_of_gain(dist));
+    then additional_depreciation_before_partnership_distribution(dist, gain);
+}
+pub relation section_751b_applied_to_part_of_gain(dist: Transaction) kind institutional {
+    label en unofficial "a section 751(b) portion is recorded";
+}
+rule Section751bAppliedRule(dist: Transaction, part: Money) defeasible {
+    label en unofficial "helper";
+    when section_751b_portion_of_that_gain(dist, part);
+    then section_751b_applied_to_part_of_gain(dist);
+}
+pub relation section_1250_property_distributed_by_partnership(a: Asset, partner: Person) kind empirical {
+    label en official "section 1250(d)(5)(A): section 1250 property distributed by a partnership to a partner";
+}
+pub relation basis_treated_as_carryover_from_partnership_1250d5A(a: Asset, partner: Person) kind institutional {
+    label en official "section 1250(d)(5)(A): the basis is deemed to be determined by reference to the adjusted basis of the property to the partnership";
+}
+@source(IRC_S1250_D, relation = formalizes, coverage = exact, quote = "For purposes of this section, the basis of section 1250 property distributed by a partnership to a partner shall be deemed to be determined by reference to the adjusted basis of such property to the partnership.")
+rule PartnershipBasisCarryoverRule(a: Asset, partner: Person) defeasible {
+    label en official "section 1250(d)(5)(A)";
+    when section_1250_property_distributed_by_partnership(a, partner);
+    then basis_treated_as_carryover_from_partnership_1250d5A(a, partner);
+}
+// (d)(6)
+pub relation disposition_to_exempt_organization_using_in_unrelated_business(t: Transaction, org: Person) kind empirical {
+    label en official "section 1250(d)(6)(A): a disposition of section 1250 property to an organization described in section 511(a)(2) or 511(b)(2) that, immediately after, uses the property in an unrelated trade or business (section 513)";
+}
+pub relation second_sentence_of_d3_inapplicable_1250d6A(t: Transaction) kind institutional {
+    label en official "section 1250(d)(6)(A): the second sentence of paragraph (3) does not apply to the disposition";
+}
+@source(IRC_S1250_D, relation = formalizes, coverage = exact, quote = "The second sentence of paragraph (3) shall not apply to a disposition of section 1250 property to an organization described in section 511(a)(2) or 511(b)(2) if, immediately after such disposition, such organization uses such property in an unrelated trade or business (as defined in section 513).")
+rule D6ARule(t: Transaction, org: Person) defeasible {
+    label en official "section 1250(d)(6)(A)";
+    when disposition_to_exempt_organization_using_in_unrelated_business(t, org);
+    then second_sentence_of_d3_inapplicable_1250d6A(t);
+}
+pub relation property_ceases_to_be_used_in_unrelated_business_on(a: Asset, org: Person, on: Date) kind empirical {
+    label en official "section 1250(d)(6)(B): the property ceases to be used in an unrelated trade or business of the acquiring organization on the date";
+}
+pub relation deemed_disposition_by_organization_1250d6B(a: Asset, org: Person, on: Date) kind institutional {
+    label en official "section 1250(d)(6)(B): the organization is treated as having disposed of the property on the date of the cessation";
+}
+@source(IRC_S1250_D, relation = formalizes, coverage = exact, quote = "If any property with respect to the disposition of which gain is not recognized by reason of subparagraph (A) ceases to be used in an unrelated trade or business of the organization acquiring such property, such organization shall be treated for purposes of this section as having disposed of such property on the date of such cessation.")
+rule D6BRule(a: Asset, org: Person, on: Date, t: Transaction) defeasible {
+    label en official "section 1250(d)(6)(B)";
+    when disposition_to_exempt_organization_using_in_unrelated_business(t, org);
+    when property_ceases_to_be_used_in_unrelated_business_on(a, org, on);
+    then deemed_disposition_by_organization_1250d6B(a, org, on);
+}
+
+// =============================================================================
+// (f): separate elements
+// =============================================================================
+
+pub relation capital_account_additions_36_month(a: Asset, amount: Money) kind empirical {
+    label en official "section 1250(f)(4)(A): the sum of the amounts added to the capital account during the 36-month period ending on the last day of the taxable year";
+}
+pub relation adjusted_basis_at_period_start(a: Asset, amount: Money) kind empirical {
+    label en official "section 1250(f)(4)(A): the adjusted basis at the beginning of the first day of the 36-month period, or of the holding period, whichever is later";
+}
+pub relation adjusted_basis_without_1016a2_a3_adjustments(a: Asset, amount: Money) kind empirical {
+    label en official "section 1250(f)(4)(A)(ii): the adjusted basis determined without regard to the adjustments of paragraphs (2) and (3) of section 1016(a)";
+}
+pub relation improvements_together_exceed_thresholds_1250f4A(a: Asset) kind institutional {
+    label en official "section 1250(f)(4)(A): the additions exceed the greatest of 25 percent of the adjusted basis, 10 percent of the adjusted basis without the 1016(a)(2)-(3) adjustments, and $5,000";
+}
+@source(IRC_S1250_F, relation = formalizes, coverage = exact, quote = "The term \"separate improvement\" means each improvement added during the 36–month period ending on the last day of any taxable year to the capital account for the property, but only if the sum of the amounts added to such account during such period exceeds the greatest of—")
+rule ImprovementsExceedThresholdsRule(a: Asset, added: Money, basis: Money, basis_no_adj: Money) defeasible {
+    label en official "section 1250(f)(4)(A)(i)-(iii)";
+    when capital_account_additions_36_month(a, added);
+    when adjusted_basis_at_period_start(a, basis);
+    when adjusted_basis_without_1016a2_a3_adjustments(a, basis_no_adj);
+    when added > basis * 25 percent;
+    when added > basis_no_adj * 10 percent;
+    when added > 5000.00 USD;
+    then improvements_together_exceed_thresholds_1250f4A(a);
+}
+pub relation improvements_added_in_taxable_year(a: Asset, amount: Money) kind empirical {
+    label en official "section 1250(f)(4)(B): the sum of the amounts added to the capital account for the property for the taxable year";
+}
+pub relation adjusted_basis_at_start_of_taxable_year(a: Asset, amount: Money) kind empirical {
+    label en official "section 1250(f)(4)(B)(ii): the adjusted basis referred to in (A)(ii), determined as of the beginning of the taxable year";
+}
+pub relation year_improvements_taken_into_account_1250f4B(a: Asset) kind institutional {
+    label en official "section 1250(f)(4)(B): the year's improvements are taken into account only if their sum exceeds the greater of $2,000 and one percent of the adjusted basis";
+}
+@source(IRC_S1250_F, relation = formalizes, coverage = exact, quote = "Improvements in any taxable year shall be taken into account for purposes of subparagraph (A) only if the sum of the amounts added to the capital account for the property for such taxable year exceeds the greater of—")
+rule YearImprovementsRule(a: Asset, added: Money, basis: Money) defeasible {
+    label en official "section 1250(f)(4)(B)(i)-(ii)";
+    when improvements_added_in_taxable_year(a, added);
+    when adjusted_basis_at_start_of_taxable_year(a, basis);
+    when added > 2000.00 USD;
+    when added > basis * 1 percent;
+    then year_improvements_taken_into_account_1250f4B(a);
+}
+pub relation separate_improvement_1250f4(a: Asset, improvement: Asset) kind institutional {
+    label en official "section 1250(f)(4)(A): a separate improvement";
+}
+pub relation improvement_added_to_capital_account(a: Asset, improvement: Asset) kind empirical {
+    label en official "section 1250(f)(4)(C): the improvement - an addition to the capital account for the property after the initial acquisition or after completion";
+}
+rule SeparateImprovementRule(a: Asset, improvement: Asset) defeasible {
+    label en official "section 1250(f)(4)(A), (B), (C)";
+    when improvement_added_to_capital_account(a, improvement);
+    when improvements_together_exceed_thresholds_1250f4A(a);
+    when year_improvements_taken_into_account_1250f4B(a);
+    then separate_improvement_1250f4(a, improvement);
+}
+pub relation improvement_placed_in_service_first_day_nearest_middle_of_year(a: Asset, improvement: Asset, on: Date) kind empirical {
+    label en official "section 1250(f)(4)(B), last sentence: the first day of the calendar month closest to the middle of the taxable year (supplied by the case: the month arithmetic is date-part)";
+}
+pub relation small_improvement_placed_in_service_on(a: Asset, improvement: Asset, on: Date) kind institutional {
+    label en official "section 1250(f)(4)(B), last sentence: an improvement whose amount does not exceed the greater of $2,000 and one percent of the basis is treated as placed in service on the first day of the calendar month closest to the middle of the taxable year";
+}
+pub relation improvement_amount(a: Asset, improvement: Asset, amount: Money) kind empirical {
+    label en official "the amount added to the capital account for the improvement";
+}
+@source(IRC_S1250_F, relation = formalizes, coverage = exact, quote = "For purposes of this section, if the amount added to the capital account for any separate improvement does not exceed the greater of clause (i) or (ii), such improvement shall be treated as placed in service on the first day, of a calendar month, which is closest to the middle of the taxable year.")
+rule SmallImprovementPlacedRule(a: Asset, improvement: Asset, amount: Money, basis: Money, on: Date) defeasible {
+    label en official "section 1250(f)(4)(B), last sentence";
+    when improvement_amount(a, improvement, amount);
+    when adjusted_basis_at_start_of_taxable_year(a, basis);
+    when improvement_placed_in_service_first_day_nearest_middle_of_year(a, improvement, on);
+    when amount <= 2000.00 USD;
+    then small_improvement_placed_in_service_on(a, improvement, on);
+}
+rule SmallImprovementPercentRule(a: Asset, improvement: Asset, amount: Money, basis: Money, on: Date) defeasible {
+    label en official "section 1250(f)(4)(B), last sentence: not above one percent of the adjusted basis";
+    when improvement_amount(a, improvement, amount);
+    when adjusted_basis_at_start_of_taxable_year(a, basis);
+    when improvement_placed_in_service_first_day_nearest_middle_of_year(a, improvement, on);
+    when amount <= basis * 1 percent;
+    then small_improvement_placed_in_service_on(a, improvement, on);
+}
+pub enum ElementKind1250 {
+    SeparateImprovement;
+    UnitPlacedInServiceBeforeCompletion;
+    RemainingProperty;
+    label en official "the separate elements of section 1250(f)(3)(A)-(C)";
+}
+pub relation element_of_property(a: Asset, element: Asset, kind: ElementKind1250) kind empirical {
+    label en official "section 1250(f)(3): the element of the property";
+}
+pub relation treated_as_separate_element_1250f3(a: Asset, element: Asset) kind institutional {
+    label en official "section 1250(f)(3): the element is treated as a separate element";
+}
+@source(IRC_S1250_F, relation = formalizes, coverage = exact, quote = "In applying this subsection in the case of any section 1250 property, there shall be treated as a separate element—")
+rule SeparateElementRule(a: Asset, element: Asset, kind: ElementKind1250) defeasible {
+    label en official "section 1250(f)(3)(A)-(C)";
+    when element_of_property(a, element, kind);
+    then treated_as_separate_element_1250f3(a, element);
+}
+pub relation element_share_of_additional_depreciation(a: Asset, element: Asset, period: Integer, share: Decimal) kind empirical {
+    label en official "section 1250(f)(2)(A): the ratio of the element's additional depreciation to the additional depreciation of the property, for the period";
+}
+pub relation lower_amount_for_period_1250f2(a: Asset, period: Integer, amount: Money) kind empirical {
+    label en official "section 1250(f)(2)(A): the lower of the amounts specified in clause (i) or (ii) of (a)(1)(A), (a)(2)(A) or (a)(3)(A) for the property and period";
+}
+pub relation element_applicable_percentage_for_period(a: Asset, element: Asset, period: Integer, pct: Decimal) kind empirical {
+    label en official "section 1250(f)(2)(B): the applicable percentage for the element for the period (determined as if the element were a separate property)";
+}
+pub relation element_period_amount_1250f2(a: Asset, element: Asset, period: Integer, amount: Money) kind institutional {
+    label en official "section 1250(f)(2): the amount for the element and the period - the ratio times the lower amount times the applicable percentage (cents HALF_UP: JUDGMENT CALL)";
+}
+@source(IRC_S1250_F, relation = formalizes, coverage = exact, quote = "(B) the applicable percentage for such element for such period.")
+rule ElementPeriodAmountRule(a: Asset, element: Asset, period: Integer, share: Decimal, lower: Money, pct: Decimal) defeasible {
+    label en official "section 1250(f)(2)(A)-(B)";
+    when treated_as_separate_element_1250f3(a, element);
+    when element_share_of_additional_depreciation(a, element, period, share);
+    when lower_amount_for_period_1250f2(a, period, lower);
+    when element_applicable_percentage_for_period(a, element, period, pct);
+    then element_period_amount_1250f2(a, element, period, round(lower * share * pct, 2, "HALF_UP"));
+}
+pub relation section_1250f1_ordinary_income(a: Asset, amount: Money) kind institutional {
+    label en official "section 1250(f)(1): the amount taken into account under subsection (a) is the sum of the amounts determined for the elements (an aggregate over a derived relation: the section 111 runtime subset limit, expected NEITHER until it is lifted)";
+}
+@source(IRC_S1250_F, relation = formalizes, coverage = partial, quote = "If, in the case of a disposition of section 1250 property, the property is treated as consisting of more than one element by reason of paragraph (3), then the amount taken into account under subsection (a) in respect of such section 1250 property as ordinary income shall be the sum of the amounts de")
+rule Section1250f1Rule(a: Asset, element: Asset) defeasible {
+    label en official "section 1250(f)(1)-(2): the sum over elements and periods";
+    when treated_as_separate_element_1250f3(a, element);
+    then section_1250f1_ordinary_income(a, sum all amount: Money for e: Asset, period: Integer where element_period_amount_1250f2(a, e, period, amount));
+}

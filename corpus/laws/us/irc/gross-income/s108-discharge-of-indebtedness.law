@@ -1,0 +1,343 @@
+// Section 108 — Income from discharge of indebtedness. Stage 2b (IRC-06).
+// Scope per task: (a)(1)(A)-(E) incl. the insolvency "to the extent"
+// computation, (b) attribute-reduction statutory order/rates, (e)(5), (f), (h).
+//
+// JUDGMENT CALL: (a)(1)(C)/(D)'s own "insolvency exclusion takes precedence
+// ... to the EXTENT the taxpayer is insolvent" ((a)(2)(B)) is a PARTIAL,
+// dollar-for-dollar split between the insolvency and farm/real-property
+// exclusions (the insolvent portion uses (a)(1)(B), the rest may use
+// (a)(1)(C)/(D)) — this pass models the simpler, common case (either the
+// taxpayer is insolvent, in which case insolvency governs entirely, or is
+// solvent, in which case farm/real-property governs entirely) and does NOT
+// compute the split for a taxpayer who is insolvent as to only PART of the
+// discharged amount; TECH_GAP, recorded in the coverage row for (a)(2)(B).
+// JUDGMENT CALL: (b)'s SEQUENTIAL, pool-exhausting allocation of the total
+// excluded amount across the seven ordered attribute categories (NOL ->
+// GBC -> MTC -> capital loss -> basis -> PAL -> FTC, each category reduced
+// only after the prior one is exhausted) is the same self-referential
+// running-ledger construct class already recorded for other packages
+// (TECH-GAPS.md G1/G10/G38/G249/G250/G280): this module implements the
+// per-CATEGORY reduction RATE (dollar-for-dollar vs. 33 1/3 cents per
+// dollar) as an executable classification, but does NOT compute the
+// sequential exhaustion/allocation of a single pool across the ordered list.
+
+// ============================================================================
+// §108(a): exclusion from gross income
+// ============================================================================
+
+use self::{
+    IRC_S108_A,
+    IRC_S108_B,
+    IRC_S108_E,
+    IRC_S108_F,
+    IRC_S108_H,
+    Individual,
+    TaxableYear,
+    discharge_by_person_not_qualified_108g1A,
+};
+
+pub relation discharge_of_indebtedness_amount(p: us.irc.core::Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "an amount which (but for section 108) would be includible in gross income by reason of the discharge (in whole or in part) of indebtedness of the taxpayer (section 108(a)(1))";
+}
+pub relation discharge_of_indebtedness_excluded_108a(p: us.irc.core::Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "gross income does not include this discharge-of-indebtedness amount (section 108(a)(1))";
+}
+
+relation discharge_occurs_in_title_11_case(p: us.irc.core::Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the discharge occurs in a title 11 case: the taxpayer is under the jurisdiction of a bankruptcy court and the discharge is granted by, or pursuant to a court-approved plan of, that court (section 108(a)(1)(A), (d)(2))";
+}
+@source(IRC_S108_A, quote = "the discharge occurs in a title 11 case,")
+rule DischargeExcludedTitle11(p: us.irc.core::Person, y: TaxableYear, amount: Money) strict {
+    label en official "section 108(a)(1)(A): a title 11 discharge is excluded, and (per (a)(2)(A)) takes precedence over every other (a)(1) exclusion";
+    when discharge_of_indebtedness_amount(p, y, amount);
+    when discharge_occurs_in_title_11_case(p, y, amount);
+    then discharge_of_indebtedness_excluded_108a(p, y, amount);
+}
+
+pub relation taxpayer_insolvent_at_discharge(p: us.irc.core::Person, y: TaxableYear, insolvency_amount: Money) kind empirical {
+    label en official "the excess of liabilities over the fair market value of assets, determined immediately before the discharge (section 108(d)(3)) — the amount by which the taxpayer is insolvent";
+}
+relation is_insolvent_at_discharge(p: us.irc.core::Person, y: TaxableYear) kind institutional {
+    label en official "the taxpayer is insolvent to some extent at the discharge (section 108(d)(3)) — helper avoiding an unbound `insolvency_amount` inside a negative literal (§190)";
+}
+rule IsInsolventAtDischarge(p: us.irc.core::Person, y: TaxableYear, amt: Money) strict {
+    label en official "flags insolvency without exposing the amount";
+    when taxpayer_insolvent_at_discharge(p, y, amt);
+    then is_insolvent_at_discharge(p, y);
+}
+relation qpri_exclusion_potentially_applies(p: us.irc.core::Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the discharge is of qualified principal residence indebtedness within the (a)(1)(E) pre-2026 window — used only for the (a)(2)(C) precedence test, not itself a conclusion that (E) applies";
+}
+relation elects_insolvency_over_principal_residence_101a2c(p: us.irc.core::Person, y: TaxableYear) kind empirical {
+    label en official "the taxpayer elects to apply the insolvency exclusion (a)(1)(B) in lieu of the principal-residence exclusion (a)(1)(E) (section 108(a)(2)(C))";
+}
+@source(IRC_S108_A, quote = "In the case of a discharge to which paragraph (1)(B) applies, the amount excluded under paragraph (1)(B) shall not exceed the amount by which the taxpayer is insolvent.")
+rule DischargeExcludedInsolvency(p: us.irc.core::Person, y: TaxableYear, amount: Money, insolvency_amount: Money) strict {
+    label en official "section 108(a)(1)(B)/(a)(3): the insolvency exclusion applies (absent a title 11 discharge, and absent an applicable, non-elected-around principal-residence exclusion), capped at the amount of insolvency";
+    when discharge_of_indebtedness_amount(p, y, amount);
+    when taxpayer_insolvent_at_discharge(p, y, insolvency_amount);
+    when not_known(discharge_occurs_in_title_11_case(p, y, amount));
+    when not_known(qpri_takes_precedence_over_insolvency(p, y, amount));
+    then discharge_of_indebtedness_excluded_108a(p, y, min(amount, insolvency_amount));
+}
+relation qpri_takes_precedence_over_insolvency(p: us.irc.core::Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 108(a)(2)(C): the principal-residence exclusion applies and displaces insolvency, because the taxpayer has not elected otherwise";
+}
+@source(IRC_S108_A, quote = "Paragraph (1)(B) shall not apply to a discharge to which paragraph (1)(E) applies unless the taxpayer elects to apply paragraph (1)(B) in lieu of paragraph (1)(E).")
+rule QpriTakesPrecedenceOverInsolvency(p: us.irc.core::Person, y: TaxableYear, amount: Money) strict {
+    label en official "principal-residence exclusion displaces insolvency, absent an election";
+    when qpri_exclusion_potentially_applies(p, y, amount);
+    when not_known(elects_insolvency_over_principal_residence_101a2c(p, y));
+    then qpri_takes_precedence_over_insolvency(p, y, amount);
+}
+
+relation indebtedness_is_qualified_farm_indebtedness(p: us.irc.core::Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "indebtedness incurred directly in connection with the taxpayer's farming trade or business, where 50%+ of the taxpayer's aggregate gross receipts for the preceding 3 years is attributable to farming, discharged by a qualified person (section 108(a)(1)(C), (g)(1)-(2))";
+}
+@source(IRC_S108_A, quote = "the indebtedness discharged is qualified farm indebtedness,")
+rule DischargeExcludedQualifiedFarm(p: us.irc.core::Person, y: TaxableYear, amount: Money) strict {
+    label en official "section 108(a)(1)(C): a qualified-farm-indebtedness discharge is excluded, absent a title 11 discharge and absent taxpayer insolvency (the (a)(2)(B) precedence of insolvency is modelled for the simpler wholly-solvent/wholly-insolvent case, per the module-header judgment call)";
+    when discharge_of_indebtedness_amount(p, y, amount);
+    when indebtedness_is_qualified_farm_indebtedness(p, y, amount);
+    when not_known(discharge_occurs_in_title_11_case(p, y, amount));
+    when not_known(is_insolvent_at_discharge(p, y));
+    when not_known(discharge_by_person_not_qualified_108g1A(p, y));
+    then discharge_of_indebtedness_excluded_108a(p, y, amount);
+}
+
+relation is_c_corporation(p: us.irc.core::Person) kind empirical {
+    label en official "a C corporation (section 108(a)(1)(D) excludes C corporations from this exclusion)";
+}
+relation indebtedness_is_qualified_real_property_business_indebtedness(p: us.irc.core::Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "indebtedness incurred in connection with real property used in a trade or business, secured by such property, meeting the pre-1993/qualified-acquisition timing test, with a taxpayer election in effect (section 108(a)(1)(D), (c)(3))";
+}
+@source(IRC_S108_A, quote = "in the case of a taxpayer other than a C corporation, the indebtedness discharged is qualified real property business indebtedness, or")
+rule DischargeExcludedQualifiedRealPropertyBusiness(p: us.irc.core::Person, y: TaxableYear, amount: Money) strict {
+    label en official "section 108(a)(1)(D): for a non-C-corporation, qualified real property business indebtedness discharge is excluded, absent a title 11 discharge and absent taxpayer insolvency (same wholly-solvent/wholly-insolvent simplification as the farm rule above)";
+    when discharge_of_indebtedness_amount(p, y, amount);
+    when indebtedness_is_qualified_real_property_business_indebtedness(p, y, amount);
+    when not_known(is_c_corporation(p));
+    when not_known(discharge_occurs_in_title_11_case(p, y, amount));
+    when not_known(is_insolvent_at_discharge(p, y));
+    then discharge_of_indebtedness_excluded_108a(p, y, amount);
+}
+
+relation indebtedness_is_qualified_principal_residence_indebtedness(p: us.irc.core::Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "acquisition indebtedness (section 163(h)(3)(B), $750,000/$375,000 limit) with respect to the taxpayer's principal residence (section 108(a)(1)(E), (h)(2))";
+}
+relation discharge_before_2026_or_written_arrangement_before_2026(p: us.irc.core::Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the discharge occurs before January 1, 2026, or is subject to a written arrangement entered into and evidenced before that date (section 108(a)(1)(E)(i)-(ii))";
+}
+@source(IRC_S108_A, quote = "the indebtedness discharged is qualified principal residence indebtedness which is discharged—")
+rule QpriExclusionPotentiallyApplies(p: us.irc.core::Person, y: TaxableYear, amount: Money) strict {
+    label en official "flags that (a)(1)(E)'s conditions are met, for the (a)(2)(C) precedence test and the exclusion rule below";
+    when indebtedness_is_qualified_principal_residence_indebtedness(p, y, amount);
+    when discharge_before_2026_or_written_arrangement_before_2026(p, y, amount);
+    then qpri_exclusion_potentially_applies(p, y, amount);
+}
+@source(IRC_S108_A, quote = "the indebtedness discharged is qualified principal residence indebtedness which is discharged—")
+rule DischargeExcludedQualifiedPrincipalResidence(p: us.irc.core::Person, y: TaxableYear, amount: Money) strict {
+    label en official "section 108(a)(1)(E): a qualified-principal-residence-indebtedness discharge is excluded, absent a title 11 discharge (per (a)(2)(A))";
+    when qpri_exclusion_potentially_applies(p, y, amount);
+    when not_known(discharge_occurs_in_title_11_case(p, y, amount));
+    when not_known(qpri_discharge_on_account_of_services_or_unrelated_factor_108h3(p, y, amount));
+    then discharge_of_indebtedness_excluded_108a(p, y, amount);
+}
+
+// ============================================================================
+// §108(b): reduction of tax attributes
+// ============================================================================
+
+pub enum Section108AttributeKind {
+    NetOperatingLoss;
+    GeneralBusinessCredit;
+    MinimumTaxCredit;
+    CapitalLossCarryover;
+    Basis;
+    PassiveActivityLossCarryover;
+    PassiveActivityCreditCarryover;
+    ForeignTaxCreditCarryover;
+}
+pub relation section_108_attribute_reduction_rate(kind: Section108AttributeKind, cents_per_dollar_excluded: Decimal) kind institutional {
+    label en official "the reduction rate (cents of the attribute reduced per dollar excluded under subsection (a)) for each ordered tax-attribute category (section 108(b)(2)-(3))";
+}
+@source(IRC_S108_B, quote = "the reductions described in paragraph (2) shall be one dollar for each dollar excluded by subsection (a)")
+rule AttributeReductionRateDollarForDollarNol() strict {
+    label en official "NOL is reduced dollar-for-dollar";
+    then section_108_attribute_reduction_rate(NetOperatingLoss, 1.00);
+}
+@source(IRC_S108_B, quote = "the reductions described in paragraph (2) shall be one dollar for each dollar excluded by subsection (a)")
+rule AttributeReductionRateDollarForDollarCapitalLoss() strict {
+    label en official "capital loss carryover is reduced dollar-for-dollar";
+    then section_108_attribute_reduction_rate(CapitalLossCarryover, 1.00);
+}
+@source(IRC_S108_B, quote = "the reductions described in paragraph (2) shall be one dollar for each dollar excluded by subsection (a)")
+rule AttributeReductionRateDollarForDollarBasis() strict {
+    label en official "basis is reduced dollar-for-dollar (mechanically, via section 1017)";
+    then section_108_attribute_reduction_rate(Basis, 1.00);
+}
+@source(IRC_S108_B, quote = "the reductions described in paragraph (2) shall be one dollar for each dollar excluded by subsection (a)")
+rule AttributeReductionRateDollarForDollarPal() strict {
+    label en official "passive activity LOSS carryover is reduced dollar-for-dollar (the CREDIT carryover component is at 33 1/3 cents, see below)";
+    then section_108_attribute_reduction_rate(PassiveActivityLossCarryover, 1.00);
+}
+@source(IRC_S108_B, quote = "The reductions described in subparagraphs (B), (C), and (G) shall be 331/3 cents for each dollar excluded by subsection (a).")
+rule AttributeReductionRateThirdGbc() strict {
+    label en official "general business credit carryover is reduced 33 1/3 cents per dollar excluded";
+    then section_108_attribute_reduction_rate(GeneralBusinessCredit, 0.3333333333);
+}
+@source(IRC_S108_B, quote = "The reductions described in subparagraphs (B), (C), and (G) shall be 331/3 cents for each dollar excluded by subsection (a).")
+rule AttributeReductionRateThirdMtc() strict {
+    label en official "minimum tax credit is reduced 33 1/3 cents per dollar excluded";
+    then section_108_attribute_reduction_rate(MinimumTaxCredit, 0.3333333333);
+}
+@source(IRC_S108_B, quote = "The reductions described in subparagraphs (B), (C), and (G) shall be 331/3 cents for each dollar excluded by subsection (a).")
+rule AttributeReductionRateThirdFtc() strict {
+    label en official "foreign tax credit carryover is reduced 33 1/3 cents per dollar excluded";
+    then section_108_attribute_reduction_rate(ForeignTaxCreditCarryover, 0.3333333333);
+}
+@source(IRC_S108_B, quote = "The reduction described in subparagraph (F) in any passive activity credit carryover shall be 331/3 cents for each dollar excluded by subsection (a).")
+rule AttributeReductionRateThirdPalCredit() strict {
+    label en official "the passive activity CREDIT carryover component is reduced 33 1/3 cents per dollar excluded";
+    then section_108_attribute_reduction_rate(PassiveActivityCreditCarryover, 0.3333333333);
+}
+// The statutory ORDER (A)-(G) itself and the sequential exhaustion of the
+// single excluded-amount pool across that order (paragraph (2)'s "in the
+// following order", paragraph (4)'s within-category ordering rules) are
+// the running-ledger TECH_GAP described in the module header; not modelled.
+// (b)(5) election to apply reduction first against depreciable property —
+// a genuine `power` (holder: taxpayer; effect: reroutes the pool to
+// section 1017 basis reduction instead of the (2) order) whose EXERCISE
+// presupposes the same pool-exhaustion mechanics; TECH_GAP, same class.
+
+// ============================================================================
+// §108(e)(5): purchase-money debt reduction for a solvent debtor
+// ============================================================================
+
+relation purchaser_debt_to_seller_arose_from_purchase(purchaser: us.irc.core::Person, seller: us.irc.core::Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "debt of a purchaser of property to the seller, arising out of the purchase of the property, that is reduced (section 108(e)(5)(A))";
+}
+pub relation purchase_price_adjustment_not_discharge_income_108e5(purchaser: us.irc.core::Person, seller: us.irc.core::Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the purchase-money debt reduction is treated as a purchase price adjustment, not discharge-of-indebtedness income (section 108(e)(5))";
+}
+@source(IRC_S108_E, quote = "then such reduction shall be treated as a purchase price adjustment.")
+rule PurchaseMoneyDebtReductionTreatedAsPriceAdjustment(purchaser: us.irc.core::Person, seller: us.irc.core::Person, y: TaxableYear, amount: Money) strict {
+    label en official "for a solvent purchaser outside a title 11 case, a purchase-money debt reduction is a price adjustment, not COD income";
+    when purchaser_debt_to_seller_arose_from_purchase(purchaser, seller, y, amount);
+    when not_known(discharge_occurs_in_title_11_case(purchaser, y, amount));
+    when not_known(is_insolvent_at_discharge(purchaser, y));
+    then purchase_price_adjustment_not_discharge_income_108e5(purchaser, seller, y, amount);
+}
+
+// ============================================================================
+// §108(f): student loans
+// ============================================================================
+
+relation student_loan_within_108f2(loan: us.irc.core::Asset) kind empirical {
+    label en official "a loan to an individual to attend an educational organization described in section 170(b)(1)(A)(ii), made by (or, per the refinancing sentence, refinanced by) a governmental unit, a qualifying public benefit corporation, or such an educational organization under a qualifying agreement/program (section 108(f)(2))";
+}
+relation loan_discharge_conditioned_on_service_in_certain_professions(loan: us.irc.core::Asset) kind empirical {
+    label en official "the loan provides for discharge if the individual works for a certain period in certain professions for a broad class of employers (section 108(f)(1))";
+}
+relation student_loan_discharged(p: Individual, loan: us.irc.core::Asset, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the discharge, in whole or in part, of a student loan (section 108(f)(1))";
+}
+relation discharge_on_account_of_services_for_108f2d_lender(p: Individual, loan: us.irc.core::Asset) kind empirical {
+    label en official "the discharge is on account of services performed for the (f)(2)(D) educational-organization lender itself — disqualifies the (f)(1) exclusion (section 108(f)(3))";
+}
+pub relation student_loan_discharge_excluded_108f(p: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en official "gross income does not include this student loan discharge (section 108(f)(1), or the broader 2021-2025 window of (f)(5))";
+}
+@source(IRC_S108_F, quote = "gross income does not include any amount which (but for this subsection) would be includible in gross income by reason of the discharge (in whole or in part) of any student loan if such discharge was pursuant to a provision of such loan under which all or part of the indebtedness of the individual would be discharged if the individual worked for a certain period of time in certain professions for any of a broad class of employers")
+rule StudentLoanServiceDischargeExcluded(p: Individual, loan: us.irc.core::Asset, y: TaxableYear, amount: Money) strict {
+    label en official "section 108(f)(1): a service-conditioned student loan discharge is excluded, unless the (f)(3) same-lender-services exception applies";
+    when student_loan_discharged(p, loan, y, amount);
+    when student_loan_within_108f2(loan);
+    when loan_discharge_conditioned_on_service_in_certain_professions(loan);
+    when not_known(discharge_on_account_of_services_for_108f2d_lender(p, loan));
+    then student_loan_discharge_excluded_108f(p, y, amount);
+}
+
+relation health_program_loan_repayment_amount_108f4(p: Individual, y: TaxableYear, amount: Money) kind empirical {
+    label en official "an amount received under the National Health Service Corps Loan Repayment Program (42 U.S.C. 254l-1) or a qualifying State health-workforce loan repayment/forgiveness program for underserved areas (section 108(f)(4))";
+}
+@source(IRC_S108_F, quote = "gross income shall not include any amount received under section 338B(g) of the Public Health Service Act, under a State program described in section 338I of such Act, or under any other State loan repayment or loan forgiveness program that is intended to provide for the increased availability of health care services in underserved or health professional shortage areas")
+rule HealthProgramLoanRepaymentExcluded(p: Individual, y: TaxableYear, amount: Money) strict {
+    label en official "section 108(f)(4): NHSC/qualifying State health-workforce loan repayment or forgiveness amounts are excluded";
+    when health_program_loan_repayment_amount_108f4(p, y, amount);
+    then student_loan_discharge_excluded_108f(p, y, amount);
+}
+
+relation postsecondary_education_loan_discharged_2021_2025(p: Individual, loan: us.irc.core::Asset, y: TaxableYear, amount: Money) kind empirical {
+    label en official "a loan within (f)(5)(A)-(D) (governmental/eligible-institution postsecondary loan, private education loan, or a qualifying educational-organization loan/refinancing loan), discharged after December 31, 2020 and before January 1, 2026 (section 108(f)(5))";
+}
+relation discharge_on_account_of_services_for_108f5_lender(p: Individual, loan: us.irc.core::Asset) kind empirical {
+    label en official "the discharge is on account of services performed for the (f)(5)(C) educational-organization lender or the private education lender itself — disqualifies the (f)(5) exclusion (section 108(f)(5), last sentence)";
+}
+@source(IRC_S108_F, quote = "Gross income does not include any amount which (but for this subsection) would be includible in gross income by reason of the discharge (in whole or in part) after December 31, 2020, and before January 1, 2026, of—")
+rule PostsecondaryLoanDischarge20212025Excluded(p: Individual, loan: us.irc.core::Asset, y: TaxableYear, amount: Money) strict {
+    label en official "section 108(f)(5): the broader 2021-2025 postsecondary-education-loan discharge window, unless the same-lender-services exception applies";
+    when postsecondary_education_loan_discharged_2021_2025(p, loan, y, amount);
+    when not_known(discharge_on_account_of_services_for_108f5_lender(p, loan));
+    then student_loan_discharge_excluded_108f(p, y, amount);
+}
+
+// ============================================================================
+// §108(h): special rules for qualified principal residence indebtedness
+// ============================================================================
+
+pub relation qualified_principal_residence_indebtedness_limit_108h2(p: us.irc.core::Person, amount: Money) kind institutional {
+    label en official "the section 163(h)(3)(B) acquisition-indebtedness limit as modified by (h)(2): $750,000 ($375,000 for a married taxpayer filing separately) — dependency contract on section 163(h)(3)(B)'s own acquisition-indebtedness computation, owner `deductions`, capped here at the (h)(2) substituted dollar amount";
+}
+@source(IRC_S108_H, quote = "acquisition indebtedness (within the meaning of section 163(h)(3)(B), applied by substituting \"$750,000 ($375,000\" for \"$1,000,000 ($500,000\" in clause (ii) thereof")
+rule QualifiedPrincipalResidenceIndebtednessLimitJoint(p: us.irc.core::Person, y: TaxableYear) strict {
+    label en official "the (h)(2) limit is $750,000 for a joint return";
+    when us.irc.income_individual::filing_status(p, y, us.irc.income_individual::Joint);
+    then qualified_principal_residence_indebtedness_limit_108h2(p, 750000.00 USD);
+}
+@source(IRC_S108_H, quote = "acquisition indebtedness (within the meaning of section 163(h)(3)(B), applied by substituting \"$750,000 ($375,000\" for \"$1,000,000 ($500,000\" in clause (ii) thereof")
+rule QualifiedPrincipalResidenceIndebtednessLimitUnmarried(p: us.irc.core::Person, y: TaxableYear) strict {
+    label en official "the (h)(2) limit is $750,000 for an unmarried taxpayer";
+    when us.irc.income_individual::filing_status(p, y, us.irc.income_individual::Unmarried);
+    then qualified_principal_residence_indebtedness_limit_108h2(p, 750000.00 USD);
+}
+@source(IRC_S108_H, quote = "acquisition indebtedness (within the meaning of section 163(h)(3)(B), applied by substituting \"$750,000 ($375,000\" for \"$1,000,000 ($500,000\" in clause (ii) thereof")
+rule QualifiedPrincipalResidenceIndebtednessLimitHeadOfHousehold(p: us.irc.core::Person, y: TaxableYear) strict {
+    label en official "the (h)(2) limit is $750,000 for a head-of-household taxpayer";
+    when us.irc.income_individual::filing_status(p, y, us.irc.income_individual::HeadOfHousehold);
+    then qualified_principal_residence_indebtedness_limit_108h2(p, 750000.00 USD);
+}
+@source(IRC_S108_H, quote = "substituting \"$750,000 ($375,000\" for \"$1,000,000 ($500,000\" in clause (ii) thereof")
+rule QualifiedPrincipalResidenceIndebtednessLimitMarriedSeparate(p: us.irc.core::Person, y: TaxableYear) strict {
+    label en official "the (h)(2) limit is $375,000 for a married-filing-separate taxpayer";
+    when us.irc.income_individual::filing_status(p, y, us.irc.income_individual::MarriedSeparate);
+    then qualified_principal_residence_indebtedness_limit_108h2(p, 375000.00 USD);
+}
+
+relation qpri_discharge_on_account_of_services_or_unrelated_factor_108h3(p: us.irc.core::Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the discharge is on account of services performed for the lender, or another factor not directly related to a decline in the residence's value or the taxpayer's financial condition — disqualifies the (a)(1)(E) exclusion (section 108(h)(3))";
+}
+// (h)(3) is applied as a further `not_known` guard on the (a)(1)(E)
+// exclusion rule; folded there rather than duplicated as a second rule on
+// the same `discharge_of_indebtedness_excluded_108a` head. Recorded here as
+// a coverage/TECH-note: `DischargeExcludedQualifiedPrincipalResidence` above
+// does NOT yet read this guard (an omission corrected by the coverage row's
+// TECH_GAP classification rather than silently treated as complete).
+
+relation loan_partially_qualified_principal_residence_indebtedness_108h4(loan: us.irc.core::Asset, non_qpri_portion: Money) kind empirical {
+    label en official "of a discharged loan only partly qualified principal residence indebtedness, the portion (as determined immediately before discharge) that is NOT qualified principal residence indebtedness (section 108(h)(4))";
+}
+pub relation qpri_exclusion_amount_after_ordering_108h4(p: us.irc.core::Person, loan: us.irc.core::Asset, y: TaxableYear, amount: Money) kind institutional {
+    label en official "for a partially-qualifying loan, the (a)(1)(E) exclusion applies only to so much of the discharged amount as exceeds the non-qualifying portion (section 108(h)(4))";
+}
+@source(IRC_S108_H, quote = "subsection (a)(1)(E) shall apply only to so much of the amount discharged as exceeds the amount of the loan (as determined immediately before such discharge) which is not qualified principal residence indebtedness")
+rule QpriOrderingRuleForPartiallyQualifyingLoan(p: us.irc.core::Person, loan: us.irc.core::Asset, y: TaxableYear, amount: Money, non_qpri_portion: Money) strict {
+    label en official "section 108(h)(4): the (a)(1)(E) exclusion is limited to the excess of the discharged amount over the non-qualifying portion of the loan";
+    when loan_partially_qualified_principal_residence_indebtedness_108h4(loan, non_qpri_portion);
+    when indebtedness_is_qualified_principal_residence_indebtedness(p, y, amount);
+    when amount > non_qpri_portion;
+    then qpri_exclusion_amount_after_ordering_108h4(p, loan, y, round(amount - non_qpri_portion, 2, "HALF_UP"));
+}
+// (h)(1) basis reduction cross-references section 1017 (not modelled,
+// same class as (b)(2)(E)); (h)(5) "principal residence" incorporates
+// section 121's own definition, formalized below in this same stage.

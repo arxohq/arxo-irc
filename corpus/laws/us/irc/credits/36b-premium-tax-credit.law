@@ -1,0 +1,398 @@
+// Section 36B — Refundable credit for coverage under a qualified health
+// plan ("premium tax credit"). Stage 2 (IRC-06 stage 2, DECISION-0379).
+// Priority list item: §36B core.
+//
+// Judgment calls:
+// * §36B(c)(1)(A)'s "100 to 400 percent of the poverty line" test needs the
+//   poverty line for a family of the taxpayer's size — an HHS-published
+//   figure. `poverty_line_amount` is an EXTERNAL_DEPENDENCY dependency
+//   contract (HHS poverty guidelines), never invented; `household_income`
+//   is likewise a case-asserted amount this pass does not re-derive from
+//   `us.irc.gross_income::adjusted_gross_income` end to end (TECH_GAP: the
+//   section 36B(d)(2) modified-AGI aggregation across the family, including
+//   section 911/86(d)/tax-exempt-interest add-backs, is not wired).
+// * §36B(c)(1)(E) (the ARPA/PL 119-21 temporary removal of the 400-percent
+//   ceiling for taxable years beginning after 12/31/2020 and before
+//   1/1/2026) is modelled via an `effective`-windowed edition of
+//   `applicable_taxpayer`, matching this package's own §24 three-edition
+//   idiom from stage 1.
+// * §36B(b)(3)(A)'s applicable-percentage table (IRC_S36B_TABLE_2, the
+//   temporary 2021-2025 percentages named by the priority list) is
+//   computed by direct linear-interpolation rules keyed to the same six
+//   income tiers, each anchored to the table fragment with its own
+//   `@source` quote, rather than a `.lawtable.json` lookup — the statute's
+//   own "sliding scale in a linear manner" instruction needs the tier's
+//   lower/upper bounds as well as its initial/final percentages, which a
+//   flat lookup table (single input, single output) cannot express without
+//   a second table for the bounds; the direct rules keep both in one
+//   place.
+//   The GENERAL (b)(3)(A)(i) table (IRC_S36B_TABLE_1) and its (ii) indexing
+//   mechanism (premium-growth/income-growth/CPI adjustment, gated by a
+//   0.504-percent-of-GDP failsafe) are SOURCE_GAP: no post-2025 taxable
+//   year resolves under the pinned 2024-Edition text, matching this
+//   package's own §24/§32 SOURCE_GAP precedent from stage 1.
+// * §36B(b)(2)(A) ("enrollment premiums") and (b)(2)(B)(i) ("adjusted
+//   monthly premium for the applicable second lowest cost silver plan",
+//   i.e. the "benchmark" premium) are case-asserted per coverage month —
+//   the (b)(3)(B) benchmark-plan-selection rule and (b)(3)(C) age-rating
+//   recomputation are EXTERNAL_DEPENDENCY on the Exchange's own published
+//   rates, never invented.
+// * §36B(c)(2) ("coverage month") is modelled as ONE relation with its
+//   (2)(A) affirmative test and (2)(B)/(C) minimum-essential-coverage
+//   exclusion as a defeater (`unless`), mirroring this package's own
+//   §21(e)(1) idiom; the (c)(4) small-employer-HRA coordination is
+//   TECH_GAP, not modelled.
+// * §36B(f) (reconciliation with advance payments, including the
+//   (f)(2)(B) repayment-limitation table) is modelled: the excess-advance-
+//   payment increase in tax and its statutory cap (IRC_S36B_TABLE_3,
+//   un-indexed 2010-Act dollar amounts — the (f)(2)(B)(ii) indexing is
+//   SOURCE_GAP, same class as the applicable-percentage table above).
+//   §36B(e) (individuals not lawfully present), (g) (2021 unemployment
+//   special rule) are NOT modelled — TECH_GAP.
+
+// --- §36B(c)(1): applicable taxpayer -------------------------------------------------
+
+use self::{
+    IRC_S36B_A,
+    IRC_S36B_B,
+    IRC_S36B_C,
+    IRC_S36B_D,
+    IRC_S36B_F,
+    IRC_S36B_TABLE_2,
+    IRC_S36B_TABLE_3,
+    Person,
+    TaxableYear,
+};
+
+pub relation poverty_line_amount(family_size: Decimal, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the poverty line for a family of the given size, as most recently published as of the first day of the regular enrollment period for the calendar year (section 36B(c)(3), section 2110(c)(5) of the Social Security Act) — EXTERNAL_DEPENDENCY, HHS poverty guidelines";
+}
+// SSA readers (IRC-G/G6, 2026-09-27): section 36B(d) rows citing the Social
+// Security Act and section 86(d). Pattern G4/CFR: the external content
+// enters as case-selected facts; the from-package leg — reading pubs of
+// `us.ssa.title42_values` (govinfo bytes pinned in
+// corpus/laws/us/ssa-title42-values/sources/) — waits for registry +
+// lock --write + flip (step 6, owner gate). Honest boundary: the 2110(c)(5)
+// leg (d)(3)(A) reads the pinned 42 USC 1397jj text; the 86(d) leg
+// (d)(2)(B)(iii) is Title-26-internal (§86(d) lives in the gross-income
+// package, already in corpus) and enters as a case fact here.
+pub relation hhs_poverty_guideline_published_36bd3a(family_size: Decimal, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the HHS poverty guideline for a family of the given size (section 2110(c)(5) content), case-asserted from the pinned 42 USC 1397jj text";
+}
+@source(IRC_S36B_D, relation = formalizes, coverage = partial, quote = "The term \"poverty line\" has the meaning given that term in section 2110(c)(5) of the Social Security Act (42 U.S.C. 1397jj(c)(5)).")
+rule S36BD3APovertyLineFromHhsGuideline(family_size: Decimal, y: TaxableYear, amount: Money) strict {
+    label en official "section 36B(d)(3)(A): the asserted HHS guideline amount is the poverty line";
+    when hhs_poverty_guideline_published_36bd3a(family_size, y, amount);
+    then poverty_line_amount(family_size, y, amount);
+}
+pub relation ss_benefits_excluded_portion_asserted_86d_36bd2b(taxpayer: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the portion of the taxpayer's section 86(d) social security benefits not included in gross income under section 86 for the year, case-asserted (Title-26-internal content)";
+}
+pub relation ss_benefits_excluded_from_gross_income_86d_36bd2b(taxpayer: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 36B(d)(2)(B)(iii): the social-security-benefits portion excluded from gross income";
+}
+@source(IRC_S36B_D, relation = formalizes, coverage = partial, quote = "(iii) an amount equal to the portion of the taxpayer's social security benefits (as defined in section 86(d)) which is not included in gross income under section 86 for the taxable year.")
+rule S36BD2BSsBenefitsExcludedPortion(taxpayer: Person, y: TaxableYear, amount: Money) strict {
+    label en official "section 36B(d)(2)(B)(iii): the asserted excluded portion derives";
+    when ss_benefits_excluded_portion_asserted_86d_36bd2b(taxpayer, y, amount);
+    then ss_benefits_excluded_from_gross_income_86d_36bd2b(taxpayer, y, amount);
+}
+pub relation household_income(taxpayer: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "household income for section 36B(d)(2): modified adjusted gross income of the taxpayer plus the aggregate modified adjusted gross incomes of other family members required to file — case-asserted (TECH_GAP on deriving it from gross_income/section 911/86(d) end to end)";
+}
+pub relation family_size_36b(taxpayer: Person, y: TaxableYear, size: Decimal) kind institutional {
+    label en official "the number of individuals for whom the taxpayer is allowed a section 151 deduction for the taxable year (section 36B(d)(1))";
+}
+pub relation household_income_pct_of_poverty_line(taxpayer: Person, y: TaxableYear, pct: Decimal) kind institutional {
+    label en official "household income expressed as a percentage of the poverty line for a family of the taxpayer's size";
+}
+rule HouseholdIncomePctOfPovertyLine strict {
+    for taxpayer: Person;
+    for y: TaxableYear;
+    for income: Money;
+    for size: Decimal;
+    for line: Money;
+    when household_income(taxpayer, y, income);
+    when family_size_36b(taxpayer, y, size);
+    when poverty_line_amount(size, y, line);
+    then household_income_pct_of_poverty_line(taxpayer, y, round(income / line, 4, "HALF_UP"));
+}
+
+relation married_filing_jointly_36b(taxpayer: Person, y: TaxableYear) kind empirical;
+relation dependent_of_another_taxpayer_36b(taxpayer: Person, y: TaxableYear) kind empirical {
+    label en official "a section 151 deduction with respect to this individual is allowable to another taxpayer for a taxable year beginning in the same calendar year (section 36B(c)(1)(D)) — bars the credit entirely";
+}
+relation temporary_400_pct_ceiling_removed_36b(y: TaxableYear) kind empirical {
+    label en official "the taxable year begins after December 31, 2020 and before January 1, 2026 (section 36B(c)(1)(E)) — case-asserted edition flag, mirroring the temporal-window idiom this package's own §24/§32 modules use rather than reading context.legal_time directly";
+}
+
+pub relation applicable_taxpayer(taxpayer: Person, y: TaxableYear) kind institutional {
+    label en official "an applicable taxpayer under section 36B(c)(1): household income between 100 and 400 percent of the poverty line (or, for 2021-2025, at least 100 percent with no ceiling), married taxpayers filing jointly, and not itself claimed as another taxpayer's dependent";
+}
+@source(IRC_S36B_C, quote = "The term \"applicable taxpayer\" means, with respect to any taxable year, a taxpayer whose household income for the taxable year equals or exceeds 100 percent but does not exceed 400 percent of an amount equal to the poverty line for a family of the size involved.")
+rule ApplicableTaxpayerGeneral strict {
+    for taxpayer: Person;
+    for y: TaxableYear;
+    for pct: Decimal;
+    when not_known(temporary_400_pct_ceiling_removed_36b(y));
+    when household_income_pct_of_poverty_line(taxpayer, y, pct);
+    when pct >= 1.00;
+    when pct <= 4.00;
+    when not dependent_of_another_taxpayer_36b(taxpayer, y);
+    when not_known(married_filing_jointly_36b(taxpayer, y));
+    then applicable_taxpayer(taxpayer, y);
+}
+@source(IRC_S36B_C, quote = "In the case of a taxable year beginning after December 31, 2020, and before January 1, 2026, subparagraph (A) shall be applied without regard to \"but does not exceed 400 percent\".")
+rule ApplicableTaxpayerArpaNoCeiling strict {
+    for taxpayer: Person;
+    for y: TaxableYear;
+    for pct: Decimal;
+    when temporary_400_pct_ceiling_removed_36b(y);
+    when household_income_pct_of_poverty_line(taxpayer, y, pct);
+    when pct >= 1.00;
+    when not dependent_of_another_taxpayer_36b(taxpayer, y);
+    when not_known(married_filing_jointly_36b(taxpayer, y));
+    then applicable_taxpayer(taxpayer, y);
+}
+@source(IRC_S36B_C, quote = "If the taxpayer is married (within the meaning of section 7703) at the close of the taxable year, the taxpayer shall be treated as an applicable taxpayer only if the taxpayer and the taxpayer's spouse file a joint return for the taxable year.")
+rule ApplicableTaxpayerMarriedJoint strict {
+    for taxpayer: Person;
+    for y: TaxableYear;
+    for pct: Decimal;
+    when married_filing_jointly_36b(taxpayer, y);
+    when household_income_pct_of_poverty_line(taxpayer, y, pct);
+    when pct >= 1.00;
+    when not_known(temporary_400_pct_ceiling_removed_36b(y));
+    when pct <= 4.00;
+    when not dependent_of_another_taxpayer_36b(taxpayer, y);
+    then applicable_taxpayer(taxpayer, y);
+}
+
+// --- §36B(b)(3)(A): applicable percentage (2021-2025 temporary table) -------------
+
+pub relation applicable_percentage_36b(taxpayer: Person, y: TaxableYear, pct: Decimal) kind institutional {
+    label en official "the applicable percentage (section 36B(b)(3)(A)), 2021-2025 temporary table, linearly interpolated within the taxpayer's income tier";
+}
+@source(IRC_S36B_TABLE_2, quote = "Up to 150.0 percent / 0.0 / 0.0")
+rule ApplicablePercentageUpTo150 strict {
+    for taxpayer: Person;
+    for y: TaxableYear;
+    for pct: Decimal;
+    when temporary_400_pct_ceiling_removed_36b(y);
+    when household_income_pct_of_poverty_line(taxpayer, y, pct);
+    when pct < 1.50;
+    then applicable_percentage_36b(taxpayer, y, 0.00);
+}
+@source(IRC_S36B_TABLE_2, quote = "150.0 percent up to 200.0 percent / 0.0 / 2.0")
+rule ApplicablePercentage150To200 strict {
+    for taxpayer: Person;
+    for y: TaxableYear;
+    for pct: Decimal;
+    when temporary_400_pct_ceiling_removed_36b(y);
+    when household_income_pct_of_poverty_line(taxpayer, y, pct);
+    when pct >= 1.50;
+    when pct < 2.00;
+    then applicable_percentage_36b(taxpayer, y, round(0.00 + (0.02 - 0.00) * (pct - 1.50) / (2.00 - 1.50), 4, "HALF_UP"));
+}
+@source(IRC_S36B_TABLE_2, quote = "200.0 percent up to 250.0 percent / 2.0 / 4.0")
+rule ApplicablePercentage200To250 strict {
+    for taxpayer: Person;
+    for y: TaxableYear;
+    for pct: Decimal;
+    when temporary_400_pct_ceiling_removed_36b(y);
+    when household_income_pct_of_poverty_line(taxpayer, y, pct);
+    when pct >= 2.00;
+    when pct < 2.50;
+    then applicable_percentage_36b(taxpayer, y, round(0.02 + (0.04 - 0.02) * (pct - 2.00) / (2.50 - 2.00), 4, "HALF_UP"));
+}
+@source(IRC_S36B_TABLE_2, quote = "250.0 percent up to 300.0 percent / 4.0 / 6.0")
+rule ApplicablePercentage250To300 strict {
+    for taxpayer: Person;
+    for y: TaxableYear;
+    for pct: Decimal;
+    when temporary_400_pct_ceiling_removed_36b(y);
+    when household_income_pct_of_poverty_line(taxpayer, y, pct);
+    when pct >= 2.50;
+    when pct < 3.00;
+    then applicable_percentage_36b(taxpayer, y, round(0.04 + (0.06 - 0.04) * (pct - 2.50) / (3.00 - 2.50), 4, "HALF_UP"));
+}
+@source(IRC_S36B_TABLE_2, quote = "300.0 percent up to 400.0 percent / 6.0 / 8.5")
+rule ApplicablePercentage300To400 strict {
+    for taxpayer: Person;
+    for y: TaxableYear;
+    for pct: Decimal;
+    when temporary_400_pct_ceiling_removed_36b(y);
+    when household_income_pct_of_poverty_line(taxpayer, y, pct);
+    when pct >= 3.00;
+    when pct < 4.00;
+    then applicable_percentage_36b(taxpayer, y, round(0.06 + (0.085 - 0.06) * (pct - 3.00) / (4.00 - 3.00), 4, "HALF_UP"));
+}
+@source(IRC_S36B_TABLE_2, quote = "400.0 percent and higher / 8.5 / 8.5")
+rule ApplicablePercentage400AndHigher strict {
+    for taxpayer: Person;
+    for y: TaxableYear;
+    for pct: Decimal;
+    when temporary_400_pct_ceiling_removed_36b(y);
+    when household_income_pct_of_poverty_line(taxpayer, y, pct);
+    when pct >= 4.00;
+    then applicable_percentage_36b(taxpayer, y, 0.085);
+}
+
+// --- §36B(c)(2): coverage month -------------------------------------------------------
+
+pub relation enrolled_in_exchange_qualified_health_plan(taxpayer: Person, y: TaxableYear, month: Date) kind empirical {
+    label en official "as of the first day of the month, the taxpayer, spouse, or dependent is covered by a qualified health plan enrolled in through an Exchange, and the premium is paid (section 36B(c)(2)(A))";
+}
+relation eligible_for_other_minimum_essential_coverage(taxpayer: Person, month: Date) kind empirical {
+    label en official "eligible for minimum essential coverage other than individual-market coverage under section 5000A(f)(1)(C) (section 36B(c)(2)(B))";
+}
+pub relation coverage_month_36b(taxpayer: Person, y: TaxableYear, month: Date) kind institutional {
+    label en official "a coverage month under section 36B(c)(2)";
+}
+@source(IRC_S36B_C, quote = "The term \"coverage month\" means, with respect to an applicable taxpayer, any month if—\n(i) as of the first day of such month the taxpayer, the taxpayer's spouse, or any dependent of the taxpayer is covered by a qualified health plan described in subsection (b)(2)(A) that was enrolled in through an Exchange established by the State under section 1311 of the Patient Protection and Affordable Care Act, and\n(ii) the premium for coverage under such plan for such month is paid by the taxpayer (or through advance payment of the credit under subsection (a) under section 1412 of the Patient Protection and Affordable Care Act).")
+rule CoverageMonth strict {
+    for taxpayer: Person;
+    for y: TaxableYear;
+    for month: Date;
+    when applicable_taxpayer(taxpayer, y);
+    when enrolled_in_exchange_qualified_health_plan(taxpayer, y, month);
+    when not eligible_for_other_minimum_essential_coverage(taxpayer, month);
+    then coverage_month_36b(taxpayer, y, month);
+}
+
+// --- §36B(b): premium assistance amount / credit amount -----------------------------
+
+pub relation monthly_enrollment_premium(taxpayer: Person, month: Date, amount: Money) kind empirical {
+    label en official "the monthly premiums for the qualified health plan(s) covering the taxpayer/spouse/dependents for the coverage month (section 36B(b)(2)(A))";
+}
+pub relation adjusted_monthly_benchmark_premium(taxpayer: Person, month: Date, amount: Money) kind empirical {
+    label en official "the adjusted monthly premium for the applicable second lowest cost silver plan for the coverage month (section 36B(b)(2)(B)(i)/(3)(B)-(C)) — EXTERNAL_DEPENDENCY, Exchange-published rate";
+}
+
+pub relation premium_assistance_amount(taxpayer: Person, y: TaxableYear, month: Date, amount: Money) kind institutional {
+    label en official "the premium assistance amount for a coverage month (section 36B(b)(2)): the lesser of the enrollment premium or the excess of the benchmark premium over 1/12 of applicable percentage times household income";
+}
+@source(IRC_S36B_B, quote = "The premium assistance amount determined under this subsection with respect to any coverage month is the amount equal to the lesser of—\n(A) the monthly premiums for such month for 1 or more qualified health plans offered in the individual market within a State which cover the taxpayer, the taxpayer's spouse, or any dependent (as defined in section 152) of the taxpayer and which were enrolled in through an Exchange established by the State under 1311 [1] of the Patient Protection and Affordable Care Act, or\n(B) the excess (if any) of—\n(i) the adjusted monthly premium for such month for the applicable second lowest cost silver plan with respect to the taxpayer, over\n(ii) an amount equal to 1/12 of the product of the applicable percentage and the taxpayer's household income for the taxable year.")
+rule PremiumAssistanceAmount strict {
+    for taxpayer: Person;
+    for y: TaxableYear;
+    for month: Date;
+    for enrollment: Money;
+    for benchmark: Money;
+    for pct: Decimal;
+    for income: Money;
+    when coverage_month_36b(taxpayer, y, month);
+    when monthly_enrollment_premium(taxpayer, month, enrollment);
+    when adjusted_monthly_benchmark_premium(taxpayer, month, benchmark);
+    when applicable_percentage_36b(taxpayer, y, pct);
+    when household_income(taxpayer, y, income);
+    then premium_assistance_amount(taxpayer, y, month,
+        min(enrollment, max(0 USD, benchmark - round((pct * income) / 12.0, 2, "HALF_UP"))));
+}
+
+pub relation premium_assistance_credit_amount(taxpayer: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the premium assistance credit amount (section 36B(b)(1)): the sum of the premium assistance amounts for all coverage months during the taxable year";
+}
+@source(IRC_S36B_B, quote = "The term \"premium assistance credit amount\" means, with respect to any taxable year, the sum of the premium assistance amounts determined under paragraph (2) with respect to all coverage months of the taxpayer occurring during the taxable year.")
+rule PremiumAssistanceCreditAmount defeasible {
+    for taxpayer: Person;
+    for y: TaxableYear;
+    for one_month: Date;
+    for one_amount: Money;
+    when premium_assistance_amount(taxpayer, y, one_month, one_amount);
+    then premium_assistance_credit_amount(taxpayer, y,
+        sum all amount: Money for month: Date where premium_assistance_amount(taxpayer, y, month, amount));
+}
+
+pub relation premium_tax_credit(taxpayer: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the section 36B premium tax credit for the taxable year: the premium assistance credit amount, for an applicable taxpayer";
+}
+@source(IRC_S36B_A, quote = "In the case of an applicable taxpayer, there shall be allowed as a credit against the tax imposed by this subtitle for any taxable year an amount equal to the premium assistance credit amount of the taxpayer for the taxable year.")
+rule PremiumTaxCredit defeasible {
+    for taxpayer: Person;
+    for y: TaxableYear;
+    for amount: Money;
+    when applicable_taxpayer(taxpayer, y);
+    when premium_assistance_credit_amount(taxpayer, y, amount);
+    then premium_tax_credit(taxpayer, y, amount);
+}
+
+// --- §36B(f): reconciliation of credit and advance payment --------------------------
+
+pub relation advance_payment_amount_36b(taxpayer: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the aggregate advance payments of the credit under section 1412 of the Patient Protection and Affordable Care Act for the taxable year (section 36B(f)(1))";
+}
+pub relation excess_advance_payment_increase_36b(taxpayer: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the section 36B(f)(2) increase in tax on account of excess advance payments, capped by the section 36B(f)(2)(B) table for a taxpayer under 400 percent of the poverty line (un-indexed 2010-Act dollar amounts; the (f)(2)(B)(ii) indexing is SOURCE_GAP)";
+}
+@source(IRC_S36B_TABLE_3, quote = "Less than 200% / $600")
+rule ExcessAdvancePaymentIncreaseCappedUnder200 defeasible {
+    for taxpayer: Person;
+    for y: TaxableYear;
+    for advance: Money;
+    for credit: Money;
+    for pct: Decimal;
+    when advance_payment_amount_36b(taxpayer, y, advance);
+    when premium_assistance_credit_amount(taxpayer, y, credit);
+    when advance > credit;
+    when household_income_pct_of_poverty_line(taxpayer, y, pct);
+    when pct < 2.00;
+    then excess_advance_payment_increase_36b(taxpayer, y, min(advance - credit, 600.00 USD));
+}
+@source(IRC_S36B_TABLE_3, quote = "At least 200% but less than 300% / $1,500")
+rule ExcessAdvancePaymentIncreaseCapped200To300 defeasible {
+    for taxpayer: Person;
+    for y: TaxableYear;
+    for advance: Money;
+    for credit: Money;
+    for pct: Decimal;
+    when advance_payment_amount_36b(taxpayer, y, advance);
+    when premium_assistance_credit_amount(taxpayer, y, credit);
+    when advance > credit;
+    when household_income_pct_of_poverty_line(taxpayer, y, pct);
+    when pct >= 2.00;
+    when pct < 3.00;
+    then excess_advance_payment_increase_36b(taxpayer, y, min(advance - credit, 1500.00 USD));
+}
+@source(IRC_S36B_TABLE_3, quote = "At least 300% but less than 400% / $2,500")
+rule ExcessAdvancePaymentIncreaseCapped300To400 defeasible {
+    for taxpayer: Person;
+    for y: TaxableYear;
+    for advance: Money;
+    for credit: Money;
+    for pct: Decimal;
+    when advance_payment_amount_36b(taxpayer, y, advance);
+    when premium_assistance_credit_amount(taxpayer, y, credit);
+    when advance > credit;
+    when household_income_pct_of_poverty_line(taxpayer, y, pct);
+    when pct >= 3.00;
+    when pct < 4.00;
+    then excess_advance_payment_increase_36b(taxpayer, y, min(advance - credit, 2500.00 USD));
+}
+@source(IRC_S36B_F, quote = "If the advance payments to a taxpayer under section 1412 of the Patient Protection and Affordable Care Act for a taxable year exceed the credit allowed by this section (determined without regard to paragraph (1)), the tax imposed by this chapter for the taxable year shall be increased by the amount of such excess.")
+rule ExcessAdvancePaymentIncreaseUncapped defeasible {
+    for taxpayer: Person;
+    for y: TaxableYear;
+    for advance: Money;
+    for credit: Money;
+    for pct: Decimal;
+    when advance_payment_amount_36b(taxpayer, y, advance);
+    when premium_assistance_credit_amount(taxpayer, y, credit);
+    when advance > credit;
+    when household_income_pct_of_poverty_line(taxpayer, y, pct);
+    when pct >= 4.00;
+    then excess_advance_payment_increase_36b(taxpayer, y, advance - credit);
+}
+
+pub relation premium_tax_credit_net_of_advance(taxpayer: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the section 36B(f)(1) credit reduced (not below zero) by advance payments";
+}
+rule PremiumTaxCreditNetOfAdvance defeasible {
+    for taxpayer: Person;
+    for y: TaxableYear;
+    for credit: Money;
+    for advance: Money;
+    when premium_tax_credit(taxpayer, y, credit);
+    when advance_payment_amount_36b(taxpayer, y, advance);
+    then premium_tax_credit_net_of_advance(taxpayer, y, max(0 USD, credit - advance));
+}

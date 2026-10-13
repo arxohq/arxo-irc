@@ -1,0 +1,408 @@
+// Stage 2: chapter 32 subchapter C (vaccines: sections 4131 and 4132) and
+// subchapter D (recreational equipment: sections 4161 and 4162). Section 4182
+// (firearms exemptions) is in 12-leases-firearms-and-tax-free-sales.law.
+//
+// Vaccines. The tax is 75 cents per dose per covered vaccine component:
+// section 4131(b)(2) sums the amounts for each subparagraph of section
+// 4132(a)(1) that describes the vaccine, and section 4132(c)(3) taxes a
+// fraction of a dose by the same fraction. The case therefore asserts, per
+// vaccine component, the number of doses (a fraction allowed); the rules sum
+// them. The aggregate ranges over an EMPIRICAL relation (no §111 problem).
+
+// =====================================================================
+// Sections 4131 and 4132 — taxable vaccines
+// =====================================================================
+
+use self::{
+    ExciseEvent,
+    IRC_S4131_A,
+    IRC_S4131_B,
+    IRC_S4132_A,
+    IRC_S4132_B,
+    IRC_S4132_C,
+    IRC_S4161_A,
+    IRC_S4161_B,
+    IRC_S4162_A,
+    IRC_S4162_B,
+    IRC_S4221_A,
+    Person,
+    TaxFreeSaleUse,
+    excise_tax_due,
+    liable_for_excise,
+    s4221_carveout_applies,
+    sold_for_tax_free_use,
+    tax_free_sale,
+};
+
+pub enum VaccineComponent {
+    DiphtheriaToxoid;
+    TetanusToxoid;
+    PertussisBacteriaOrAntigens;
+    MeaslesVaccine;
+    MumpsVaccine;
+    RubellaVaccine;
+    PolioVirus;
+    HibVaccine;
+    HepatitisAVaccine;
+    HepatitisBVaccine;
+    ChickenPoxVaccine;
+    RotavirusGastroenteritisVaccine;
+    PneumococcalConjugateVaccine;
+    SeasonalInfluenzaVaccine;
+    MeningococcalVaccine;
+    HumanPapillomavirusVaccine;
+}
+
+pub entity VaccineSaleEvent : ExciseEvent;
+
+pub relation vaccine_sale(e: VaccineSaleEvent, on: Date, manufacturer: Person) kind empirical {
+    label en official "section 4131(a): a sale of a taxable vaccine by the manufacturer, producer, or importer";
+}
+pub relation vaccine_component_doses(e: VaccineSaleEvent, component: VaccineComponent, doses: Decimal) kind empirical {
+    label en official "sections 4131(b)(2), 4132(a)(1), 4132(c)(3): the number of doses (a fraction of a dose allowed) of the vaccine that is described in the subparagraph of section 4132(a)(1) naming this component";
+}
+pub relation vaccine_substance_designed_for_human_disease_prevention(e: VaccineSaleEvent) kind empirical {
+    label en official "section 4132(a)(2): the substance is designed to be administered to a human being for the prevention of 1 or more diseases";
+}
+pub relation vaccine_manufactured_in_or_entered_into_united_states(e: VaccineSaleEvent) kind empirical {
+    label en official "section 4132(a)(1): the vaccine is manufactured or produced in the United States or entered into the United States for consumption, use, or warehousing";
+}
+pub relation vaccine_total_component_doses(e: VaccineSaleEvent, total: Decimal) kind institutional {
+    label en official "sections 4131(b)(2), 4132(c)(3): the sum, over the subparagraphs of section 4132(a)(1) that describe the vaccine, of the doses";
+}
+pub relation taxable_vaccine(e: VaccineSaleEvent) kind institutional {
+    label en official "section 4132(a)(1): a taxable vaccine";
+}
+
+@source(IRC_S4131_B, relation = formalizes, coverage = exact, quote = "If any taxable vaccine is described in more than 1 subparagraph of section 4132(a)(1)")
+rule VaccineTotalComponentDoses(e: VaccineSaleEvent) strict {
+    when vaccine_sale(e, _, _);
+    then vaccine_total_component_doses(e, sum all d: Decimal for c: VaccineComponent where vaccine_component_doses(e, c, d));
+}
+@source(IRC_S4132_A, relation = formalizes, coverage = exact, quote = "The term \"vaccine\" means any substance designed to be administered to a human being for the prevention of 1 or more diseases.")
+rule TaxableVaccineClassification(e: VaccineSaleEvent, total: Decimal) strict {
+    when vaccine_sale(e, _, _)
+        and vaccine_substance_designed_for_human_disease_prevention(e)
+        and vaccine_manufactured_in_or_entered_into_united_states(e)
+        and vaccine_total_component_doses(e, total)
+        and total > 0.0;
+    then taxable_vaccine(e);
+}
+
+@source(IRC_S4131_B, relation = formalizes, coverage = exact, quote = "The amount of the tax imposed by subsection (a) shall be 75 cents per dose of any taxable vaccine.")
+rule VaccineTax(e: VaccineSaleEvent, on: Date, total: Decimal) strict {
+    label en official "sections 4131(b), (c)(2): 75 cents per dose in periods after the enactment of the Revenue Reconciliation Act of 1993 (Pub. L. 103-66, Aug. 10, 1993, as recorded in the pinned notes to section 4041)";
+    when vaccine_sale(e, on, _) and taxable_vaccine(e) and vaccine_total_component_doses(e, total) and on > @1993-08-10;
+    then excise_tax_due(e, round(S4131RatePerDose * total, 2, "HALF_UP"));
+}
+
+pub relation vaccine_prior_sale_taxed_and_not_abated(e: VaccineSaleEvent) kind empirical {
+    label en official "section 4132(b)(4): tax was imposed by section 4131 on a prior sale of this vaccine and that tax was not abated, credited, or refunded";
+}
+@source(IRC_S4132_B, relation = formalizes, coverage = exact, quote = "No tax shall be imposed by section 4131 on the sale of any vaccine if tax was imposed by section 4131 on any prior sale of such vaccine and such tax is not abated, credited, or refunded.")
+rule VaccineTaxImposedOnlyOnce(e: VaccineSaleEvent) strict {
+    when vaccine_sale(e, _, _) and vaccine_prior_sale_taxed_and_not_abated(e);
+    then tax_free_sale(e);
+}
+
+@source(IRC_S4131_A, relation = formalizes, coverage = exact, quote = "There is hereby imposed a tax on any taxable vaccine sold by the manufacturer, producer, or importer thereof.")
+rule VaccineLiability(e: VaccineSaleEvent, manufacturer: Person, amount: Money) defeasible {
+    when vaccine_sale(e, _, manufacturer) and excise_tax_due(e, amount) and not_known(tax_free_sale(e));
+    then liable_for_excise(manufacturer, e, amount);
+}
+
+// --- section 4132(c)(1): use before sale --------------------------------------
+
+pub relation vaccine_used_by_producer_before_sale(e: VaccineSaleEvent, user: Person) kind empirical {
+    label en official "section 4132(c)(1): a manufacturer, producer, or importer of a vaccine uses it before it is sold";
+}
+@source(IRC_S4132_C, relation = formalizes, coverage = exact, quote = "shall be liable for the tax imposed by section 4131 in the same manner as if such vaccine were sold by such manufacturer, producer, or importer.")
+rule VaccineUseBeforeSaleLiability(e: VaccineSaleEvent, user: Person, amount: Money) defeasible {
+    when vaccine_used_by_producer_before_sale(e, user) and excise_tax_due(e, amount);
+    then liable_for_excise(user, e, amount);
+}
+
+// --- section 4221(a) flush language for vaccines (stage 1 left this open) ----
+
+pub relation vaccine_export_use_meets_secretary_requirements(e: VaccineSaleEvent) kind empirical {
+    label en official "section 4221(a) flush language: the use of the exported vaccine meets the requirements the Secretary prescribes by regulations (regulations not pinned in this package: EXTERNAL_DEPENDENCY, carried as a fact)";
+}
+pub relation vaccine_shipped_to_united_states_possession(e: VaccineSaleEvent) kind empirical {
+    label en official "section 4132(c)(2): the vaccine is shipped to a possession of the United States";
+}
+@source(IRC_S4221_A, relation = formalizes, coverage = exact, quote = "In the case of the tax imposed by section 4131, paragraphs (3), (4), and (5) shall not apply")
+rule VaccineCarveoutSuppliesGovernmentEducation(e: VaccineSaleEvent, use: TaxFreeSaleUse) strict {
+    when vaccine_sale(e, _, _)
+        and sold_for_tax_free_use(e, use)
+        and (use == SuppliesForVesselsOrAircraft or use == StateOrLocalGovernmentExclusiveUse or use == NonprofitEducationalOrganizationExclusiveUse or use == QualifiedBloodCollectorExclusiveUse);
+    then s4221_carveout_applies(e);
+}
+@source(IRC_S4132_C, relation = formalizes, coverage = exact, quote = "Section 4221(a)(2) shall not apply to any vaccine shipped to a possession of the United States.")
+rule VaccineCarveoutExportToPossession(e: VaccineSaleEvent, use: TaxFreeSaleUse) strict {
+    when vaccine_sale(e, _, _) and sold_for_tax_free_use(e, use) and (use == Export or use == ResaleForExportBySecondPurchaser) and vaccine_shipped_to_united_states_possession(e);
+    then s4221_carveout_applies(e);
+}
+@source(IRC_S4221_A, relation = formalizes, coverage = exact, quote = "paragraph (2) shall apply only if the use of the exported vaccine meets such requirements as the Secretary may by regulations prescribe")
+rule VaccineCarveoutExportWithoutRequirements(e: VaccineSaleEvent, use: TaxFreeSaleUse) strict {
+    when vaccine_sale(e, _, _) and sold_for_tax_free_use(e, use) and (use == Export or use == ResaleForExportBySecondPurchaser) and not_known(vaccine_export_use_meets_secretary_requirements(e));
+    then s4221_carveout_applies(e);
+}
+
+// --- section 4132(b)(1)-(3): abatement, credit or refund, a power of the payer ---
+
+pub relation vaccine_tax_paid(e: VaccineSaleEvent, payer: Person, amount: Money) kind empirical {
+    label en official "the amount of section 4131 tax paid on the vaccine by the person who paid it";
+}
+pub relation vaccine_returned_or_destroyed_on(e: VaccineSaleEvent, payer: Person, on: Date) kind empirical {
+    label en official "section 4132(b)(1): the vaccine is returned (other than for resale) to the person who paid the tax, or destroyed, on this date";
+}
+pub relation vaccine_abatement_claim_filed_on(e: VaccineSaleEvent, payer: Person, on: Date) kind empirical {
+    label en official "the person who paid the tax files a claim for abatement, credit or refund on this date";
+}
+pub relation vaccine_tax_repaid_or_purchaser_consent(e: VaccineSaleEvent, payer: Person) kind empirical {
+    label en official "section 4132(b)(3): the payer has repaid or agreed to repay the tax to the ultimate purchaser, or has obtained the purchaser's written consent";
+}
+pub relation vaccine_claim_within_six_months(e: VaccineSaleEvent, payer: Person) kind institutional {
+    label en official "section 4132(b)(2): the claim is filed within 6 months after the date the vaccine is returned or destroyed";
+}
+pub relation vaccine_abatement_claim_valid(e: VaccineSaleEvent, payer: Person) kind institutional {
+    label en official "section 4132(b)(2)-(3): the claim is timely and the repayment or consent condition is met (single-atom valid_when helper)";
+}
+pub relation vaccine_tax_abated_credited_or_refunded(e: VaccineSaleEvent, payer: Person, amount: Money) kind institutional {
+    label en official "section 4132(b)(1): the tax paid is abated, credited, or refunded (without interest) to the payer";
+}
+
+@source(IRC_S4132_B, relation = formalizes, coverage = exact, quote = "Paragraph (1) shall apply to any returned or destroyed vaccine only with respect to claims filed within 6 months after the date the vaccine is returned or destroyed.")
+rule VaccineClaimTimely(e: VaccineSaleEvent, p: Person, returned: Date, filed: Date) strict {
+    when vaccine_returned_or_destroyed_on(e, p, returned)
+        and vaccine_abatement_claim_filed_on(e, p, filed)
+        and filed >= returned
+        and filed <= add_calendar_period(returned, 6 calendar_month);
+    then vaccine_claim_within_six_months(e, p);
+}
+@source(IRC_S4132_B, relation = formalizes, coverage = exact, quote = "No credit or refund shall be allowed or made under paragraph (1) with respect to any vaccine unless the person who paid the tax establishes that he—")
+rule VaccineClaimValid(e: VaccineSaleEvent, p: Person) strict {
+    when vaccine_claim_within_six_months(e, p) and vaccine_tax_repaid_or_purchaser_consent(e, p);
+    then vaccine_abatement_claim_valid(e, p);
+}
+@source(IRC_S4132_B, relation = formalizes, coverage = exact, quote = "the Secretary shall abate such tax or allow a credit, or pay a refund (without interest), to such person equal to the tax paid under section 4131 with respect to such vaccine.")
+rule VaccineAbatementPowerRule(e: VaccineSaleEvent, p: Person, filed: Date, paid: Money) defeasible {
+    when vaccine_abatement_claim_filed_on(e, p, filed) and vaccine_tax_paid(e, p, paid);
+    then power VaccineTaxAbatementClaim {
+        holder p;
+        over e;
+        exercise vaccine_abatement_claim_filed_on(e, p, filed);
+        valid_when vaccine_abatement_claim_valid(e, p);
+        effect create(vaccine_tax_abated_credited_or_refunded(e, p, paid));
+        window [-infinity, infinity];
+    };
+}
+
+// =====================================================================
+// Sections 4161 and 4162 — sport fishing equipment, bows and arrows
+// =====================================================================
+
+pub enum SportFishingArticle {
+    FishingRodOrPole;
+    FishingReel;
+    FishingLineNotOver130PoundsTest;
+    FishingSpearOrSpearGun;
+    TerminalTackleItem;
+    FishingTackleBox;
+    OtherFishingSupplyOrAccessory;
+    FishingTipUpOrTilt;
+    FishingRodBeltHolderHarnessChairOutriggerOrDownrigger;
+    ElectricOutboardBoatMotor;
+}
+
+pub entity SportFishingSaleEvent : ExciseEvent;
+
+pub relation sport_fishing_sale(e: SportFishingSaleEvent, article: SportFishingArticle, price: Money, on: Date, manufacturer: Person) kind empirical {
+    label en official "section 4161(a)(1)(A): a sale of an article of sport fishing equipment by the manufacturer, producer, or importer, at this price (the price includes parts and accessories sold in connection with it, (a)(4))";
+}
+pub relation article_is_natural_bait(e: SportFishingSaleEvent) kind empirical {
+    label en official "section 4162(a)(5): the article is natural bait (excluded from terminal tackle)";
+}
+pub relation terminal_tackle_for_lines_over_130_pounds_test(e: SportFishingSaleEvent) kind empirical {
+    label en official "section 4162(a)(5): the item of terminal tackle is designed for use and ordinarily used on fishing lines not described in paragraph (3)";
+}
+pub relation sport_fishing_equipment(e: SportFishingSaleEvent) kind institutional {
+    label en official "section 4162(a): the article is sport fishing equipment";
+}
+
+@source(IRC_S4162_A, relation = formalizes, coverage = exact, quote = "For purposes of this part, the term \"sport fishing equipment\" means—")
+rule SportFishingEquipmentNonTerminalTackle(e: SportFishingSaleEvent, article: SportFishingArticle) strict {
+    when sport_fishing_sale(e, article, _, _, _) and article != TerminalTackleItem;
+    then sport_fishing_equipment(e);
+}
+@source(IRC_S4162_A, relation = formalizes, coverage = exact, quote = "but not including natural bait or any item of terminal tackle designed for use and ordinarily used on fishing lines not described in paragraph (3), and")
+rule SportFishingEquipmentTerminalTackle(e: SportFishingSaleEvent) strict {
+    when sport_fishing_sale(e, TerminalTackleItem, _, _, _)
+        and not_known(article_is_natural_bait(e))
+        and not_known(terminal_tackle_for_lines_over_130_pounds_test(e));
+    then sport_fishing_equipment(e);
+}
+
+@source(IRC_S4161_A, relation = formalizes, coverage = exact, quote = "a tax equal to 10 percent of the price for which so sold.")
+rule SportFishingTaxGeneral(e: SportFishingSaleEvent, article: SportFishingArticle, price: Money) strict {
+    when sport_fishing_sale(e, article, price, _, _)
+        and sport_fishing_equipment(e)
+        and article != FishingRodOrPole
+        and article != ElectricOutboardBoatMotor
+        and article != FishingTackleBox;
+    then excise_tax_due(e, round(price * S4161SportFishingRatePercent, 2, "HALF_UP"));
+}
+@source(IRC_S4161_A, relation = formalizes, coverage = exact, quote = "The tax imposed by subparagraph (A) on any fishing rod or pole shall not exceed $10.")
+rule SportFishingTaxRodCappedAtTenDollars(e: SportFishingSaleEvent, price: Money) strict {
+    when sport_fishing_sale(e, FishingRodOrPole, price, _, _) and sport_fishing_equipment(e);
+    then excise_tax_due(e, min(round(price * S4161SportFishingRatePercent, 2, "HALF_UP"), S4161RodAndPoleTaxCap));
+}
+@source(IRC_S4161_A, relation = formalizes, coverage = exact, quote = "In the case of an electric outboard motor, paragraph (1) shall be applied by substituting \"3 percent\" for \"10 percent\".")
+rule SportFishingTaxElectricOutboardMotor(e: SportFishingSaleEvent, price: Money) strict {
+    when sport_fishing_sale(e, ElectricOutboardBoatMotor, price, _, _) and sport_fishing_equipment(e);
+    then excise_tax_due(e, round(price * S4161ReducedRatePercent, 2, "HALF_UP"));
+}
+@source(IRC_S4161_A, relation = formalizes, coverage = exact, quote = "In the case of fishing tackle boxes, paragraph (1) shall be applied by substituting \"3 percent\" for \"10 percent\".")
+rule SportFishingTaxTackleBox(e: SportFishingSaleEvent, price: Money) strict {
+    when sport_fishing_sale(e, FishingTackleBox, price, _, _) and sport_fishing_equipment(e);
+    then excise_tax_due(e, round(price * S4161ReducedRatePercent, 2, "HALF_UP"));
+}
+@source(IRC_S4161_A, relation = formalizes, coverage = exact, quote = "There is hereby imposed on the sale of any article of sport fishing equipment by the manufacturer, producer, or importer")
+rule SportFishingLiability(e: SportFishingSaleEvent, manufacturer: Person, amount: Money) defeasible {
+    when sport_fishing_sale(e, _, _, _, manufacturer) and excise_tax_due(e, amount) and not_known(tax_free_sale(e));
+    then liable_for_excise(manufacturer, e, amount);
+    unless related_person_credited_sale(e) and sport_fishing_sale(e, _, _, _, manufacturer) and excise_tax_due(e, amount);
+}
+
+// --- bows and arrows, section 4161(b) ---------------------------------------
+
+pub enum ArcheryArticle {
+    Bow;
+    BowPartOrAccessory;
+    QuiverBroadheadOrPoint;
+    ArrowShaft;
+}
+
+pub entity ArcherySaleEvent : ExciseEvent;
+
+pub relation archery_sale(e: ArcherySaleEvent, article: ArcheryArticle, price: Money, shafts: Decimal, on: Date, manufacturer: Person) kind empirical {
+    label en official "section 4161(b): a sale by the manufacturer, producer, or importer of a bow, bow part or accessory, quiver, broadhead or point, or (first sale of) arrow shafts (`shafts` counts arrow shafts; price applies to the other articles)";
+}
+pub relation bow_peak_draw_weight_pounds(e: ArcherySaleEvent, pounds: Decimal) kind empirical {
+    label en official "section 4161(b)(1)(A): the peak draw weight of the bow (or of the bow the part, accessory, or arrow shaft is suitable for)";
+}
+pub relation arrow_measures_18_inches_or_more(e: ArcherySaleEvent) kind empirical {
+    label en official "section 4161(b)(2)(A)(i): the arrow assembled from the shaft measures 18 inches overall or more in length";
+}
+pub relation shaft_suitable_for_bow_of_30_pounds_or_more(e: ArcherySaleEvent) kind empirical {
+    label en official "section 4161(b)(2)(A)(ii): the shaft is suitable for use with a bow described in paragraph (1)(A)";
+}
+pub relation shaft_all_natural_wood_no_laminations(e: ArcherySaleEvent) kind empirical {
+    label en official "section 4161(b)(2)(B): a shaft consisting of all natural wood with no laminations or artificial means of enhancing the spine";
+}
+pub relation shaft_diameter_five_sixteenths_inch_or_less(e: ArcherySaleEvent) kind empirical {
+    label en official "section 4161(b)(2)(B)(i): the arrow measures 5/16 of an inch or less in diameter";
+}
+pub relation article_taxable_under_4161a(e: ArcherySaleEvent) kind empirical {
+    label en official "section 4161(b)(3): the article is also taxable under subsection (a) (no tax under subsection (b))";
+}
+pub relation arrow_shaft_first_sale(e: ArcherySaleEvent) kind empirical {
+    label en official "section 4161(b)(2)(A): this is the first sale by the manufacturer, producer, or importer of the shaft";
+}
+pub relation archery_article_taxable(e: ArcherySaleEvent) kind institutional {
+    label en official "section 4161(b): the article is within the tax and not excluded by paragraph (2)(B) or (3)";
+}
+pub relation arrow_shaft_exempt_wooden(e: ArcherySaleEvent) kind institutional {
+    label en official "section 4161(b)(2)(B): exempt all-wood shaft (not suitable for a 30-pound bow, natural wood, no lamination, diameter of 5/16 inch or less)";
+}
+
+@source(IRC_S4161_B, relation = formalizes, coverage = exact, quote = "(ii) is not suitable for use with a bow described in paragraph (1)(A).")
+rule WoodenShaftExemption(e: ArcherySaleEvent) strict {
+    when shaft_all_natural_wood_no_laminations(e) and shaft_diameter_five_sixteenths_inch_or_less(e) and not_known(shaft_suitable_for_bow_of_30_pounds_or_more(e));
+    then arrow_shaft_exempt_wooden(e);
+}
+@source(IRC_S4161_B, relation = formalizes, coverage = exact, quote = "No tax shall be imposed under this subsection with respect to any article taxable under subsection (a).")
+rule ArcheryBowTaxable(e: ArcherySaleEvent, pounds: Decimal) strict {
+    when archery_sale(e, Bow, _, _, _, _) and bow_peak_draw_weight_pounds(e, pounds) and pounds >= 30.0 and not_known(article_taxable_under_4161a(e));
+    then archery_article_taxable(e);
+}
+@source(IRC_S4161_B, relation = formalizes, coverage = exact, quote = "No tax shall be imposed under this subsection with respect to any article taxable under subsection (a).")
+rule ArcheryPartOrAccessoryTaxable(e: ArcherySaleEvent, pounds: Decimal) strict {
+    when (archery_sale(e, BowPartOrAccessory, _, _, _, _) or archery_sale(e, QuiverBroadheadOrPoint, _, _, _, _))
+        and bow_peak_draw_weight_pounds(e, pounds)
+        and pounds >= 30.0
+        and not_known(article_taxable_under_4161a(e));
+    then archery_article_taxable(e);
+}
+@source(IRC_S4161_B, relation = formalizes, coverage = exact, quote = "There is hereby imposed on the first sale by the manufacturer, producer, or importer of any shaft")
+rule ArcheryShaftTaxable(e: ArcherySaleEvent) strict {
+    when archery_sale(e, ArrowShaft, _, _, _, _)
+        and arrow_shaft_first_sale(e)
+        and (arrow_measures_18_inches_or_more(e) or shaft_suitable_for_bow_of_30_pounds_or_more(e))
+        and not_known(arrow_shaft_exempt_wooden(e))
+        and not_known(article_taxable_under_4161a(e));
+    then archery_article_taxable(e);
+}
+
+@source(IRC_S4161_B, relation = formalizes, coverage = exact, quote = "a tax equal to 11 percent of the price for which so sold.")
+rule ArcheryEquipmentTax11Percent(e: ArcherySaleEvent, article: ArcheryArticle, price: Money) strict {
+    when archery_sale(e, article, price, _, _, _) and article != ArrowShaft and archery_article_taxable(e);
+    then excise_tax_due(e, round(price * S4161ArcheryRatePercent, 2, "HALF_UP"));
+}
+@source(IRC_S4161_B, relation = formalizes, coverage = partial, quote = "a tax equal to 39 cents per shaft.")
+rule ArrowShaftTax39Cents(e: ArcherySaleEvent, shafts: Decimal) strict {
+    label en official "39 cents per shaft; for calendar years beginning after 2005 the amount is increased by the cost-of-living adjustment of section 1(f)(3) (2004 base, rounded to the nearest cent). The parameter holds the unindexed 39 cents to 2005 and the Revenue Procedure values pinned for 2025 ($0.63) and 2026 ($0.65); 2006-2024 is MISSING_PARAMETER_VALUE, never the unindexed 39 cents";
+    when archery_sale(e, ArrowShaft, _, shafts, _, _) and archery_article_taxable(e);
+    then excise_tax_due(e, round(S4161ArrowShaftTaxPerShaft * shafts, 2, "HALF_UP"));
+}
+@source(IRC_S4161_B, relation = formalizes, coverage = partial, quote = "There is hereby imposed on the sale by the manufacturer, producer, or importer of any bow")
+rule ArcheryLiability(e: ArcherySaleEvent, manufacturer: Person, amount: Money) defeasible {
+    when archery_sale(e, _, _, _, _, manufacturer) and excise_tax_due(e, amount) and not_known(tax_free_sale(e));
+    then liable_for_excise(manufacturer, e, amount);
+}
+
+// --- section 4162(b): resales to related persons ----------------------------
+
+pub relation resale_of_sport_fishing_article_to_related_person(e: SportFishingSaleEvent, related: Person) kind empirical {
+    label en official "section 4162(b)(1)(C): the buyer (or any other person) sells the article to a person related to the manufacturer, producer, or importer (related person: section 465(b)(3)(C), carried as a fact)";
+}
+pub relation constructive_sale_price_rules_of_4216b_apply(e: SportFishingSaleEvent) kind empirical {
+    label en official "section 4162(b)(1)(B): the constructive sale price rules of section 4216(b) apply to the original sale";
+}
+pub relation tax_previously_paid_on_original_sale(e: SportFishingSaleEvent, paid: Money) kind empirical {
+    label en official "section 4162(b)(2)(B): the amount of tax paid on the original sale, established by the related person";
+}
+pub relation related_person_established_tax_paid(e: SportFishingSaleEvent) kind empirical {
+    label en official "section 4162(b)(2)(B): the related person establishes the amount of tax paid on the original sale (marker for the credit rule)";
+}
+pub relation related_person_treated_as_manufacturer(related: Person, original: SportFishingSaleEvent) kind institutional {
+    label en official "section 4162(b)(1): the related person is liable for tax under section 4161 as if it were the manufacturer of the article";
+}
+pub relation related_person_credited_sale(e2: SportFishingSaleEvent) kind institutional {
+    label en official "section 4162(b)(2): the related person's own sale, on which the tax paid on the original sale is credited";
+}
+
+@source(IRC_S4162_B, relation = formalizes, coverage = exact, quote = "then such related person shall be liable for tax under section 4161 in the same manner as if such related person were the manufacturer of the article.")
+rule RelatedPersonTreatedAsManufacturer(orig: SportFishingSaleEvent, related: Person) strict {
+    when sport_fishing_sale(orig, _, _, _, _)
+        and resale_of_sport_fishing_article_to_related_person(orig, related)
+        and not_known(constructive_sale_price_rules_of_4216b_apply(orig));
+    then related_person_treated_as_manufacturer(related, orig);
+}
+@source(IRC_S4162_B, relation = formalizes, coverage = exact, quote = "the amount of the tax so paid shall be allowed as a credit against the tax imposed by reason of paragraph (1).")
+rule RelatedPersonCreditedSaleClassification(orig: SportFishingSaleEvent, e2: SportFishingSaleEvent, related: Person) strict {
+    when related_person_treated_as_manufacturer(related, orig)
+        and sport_fishing_sale(e2, _, _, _, related)
+        and related_person_established_tax_paid(orig);
+    then related_person_credited_sale(e2);
+}
+@source(IRC_S4162_B, relation = formalizes, coverage = exact, quote = "the amount of the tax so paid shall be allowed as a credit against the tax imposed by reason of paragraph (1).")
+rule RelatedPersonLiabilityNetOfCredit(orig: SportFishingSaleEvent, e2: SportFishingSaleEvent, related: Person, due: Money, paid: Money) defeasible {
+    when related_person_treated_as_manufacturer(related, orig)
+        and sport_fishing_sale(e2, _, _, _, related)
+        and excise_tax_due(e2, due)
+        and tax_previously_paid_on_original_sale(orig, paid)
+        and related_person_established_tax_paid(orig)
+        and due >= paid;
+    then liable_for_excise(related, e2, due - paid);
+}

@@ -1,0 +1,300 @@
+// Returns — stage 4 (26.09.2026, DECISION-0379, implemented_unverified): rows that stages 1-2 left
+// as TECH_GAP and could be expressed.
+//
+// Covered: §6015(d)(3)(A) (baseline allocation of items), §6015(e)(6) (title 11 suspension of the
+// petition period), §6109(i)(3)(A)-(C) (the term of an ITIN: the third consecutive nonfiling year
+// and the pre-2013 transition with its table of applicable dates), §6113(b)(2)(B) (the Secretary's
+// multiple-organization rule).
+//
+// METHOD AND JUDGMENT CALLS.
+//  - §6109(i)(3): "3 consecutive taxable years" is a window of three calendar years (`calendar_year_of`
+//    with n+1, n+2); every window of three nonfiling years is a candidate and the expiry uses the
+//    EARLIEST candidate (G136: no strictly earlier candidate), so no ledger over years is needed.
+//    (A) counts only years ending after the issuance; (B)(ii) needs one year ending after
+//    December 18, 2015, which is tested on the third (latest) year.
+//  - §6109(i)(3)(B): "remain in effect until the earlier of (i) the applicable date, (ii) the due date"
+//    ends the window on that day (the post-2012 rule of (A) ends it the day after the due date).
+//  - §6015(d)(3)(A): the item that "would have been allocated if the individuals had filed separate
+//    returns" is a counterfactual; the case supplies which spouse's separate return the item belongs to.
+//  - §6015(e)(6): the petition deadline moves by a variable number of days (the prohibition plus
+//    60 days), so the suspension is an interval and no new date is computed.
+
+language "law.core" version "0.2";
+package us.irc.returns version "0.1.1";
+namespace "urn:us:irc:returns:clir";
+
+use self::{
+    IRC_S6015_D,
+    IRC_S6015_E,
+    IRC_S6109_I,
+    IRC_S6113_B,
+    Individual,
+    Organ,
+    Person,
+    Secretary,
+    TaxableYear,
+    files_return_or_claimed_as_dependent,
+    item_allocated_as_if_separate_returns,
+    itin_effective_window_ends,
+    itin_third_consecutive_nonfiling_year_due_date,
+    statutory_due_date,
+};
+
+// ============================================================================
+// §6015(d)(3)(A) — items allocated as if separate returns had been filed
+// ============================================================================
+
+relation item_on_separate_return_of(p: Individual, s: Individual, y: TaxableYear, item: Integer, amount: Money) kind empirical {
+    label en official "the item giving rise to the deficiency would have been on the separate return of p (the counterfactual of §6015(d)(3)(A), supplied by the case)";
+}
+relation item_subject_to_6015d4_or_d5(item: Integer) kind empirical {
+    label en official "the item is one of paragraph (4) (disallowed solely because a separate return is filed) or paragraph (5) (a child's liability)";
+}
+@source(IRC_S6015_D, relation = formalizes, coverage = exact, quote = "Except as provided in paragraphs (4) and (5), any item giving rise to a deficiency on a joint return shall be allocated to individuals filing the return in the same manner as it would have been allocated if the individuals had filed separate returns for the taxable year.")
+rule S6015d3ABaselineAllocation strict {
+    label en official "an item is allocated to the spouse whose separate return would have carried it, except items of (d)(4) and (d)(5)";
+    for p: Individual;
+    for s: Individual;
+    for y: TaxableYear;
+    for item: Integer;
+    for amount: Money;
+    when item_on_separate_return_of(p, s, y, item, amount)
+        and not_known(item_subject_to_6015d4_or_d5(item));
+    then item_allocated_as_if_separate_returns(p, s, y, item, amount);
+}
+
+// ============================================================================
+// §6015(e)(6) — title 11 case suspends the petition period
+// ============================================================================
+
+relation prohibited_by_title_11_from_6015e_petition(p: Individual, s: Individual, y: TaxableYear, start: Date, end: Date) kind empirical {
+    label en official "the person is prohibited by reason of a case under title 11 from filing a petition under paragraph (1)(A) with respect to a final determination of relief";
+}
+pub relation s6015e_petition_period_suspended(p: Individual, s: Individual, y: TaxableYear, start: Date, end: Date) kind institutional {
+    label en official "the running of the period for filing the petition is suspended during the prohibition and for 60 days thereafter (the deadline moves by a variable number of days, so no date is computed here)";
+}
+@source(IRC_S6015_E, relation = formalizes, coverage = exact, quote = "the running of the period prescribed by such paragraph for filing such a petition with respect to such final determination shall be suspended for the period during which the person is so prohibited from filing such a petition, and for 60 days thereafter.")
+rule S6015e6SuspensionInTitle11Case strict {
+    label en official "the petition period is suspended during the title 11 prohibition and for 60 days thereafter";
+    for p: Individual;
+    for s: Individual;
+    for y: TaxableYear;
+    for start: Date;
+    for end: Date;
+    when prohibited_by_title_11_from_6015e_petition(p, s, y, start, end);
+    then s6015e_petition_period_suspended(p, s, y, start, add_calendar_period(end, 60 calendar_day));
+}
+
+// ============================================================================
+// §6109(i)(3) — the term of an individual taxpayer identification number
+// ============================================================================
+
+relation applicant_taxable_year(applicant: Individual, y: TaxableYear) kind empirical {
+    label en unofficial "a taxable year of the ITIN holder considered for the nonfiling run";
+}
+relation year_ends_after_itin_issuance(applicant: Individual, y: TaxableYear) kind empirical {
+    label en official "the taxable year ends after the issuance of the number";
+}
+relation itin_nonfiling_year(applicant: Individual, y: TaxableYear) kind institutional {
+    label en unofficial "the individual does not file a return of tax and is not included as a dependent on the return of another taxpayer for the year";
+}
+rule S6109iNonfilingYear strict {
+    for applicant: Individual;
+    for y: TaxableYear;
+    when applicant_taxable_year(applicant, y) and not_known(files_return_or_claimed_as_dependent(applicant, y));
+    then itin_nonfiling_year(applicant, y);
+}
+relation itin_nonfiling_run_due_date(applicant: Individual, third: TaxableYear, due: Date, endsOn: Date) kind institutional {
+    label en unofficial "three consecutive nonfiling taxable years end with `third`; `due` is the due date of the return for the third year, which ends on `endsOn`";
+}
+@source(IRC_S6109_I, relation = formalizes, coverage = exact, quote = "for 3 consecutive taxable years")
+rule S6109iThreeConsecutiveNonfilingYears defeasible {
+    label en official "three consecutive taxable years without a return or dependency";
+    for applicant: Individual;
+    for y1: TaxableYear;
+    for y2: TaxableYear;
+    for y3: TaxableYear;
+    for n1: Integer;
+    for n2: Integer;
+    for n3: Integer;
+    for due: Date;
+    for endsOn: Date;
+    when itin_nonfiling_year(applicant, y1)
+        and itin_nonfiling_year(applicant, y2)
+        and itin_nonfiling_year(applicant, y3)
+        and us.irc.core::calendar_year_of(y1, n1)
+        and us.irc.core::calendar_year_of(y2, n2)
+        and us.irc.core::calendar_year_of(y3, n3)
+        and n2 == n1 + 1
+        and n3 == n2 + 1
+        and statutory_due_date(applicant, y3, us.irc.core::IncomeCh1, due)
+        and us.irc.core::ends(y3, endsOn);
+    then itin_nonfiling_run_due_date(applicant, y3, due, endsOn);
+}
+relation itin_post2012_run_due_date(applicant: Individual, due: Date) kind institutional {
+    label en unofficial "a run of three nonfiling years, all ending after the issuance, has the given due date for its third year";
+}
+rule S6109i3ARunAfterIssuance defeasible {
+    for applicant: Individual;
+    for y1: TaxableYear;
+    for y2: TaxableYear;
+    for y3: TaxableYear;
+    for n1: Integer;
+    for n2: Integer;
+    for n3: Integer;
+    for due: Date;
+    when year_ends_after_itin_issuance(applicant, y1)
+        and year_ends_after_itin_issuance(applicant, y2)
+        and year_ends_after_itin_issuance(applicant, y3)
+        and itin_nonfiling_year(applicant, y1)
+        and itin_nonfiling_year(applicant, y2)
+        and itin_nonfiling_year(applicant, y3)
+        and us.irc.core::calendar_year_of(y1, n1)
+        and us.irc.core::calendar_year_of(y2, n2)
+        and us.irc.core::calendar_year_of(y3, n3)
+        and n2 == n1 + 1
+        and n3 == n2 + 1
+        and statutory_due_date(applicant, y3, us.irc.core::IncomeCh1, due);
+    then itin_post2012_run_due_date(applicant, due);
+}
+relation earlier_post2012_run_exists(applicant: Individual, due: Date) kind institutional {
+    label en unofficial "G136 pattern: a run with a strictly earlier due date exists";
+}
+rule S6109i3AEarlierRunExists defeasible {
+    for applicant: Individual;
+    for due: Date;
+    for earlier: Date;
+    when itin_post2012_run_due_date(applicant, due) and itin_post2012_run_due_date(applicant, earlier) and earlier < due;
+    then earlier_post2012_run_exists(applicant, due);
+}
+@source(IRC_S6109_I, relation = formalizes, coverage = exact, quote = "shall remain in effect unless the individual to whom such number is issued does not file a return of tax (or is not included as a dependent on the return of tax of another taxpayer) for 3 consecutive taxable years ending after the issuance of such number.")
+rule S6109i3AThirdConsecutiveNonfilingYear defeasible {
+    label en official "the number lapses at the first run of three consecutive nonfiling years ending after the issuance; the third year's due date is the operative date";
+    for applicant: Individual;
+    for due: Date;
+    when itin_post2012_run_due_date(applicant, due) and not_known(earlier_post2012_run_exists(applicant, due));
+    then itin_third_consecutive_nonfiling_year_due_date(applicant, due);
+}
+relation itin_issued_before_2013_on(applicant: Individual, application: Integer, issuedOn: Date) kind empirical {
+    label en official "an individual taxpayer identification number was issued before January 1, 2013";
+}
+relation itin_applicable_date(applicant: Individual, application: Integer, applicable: Date) kind institutional {
+    label en official "the applicable date of subparagraph (C) for the number";
+}
+@source(IRC_S6109_I, relation = formalizes, coverage = exact, quote = "(i) January 1, 2017, in the case of an individual taxpayer identification number issued before January 1, 2008,")
+rule S6109i3CiBefore2008 strict {
+    label en official "a number issued before January 1, 2008 has the applicable date January 1, 2017";
+    for applicant: Individual;
+    for application: Integer;
+    for issuedOn: Date;
+    when itin_issued_before_2013_on(applicant, application, issuedOn) and issuedOn < @2008-01-01;
+    then itin_applicable_date(applicant, application, @2017-01-01);
+}
+@source(IRC_S6109_I, relation = formalizes, coverage = exact, quote = "(ii) January 1, 2018, in the case of an individual taxpayer identification number issued in 2008,")
+rule S6109i3CiiIssuedIn2008 strict {
+    label en official "a number issued in 2008 has the applicable date January 1, 2018";
+    for applicant: Individual;
+    for application: Integer;
+    for issuedOn: Date;
+    when itin_issued_before_2013_on(applicant, application, issuedOn) and issuedOn >= @2008-01-01 and issuedOn < @2009-01-01;
+    then itin_applicable_date(applicant, application, @2018-01-01);
+}
+@source(IRC_S6109_I, relation = formalizes, coverage = exact, quote = "(iii) January 1, 2019, in the case of an individual taxpayer identification number issued in 2009 or 2010, and")
+rule S6109i3CiiiIssuedIn2009Or2010 strict {
+    label en official "a number issued in 2009 or 2010 has the applicable date January 1, 2019";
+    for applicant: Individual;
+    for application: Integer;
+    for issuedOn: Date;
+    when itin_issued_before_2013_on(applicant, application, issuedOn) and issuedOn >= @2009-01-01 and issuedOn < @2011-01-01;
+    then itin_applicable_date(applicant, application, @2019-01-01);
+}
+@source(IRC_S6109_I, relation = formalizes, coverage = exact, quote = "(iv) January 1, 2020, in the case of an individual taxpayer identification number issued in 2011 or 2012.")
+rule S6109i3CivIssuedIn2011Or2012 strict {
+    label en official "a number issued in 2011 or 2012 has the applicable date January 1, 2020";
+    for applicant: Individual;
+    for application: Integer;
+    for issuedOn: Date;
+    when itin_issued_before_2013_on(applicant, application, issuedOn) and issuedOn >= @2011-01-01 and issuedOn < @2013-01-01;
+    then itin_applicable_date(applicant, application, @2020-01-01);
+}
+relation itin_pre2013_run_due_date(applicant: Individual, due: Date) kind institutional {
+    label en unofficial "a run of three consecutive nonfiling years, at least one ending after December 18, 2015, has the given due date for its third year";
+}
+rule S6109i3BiiRun defeasible {
+    label en official "three consecutive nonfiling years, one of which ends after December 18, 2015";
+    for applicant: Individual;
+    for third: TaxableYear;
+    for due: Date;
+    for endsOn: Date;
+    when itin_nonfiling_run_due_date(applicant, third, due, endsOn) and endsOn > @2015-12-18;
+    then itin_pre2013_run_due_date(applicant, due);
+}
+relation itin_pre2013_end_candidate(applicant: Individual, application: Integer, endsOn: Date) kind institutional {
+    label en unofficial "a date at which the pre-2013 number may end: the applicable date or the due date of the third nonfiling year";
+}
+rule S6109i3BiApplicableDateCandidate defeasible {
+    for applicant: Individual;
+    for application: Integer;
+    for applicable: Date;
+    when itin_applicable_date(applicant, application, applicable);
+    then itin_pre2013_end_candidate(applicant, application, applicable);
+}
+rule S6109i3BiiRunDateCandidate defeasible {
+    for applicant: Individual;
+    for application: Integer;
+    for issuedOn: Date;
+    for due: Date;
+    when itin_issued_before_2013_on(applicant, application, issuedOn) and itin_pre2013_run_due_date(applicant, due);
+    then itin_pre2013_end_candidate(applicant, application, due);
+}
+relation earlier_pre2013_candidate_exists(applicant: Individual, application: Integer, endsOn: Date) kind institutional {
+    label en unofficial "G136 pattern: a strictly earlier candidate exists";
+}
+rule S6109i3BEarlierCandidateExists defeasible {
+    for applicant: Individual;
+    for application: Integer;
+    for endsOn: Date;
+    for earlier: Date;
+    when itin_pre2013_end_candidate(applicant, application, endsOn) and itin_pre2013_end_candidate(applicant, application, earlier) and earlier < endsOn;
+    then earlier_pre2013_candidate_exists(applicant, application, endsOn);
+}
+@source(IRC_S6109_I, relation = formalizes, coverage = exact, quote = "such number shall remain in effect until the earlier of—")
+rule S6109i3BRemainsInEffectUntilTheEarlier defeasible {
+    label en official "a number issued before 2013 remains in effect until the earlier of the applicable date and the due date of the third nonfiling year";
+    for applicant: Individual;
+    for application: Integer;
+    for endsOn: Date;
+    when itin_pre2013_end_candidate(applicant, application, endsOn) and not_known(earlier_pre2013_candidate_exists(applicant, application, endsOn));
+    then itin_effective_window_ends(applicant, application, endsOn);
+}
+
+// ============================================================================
+// §6113(b)(2)(B) — the Secretary may treat a group of organizations as one
+// ============================================================================
+
+relation organization_group_member(group: Organ, member: Organ) kind empirical {
+    label en official "the organization belongs to the group of 2 or more organizations";
+}
+external judgment relation aggregation_necessary_to_prevent_avoidance_of_6113(group: Organ) {
+    authority Secretary;
+    label en official "treating the group as one organization is necessary or appropriate to prevent the avoidance of section 6113 through the use of multiple organizations (DECISION-0194: the Secretary's judgment)";
+}
+relation secretary_treats_group_as_one_organization(group: Organ) kind empirical {
+    label en official "the Secretary treats the group as 1 organization for purposes of the $100,000 gross receipts exception";
+}
+relation group_treated_as_one_organization_for_6113(group: Organ) kind institutional {
+    label en official "the group is treated as 1 organization for purposes of subparagraph (A)";
+}
+@source(IRC_S6113_B, relation = formalizes, coverage = exact, quote = "The Secretary may treat any group of 2 or more organizations as 1 organization for purposes of subparagraph (A) where necessary or appropriate to prevent the avoidance of this section through the use of multiple organizations.")
+rule S6113b2BSecretaryMayAggregateOrganizations defeasible {
+    label en official "the Secretary may treat a group of two or more organizations as one where necessary or appropriate to prevent avoidance";
+    for group: Organ;
+    when secretary_treats_group_as_one_organization(group);
+    then power S6113b2BAggregateGroupPower {
+        holder Secretary;
+        over group;
+        exercise secretary_treats_group_as_one_organization(group);
+        valid_when aggregation_necessary_to_prevent_avoidance_of_6113(group);
+        effect create(group_treated_as_one_organization_for_6113(group));
+    };
+}

@@ -1,0 +1,181 @@
+// Section 4958 — taxes on excess benefit transactions. Third instantiation
+// of the shared two-tier shape; reuses `taxable_period`/`taxable_period_ends`/
+// `corrected_within_taxable_period` under the SAME INTERPRETATION noted in
+// 06-taxable-expenditures-4945.law (this section's own rows read this pass
+// do not include a lettered "taxable period" subsection; assumed identical
+// to section 4941(e)(1)'s shape).
+//
+// SCOPE:
+//  - (a)(1)/(a)(2): 25% initial tax on the disqualified person, 10% initial
+//    tax on a knowing organization manager capped at $20,000 — modelled.
+//  - (b): 200% additional tax on the disqualified person if not corrected
+//    within the taxable period — modelled.
+//  - (c)(1)(A)/(B): "excess benefit transaction"/"excess benefit" general
+//    definition — modelled as economic-benefit-minus-consideration
+//    arithmetic. (c)(2)-(4) (donor-advised-fund and section 509(a)(3)
+//    organization special excess-benefit-transaction categories, and the
+//    Secretary's revenue-sharing-inurement category): NOT modelled —
+//    TECH_GAP.
+//  - (d)(1) joint-and-several liability, (d)(2) $20,000 manager cap
+//    (applied via `min()` inside the manager-tax rule): modelled.
+//  - (e) "applicable tax-exempt organization": modelled as a case-asserted
+//    classification WITHOUT independently testing the (e)(2) 5-year
+//    lookback window on the ORGANIZATION's own former 501(c)(3)/(4)/(29)
+//    status (TECH_GAP) — the exact date arithmetic this stage DOES model is
+//    the (f)(1)(A) 5-year lookback for the DISQUALIFIED PERSON's own
+//    substantial-influence position, per the coordinator's specific ask.
+//  - (f)(1)(A): disqualified person = a position of substantial influence
+//    held at ANY TIME during the 5-year period ending on the date of the
+//    transaction — modelled as exact date arithmetic
+//    (`add_calendar_period(on, -5 calendar_year)`).
+//  - (f)(1)(B)-(F) (family, 35%-controlled entity, section 509(a)(3)
+//    organization managers, donor-advised-fund/sponsoring-organization
+//    persons), and (f)(2)-(8) (the definitions those paragraphs use):
+//    NOT modelled — TECH_GAP.
+
+use self::{
+    ExciseAct,
+    ExciseActKind,
+    IRC_S4958_A,
+    IRC_S4958_B,
+    IRC_S4958_C,
+    IRC_S4958_D,
+    IRC_S4958_E,
+    IRC_S4958_F,
+    Person,
+    additional_tax,
+    corrected_within_notice_or_assessment_period,
+    excess_benefit_transaction_outside_1996_amendments,
+    excise_act_kind,
+    initial_tax,
+    taxed_under_4955_as_same_expenditure,
+};
+
+@source(IRC_S4958_E, coverage = partial, quote = "the term \"applicable tax-exempt organization\" means—")
+pub relation applicable_tax_exempt_organization(org: Person, on: Date) kind institutional {
+    label en unofficial "section 4958(e): case-asserted classification, WITHOUT independently testing the (e)(2) 5-year lookback on the organization's own former exempt status — TECH_GAP; excludes private foundations per (e)'s last sentence, which the case must respect when asserting this fact";
+}
+
+@source(IRC_S4958_F, coverage = partial, quote = "any person who was, at any time during the 5-year period ending on the date of such transaction, in a position to exercise substantial influence over the affairs of the organization")
+pub relation position_of_substantial_influence_on(p: Person, org: Person, on: Date) kind empirical {
+    label en unofficial "section 4958(f)(1)(A): p held a position to exercise substantial influence over the organization's affairs on this date";
+}
+@source(IRC_S4958_F, coverage = partial, quote = "any person who was, at any time during the 5-year period ending on the date of such transaction, in a position to exercise substantial influence over the affairs of the organization")
+pub relation disqualified_person_4958(p: Person, org: Person, a: ExciseAct) kind institutional {
+    label en official "section 4958(f)(1)(A): p is a disqualified person with respect to org for the excess-benefit act `a` — held a position of substantial influence at any time in the 5 years ending on the transaction date. (f)(1)(B)-(F) are NOT modelled (TECH_GAP)";
+}
+rule DisqualifiedPerson4958ViaSubstantialInfluence(p: Person, org: Person, a: ExciseAct, transaction_on: Date, held_on: Date, calendar_before_1: Date) defeasible {
+    label en official "section 4958(f)(1)(A): a position of substantial influence held at any time during the 5-year period ending on the transaction date makes p a disqualified person";
+    when excess_benefit_transaction_date(a, transaction_on);
+    when position_of_substantial_influence_on(p, org, held_on);
+    when held_on <= transaction_on;
+    when held_on >= calendar_before_1
+        and us.irc.core::civil_calendar_boundary_before(transaction_on, 5, us.irc.core::CalendarYear, calendar_before_1);
+    then disqualified_person_4958(p, org, a);
+}
+
+pub relation excess_benefit_organization(a: ExciseAct, org: Person) kind empirical {
+    label en unofficial "the applicable tax-exempt organization providing the economic benefit";
+}
+pub relation excess_benefit_disqualified_person(a: ExciseAct, p: Person) kind empirical {
+    label en unofficial "the disqualified person receiving the economic benefit";
+}
+pub relation excess_benefit_transaction_date(a: ExciseAct, on: Date) kind empirical {
+    label en unofficial "the date of the transaction, for the (f)(1)(A) 5-year lookback";
+}
+@source(IRC_S4958_C, coverage = partial, quote = "an economic benefit is provided by an applicable tax-exempt organization directly or indirectly to or for the use of any disqualified person")
+pub relation economic_benefit_provided(a: ExciseAct, amount: Money) kind empirical {
+    label en unofficial "section 4958(c)(1)(A): the value of the economic benefit provided";
+}
+@source(IRC_S4958_C, coverage = partial, quote = "the value of the economic benefit provided exceeds the value of the consideration (including the performance of services) received for providing such benefit")
+pub relation consideration_received(a: ExciseAct, amount: Money) kind empirical {
+    label en unofficial "section 4958(c)(1)(A): the value of the consideration received for the benefit";
+}
+
+@source(IRC_S4958_C, coverage = partial, quote = "The term \"excess benefit\" means the excess referred to in subparagraph (A).")
+pub relation excess_benefit_amount(a: ExciseAct, amount: Money) kind institutional {
+    label en official "section 4958(c)(1)(B): the excess of the economic benefit provided over the consideration received";
+}
+rule ExcessBenefitAmount(a: ExciseAct, amount: Money, benefit: Money, consideration: Money) defeasible {
+    label en official "section 4958(c)(1): excess benefit = economic benefit provided − consideration received, when the benefit exceeds the consideration";
+    when economic_benefit_provided(a, benefit);
+    when consideration_received(a, consideration);
+    when benefit > consideration;
+    then excess_benefit_amount(a, benefit - consideration);
+}
+
+@source(IRC_S4958_C, coverage = partial, quote = "any transaction in which an economic benefit is provided by an applicable tax-exempt organization directly or indirectly to or for the use of any disqualified person if the value of the economic benefit provided exceeds the value of the consideration (including the performance of services) received for providing such benefit")
+pub relation excess_benefit_transaction(a: ExciseAct) kind institutional {
+    label en official "section 4958(c)(1)(A): the transaction is an excess benefit transaction";
+}
+rule ExcessBenefitTransactionClassification(a: ExciseAct, org: Person, p: Person, on: Date) defeasible {
+    label en official "section 4958(c)(1)(A): a transaction providing an economic benefit exceeding the consideration received, from an applicable tax-exempt organization to a disqualified person, is an excess benefit transaction";
+    when excise_act_kind(a, ExcessBenefitTransaction);
+    when excess_benefit_organization(a, org);
+    when excess_benefit_disqualified_person(a, p);
+    when excess_benefit_transaction_date(a, on);
+    when applicable_tax_exempt_organization(org, on);
+    when disqualified_person_4958(p, org, a);
+    when excess_benefit_amount(a, _);
+    // Stage 2: section 4955(e) — tax imposed under 4955 on the same expenditure displaces this classification.
+    unless taxed_under_4955_as_same_expenditure(a) and excess_benefit_organization(a, org) and excess_benefit_disqualified_person(a, p) and excess_benefit_transaction_date(a, on);
+    // Stage 3: the 1996 effective-date and binding-contract rule (note 4 under section 4955, 37-*.law).
+    unless excess_benefit_transaction_outside_1996_amendments(a) and excess_benefit_organization(a, org) and excess_benefit_disqualified_person(a, p) and excess_benefit_transaction_date(a, on);
+    then excess_benefit_transaction(a);
+}
+
+@source(IRC_S4958_A, coverage = partial, quote = "knowing that it is such a transaction")
+external judgment relation manager_knew_excess_benefit_transaction(a: ExciseAct, p: Person) {
+    authority TaxCourt;
+    label en official "section 4958(a)(2): the organization manager participated knowing that it was an excess benefit transaction";
+}
+@source(IRC_S4958_A, coverage = partial, quote = "unless such participation is not willful and is due to reasonable cause")
+external judgment relation manager_excess_benefit_participation_not_willful_and_reasonable_cause(a: ExciseAct, p: Person) {
+    authority TaxCourt;
+    label en official "section 4958(a)(2): the organization manager's participation was not willful and was due to reasonable cause";
+}
+pub relation excess_benefit_organization_manager(p: Person, org: Person) kind institutional {
+    label en unofficial "p is an organization manager of org (analogous to a foundation manager, for the applicable tax-exempt organization)";
+}
+
+@source(IRC_S4958_A, coverage = partial, quote = "There is hereby imposed on each excess benefit transaction a tax equal to 25 percent of the excess benefit. The tax imposed by this paragraph shall be paid by any disqualified person referred to in subsection (f)(1) with respect to such transaction.")
+rule InitialTaxOnDisqualifiedPerson4958(a: ExciseAct, p: Person, amount: Money, base: Money) defeasible {
+    label en official "section 4958(a)(1): 25 percent of the excess benefit, paid by the disqualified person";
+    when excess_benefit_transaction(a);
+    when excess_benefit_disqualified_person(a, p);
+    when excess_benefit_amount(a, base);
+    then initial_tax(a, p, base * ExcessBenefitInitialTaxRateDisqualifiedPerson);
+}
+rule InitialTaxOnOrganizationManager4958(a: ExciseAct, p: Person, amount: Money, org: Person, base: Money) defeasible {
+    label en official "section 4958(a)(2): 10 percent of the excess benefit, capped at $20,000, paid by a knowing organization manager, unless not willful and due to reasonable cause";
+    when excess_benefit_transaction(a);
+    when excess_benefit_organization(a, org);
+    when excess_benefit_organization_manager(p, org);
+    when manager_knew_excess_benefit_transaction(a, p);
+    when excess_benefit_amount(a, base);
+    unless manager_excess_benefit_participation_not_willful_and_reasonable_cause(a, p) and excess_benefit_organization_manager(p, org) and excess_benefit_amount(a, base);
+    then initial_tax(a, p, min(base * ExcessBenefitInitialTaxRateManager, ExcessBenefitManagerTaxCap));
+}
+
+@source(IRC_S4958_B, coverage = partial, quote = "In any case in which an initial tax is imposed by subsection (a)(1) on an excess benefit transaction and the excess benefit involved in such transaction is not corrected within the taxable period, there is hereby imposed a tax equal to 200 percent of the excess benefit involved. The tax imposed by this subsection shall be paid by any disqualified person referred to in subsection (f)(1) with respect to such transaction.")
+rule AdditionalTaxOnDisqualifiedPerson4958(a: ExciseAct, p: Person, amount: Money, base: Money) defeasible {
+    label en official "section 4958(b): 200 percent of the excess benefit, paid by the disqualified person, if not corrected within the taxable period";
+    when excess_benefit_transaction(a);
+    when excess_benefit_disqualified_person(a, p);
+    when excess_benefit_amount(a, base);
+    unless corrected_within_notice_or_assessment_period(a) and excess_benefit_disqualified_person(a, p) and excess_benefit_amount(a, base);
+    then additional_tax(a, p, base * ExcessBenefitAdditionalTaxRateDisqualifiedPerson);
+}
+
+@source(IRC_S4958_D, coverage = partial, quote = "If more than 1 person is liable for any tax imposed by subsection (a) or subsection (b), all such persons shall be jointly and severally liable for such tax.")
+pub relation excess_benefit_jointly_and_severally_liable(a: ExciseAct, p1: Person, p2: Person) kind institutional {
+    label en official "section 4958(d)(1): p1 and p2 are jointly and severally liable for the same tax on the same excess benefit transaction";
+}
+rule JointAndSeveralExcessBenefitTax(a: ExciseAct, p1: Person, p2: Person, amount1: Money, amount2: Money) defeasible {
+    label en official "section 4958(d)(1): two persons both liable under (a)(1) for the same transaction are jointly and severally liable";
+    when excess_benefit_transaction(a);
+    when initial_tax(a, p1, amount1);
+    when initial_tax(a, p2, amount2);
+    when p1 != p2;
+    then excess_benefit_jointly_and_severally_liable(a, p1, p2);
+}

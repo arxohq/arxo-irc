@@ -1,0 +1,685 @@
+// 26 U.S.C. chapter 13, the rest: §2603 (liability and source of the tax),
+// §2611(b) (excluded transfers), §2612(a)(2), (c)(2), §2621(b) (the tax paid out
+// of the trust, in closed form), §2624(b)-(c), §2651(e)-(f) (generation
+// assignment: deceased parent, more than one generation, entities, exempt
+// entities), §2652(b)-(d) (trust, interest, executor), §2653(b)(2), §2654(a)(2),
+// §§2661-2663. Stage 2 (DECISION-0379 with deontics) of `us.irc.estate_gift`.
+//
+// GENERATION ASSIGNMENT. `generation_assignment` keeps its stage-1 meaning: a
+// raw assignment by one test of section 2651. Several may hold for one person;
+// `generation_assignment_effective` is the one the rest of the chapter reads:
+// the deceased-parent rule of (e) replaces the raw assignments, otherwise
+// (f)(1) takes the youngest. The entity look-through of (f)(2) is a SEPARATE
+// relation (`individual_treated_as_holder_through_entity_2651f2`) that no
+// direct-skip test reads: that separation is section 2612(c)(2).
+//
+// JUDGMENT CALLS
+//  - §2611(b)(2) "to the extent": the excluded amount is asserted; the tax is
+//    computed on the taxable amount less it (`GstTaxRule`, 06).
+//  - §2621(b): when the whole tax is paid out of the trust the tax-inclusive
+//    amount is the closed form D * r / (1 - r) of the geometric series (TECH-GAPS
+//    G482 resolved for that case; a partly-paid case needs the asserted amount).
+//  - §2662(a): the statute instructs the Secretary and states defaults for the
+//    regulations; the defaults are computed, the regulations themselves are the
+//    Secretary's (EXTERNAL_DEPENDENCY).
+
+language "law.core" version "0.2";
+package us.irc.estate_gift version "0.1.1";
+namespace "urn:us:irc:estate_gift:clir";
+
+use self::{
+    Asset,
+    Estate,
+    GstTransfer,
+    GstTransferKind,
+    IRC_S2203,
+    IRC_S2603_A,
+    IRC_S2603_B,
+    IRC_S2611_B,
+    IRC_S2612_A,
+    IRC_S2621_B,
+    IRC_S2624_B,
+    IRC_S2624_C,
+    IRC_S2651_E,
+    IRC_S2651_F,
+    IRC_S2652_B,
+    IRC_S2652_C,
+    IRC_S2652_D,
+    IRC_S2653_B,
+    IRC_S2654_A,
+    IRC_S2661,
+    IRC_S2662_A,
+    IRC_S2662_B,
+    Individual,
+    Person,
+    Secretary,
+    TaxableYear,
+    Trust,
+    generation_assignment,
+    gross_estate_item,
+    gst_adjusted_basis_before_transfer,
+    gst_applicable_rate,
+    gst_fair_market_value_at_transfer,
+    gst_inclusion_ratio,
+    gst_property_value_transferred,
+    gst_tax_imposed,
+    gst_taxable_amount,
+    gst_transfer_kind,
+    special_use_value,
+    transferee_of,
+    transferor_of,
+};
+
+// =====================================================================
+// §2603: who pays, and out of what
+// =====================================================================
+
+pub relation gst_transfer_occurs_on(t: GstTransfer, d: Date) kind empirical {
+    label en unofficial "the date of the generation-skipping transfer";
+}
+pub relation gst_direct_skip_from_trust(t: GstTransfer) kind empirical {
+    label en unofficial "the direct skip is made from a trust";
+}
+pub relation gst_trustee_of_transfer(t: GstTransfer, trustee: Person) kind empirical {
+    label en unofficial "the person is the trustee of the trust from which the taxable termination or direct skip is made";
+}
+pub relation gst_tax_paid(t: GstTransfer) kind empirical {
+    label en unofficial "the tax imposed by section 2601 with respect to the transfer has been paid";
+}
+pub relation gst_tax_due_date(t: GstTransfer, d: Date) kind empirical {
+    label en unofficial "the date by which the tax is due, under the regulations under section 2662 (or the default of gst_return_due_date_default)";
+}
+pub relation gst_tax_liable_person(t: GstTransfer, p: Person) kind institutional {
+    label en official "the person liable for the tax: the transferee of a taxable distribution, the trustee for a taxable termination or a direct skip from a trust, the transferor for another direct skip (section 2603(a))";
+}
+@source(IRC_S2603_A, relation = formalizes, coverage = exact, quote = "In the case of a taxable distribution, the tax imposed by section 2601 shall be paid by the transferee.")
+rule GstTaxLiablePersonDistributionRule(t: GstTransfer, p: Person) defeasible {
+    when gst_transfer_kind(t, TaxableDistribution);
+    when transferee_of(t, p);
+    then gst_tax_liable_person(t, p);
+}
+@source(IRC_S2603_A, relation = formalizes, coverage = exact, quote = "In the case of a taxable termination or a direct skip from a trust, the tax shall be paid by the trustee.")
+rule GstTaxLiablePersonTerminationRule(t: GstTransfer, p: Person) defeasible {
+    when gst_transfer_kind(t, TaxableTermination);
+    when gst_trustee_of_transfer(t, p);
+    then gst_tax_liable_person(t, p);
+}
+rule GstTaxLiablePersonDirectSkipFromTrustRule(t: GstTransfer, p: Person) defeasible {
+    when gst_transfer_kind(t, DirectSkip);
+    when gst_direct_skip_from_trust(t);
+    when gst_trustee_of_transfer(t, p);
+    then gst_tax_liable_person(t, p);
+}
+@source(IRC_S2603_A, relation = formalizes, coverage = exact, quote = "In the case of a direct skip (other than a direct skip from a trust), the tax shall be paid by the transferor.")
+rule GstTaxLiablePersonDirectSkipOutrightRule(t: GstTransfer, p: Person) defeasible {
+    when gst_transfer_kind(t, DirectSkip);
+    when not_known(gst_direct_skip_from_trust(t));
+    when transferor_of(t, p);
+    then gst_tax_liable_person(t, p);
+}
+@source(IRC_S2603_A, relation = formalizes, coverage = exact, quote = "the tax imposed by section 2601 shall be paid by the transferee")
+rule GstTaxPaymentDutyRule(t: GstTransfer, p: Person, on: Date, due: Date) defeasible {
+    label en official "the person liable under section 2603(a) shall pay the tax by its due date (section 2603(a))";
+    when gst_tax_liable_person(t, p);
+    when gst_transfer_occurs_on(t, on);
+    when gst_tax_due_date(t, due);
+    then duty GstTaxPaymentDuty {
+        bearer p;
+        beneficiary Secretary;
+        achieve gst_tax_paid(t) during [on, due];
+    };
+}
+pub relation governing_instrument_directs_other_source_by_specific_reference(t: GstTransfer) kind empirical {
+    label en unofficial "the governing instrument directs that the tax be charged elsewhere, by specific reference to the tax imposed by this chapter";
+}
+@source(IRC_S2603_B, relation = formalizes, coverage = exact, quote = "the tax imposed by this chapter on a generation-skipping transfer shall be charged to the property constituting such transfer")
+pub relation gst_tax_charged_to_transferred_property_2603b(t: GstTransfer) kind institutional {
+    label en official "unless the governing instrument otherwise directs by specific reference, the tax is charged to the property constituting the transfer (section 2603(b))";
+}
+rule GstTaxChargedToTransferredPropertyRule(t: GstTransfer) defeasible {
+    when gst_tax_imposed(t);
+    when not_known(governing_instrument_directs_other_source_by_specific_reference(t));
+    then gst_tax_charged_to_transferred_property_2603b(t);
+}
+
+// =====================================================================
+// §2611(b): transfers that are not generation-skipping transfers
+// =====================================================================
+
+pub relation transfer_would_be_2503e_exempt_if_made_inter_vivos(t: GstTransfer) kind empirical {
+    label en unofficial "the transfer, if made inter vivos by an individual, would not be treated as a taxable gift by reason of section 2503(e)";
+}
+pub relation value_subject_to_prior_gst_tax(t: GstTransfer, amount: Money) kind empirical {
+    label en unofficial "the part of the property transferred that was subject to a prior tax imposed under this chapter (section 2611(b)(2)(A))";
+}
+pub relation prior_transferee_same_or_lower_generation(t: GstTransfer) kind empirical {
+    label en unofficial "the transferee in the prior transfer was assigned to the same generation as, or a lower generation than, the generation assignment of the transferee in this transfer (section 2611(b)(2)(B))";
+}
+pub relation transfers_do_not_avoid_gst_tax(t: GstTransfer) kind empirical {
+    label en unofficial "the transfers do not have the effect of avoiding tax under this chapter with respect to any transfer (section 2611(b)(2)(C))";
+}
+pub relation gst_excluded_amount_2611b2(t: GstTransfer, amount: Money) kind institutional {
+    label en official "the part of the transfer that is excluded because the property was subject to a prior tax, the prior transferee was of the same or a lower generation, and avoidance is not the effect (section 2611(b)(2))";
+}
+rule GstExcludedAmount2611b2Rule(t: GstTransfer, amount: Money) defeasible {
+    when value_subject_to_prior_gst_tax(t, amount);
+    when prior_transferee_same_or_lower_generation(t);
+    when transfers_do_not_avoid_gst_tax(t);
+    then gst_excluded_amount_2611b2(t, amount);
+}
+@source(IRC_S2611_B, relation = formalizes, coverage = exact, quote = "any transfer which, if made inter vivos by an individual, would not be treated as a taxable gift by reason of section 2503(e)")
+pub relation gst_transfer_excluded_2611b(t: GstTransfer) kind institutional {
+    label en official "the transfer is not a generation-skipping transfer: an educational or medical transfer (b)(1), or a transfer wholly covered by the prior-tax exclusion (b)(2)";
+}
+rule GstTransferExcluded2503eRule(t: GstTransfer) defeasible {
+    when transfer_would_be_2503e_exempt_if_made_inter_vivos(t);
+    then gst_transfer_excluded_2611b(t);
+}
+rule GstTransferExcludedPriorTaxWholeRule(t: GstTransfer, excluded: Money, value: Money) defeasible {
+    when gst_excluded_amount_2611b2(t, excluded);
+    when gst_property_value_transferred(t, value) and excluded >= value;
+    then gst_transfer_excluded_2611b(t);
+}
+
+// =====================================================================
+// §2612(a)(2): the specified portion on the death of a lineal descendant
+// =====================================================================
+
+pub relation trust_interest_terminated_by_death_of_lineal_descendant(t: GstTransfer, trust: Trust) kind empirical {
+    label en unofficial "an interest in property held in trust terminates by reason of the death of a lineal descendant of the transferor (section 2612(a)(2))";
+}
+pub relation specified_portion_distributed_to_skip_persons(t: GstTransfer, trust: Trust) kind empirical {
+    label en unofficial "a specified portion of the trust's assets is distributed to one or more skip persons, or to trusts for their exclusive benefit";
+}
+@source(IRC_S2612_A, relation = formalizes, coverage = exact, quote = "such termination shall constitute a taxable termination with respect to such portion of the trust property")
+rule TaxableTerminationSpecifiedPortionRule(t: GstTransfer, trust: Trust) strict {
+    label en official "a termination on the death of a lineal descendant with a specified portion distributed to skip persons is a taxable termination as to that portion (section 2612(a)(2))";
+    when trust_interest_terminated_by_death_of_lineal_descendant(t, trust);
+    when specified_portion_distributed_to_skip_persons(t, trust);
+    then gst_transfer_kind(t, TaxableTermination);
+}
+
+// =====================================================================
+// §2621(b): the tax paid out of the trust, tax-inclusive
+// =====================================================================
+
+pub relation gst_tax_entirely_paid_out_of_trust(t: GstTransfer) kind empirical {
+    label en unofficial "all the tax imposed by section 2601 with respect to the taxable distribution is paid out of the trust (section 2621(b))";
+}
+@source(IRC_S2621_B, relation = formalizes, coverage = exact, quote = "if any of the tax imposed by this chapter with respect to any taxable distribution is paid out of the trust, an amount equal to the portion so paid shall be treated as a taxable distribution")
+pub relation gst_tax_inclusive_of_tax_paid_out_of_trust_2621b(t: GstTransfer, amount: Money) kind institutional {
+    label en official "where the whole tax is paid out of the trust, each payment is itself a taxable distribution bearing tax: the total tax is the taxable amount times r/(1-r), the sum of the geometric series (section 2621(b)); resolves TECH-GAPS G482 for that case";
+}
+rule GstTaxInclusiveOfTaxPaidOutOfTrustRule(t: GstTransfer, base: Money, rate: Decimal) defeasible {
+    when gst_transfer_kind(t, TaxableDistribution);
+    when gst_tax_entirely_paid_out_of_trust(t);
+    when gst_taxable_amount(t, base);
+    when gst_applicable_rate(t, rate) and rate < 1.0;
+    then gst_tax_inclusive_of_tax_paid_out_of_trust_2621b(t, div_round(base * rate, 1.0 - rate, 2, "HALF_UP"));
+}
+
+// =====================================================================
+// §2624(b), (c): valuation coordination with chapter 11
+// =====================================================================
+
+pub relation direct_skip_property_in_transferor_gross_estate(t: GstTransfer, e: Estate, item: Asset) kind empirical {
+    label en unofficial "the property of the direct skip is included in the transferor's gross estate";
+}
+@source(IRC_S2624_B, relation = formalizes, coverage = exact, quote = "the value of such property for purposes of this chapter shall be the same as its value for purposes of chapter 11 (determined with regard to sections 2032 and 2032A)")
+pub relation gst_direct_skip_estate_property_value_2624b(t: GstTransfer, amount: Money) kind institutional {
+    label en official "the value of a direct skip of property included in the transferor's gross estate is its chapter 11 value, with regard to the alternate valuation (section 2032) and special use valuation (section 2032A) elections (section 2624(b))";
+}
+rule GstDirectSkipEstatePropertyValueSpecialUseRule(t: GstTransfer, e: Estate, item: Asset, value: Money) defeasible {
+    when direct_skip_property_in_transferor_gross_estate(t, e, item);
+    when special_use_value(e, item, value);
+    then gst_direct_skip_estate_property_value_2624b(t, value);
+}
+rule GstDirectSkipEstatePropertyValueGrossEstateRule(t: GstTransfer, e: Estate, item: Asset, value: Money) defeasible {
+    when direct_skip_property_in_transferor_gross_estate(t, e, item);
+    when not_known(special_use_value_recorded(e, item));
+    when gross_estate_item(e, item, value);
+    then gst_direct_skip_estate_property_value_2624b(t, value);
+}
+relation special_use_value_recorded(e: Estate, item: Asset) kind institutional;
+rule SpecialUseValueRecordedRule(e: Estate, item: Asset) defeasible {
+    when special_use_value(e, item, _);
+    then special_use_value_recorded(e, item);
+}
+pub relation gst_alternate_valuation_election_made(trust: Trust, x: Person, w: Interval<Instant>) kind empirical {
+    label en unofficial "an election is made to value all the property included in the taxable terminations in accordance with section 2032";
+}
+pub relation taxable_terminations_at_death_of_individual(trust: Trust) kind empirical {
+    label en unofficial "one or more taxable terminations with respect to the same trust occur at the same time as, and as a result of, the death of an individual (section 2624(c))";
+}
+pub relation gst_terminations_valued_under_2032(trust: Trust) kind institutional {
+    label en official "the property included in the terminations at death is valued in accordance with section 2032 (section 2624(c))";
+}
+@source(IRC_S2624_C, relation = formalizes, coverage = exact, quote = "an election may be made to value all of the property included in such terminations in accordance with section 2032")
+rule GstAlternateValuationElectionPower(trust: Trust, x: Person, w: Interval<Instant>) strict {
+    label en official "the alternate valuation may be elected for taxable terminations at the death of an individual (section 2624(c))";
+    when gst_alternate_valuation_election_made(trust, x, w);
+    then power GstAlternateValuationElection {
+        holder x;
+        over trust;
+        exercise gst_alternate_valuation_election_made(trust, x, w);
+        valid_when taxable_terminations_at_death_of_individual(trust);
+        effect create(gst_terminations_valued_under_2032(trust));
+        window w;
+    };
+}
+
+// =====================================================================
+// §2651(e), (f): generation assignment, the rest
+// =====================================================================
+
+pub relation descendant_of_parent_of_transferor_or_spouse(p: Person, transferor: Person) kind empirical {
+    label en unofficial "the individual is a descendant of a parent of the transferor (or of the transferor's spouse or former spouse) (section 2651(e)(1)(A))";
+}
+pub relation parent_of_individual_dead_at_first_taxed_time(p: Person, transferor: Person) kind empirical {
+    label en unofficial "the individual's parent, who is a lineal descendant of that parent, is dead at the time the transfer from which the individual's interest is established or derived is subject to a tax under chapter 11 or 12 upon the transferor, at the earliest such time (section 2651(e)(1)(B))";
+}
+pub relation youngest_living_ancestor_generation(p: Person, transferor: Person, g: Integer) kind empirical {
+    label en unofficial "the generation assignment of the youngest living ancestor of the individual who is also a descendant of the parent of the transferor (or the spouse or former spouse); the transferor's own generation is 0";
+}
+pub relation individual_is_lineal_descendant_of_transferor_or_spouse(p: Person, transferor: Person) kind empirical {
+    label en unofficial "the individual is a lineal descendant of the transferor (or the transferor's spouse or former spouse) (section 2651(e)(2))";
+}
+pub relation transferor_has_living_lineal_descendant(transferor: Person) kind empirical {
+    label en unofficial "at the time of the transfer the transferor has a living lineal descendant (section 2651(e)(2))";
+}
+relation predeceased_parent_rule_applies(p: Person, transferor: Person) kind institutional;
+rule PredeceasedParentRuleAppliesRule(p: Person, transferor: Person) defeasible {
+    when descendant_of_parent_of_transferor_or_spouse(p, transferor);
+    when parent_of_individual_dead_at_first_taxed_time(p, transferor);
+    when not_known(predeceased_parent_rule_excluded_for_collateral_heir(p, transferor));
+    then predeceased_parent_rule_applies(p, transferor);
+}
+relation predeceased_parent_rule_excluded_for_collateral_heir(p: Person, transferor: Person) kind institutional;
+rule PredeceasedParentRuleExcludedRule(p: Person, transferor: Person) defeasible {
+    label en official "the subsection does not apply to a transfer to a collateral heir, not a lineal descendant, if the transferor has a living lineal descendant (section 2651(e)(2))";
+    when descendant_of_parent_of_transferor_or_spouse(p, transferor);
+    when not_known(individual_is_lineal_descendant_of_transferor_or_spouse(p, transferor));
+    when transferor_has_living_lineal_descendant(transferor);
+    then predeceased_parent_rule_excluded_for_collateral_heir(p, transferor);
+}
+pub relation generation_assignment_override_2651e(p: Person, transferor: Person, g: Integer) kind institutional {
+    label en official "the individual is treated as a member of the generation 1 below the lower (younger) of the transferor's generation and that of the youngest living ancestor who is a descendant of the parent of the transferor (section 2651(e)(1))";
+}
+@source(IRC_S2651_E, relation = formalizes, coverage = exact, quote = "such individual shall be treated as if such individual were a member of the generation which is 1 generation below the lower of the transferor's generation or the generation assignment of the youngest living ancestor of such individual who is also a descendant of the parent of the transferor")
+rule GenerationAssignmentOverride2651eRule(p: Person, transferor: Person, anc: Integer) defeasible {
+    label en official "a person with a deceased parent moves up to one generation below the younger of the transferor's generation and the youngest living qualifying ancestor's (section 2651(e)(1))";
+    when predeceased_parent_rule_applies(p, transferor);
+    when youngest_living_ancestor_generation(p, transferor, anc);
+    then generation_assignment_override_2651e(p, transferor, max(0, anc) + 1);
+}
+// (f)(1): more than one generation: the youngest
+relation later_generation_assignment_exists(p: Person, transferor: Person, g: Integer) kind institutional;
+rule LaterGenerationAssignmentExistsRule(p: Person, transferor: Person, g: Integer, g2: Integer) defeasible {
+    when generation_assignment(p, transferor, g);
+    when generation_assignment(p, transferor, g2) and g2 > g;
+    then later_generation_assignment_exists(p, transferor, g);
+}
+relation youngest_generation_assignment(p: Person, transferor: Person, g: Integer) kind institutional;
+@source(IRC_S2651_F, relation = formalizes, coverage = exact, quote = "an individual who, but for this subsection, would be assigned to more than 1 generation shall be assigned to the youngest such generation")
+rule YoungestGenerationAssignmentRule(p: Person, transferor: Person, g: Integer) defeasible {
+    label en official "an individual assigned to more than one generation is assigned to the youngest (section 2651(f)(1))";
+    when generation_assignment(p, transferor, g);
+    unless later_generation_assignment_exists(p, transferor, g);
+    then youngest_generation_assignment(p, transferor, g);
+}
+pub relation generation_assignment_effective(p: Person, transferor: Person, g: Integer) kind institutional {
+    label en official "the generation to which the person is assigned for the chapter: the deceased-parent adjustment of section 2651(e) where it applies, otherwise the youngest of the raw assignments (section 2651(f)(1))";
+}
+rule GenerationAssignmentEffectiveOverrideRule(p: Person, transferor: Person, g: Integer) defeasible {
+    when generation_assignment_override_2651e(p, transferor, g);
+    then generation_assignment_effective(p, transferor, g);
+}
+rule GenerationAssignmentEffectiveYoungestRule(p: Person, transferor: Person, g: Integer) defeasible {
+    when youngest_generation_assignment(p, transferor, g);
+    when not_known(generation_assignment_override_recorded(p, transferor));
+    then generation_assignment_effective(p, transferor, g);
+}
+relation generation_assignment_override_recorded(p: Person, transferor: Person) kind institutional;
+rule GenerationAssignmentOverrideRecordedRule(p: Person, transferor: Person) defeasible {
+    when generation_assignment_override_2651e(p, transferor, _);
+    then generation_assignment_override_recorded(p, transferor);
+}
+// (f)(2): interests through entities (never read by the direct skip test)
+pub relation entity_has_interest_in_property(entity_holder: Person, prop: Asset) kind empirical {
+    label en unofficial "an estate, trust, partnership, corporation or other entity has an interest in the property";
+}
+pub relation individual_has_beneficial_interest_in_entity(individual: Individual, entity_holder: Person) kind empirical {
+    label en unofficial "the individual has a beneficial interest in the entity";
+}
+@source(IRC_S2651_F, relation = formalizes, coverage = exact, quote = "each individual having a beneficial interest in such entity shall be treated as having an interest in such property")
+pub relation individual_treated_as_holder_through_entity_2651f2(individual: Individual, prop: Asset) kind institutional {
+    label en official "each individual with a beneficial interest in an entity that has an interest in property is treated as having an interest in that property; solely for determining whether a transfer to a trust is a direct skip the look-through does not apply (section 2612(c)(2)), so this relation is read by no direct skip rule";
+}
+rule IndividualTreatedAsHolderThroughEntityRule(individual: Individual, holder_entity: Person, prop: Asset) defeasible {
+    when entity_has_interest_in_property(holder_entity, prop);
+    when individual_has_beneficial_interest_in_entity(individual, holder_entity);
+    when not_known(entity_described_in_2651f3(holder_entity));
+    then individual_treated_as_holder_through_entity_2651f2(individual, prop);
+}
+pub relation entity_described_in_2651f3(holder_entity: Person) kind institutional {
+    label en official "an organization described in section 511(a)(2), a charitable trust described in section 511(b)(2), or a governmental entity (section 2651(f)(3))";
+}
+pub relation organization_described_in_511a2(holder_entity: Person) kind empirical {
+    label en unofficial "the entity is an organization described in section 511(a)(2)";
+}
+pub relation charitable_trust_described_in_511b2(holder_entity: Person) kind empirical {
+    label en unofficial "the entity is a charitable trust described in section 511(b)(2)";
+}
+pub relation entity_is_governmental(holder_entity: Person) kind empirical {
+    label en unofficial "the entity is a governmental entity";
+}
+rule EntityDescribedIn2651f3OrganizationRule(holder_entity: Person) defeasible {
+    when organization_described_in_511a2(holder_entity);
+    then entity_described_in_2651f3(holder_entity);
+}
+rule EntityDescribedIn2651f3TrustRule(holder_entity: Person) defeasible {
+    when charitable_trust_described_in_511b2(holder_entity);
+    then entity_described_in_2651f3(holder_entity);
+}
+rule EntityDescribedIn2651f3GovernmentRule(holder_entity: Person) defeasible {
+    when entity_is_governmental(holder_entity);
+    then entity_described_in_2651f3(holder_entity);
+}
+@source(IRC_S2651_F, relation = formalizes, coverage = exact, quote = "shall be assigned to the transferor's generation")
+rule GenerationAssignmentExemptEntityRule(holder_entity: Person, transferor: Person) defeasible {
+    label en official "such an organization, charitable trust or governmental entity is assigned to the transferor's generation (section 2651(f)(3))";
+    when entity_described_in_2651f3(holder_entity);
+    when transferor_of(_, transferor);
+    then generation_assignment(holder_entity, transferor, 0);
+}
+
+// =====================================================================
+// §2652(b)-(d): trust, interest, executor
+// =====================================================================
+
+pub enum ArrangementKind {
+    LifeEstateAndRemainderArrangement;
+    EstateForYearsArrangement;
+    InsuranceContractArrangement;
+    AnnuityContractArrangement;
+    OtherArrangement;
+}
+pub relation arrangement_kind_of(a: Trust, kind: ArrangementKind) kind empirical {
+    label en unofficial "the kind of arrangement that is not a trust in form";
+}
+pub relation arrangement_has_substantially_same_effect_as_trust(a: Trust) kind empirical {
+    label en unofficial "the arrangement, although not a trust, has substantially the same effect as a trust (section 2652(b)(1))";
+}
+pub relation arrangement_is_an_estate(a: Trust) kind empirical {
+    label en unofficial "the arrangement is an estate, which is excluded from the term trust";
+}
+@source(IRC_S2652_B, relation = formalizes, coverage = exact, quote = "The term \"trust\" includes any arrangement (other than an estate) which, although not a trust, has substantially the same effect as a trust.")
+pub relation treated_as_trust_2652b(a: Trust) kind institutional {
+    label en official "the arrangement is treated as a trust: it has substantially the same effect as a trust and is not an estate; life estates and remainders, estates for years, and insurance and annuity contracts are examples (section 2652(b)(1), (3))";
+}
+rule TreatedAsTrust2652bEffectRule(a: Trust) defeasible {
+    when arrangement_has_substantially_same_effect_as_trust(a);
+    when not_known(arrangement_is_an_estate(a));
+    then treated_as_trust_2652b(a);
+}
+rule TreatedAsTrust2652bExampleLifeEstateRule(a: Trust) defeasible {
+    when arrangement_kind_of(a, LifeEstateAndRemainderArrangement);
+    when not_known(arrangement_is_an_estate(a));
+    then treated_as_trust_2652b(a);
+}
+rule TreatedAsTrust2652bExampleTermRule(a: Trust) defeasible {
+    when arrangement_kind_of(a, EstateForYearsArrangement);
+    when not_known(arrangement_is_an_estate(a));
+    then treated_as_trust_2652b(a);
+}
+rule TreatedAsTrust2652bExampleInsuranceRule(a: Trust) defeasible {
+    when arrangement_kind_of(a, InsuranceContractArrangement);
+    when not_known(arrangement_is_an_estate(a));
+    then treated_as_trust_2652b(a);
+}
+rule TreatedAsTrust2652bExampleAnnuityRule(a: Trust) defeasible {
+    when arrangement_kind_of(a, AnnuityContractArrangement);
+    when not_known(arrangement_is_an_estate(a));
+    then treated_as_trust_2652b(a);
+}
+pub relation person_in_possession_of_arrangement_property(a: Trust, p: Person) kind empirical {
+    label en unofficial "the person is in actual or constructive possession of the property subject to the arrangement";
+}
+@source(IRC_S2652_B, relation = formalizes, coverage = exact, quote = "the term \"trustee\" shall mean the person in actual or constructive possession of the property subject to such arrangement")
+pub relation trustee_of_arrangement_2652b2(a: Trust, p: Person) kind institutional {
+    label en official "for an arrangement that is not a trust but is treated as one, the trustee is the person in actual or constructive possession of its property (section 2652(b)(2))";
+}
+rule TrusteeOfArrangement2652b2Rule(a: Trust, p: Person) defeasible {
+    when treated_as_trust_2652b(a);
+    when person_in_possession_of_arrangement_property(a, p);
+    then trustee_of_arrangement_2652b2(a, p);
+}
+// (c): interest
+pub relation person_has_current_right_to_income_or_corpus(p: Person, trust: Trust) kind empirical {
+    label en unofficial "the person has a right, other than a future right, to receive income or corpus from the trust (section 2652(c)(1)(A))";
+}
+pub relation person_is_permissible_current_recipient(p: Person, trust: Trust) kind empirical {
+    label en unofficial "the person is a permissible current recipient of income or corpus from the trust (section 2652(c)(1)(B))";
+}
+pub relation person_described_in_2055a(p: Person) kind empirical {
+    label en unofficial "the person is described in section 2055(a)";
+}
+pub relation trust_is_crat_crut_or_pooled_income_fund(trust: Trust) kind empirical {
+    label en unofficial "the trust is a charitable remainder annuity trust, a charitable remainder unitrust within the meaning of section 664, or a pooled income fund within the meaning of section 642(c)(5) (section 2652(c)(1)(C))";
+}
+pub relation interest_used_primarily_to_postpone_or_avoid_gst_tax(p: Person, trust: Trust) kind empirical {
+    label en unofficial "the interest is used primarily to postpone or avoid any tax imposed by this chapter (section 2652(c)(2))";
+}
+pub relation interest_only_through_support_obligation_use(p: Person, trust: Trust) kind empirical {
+    label en unofficial "the person's only claim on trust income or corpus is that it may be used to satisfy an obligation of support arising under State law (section 2652(c)(3))";
+}
+pub relation support_use_discretionary_or_ugma(p: Person, trust: Trust) kind empirical {
+    label en unofficial "the use for support is discretionary, or is pursuant to a State law substantially equivalent to the Uniform Gifts to Minors Act (section 2652(c)(3)(A)-(B))";
+}
+relation candidate_interest_2652c1(p: Person, trust: Trust) kind institutional;
+rule CandidateInterestCurrentRightRule(p: Person, trust: Trust) defeasible {
+    when person_has_current_right_to_income_or_corpus(p, trust);
+    then candidate_interest_2652c1(p, trust);
+}
+rule CandidateInterestPermissibleRecipientRule(p: Person, trust: Trust) defeasible {
+    when person_is_permissible_current_recipient(p, trust);
+    when not_known(person_described_in_2055a(p));
+    then candidate_interest_2652c1(p, trust);
+}
+rule CandidateInterestCharitableRule(p: Person, trust: Trust) defeasible {
+    when person_described_in_2055a(p);
+    when trust_is_crat_crut_or_pooled_income_fund(trust);
+    then candidate_interest_2652c1(p, trust);
+}
+@source(IRC_S2652_C, relation = formalizes, coverage = exact, quote = "A person has an interest in property held in trust if (at the time the determination is made) such person")
+pub relation has_interest_in_trust_2652c(p: Person, trust: Trust) kind institutional {
+    label en official "the person has an interest in the trust: a current right, a permissible current recipient who is not a section 2055(a) donee, or a section 2055(a) donee of a CRAT, CRUT or pooled income fund; an interest used primarily to avoid tax, or a discretionary or UGMA support use, is disregarded (section 2652(c))";
+}
+rule HasInterestInTrust2652cRule(p: Person, trust: Trust) defeasible {
+    when candidate_interest_2652c1(p, trust);
+    when not_known(interest_used_primarily_to_postpone_or_avoid_gst_tax(p, trust));
+    when not_known(support_only_interest_disregarded(p, trust));
+    then has_interest_in_trust_2652c(p, trust);
+}
+relation support_only_interest_disregarded(p: Person, trust: Trust) kind institutional;
+rule SupportOnlyInterestDisregardedRule(p: Person, trust: Trust) defeasible {
+    when interest_only_through_support_obligation_use(p, trust);
+    when support_use_discretionary_or_ugma(p, trust);
+    then support_only_interest_disregarded(p, trust);
+}
+// (d), §2203: the executor
+pub relation executor_or_administrator_acting_in_united_states(e: Estate, x: Person) kind empirical {
+    label en unofficial "the person is the executor or administrator of the decedent, appointed, qualified and acting within the United States";
+}
+pub relation person_in_possession_of_decedent_property(e: Estate, x: Person) kind empirical {
+    label en unofficial "the person is in actual or constructive possession of any property of the decedent";
+}
+relation executor_acting_in_united_states_recorded(e: Estate) kind institutional;
+rule ExecutorActingInUnitedStatesRecordedRule(e: Estate) defeasible {
+    when executor_or_administrator_acting_in_united_states(e, _);
+    then executor_acting_in_united_states_recorded(e);
+}
+@source(IRC_S2203, relation = formalizes, coverage = exact, quote = "The term \"executor\" wherever it is used in this title in connection with the estate tax imposed by this chapter means the executor or administrator of the decedent, or, if there is no executor or administrator appointed, qualified, and acting within the United States, then any person in actual or constructive possession of any property of the decedent.")
+pub relation executor_for_estate_tax_2203(e: Estate, x: Person) kind institutional {
+    label en official "the executor for the estate tax: the executor or administrator acting within the United States, or, where there is none, any person in actual or constructive possession of the decedent's property (section 2203)";
+}
+rule ExecutorForEstateTax2203AppointedRule(e: Estate, x: Person) defeasible {
+    when executor_or_administrator_acting_in_united_states(e, x);
+    then executor_for_estate_tax_2203(e, x);
+}
+rule ExecutorForEstateTax2203PossessionRule(e: Estate, x: Person) defeasible {
+    when person_in_possession_of_decedent_property(e, x);
+    when not_known(executor_acting_in_united_states_recorded(e));
+    then executor_for_estate_tax_2203(e, x);
+}
+@source(IRC_S2652_D, relation = formalizes, coverage = exact, quote = "For purposes of this chapter, the term \"executor\" has the meaning given such term by section 2203.")
+pub relation executor_for_chapter_13_2652d(e: Estate, x: Person) kind institutional {
+    label en official "for chapter 13 the executor has the meaning of section 2203";
+}
+rule ExecutorForChapter13Rule(e: Estate, x: Person) defeasible {
+    when executor_for_estate_tax_2203(e, x);
+    then executor_for_chapter_13_2652d(e, x);
+}
+
+// =====================================================================
+// §2653(b)(2): the pour-over trust
+// =====================================================================
+
+pub relation pour_over_distribution(t: GstTransfer, from_trust: Trust, to_trust: Trust, transferor: Person, amount: Money) kind empirical {
+    label en unofficial "the generation-skipping transfer involves the transfer of property, of the stated amount, from one trust to another trust, the pour-over trust";
+}
+pub relation applicable_fraction_of_distribution(t: GstTransfer, fraction: Decimal) kind empirical {
+    label en unofficial "the applicable fraction which applies to the distribution (section 2653(b)(2)(B))";
+}
+pub relation gst_nontax_portion_treated_as_exemption_allocated(transferor: Person, to_trust: Trust, amount: Money) kind institutional {
+    label en official "the inclusion ratio of the pour-over trust is determined by treating the nontax portion of the distribution, the amount times the applicable fraction, as part of a GST exemption allocated to it (section 2653(b)(2))";
+}
+@source(IRC_S2653_B, relation = formalizes, coverage = exact, quote = "the inclusion ratio for the pour-over trust shall be determined by treating the nontax portion of such distribution as if it were a part of a GST exemption allocated to such trust")
+rule GstNontaxPortionTreatedAsExemptionAllocatedRule(t: GstTransfer, from_trust: Trust, to_trust: Trust, transferor: Person, amount: Money, fraction: Decimal) defeasible {
+    when pour_over_distribution(t, from_trust, to_trust, transferor, amount);
+    when applicable_fraction_of_distribution(t, fraction);
+    then gst_nontax_portion_treated_as_exemption_allocated(transferor, to_trust, round(amount * fraction, 2, "HALF_UP"));
+}
+
+// =====================================================================
+// §2654(a)(2): the basis at a taxable termination at death
+// =====================================================================
+
+pub relation gst_termination_at_death_of_individual(t: GstTransfer) kind empirical {
+    label en unofficial "the property is transferred in a taxable termination that occurs at the same time as and as a result of the death of an individual (section 2654(a)(2))";
+}
+@source(IRC_S2654_A, relation = formalizes, coverage = exact, quote = "the basis of such property shall be adjusted in a manner similar to the manner provided under section 1014(a); except that, if the inclusion ratio with respect to such property is less than 1, any increase or decrease in basis shall be limited by multiplying such increase or decrease (as the case may be) by the inclusion ratio")
+pub relation gst_basis_after_death_termination_2654a2(t: GstTransfer, item: Asset, basis: Money) kind institutional {
+    label en official "the basis changes to the fair market value as under section 1014(a), the increase or decrease multiplied by the inclusion ratio when that is below 1 (section 2654(a)(2)); the alternative valuation date of section 1014(a)(2) is the value asserted";
+}
+rule GstBasisAfterDeathTerminationRule(t: GstTransfer, item: Asset, fmv: Money, before: Money, ratio: Decimal) defeasible {
+    when gst_termination_at_death_of_individual(t);
+    when gst_fair_market_value_at_transfer(t, item, fmv);
+    when gst_adjusted_basis_before_transfer(t, item, before);
+    when gst_inclusion_ratio(t, ratio) and ratio < 1.0;
+    then gst_basis_after_death_termination_2654a2(t, item, round(before + (fmv - before) * ratio, 2, "HALF_UP"));
+}
+rule GstBasisAfterDeathTerminationFullRatioRule(t: GstTransfer, item: Asset, fmv: Money) defeasible {
+    when gst_termination_at_death_of_individual(t);
+    when gst_fair_market_value_at_transfer(t, item, fmv);
+    when gst_inclusion_ratio(t, 1.0);
+    then gst_basis_after_death_termination_2654a2(t, item, fmv);
+}
+
+// =====================================================================
+// §§2661-2663: administration
+// =====================================================================
+
+pub relation gst_occurs_at_same_time_as_and_because_of_death(t: GstTransfer) kind empirical {
+    label en unofficial "the generation-skipping transfer occurs at the same time as and as a result of the death of an individual";
+}
+pub enum GstAdministrationRegime {
+    AdministeredAsGiftTax;
+    AdministeredAsEstateTax;
+}
+@source(IRC_S2661, relation = formalizes, coverage = exact, quote = "all provisions of subtitle F (including penalties) applicable to the gift tax, to chapter 12, or to section 2501, are hereby made applicable in respect of the generation-skipping transfer tax")
+pub relation gst_administration_regime_2661(t: GstTransfer, regime: GstAdministrationRegime) kind institutional {
+    label en official "subtitle F applies to the generation-skipping transfer tax as it applies to the gift tax, or, for a transfer at the same time as and as a result of death, as it applies to the estate tax, insofar as applicable and not inconsistent (section 2661); the provisions themselves are owned by the subtitle F packages";
+}
+rule GstAdministrationRegimeGiftRule(t: GstTransfer) defeasible {
+    when gst_tax_imposed(t);
+    when not_known(gst_occurs_at_same_time_as_and_because_of_death(t));
+    then gst_administration_regime_2661(t, AdministeredAsGiftTax);
+}
+rule GstAdministrationRegimeEstateRule(t: GstTransfer) defeasible {
+    when gst_tax_imposed(t);
+    when gst_occurs_at_same_time_as_and_because_of_death(t);
+    then gst_administration_regime_2661(t, AdministeredAsEstateTax);
+}
+pub relation secretary_has_prescribed_gst_return_regulations(t: GstTransfer) kind empirical {
+    label en unofficial "the Secretary has prescribed by regulations the person required to make the return and the time (section 2662(a)); the regulations are not pinned";
+}
+@source(IRC_S2662_A, relation = formalizes, coverage = partial, quote = "The Secretary shall prescribe by regulations the person who is required to make the return with respect to the tax imposed by this chapter and the time by which any such return must be filed.")
+rule SecretaryPrescribeGstReturnRegulationsDutyRule(t: GstTransfer) defeasible {
+    label en official "the Secretary shall prescribe by regulations who makes the return and by when (section 2662(a))";
+    when gst_tax_imposed(t);
+    then duty SecretaryPrescribeGstReturnRegulationsDuty {
+        bearer Secretary;
+        goal maintenance {
+            condition secretary_has_prescribed_gst_return_regulations(t);
+            window [@1986-10-23, infinity);
+        }
+    };
+}
+pub relation gst_return_person_default(t: GstTransfer, p: Person) kind institutional {
+    label en official "by default the person required to make the return is the person liable under section 2603(a) (section 2662(a)(1))";
+}
+rule GstReturnPersonDefaultRule(t: GstTransfer, p: Person) defeasible {
+    when gst_tax_liable_person(t, p);
+    then gst_return_person_default(t, p);
+}
+pub relation estate_or_gift_return_required_date_for_transfer(t: GstTransfer, d: Date) kind empirical {
+    label en unofficial "the date on which an estate or gift tax return is required to be filed with respect to the transfer";
+}
+pub relation return_person_taxable_year_of_transfer(t: GstTransfer, y: TaxableYear) kind empirical {
+    label en unofficial "the taxable year of the person required to make the return in which the transfer occurs";
+}
+pub relation gst_return_due_date_default(t: GstTransfer, d: Date) kind institutional {
+    label en official "by default the return of a direct skip other than from a trust is due when the estate or gift tax return is; every other return by the 15th day of the 4th month after the close of the return person's taxable year in which the transfer occurs (section 2662(a)(2))";
+}
+rule GstReturnDueDateDefaultDirectSkipRule(t: GstTransfer, d: Date) defeasible {
+    when gst_transfer_kind(t, DirectSkip);
+    when not_known(gst_direct_skip_from_trust(t));
+    when estate_or_gift_return_required_date_for_transfer(t, d);
+    then gst_return_due_date_default(t, d);
+}
+rule GstReturnDueDateDefaultOtherRule(t: GstTransfer, y: TaxableYear, close: Date) defeasible {
+    when gst_tax_imposed(t);
+    when return_person_taxable_year_of_transfer(t, y) and us.irc.core::ends(y, close);
+    when not_known(direct_skip_outside_a_trust(t));
+    then gst_return_due_date_default(t, add_calendar_period(add_calendar_period(add_calendar_period(close, 1 calendar_day), 3 calendar_month), 14 calendar_day));
+}
+relation direct_skip_outside_a_trust(t: GstTransfer) kind institutional;
+rule DirectSkipOutsideATrustRule(t: GstTransfer) defeasible {
+    when gst_transfer_kind(t, DirectSkip);
+    when not_known(gst_direct_skip_from_trust(t));
+    then direct_skip_outside_a_trust(t);
+}
+pub relation secretary_requires_information_return(t: GstTransfer, p: Person) kind empirical {
+    label en unofficial "the Secretary by regulations requires a return containing information the Secretary determines is necessary for purposes of the chapter (section 2662(b))";
+}
+pub external judgment relation information_necessary_for_purposes_of_chapter_13(t: GstTransfer) {
+    authority Secretary;
+    label en official "such information as he determines to be necessary for purposes of this chapter (section 2662(b))";
+}
+pub relation information_return_required_2662b(t: GstTransfer, p: Person) kind institutional {
+    label en official "an information return is required of the person (section 2662(b))";
+}
+@source(IRC_S2662_B, relation = formalizes, coverage = exact, quote = "The Secretary may by regulations require a return to be filed containing such information as he determines to be necessary for purposes of this chapter.")
+rule SecretaryInformationReturnPower(t: GstTransfer, p: Person) strict {
+    label en official "the Secretary may by regulations require an information return (section 2662(b))";
+    when secretary_requires_information_return(t, p);
+    then power SecretaryRequiresGstInformationReturn {
+        holder Secretary;
+        over p;
+        exercise secretary_requires_information_return(t, p);
+        valid_when information_necessary_for_purposes_of_chapter_13(t);
+        effect create(information_return_required_2662b(t, p));
+        window [@1986-10-23, infinity);
+    };
+}

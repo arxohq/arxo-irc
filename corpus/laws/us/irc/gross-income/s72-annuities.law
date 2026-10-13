@@ -1,0 +1,533 @@
+// Section 72 — Annuities; certain proceeds of endowment and life insurance
+// contracts. Stage 2c (IRC-06). Scope per task priority: (a) general
+// inclusion, (b) exclusion ratio with the (b)(2)-(4) unrecovered-investment
+// rules, (p) loans treated as distributions ($50,000/50% test and the
+// (p)(2)(B)-(D) repayment-term validity conditions), (t) 10% additional tax
+// on early distributions with the exceptions the task instruction names by
+// letter: age 59 1/2 (exact date), death, disability, the (t)(4) SEPP
+// recapture, separation after 55 (or 50 for a qualified public safety
+// employee under (t)(10)), the (t)(2)(B) medical-expense-deduction-ceiling
+// partial exception, QDRO, the IRS-levy exception, qualified reservist
+// distributions, birth/adoption ($5,000 cap), emergency personal expense
+// ($1,000 cap), domestic abuse (lesser of $10,000/50% PV cap), and terminal
+// illness.
+//
+// NOT reached this pass (recorded, not silently dropped — coverage rows
+// classify each honestly): §72(c) (definitions of "investment in the
+// contract" and "expected return" beyond the two amounts taken as case
+// facts below — (c)(3)'s actuarial-table computation of expected return is
+// EXTERNAL_DEPENDENCY, per the task instruction itself), (d) (simplified
+// method table of anticipated payments), (e) (amounts not received as
+// annuities / income-first ordering), (f)-(h), (m) (modified endowment
+// contracts, incl. (m)(7) disability used above only as a named boolean
+// fact), (o), (p)(5)-(6) (contract-purchased loans; the 2020-era/disaster
+// loan modifications), (q) (10% tax on early annuity/MEC distributions —
+// structurally the same shape as (t) but a separate subsection, not
+// attempted), (s), (t)(2)(D)-(F),(J),(M) (unemployed-health-insurance,
+// higher-education, first-time-homebuyer, pension-linked ESA, and
+// disaster-recovery exceptions — named in the statute but not in the task
+// instruction's own priority list), (t)(3),(5)-(9),(11) (aggregation,
+// trustee-to-trustee transfer, and disaster-distribution machinery), (u),
+// (v), (w).
+//
+// JUDGMENT CALL (architecture, coordinator-facing): `us.irc.deferred_
+// compensation` already depends on `us.irc.gross_income` (its exclusion
+// rules rest on this package's `gross_income`/`adjusted_gross_income`), so
+// THIS package cannot import `deferred_compensation`'s `Plan` entity or its
+// `qualified_plan`/`required_minimum_distribution` relations without a
+// dependency cycle — contrary to what a literal reading of the task
+// instruction's "use them for section 72(t) contracts" might suggest. This
+// module instead declares its OWN local, generic entities for the annuity/
+// endowment/life-insurance contract of (a)-(b) and for the "qualified
+// employer plan"/"qualified retirement plan" of (p)/(t) (which is in any
+// case a strictly narrower notion than `deferred_compensation::Plan`, since
+// section 72 also reaches individual annuity contracts having nothing to do
+// with an employer plan). A case that wants to connect a specific
+// `deferred_compensation::Plan` to one of these facts does so by asserting
+// both packages' relations against the same real-world plan; no shared
+// identifier is threaded through by this package. Flagged in
+// `gross-income.deps.json` as a coordinator-facing architecture note, not a
+// per-fragment pending dependency.
+
+// `Individual`/`Person`/`TaxableYear` are already aliased package-wide by
+// s61-gross-income.law; not re-declared here (LDC-E1201 duplicate-name).
+
+// =====================================================================
+// §72(a): general rule — amounts received as an annuity
+// =====================================================================
+
+use self::{
+    IRC_S72_A,
+    IRC_S72_B,
+    IRC_S72_P,
+    IRC_S72_T,
+    Individual,
+    TaxableYear,
+    disaster_loan_limit_applies_72p6A,
+    eped_barred_for_distribution_72t2Ivii,
+    exception_a5_and_c_barred_for_ira_72t3A,
+    sepp_exception_barred_from_qualified_trust_72t3B,
+    simple_25_percent_rate_applies_72t6a,
+    simplified_method_applies_72d1,
+};
+
+pub entity AnnuityContract {
+    label en unofficial "an annuity, endowment, or life insurance contract within the meaning of section 72(a) (case-asserted; not the deferred_compensation Plan entity — see header note)";
+}
+
+pub relation amount_received_as_annuity(p: Individual, contract: AnnuityContract, y: TaxableYear, amount: Money) kind empirical {
+    label en official "an amount received as an annuity (for a period certain or during one or more lives) under an annuity, endowment, or life insurance contract during the taxable year (section 72(a)(1))";
+}
+
+pub relation annuity_income_includible_72(p: Individual, contract: AnnuityContract, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the amount received as an annuity that is includible in gross income under section 72(a)/(b) (paragraph (8) of section 61(a)) — a case package feeds this into `gross_income_item(p, y, Annuities, amount)`, mirroring how this package's other producing sections leave the section 61(a) classification itself to the case per the s61 module header";
+}
+
+@source(IRC_S72_A, quote = "gross income includes any amount received as an annuity (whether for a period certain or during one or more lives) under an annuity, endowment, or life insurance contract")
+relation has_exclusion_ratio_72(contract: AnnuityContract) kind institutional {
+    label en official "helper binding the otherwise-open ratio variable so its absence can be tested with not_known of a fully-bound helper (this package's settled idiom)";
+}
+rule HasExclusionRatio(p: Individual, contract: AnnuityContract, ratio: Decimal) strict {
+    label en official "helper for the not_known test in AnnuityAmountIncludedByDefault below";
+    when annuity_exclusion_ratio(p, contract, ratio);
+    then has_exclusion_ratio_72(contract);
+}
+rule AnnuityAmountIncludedByDefault(p: Individual, contract: AnnuityContract, y: TaxableYear, amount: Money) strict {
+    label en official "section 72(a)(1): an amount received as an annuity is gross income in full, unless a (b) exclusion ratio is on record for the contract (in which case the rule below computes the reduced amount instead — checked via not_known of a helper, not an `unless` clause, since `unless` requires binding every head field including y/amount, which the exclusion-ratio condition alone cannot do)";
+    when amount_received_as_annuity(p, contract, y, amount);
+    when not_known(has_exclusion_ratio_72(contract));
+    when not_known(simplified_method_applies_72d1(p, contract));
+    then annuity_income_includible_72(p, contract, y, amount);
+}
+
+// =====================================================================
+// §72(b): exclusion ratio
+// =====================================================================
+
+pub relation investment_in_contract(p: Individual, contract: AnnuityContract, amount: Money) kind empirical {
+    label en official "the investment in the contract as of the annuity starting date (section 72(c)(1) aggregate-premiums computation is not itself modelled this pass — taken as a case-asserted amount, per the task's own note that (c) beyond (c)(3) is out of this pass's scope)";
+}
+relation expected_return_72c3(p: Individual, contract: AnnuityContract, amount: Money) kind empirical {
+    label en official "the expected return under the contract (section 72(c)(3)) — determined from actuarial tables prescribed by the Secretary; this package does not implement the actuarial-table computation (EXTERNAL_DEPENDENCY) and takes the resulting amount as a case fact";
+}
+
+pub relation annuity_exclusion_ratio(p: Individual, contract: AnnuityContract, ratio: Decimal) kind institutional {
+    label en official "the ratio which the investment in the contract bears to the expected return under the contract, as of the annuity starting date (section 72(b)(1))";
+}
+@source(IRC_S72_B, quote = "Gross income does not include that part of any amount received as an annuity under an annuity, endowment, or life insurance contract which bears the same ratio to such amount as the investment in the contract")
+rule AnnuityExclusionRatioComputed(p: Individual, contract: AnnuityContract, investment: Money, expected: Money) strict {
+    label en official "the exclusion ratio is investment in the contract divided by expected return";
+    when investment_in_contract(p, contract, investment);
+    when expected_return_72c3(p, contract, expected);
+    when expected > 0.00 USD;
+    then annuity_exclusion_ratio(p, contract, investment / expected);
+}
+
+pub relation unrecovered_investment_in_contract(p: Individual, contract: AnnuityContract, on: Date, amount: Money) kind institutional {
+    label en official "the unrecovered investment in the contract as of a given date: the investment in the contract as of the annuity starting date, reduced by amounts excluded under (b)(1) received on or after the starting date and before that date (section 72(b)(4))";
+}
+relation aggregate_amount_excluded_since_starting_date(p: Individual, contract: AnnuityContract, on: Date, amount: Money) kind empirical {
+    label en official "the aggregate amount received under the contract on or after the annuity starting date and before the given date, to the extent excludable under section 72(b)(1) — a running total case-asserted directly (a day-by-day ledger over prior payments is the LDC-E4102 self-recursive-arithmetic class this package avoids; see TECH-GAPS)";
+}
+@source(IRC_S72_B, quote = "the unrecovered investment in the contract as of any date is—\n(A) the investment in the contract (determined without regard to subsection (c)(2)) as of the annuity starting date, reduced by\n(B) the aggregate amount received under the contract on or after such annuity starting date and before the date as of which the determination is being made, to the extent such amount was excludable")
+rule UnrecoveredInvestmentComputed(p: Individual, contract: AnnuityContract, on: Date, investment: Money, excluded_so_far: Money) strict {
+    label en official "section 72(b)(4): unrecovered investment is investment in the contract minus the aggregate already excluded";
+    when investment_in_contract(p, contract, investment);
+    when aggregate_amount_excluded_since_starting_date(p, contract, on, excluded_so_far);
+    when investment >= excluded_so_far;
+    then unrecovered_investment_in_contract(p, contract, on, round(investment - excluded_so_far, 2, "HALF_UP"));
+}
+
+pub relation amount_excluded_under_annuity_exclusion_ratio(p: Individual, contract: AnnuityContract, y: TaxableYear, on: Date, amount: Money) kind institutional {
+    label en official "the part of an annuity payment excluded from gross income under section 72(b)(1), capped by the (b)(2) unrecovered-investment ceiling";
+}
+@source(IRC_S72_B, quote = "The portion of any amount received as an annuity which is excluded from gross income under paragraph (1) shall not exceed the unrecovered investment in the contract immediately before the receipt of such amount.")
+rule AnnuityExclusionCappedAtUnrecoveredInvestment(p: Individual, contract: AnnuityContract, y: TaxableYear, on: Date, payment: Money, ratio: Decimal, unrecovered: Money) strict {
+    label en official "the (b)(1) ratio times the payment, capped at the (b)(2) unrecovered-investment amount immediately before this receipt";
+    when amount_received_as_annuity(p, contract, y, payment);
+    when annuity_exclusion_ratio(p, contract, ratio);
+    when unrecovered_investment_in_contract(p, contract, on, unrecovered);
+    then amount_excluded_under_annuity_exclusion_ratio(p, contract, y, on, min(round(payment * ratio, 2, "HALF_UP"), unrecovered));
+}
+
+@source(IRC_S72_B, quote = "The portion of any amount received as an annuity which is excluded from gross income under paragraph (1) shall not exceed the unrecovered investment in the contract immediately before the receipt of such amount.")
+rule AnnuityAmountNotExcludedIsGrossIncome(p: Individual, contract: AnnuityContract, y: TaxableYear, on: Date, payment: Money, excluded: Money) strict {
+    label en official "the (b)(1) exclusion overrides the (a) default inclusion for the excluded portion; the remainder (payment minus excluded) is gross income";
+    when amount_received_as_annuity(p, contract, y, payment);
+    when amount_excluded_under_annuity_exclusion_ratio(p, contract, y, on, excluded);
+    when payment > excluded;
+    then annuity_income_includible_72(p, contract, y, round(payment - excluded, 2, "HALF_UP"));
+}
+
+// --- §72(b)(3): deduction for unrecovered investment at death ---------------
+
+pub relation annuity_payments_cease_by_death(p: Individual, contract: AnnuityContract, on: Date) kind empirical {
+    label en official "after the annuity starting date, payments as an annuity under the contract cease by reason of the death of an annuitant (section 72(b)(3)(A)(i))";
+}
+pub relation unrecovered_investment_deduction_at_death_72b3(p: Individual, contract: AnnuityContract, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the deduction allowed to the annuitant, for the annuitant's last taxable year, equal to the unrecovered investment in the contract as of the date payments ceased by reason of death (section 72(b)(3)(A))";
+}
+@source(IRC_S72_B, quote = "the amount of such unrecovered investment (in excess of any amount specified in subsection (e)(5) which was not included in gross income) shall be allowed as a deduction to the annuitant for his last taxable year")
+rule UnrecoveredInvestmentDeductionAtDeath(p: Individual, contract: AnnuityContract, on: Date, y: TaxableYear, unrecovered: Money) strict {
+    label en official "section 72(b)(3)(A): unrecovered investment at death becomes a deduction in the annuitant's last taxable year (the (e)(5) carve-out for amounts not included in gross income is not modelled this pass — TECH_GAP)";
+    when annuity_payments_cease_by_death(p, contract, on);
+    when unrecovered_investment_in_contract(p, contract, on, unrecovered);
+    when unrecovered > 0.00 USD;
+    when us.irc.core::year_of(p, y);
+    then unrecovered_investment_deduction_at_death_72b3(p, contract, y, unrecovered);
+}
+
+// =====================================================================
+// §72(p): loans treated as distributions
+// =====================================================================
+
+pub entity RetirementArrangement {
+    label en unofficial "a qualified employer plan or government plan within the meaning of section 72(p)(4) (case-asserted; see header note on why this is not `deferred_compensation::Plan`)";
+}
+
+pub relation plan_loan_made(p: Individual, plan: RetirementArrangement, on: Date, amount: Money) kind empirical {
+    label en official "a participant or beneficiary receives (directly or indirectly) an amount as a loan from a qualified employer plan (section 72(p)(1)(A))";
+}
+relation loan_balance_excess_before_this_loan(p: Individual, plan: RetirementArrangement, on: Date, amount: Money) kind empirical {
+    label en official "the excess (if any) of the highest outstanding loan balance during the 1-year period ending the day before this loan over the outstanding loan balance on the date this loan was made (section 72(p)(2)(A)(i))";
+}
+relation nonforfeitable_accrued_benefit_pv(p: Individual, plan: RetirementArrangement, on: Date, amount: Money) kind empirical {
+    label en official "the present value of the nonforfeitable accrued benefit of the employee under the plan, determined without regard to accumulated deductible employee contributions (section 72(p)(2)(A)(ii))";
+}
+pub relation plan_loan_dollar_limit_72p2a(p: Individual, plan: RetirementArrangement, on: Date, limit: Money) kind institutional {
+    label en official "the lesser of ($50,000 reduced by the 1-year highest-balance excess) or (the greater of half the nonforfeitable accrued benefit's present value or $10,000) (section 72(p)(2)(A))";
+}
+@source(IRC_S72_P, quote = "does not exceed the lesser of—\n(i) $50,000, reduced by the excess (if any) of—\n(I) the highest outstanding balance of loans from the plan during the 1-year period ending on the day before the date on which such loan was made, over\n(II) the outstanding balance of loans from the plan on the date on which such loan was made, or\n(ii) the greater of (I) one-half of the present value of the nonforfeitable accrued benefit of the employee under the plan, or (II) $10,000")
+rule PlanLoanDollarLimitComputed(p: Individual, plan: RetirementArrangement, on: Date, excess: Money, pv: Money) strict {
+    label en official "section 72(p)(2)(A): the dollar limit on a plan loan not treated as a distribution";
+    when loan_balance_excess_before_this_loan(p, plan, on, excess);
+    when nonforfeitable_accrued_benefit_pv(p, plan, on, pv);
+    when 50000.00 USD >= excess;
+    when not_known(disaster_loan_limit_applies_72p6A(p, plan, on));
+    then plan_loan_dollar_limit_72p2a(p, plan, on, min(round(50000.00 USD - excess, 2, "HALF_UP"), max(round(0.5 * pv, 2, "HALF_UP"), 10000.00 USD)));
+}
+
+relation loan_repayable_within_5_years(p: Individual, plan: RetirementArrangement, on: Date) kind empirical {
+    label en official "the loan, by its terms, is required to be repaid within 5 years (section 72(p)(2)(B)(i))";
+}
+relation loan_for_principal_residence(p: Individual, plan: RetirementArrangement, on: Date) kind empirical {
+    label en official "the loan is used to acquire a dwelling unit which within a reasonable time is to be used as the principal residence of the participant (section 72(p)(2)(B)(ii))";
+}
+relation loan_level_amortization(p: Individual, plan: RetirementArrangement, on: Date) kind empirical {
+    label en official "substantially level amortization of the loan, with payments not less frequently than quarterly, is required over its term (section 72(p)(2)(C))";
+}
+relation loan_via_credit_card(p: Individual, plan: RetirementArrangement, on: Date) kind empirical {
+    label en official "the loan is made through the use of a credit card or similar arrangement (section 72(p)(2)(D)) — its presence defeats the (2)(A) dollar-limit protection entirely";
+}
+
+pub relation plan_loan_repayment_terms_satisfied_72p2(p: Individual, plan: RetirementArrangement, on: Date) kind institutional {
+    label en official "the (2)(B)-(D) repayment-term validity conditions for the (2)(A) dollar-limit protection are all met: repayable within 5 years (or for a principal-residence loan, no 5-year requirement), level amortization required, and not made through a credit card";
+}
+@source(IRC_S72_P, quote = "Subparagraph (A) shall not apply to any loan unless such loan, by its terms, is required to be repaid within 5 years.")
+rule LoanRepaymentTermsSatisfiedGeneral(p: Individual, plan: RetirementArrangement, on: Date) strict {
+    label en official "the general (non-residence) branch: 5-year repayment and level amortization required, not a credit-card loan";
+    when loan_repayable_within_5_years(p, plan, on);
+    when loan_level_amortization(p, plan, on);
+    when not_known(loan_via_credit_card_flag(p, plan, on));
+    then plan_loan_repayment_terms_satisfied_72p2(p, plan, on);
+}
+relation loan_via_credit_card_flag(p: Individual, plan: RetirementArrangement, on: Date) kind institutional {
+    label en official "helper: there is a case-asserted fact that this loan was made through a credit card or similar arrangement (section 72(p)(2)(D))";
+}
+@source(IRC_S72_P, quote = "Subparagraph (A) shall not apply to any loan which is made through the use of any credit card or any other similar arrangement.")
+rule LoanViaCreditCardFlag(p: Individual, plan: RetirementArrangement, on: Date) strict {
+    label en official "helper binding the credit-card fact for the not_known test above";
+    when loan_via_credit_card(p, plan, on);
+    then loan_via_credit_card_flag(p, plan, on);
+}
+@source(IRC_S72_P, quote = "Clause (i) shall not apply to any loan used to acquire any dwelling unit which within a reasonable time is to be used (determined at the time the loan is made) as the principal residence of the participant.")
+rule LoanRepaymentTermsSatisfiedResidence(p: Individual, plan: RetirementArrangement, on: Date) strict {
+    label en official "the principal-residence branch: the 5-year requirement of (2)(B)(i) does not apply, but level amortization and the no-credit-card conditions still do";
+    when loan_for_principal_residence(p, plan, on);
+    when loan_level_amortization(p, plan, on);
+    when not_known(loan_via_credit_card_flag(p, plan, on));
+    then plan_loan_repayment_terms_satisfied_72p2(p, plan, on);
+}
+
+pub relation plan_loan_deemed_distribution(p: Individual, plan: RetirementArrangement, on: Date, amount: Money) kind institutional {
+    label en official "the amount of a plan loan treated as an amount received as a distribution under section 72(p)(1)";
+}
+@source(IRC_S72_P, quote = "such amount shall be treated as having been received by such individual as a distribution under such plan")
+rule PlanLoanDeemedDistributionWithinLimitAndTerms(p: Individual, plan: RetirementArrangement, on: Date, amount: Money, limit: Money) strict {
+    label en official "within the dollar limit and repayment terms: no part of the loan is a deemed distribution (explicit zero, this package's convention)";
+    when plan_loan_made(p, plan, on, amount);
+    when plan_loan_dollar_limit_72p2a(p, plan, on, limit);
+    when plan_loan_repayment_terms_satisfied_72p2(p, plan, on);
+    when amount <= limit;
+    when on > @1982-08-13;
+    then plan_loan_deemed_distribution(p, plan, on, 0.00 USD);
+}
+@source(IRC_S72_P, quote = "Paragraph (1) shall not apply to any loan to the extent that such loan (when added to the outstanding balance of all other loans from such plan whether made on, before, or after August 13, 1982), does not exceed the lesser of")
+rule PlanLoanDeemedDistributionOverLimit(p: Individual, plan: RetirementArrangement, on: Date, amount: Money, limit: Money) strict {
+    label en official "repayment terms met but the loan exceeds the dollar limit: only the excess over the limit is a deemed distribution (the (2)(A) exception applies only \"to the extent\" of the limit)";
+    when plan_loan_made(p, plan, on, amount);
+    when plan_loan_dollar_limit_72p2a(p, plan, on, limit);
+    when plan_loan_repayment_terms_satisfied_72p2(p, plan, on);
+    when amount > limit;
+    when on > @1982-08-13;
+    then plan_loan_deemed_distribution(p, plan, on, round(amount - limit, 2, "HALF_UP"));
+}
+@source(IRC_S72_P, quote = "If during any taxable year a participant or beneficiary receives (directly or indirectly) any amount as a loan from a qualified employer plan, such amount shall be treated as having been received by such individual as a distribution under such plan")
+rule PlanLoanDeemedDistributionTermsFail(p: Individual, plan: RetirementArrangement, on: Date, amount: Money) strict {
+    label en official "when the (2)(B)-(D) repayment-term conditions are not met, the (2)(A) dollar-limit protection does not apply at all (its own text is conditioned on those requirements): the WHOLE loan is a deemed distribution, not merely the excess over the dollar limit — a reading recorded as a judgment call";
+    when plan_loan_made(p, plan, on, amount);
+    when not_known(plan_loan_repayment_terms_satisfied_72p2(p, plan, on));
+    when on > @1982-08-13;
+    then plan_loan_deemed_distribution(p, plan, on, amount);
+}
+
+// =====================================================================
+// §72(t): 10-percent additional tax on early distributions
+// =====================================================================
+
+pub entity RetirementDistributionEvent {
+    label en unofficial "one distribution from a qualified retirement plan (section 4974(c)) within the meaning of section 72(t)(1); case-asserted, distinct per payment so that per-distribution exceptions can be tested independently";
+}
+pub relation retirement_plan_distribution_received(p: Individual, d: RetirementDistributionEvent, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the taxpayer receives this amount from a qualified retirement plan (as defined in section 4974(c)) during the taxable year (section 72(t)(1))";
+}
+relation distribution_date(d: RetirementDistributionEvent, on: Date) kind empirical {
+    label en official "the date this distribution event occurred";
+}
+
+// --- full exceptions (section 72(t)(2)) -------------------------------------
+
+pub relation distribution_fully_exempt_72t(d: RetirementDistributionEvent) kind institutional {
+    label en official "this distribution falls within one of the full exceptions of section 72(t)(2) named in this pass's scope";
+}
+
+relation employee_attains_age_59_half_on(p: Individual, on: Date) kind empirical {
+    label en official "the exact date on which the employee attains age 59 1/2 (section 72(t)(2)(A)(i) — an exact-date test, not a year-of-birth approximation)";
+}
+@source(IRC_S72_T, quote = "made on or after the date on which the employee attains age 59½")
+rule ExceptionAge59Half(p: Individual, d: RetirementDistributionEvent, y: TaxableYear, on: Date, age_date: Date) strict {
+    label en official "section 72(t)(2)(A)(i): distribution on or after the exact date the employee turns 59 1/2";
+    when retirement_plan_distribution_received(p, d, y, _);
+    when distribution_date(d, on);
+    when employee_attains_age_59_half_on(p, age_date);
+    when on >= age_date;
+    then distribution_fully_exempt_72t(d);
+}
+
+relation distribution_after_death_of_employee(d: RetirementDistributionEvent) kind empirical {
+    label en official "the distribution is made to a beneficiary (or to the estate of the employee) on or after the death of the employee (section 72(t)(2)(A)(ii))";
+}
+@source(IRC_S72_T, quote = "made to a beneficiary (or to the estate of the employee) on or after the death of the employee")
+rule ExceptionDeath(d: RetirementDistributionEvent) strict {
+    label en official "section 72(t)(2)(A)(ii)";
+    when distribution_after_death_of_employee(d);
+    then distribution_fully_exempt_72t(d);
+}
+
+relation distribution_attributable_to_disability(p: Individual, d: RetirementDistributionEvent) kind empirical {
+    label en official "the distribution is attributable to the employee's being disabled within the meaning of section 72(m)(7) (case-asserted; the (m)(7) disability standard itself is not separately modelled this pass)";
+}
+@source(IRC_S72_T, quote = "attributable to the employee's being disabled within the meaning of subsection (m)(7)")
+rule ExceptionDisability(p: Individual, d: RetirementDistributionEvent) strict {
+    label en official "section 72(t)(2)(A)(iii)";
+    when distribution_attributable_to_disability(p, d);
+    then distribution_fully_exempt_72t(d);
+}
+
+relation distribution_part_of_sepp_series(p: Individual, d: RetirementDistributionEvent) kind empirical {
+    label en official "the distribution is part of a series of substantially equal periodic payments (not less frequently than annually) made for the life or life expectancy of the employee, or the joint lives or joint life expectancies of the employee and a designated beneficiary (section 72(t)(2)(A)(iv))";
+}
+@source(IRC_S72_T, quote = "part of a series of substantially equal periodic payments (not less frequently than annually) made for the life (or life expectancy) of the employee or the joint lives (or joint life expectancies) of such employee and his designated beneficiary")
+rule ExceptionSeppSeries(p: Individual, d: RetirementDistributionEvent) strict {
+    label en official "section 72(t)(2)(A)(iv)";
+    when distribution_part_of_sepp_series(p, d);
+    when not_known(sepp_exception_barred_from_qualified_trust_72t3B(d));
+    then distribution_fully_exempt_72t(d);
+}
+relation sepp_series_modified_before_5yr_or_age_59_half(p: Individual, y: TaxableYear) kind empirical {
+    label en official "the series of substantially equal periodic payments is modified (other than by reason of death or disability) before the later of 5 years from the first payment or the employee attaining age 59 1/2 (section 72(t)(4)(A))";
+}
+pub relation sepp_recapture_tax_72t4(p: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the deficiency recapture: the tax that would have been imposed under section 72(t)(1) on the exempted SEPP distributions had the (2)(A)(iv) exception not applied, imposed in the year of the modification (section 72(t)(4)(A)) — this pass computes the recapture principal only; the (t)(4)(A) interest addition is a TECH_GAP (see TECH-GAPS.md)";
+}
+@source(IRC_S72_T, quote = "the taxpayer's tax for the 1st taxable year in which such modification occurs shall be increased by an amount, determined under regulations, equal to the tax which (but for paragraph (2)(A)(iv)) would have been imposed")
+rule SeppRecaptureTax(p: Individual, d: RetirementDistributionEvent, y: TaxableYear, original_y: TaxableYear, amount: Money) strict {
+    label en official "section 72(t)(4)(A): recapture of the exempted amount as an addition to the tax for the year of modification (interest addition not modelled — TECH_GAP)";
+    when distribution_part_of_sepp_series(p, d);
+    when retirement_plan_distribution_received(p, d, original_y, amount);
+    when sepp_series_modified_before_5yr_or_age_59_half(p, y);
+    then sepp_recapture_tax_72t4(p, y, round(amount * 0.10, 2, "HALF_UP"));
+}
+
+relation separation_from_service_at_age(p: Individual, age_at_separation: Integer) kind empirical {
+    label en official "the employee separated from service at or after this age (case-asserted whole-year age at separation), for section 72(t)(2)(A)(v) and (t)(10)";
+}
+relation qualified_public_safety_employee_72t10(p: Individual) kind empirical {
+    label en official "the employee is a qualified public safety employee within the meaning of section 72(t)(10)(B)";
+}
+@source(IRC_S72_T, quote = "made to an employee after separation from service after attainment of age 55")
+rule ExceptionSeparationAfter55(p: Individual, d: RetirementDistributionEvent, age: Integer) strict {
+    label en official "section 72(t)(2)(A)(v): separation from service at or after age 55 (general case)";
+    when retirement_plan_distribution_received(p, d, _, _);
+    when separation_from_service_at_age(p, age);
+    when age >= 55;
+    when not_known(exception_a5_and_c_barred_for_ira_72t3A(d));
+    then distribution_fully_exempt_72t(d);
+}
+@source(IRC_S72_T, quote = "In the case of a distribution to a qualified public safety employee from a governmental plan")
+rule ExceptionSeparationAfter50PublicSafety(p: Individual, d: RetirementDistributionEvent, age: Integer) strict {
+    label en official "section 72(t)(10)(A): for a qualified public safety employee, the age-55 threshold of (2)(A)(v) is applied as age 50";
+    when retirement_plan_distribution_received(p, d, _, _);
+    when qualified_public_safety_employee_72t10(p);
+    when separation_from_service_at_age(p, age);
+    when age >= 50;
+    when not_known(exception_a5_and_c_barred_for_ira_72t3A(d));
+    then distribution_fully_exempt_72t(d);
+}
+
+relation distribution_pursuant_to_levy_6331(d: RetirementDistributionEvent) kind empirical {
+    label en official "the distribution is made on account of a levy under section 6331 on the qualified retirement plan (section 72(t)(2)(A)(vii))";
+}
+@source(IRC_S72_T, quote = "made on account of a levy under section 6331 on the qualified retirement plan")
+rule ExceptionLevy(d: RetirementDistributionEvent) strict {
+    label en official "section 72(t)(2)(A)(vii)";
+    when distribution_pursuant_to_levy_6331(d);
+    then distribution_fully_exempt_72t(d);
+}
+
+relation distribution_to_alternate_payee_qdro(d: RetirementDistributionEvent) kind empirical {
+    label en official "the distribution is made to an alternate payee pursuant to a qualified domestic relations order within the meaning of section 414(p)(1) (section 72(t)(2)(C))";
+}
+@source(IRC_S72_T, quote = "Any distribution to an alternate payee pursuant to a qualified domestic relations order (within the meaning of section 414(p)(1)).")
+rule ExceptionQdro(d: RetirementDistributionEvent) strict {
+    label en official "section 72(t)(2)(C)";
+    when distribution_to_alternate_payee_qdro(d);
+    when not_known(exception_a5_and_c_barred_for_ira_72t3A(d));
+    then distribution_fully_exempt_72t(d);
+}
+
+relation qualified_reservist_distribution(d: RetirementDistributionEvent) kind empirical {
+    label en official "the distribution is a qualified reservist distribution within the meaning of section 72(t)(2)(G)(iii)";
+}
+@source(IRC_S72_T, quote = "Any qualified reservist distribution.")
+rule ExceptionReservist(d: RetirementDistributionEvent) strict {
+    label en official "section 72(t)(2)(G)(i)";
+    when qualified_reservist_distribution(d);
+    then distribution_fully_exempt_72t(d);
+}
+
+relation employee_certified_terminally_ill_on(p: Individual, cert_date: Date) kind empirical {
+    label en official "the date on which the employee is certified by a physician as having a terminal illness within the meaning of section 101(g)(4)(A) (substituting 84 months for 24 months), section 72(t)(2)(L)";
+}
+@source(IRC_S72_T, quote = "Distributions which are made to the employee who is a terminally ill individual on or after the date on which such employee has been certified by a physician as having a terminal illness.")
+rule ExceptionTerminalIllness(p: Individual, d: RetirementDistributionEvent, on: Date, cert_date: Date) strict {
+    label en official "section 72(t)(2)(L): distribution on or after the certification date";
+    when retirement_plan_distribution_received(p, d, _, _);
+    when distribution_date(d, on);
+    when employee_certified_terminally_ill_on(p, cert_date);
+    when on >= cert_date;
+    then distribution_fully_exempt_72t(d);
+}
+
+// --- partial (dollar-capped) exceptions — at most one per distribution is
+// asserted by a case (documented simplifying judgment call: the statute does
+// not contemplate more than one of these applying to the same payment) -----
+
+pub relation distribution_partial_exemption_amount_72t(d: RetirementDistributionEvent, exempt_amount: Money) kind institutional {
+    label en official "the portion of a distribution excepted from the section 72(t)(1) additional tax under one of the dollar-capped exceptions ((t)(2)(B) medical, (H) birth/adoption, (I) emergency personal expense, (K) domestic abuse)";
+}
+relation has_partial_exemption_72t(d: RetirementDistributionEvent) kind institutional {
+    label en official "helper binding the otherwise-open exempt-amount variable, so that its absence can be tested with not_known of a fully-bound helper rather than not_known of a fact with an unbound argument (this package's settled idiom, see s108/s121/s151-152)";
+}
+rule HasPartialExemption(d: RetirementDistributionEvent, exempt: Money) strict {
+    label en official "helper for the not_known test in EarlyDistributionTaxNoException below";
+    when distribution_partial_exemption_amount_72t(d, exempt);
+    then has_partial_exemption_72t(d);
+}
+
+relation medical_expense_deduction_ceiling_213(p: Individual, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the amount which would be allowable as a deduction under section 213 (determined without regard to whether the employee itemizes deductions for the taxable year) with respect to medical care for the employee (section 72(t)(2)(B))";
+}
+@source(IRC_S72_T, quote = "Distributions made to the employee (other than distributions described in subparagraph (A), (C), or (D)) to the extent such distributions do not exceed the amount allowable as a deduction under section 213 to the employee for amounts paid during the taxable year for medical care")
+rule ExceptionMedical(p: Individual, d: RetirementDistributionEvent, y: TaxableYear, ceiling: Money) strict {
+    label en official "section 72(t)(2)(B): exempt up to the section 213 deduction ceiling (the 7.5%-of-AGI floor is embedded in that ceiling amount, taken as a case fact)";
+    when retirement_plan_distribution_received(p, d, y, _);
+    when medical_expense_deduction_ceiling_213(p, y, ceiling);
+    then distribution_partial_exemption_amount_72t(d, ceiling);
+}
+
+relation qualified_birth_or_adoption_distribution_amount(d: RetirementDistributionEvent, amount: Money) kind empirical {
+    label en official "the amount of this distribution treated as a qualified birth or adoption distribution before the $5,000 aggregate cap of section 72(t)(2)(H)(ii)";
+}
+@source(IRC_S72_T, quote = "The aggregate amount which may be treated as qualified birth or adoption distributions by any individual with respect to any birth or adoption shall not exceed $5,000.")
+rule ExceptionBirthOrAdoption(d: RetirementDistributionEvent, amount: Money) strict {
+    label en official "section 72(t)(2)(H): exempt up to $5,000";
+    when qualified_birth_or_adoption_distribution_amount(d, amount);
+    then distribution_partial_exemption_amount_72t(d, min(amount, 5000.00 USD));
+}
+
+relation emergency_personal_expense_distribution_amount(d: RetirementDistributionEvent, amount: Money) kind empirical {
+    label en official "the amount of this distribution treated as an emergency personal expense distribution before the $1,000 cap of section 72(t)(2)(I)(iii)";
+}
+@source(IRC_S72_T, quote = "The amount which may be treated as an emergency personal expense distribution by any individual in any calendar year shall not exceed the lesser of $1,000 or an amount equal to the excess of—")
+rule ExceptionEmergencyPersonalExpense(d: RetirementDistributionEvent, amount: Money) strict {
+    label en official "section 72(t)(2)(I): exempt up to $1,000 (the (III)/(iii)(I)-(II) accrued-benefit-over-$1,000 alternative ceiling is not separately modelled this pass — the flat $1,000 cap is always at least as protective of the fisc, so this is a conservative simplification, not an invented relaxation)";
+    when emergency_personal_expense_distribution_amount(d, amount);
+    when not_known(eped_barred_for_distribution_72t2Ivii(d)); // G6404 wiring: §72(t)(2)(I)(vii)
+    then distribution_partial_exemption_amount_72t(d, min(amount, 1000.00 USD));
+}
+
+relation domestic_abuse_distribution_amount(p: Individual, d: RetirementDistributionEvent, amount: Money) kind empirical {
+    label en official "the amount of this distribution treated as an eligible distribution to a domestic abuse victim before the section 72(t)(2)(K)(ii) cap";
+}
+@source(IRC_S72_T, quote = "The aggregate amount which may be treated as an eligible distribution to a domestic abuse victim by any individual shall not exceed an amount equal to the lesser of—\n(I) $10,000, or\n(II) 50 percent of the present value of the nonforfeitable accrued benefit of the employee under the plan.")
+rule ExceptionDomesticAbuse(p: Individual, d: RetirementDistributionEvent, amount: Money, pv: Money) strict {
+    label en official "section 72(t)(2)(K): exempt up to the lesser of $10,000 or 50% of the nonforfeitable accrued benefit's present value (the post-2024 cost-of-living adjustment of the $10,000 figure under (K)(vii) is not modelled this pass — SOURCE_GAP, no indexed value pinned)";
+    when domestic_abuse_distribution_amount(p, d, amount);
+    when nonforfeitable_accrued_benefit_pv_72t(p, pv);
+    then distribution_partial_exemption_amount_72t(d, min(amount, min(10000.00 USD, round(0.5 * pv, 2, "HALF_UP"))));
+}
+relation nonforfeitable_accrued_benefit_pv_72t(p: Individual, amount: Money) kind empirical {
+    label en official "the present value of the nonforfeitable accrued benefit of the employee under the plan, for the section 72(t)(2)(K)(ii)(II) cap";
+}
+
+// --- the additional tax itself -----------------------------------------
+
+pub relation early_distribution_additional_tax(p: Individual, d: RetirementDistributionEvent, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the additional tax under section 72(t)(1): 10 percent of the portion of an early distribution not within a section 72(t)(2) exception";
+}
+@source(IRC_S72_T, quote = "the taxpayer's tax under this chapter for the taxable year in which such amount is received shall be increased by an amount equal to 10 percent of the portion of such amount which is includible in gross income")
+rule EarlyDistributionTaxFullyExempt(p: Individual, d: RetirementDistributionEvent, y: TaxableYear) strict {
+    label en official "a fully-exempt distribution bears no section 72(t)(1) additional tax (explicit zero)";
+    when retirement_plan_distribution_received(p, d, y, _);
+    when distribution_fully_exempt_72t(d);
+    then early_distribution_additional_tax(p, d, y, 0.00 USD);
+}
+@source(IRC_S72_T, quote = "the taxpayer's tax under this chapter for the taxable year in which such amount is received shall be increased by an amount equal to 10 percent of the portion of such amount which is includible in gross income")
+rule EarlyDistributionTaxPartialExemptBelowCap(p: Individual, d: RetirementDistributionEvent, y: TaxableYear, total: Money, exempt: Money) strict {
+    label en official "a partially-exempt distribution within its cap bears no additional tax";
+    when retirement_plan_distribution_received(p, d, y, total);
+    when not_known(distribution_fully_exempt_72t(d));
+    when distribution_partial_exemption_amount_72t(d, exempt);
+    when total <= exempt;
+    then early_distribution_additional_tax(p, d, y, 0.00 USD);
+}
+@source(IRC_S72_T, quote = "the taxpayer's tax under this chapter for the taxable year in which such amount is received shall be increased by an amount equal to 10 percent of the portion of such amount which is includible in gross income")
+rule EarlyDistributionTaxPartialExemptAboveCap(p: Individual, d: RetirementDistributionEvent, y: TaxableYear, total: Money, exempt: Money) strict {
+    label en official "a partially-exempt distribution exceeding its cap bears 10% additional tax on the excess only";
+    when retirement_plan_distribution_received(p, d, y, total);
+    when not_known(distribution_fully_exempt_72t(d));
+    when distribution_partial_exemption_amount_72t(d, exempt);
+    when total > exempt;
+    when not_known(simple_25_percent_rate_applies_72t6a(d));
+    then early_distribution_additional_tax(p, d, y, round((total - exempt) * 0.10, 2, "HALF_UP"));
+}
+@source(IRC_S72_T, quote = "If any taxpayer receives any amount from a qualified retirement plan (as defined in section 4974(c)), the taxpayer's tax under this chapter for the taxable year in which such amount is received shall be increased by an amount equal to 10 percent of the portion of such amount which is includible in gross income")
+rule EarlyDistributionTaxNoException(p: Individual, d: RetirementDistributionEvent, y: TaxableYear, total: Money) strict {
+    label en official "section 72(t)(1): no exception of any kind modelled this pass applies — the full amount bears 10% additional tax";
+    when retirement_plan_distribution_received(p, d, y, total);
+    when not_known(distribution_fully_exempt_72t(d));
+    when not_known(has_partial_exemption_72t(d));
+    when not_known(simple_25_percent_rate_applies_72t6a(d));
+    then early_distribution_additional_tax(p, d, y, round(total * 0.10, 2, "HALF_UP"));
+}

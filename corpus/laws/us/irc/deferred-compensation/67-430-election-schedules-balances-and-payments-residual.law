@@ -1,0 +1,1235 @@
+// Section 430 residuals — STAGE 3b (deferred-compensation, TECH_GAP reduction,
+// 26.09.2026): (c)(2)(B),(D)(ii)-(vi) election schedules, (c)(7)(A)-(F)
+// installment acceleration, (c)(8) 15-year rule, (e)(1) waiver charge,
+// (f)(1)-(8) prefunding and carryover balances, (g) valuation, (h)(2)(E)
+// applicable month, (j)(2)-(4) interest, quarterly installments and liquidity,
+// (k)(4)-(6) lien.
+//
+// Method as in modules 18/30: the statute's arithmetic is exact; inputs the
+// statute delegates to the Secretary or to actuaries are case facts. Compound
+// interest and the segment-rate blend are represented by one case-asserted
+// equivalent annual rate (PARTIAL). Level-payment formulas are unrolled
+// multiplications (no exponent operator). Interest between two dates uses
+// `days_between` with simple interest on an actual/365 basis: a JUDGMENT
+// CALL, the statute says "interest accruing" at the effective rate without
+// naming the compounding. Ledgers over years (balances, carryovers) are read
+// from the previous year's case-asserted value (a relation cycle over years
+// is not expressible: E4102).
+
+// =====================================================================
+// (c)(2)(B), (D)(ii)-(vi)
+// =====================================================================
+
+use self::{
+    DefinedBenefitPlan,
+    IRC_S430_C,
+    IRC_S430_E,
+    IRC_S430_F,
+    IRC_S430_G,
+    IRC_S430_H,
+    IRC_S430_J,
+    IRC_S430_K,
+    Person,
+    QuarterlyInstallmentOrdinal,
+    TaxableYear,
+    asset_averaging_permitted_430g3B,
+    averaged_asset_value_430g3,
+    balance_credit_elected_430,
+    db_plan_sponsor_430,
+    effective_interest_rate_430,
+    fair_market_value_of_assets_430g3,
+    funding_standard_carryover_balance_430,
+    funding_target_attainment_percentage_430,
+    installment_acceleration_before_cap_430c7C,
+    minimum_required_contribution_430,
+    plan_year_ordinal_430,
+    prefunding_balance_430,
+    required_installment_amount_430,
+    required_installment_due_date_430,
+    restriction_period_length_years_430c7F,
+    section430k_lien_amount,
+    shortfall_amortization_base_430,
+    shortfall_schedule_applies_430c2D,
+    value_of_plan_assets_430,
+};
+
+pub relation annual_installment_for_base_430c2A(plan: DefinedBenefitPlan, base_year: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the annual installment determined under subparagraph (A) for the shortfall amortization base of the base year, case-asserted";
+}
+
+pub relation plan_year_within_amortization_period_430c2B(plan: DefinedBenefitPlan, base_year: TaxableYear, y: TaxableYear) kind empirical {
+    label en unofficial "the plan year is one of the plan years of the amortization period of the base year, case-asserted";
+}
+
+pub relation shortfall_amortization_installment_for_year_430c2B(plan: DefinedBenefitPlan, base_year: TaxableYear, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 430(c)(2)(B): the installment for a plan year in the period is the annual installment determined under (A) for that year for that base";
+}
+
+@source(IRC_S430_C, relation = formalizes, coverage = exact, quote = "is the annual installment determined under subparagraph (A) for that year for that base")
+rule ShortfallAmortizationInstallmentForYear430c2B(plan: DefinedBenefitPlan, base_year: TaxableYear, y: TaxableYear, amount: Money) strict {
+    label en official "the annual installment applies to each year of the period";
+    when annual_installment_for_base_430c2A(plan, base_year, amount)
+        and plan_year_within_amortization_period_430c2B(plan, base_year, y);
+    then shortfall_amortization_installment_for_year_430c2B(plan, base_year, y, amount);
+}
+
+pub enum ShortfallSchedule430c2D {
+    TwoPlusSeven;
+    FifteenYear;
+}
+
+pub relation schedule_elected_for_election_year_430c2Div(plan: DefinedBenefitPlan, y: TaxableYear, schedule: ShortfallSchedule430c2D) kind empirical {
+    label en unofficial "the amortization schedule (clause (ii) or (iii)) specified in the election for the election year, case-asserted";
+}
+
+pub relation election_year_equivalent_rate_430c2D(plan: DefinedBenefitPlan, y: TaxableYear, rate: Decimal) kind empirical {
+    label en unofficial "the single equivalent annual rate standing for the segment rates under subparagraph (C) for the election year, case-asserted (PARTIAL: the blend of the three segment rates by payment date is not reproduced)";
+}
+
+pub relation election_year_level_installment_2_plus_7_430c2Dii2(plan: DefinedBenefitPlan, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 430(c)(2)(D)(ii)(II): for the last 7 plan years of the 9-year period, the level annual installment amortizing the election year base over 7 years (ordinary annuity at the election year rate)";
+}
+
+@source(IRC_S430_C, relation = formalizes, coverage = partial, quote = "the amounts necessary to amortize the remaining balance of the shortfall amortization base of the plan for the election year in level annual installments over such last 7 plan years")
+rule ElectionYearLevelInstallment2Plus7430c2Dii2(plan: DefinedBenefitPlan, y: TaxableYear, base: Money, r: Decimal, n: Integer) strict {
+    label en official "PARTIAL: base x r x (1+r)^7 / ((1+r)^7 - 1), rounded to the cent, for plan years 3 to 9 of the period; the base is the remaining balance (the first 2 years pay interest only, so the balance is the base)";
+    when shortfall_schedule_applies_430c2D(plan, y)
+        and schedule_elected_for_election_year_430c2Div(plan, y, TwoPlusSeven)
+        and plan_year_ordinal_430(plan, y, n)
+        and n >= 3 and n <= 9
+        and shortfall_amortization_base_430(plan, y, base)
+        and election_year_equivalent_rate_430c2D(plan, y, r)
+        and r > 0.0;
+    then election_year_level_installment_2_plus_7_430c2Dii2(plan, y,
+        div_round(base * r * ((1.0 + r) * (1.0 + r) * (1.0 + r) * (1.0 + r) * (1.0 + r) * (1.0 + r) * (1.0 + r)),
+            ((1.0 + r) * (1.0 + r) * (1.0 + r) * (1.0 + r) * (1.0 + r) * (1.0 + r) * (1.0 + r)) - 1.0,
+            2, "HALF_UP"));
+}
+
+pub relation election_year_level_installment_15_year_430c2Diii(plan: DefinedBenefitPlan, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 430(c)(2)(D)(iii): the level annual installment amortizing the election year base over the 15-plan-year period";
+}
+
+@source(IRC_S430_C, relation = formalizes, coverage = partial, quote = "are the amounts necessary to amortize the shortfall amortization base of the plan for the election year in level annual installments over the 15-plan-year period beginning with the election year")
+rule ElectionYearLevelInstallment15Year430c2Diii(plan: DefinedBenefitPlan, y: TaxableYear, base: Money, r: Decimal, n: Integer) strict {
+    label en official "PARTIAL: base x r x (1+r)^15 / ((1+r)^15 - 1), rounded to the cent, for plan years 1 to 15";
+    when shortfall_schedule_applies_430c2D(plan, y)
+        and schedule_elected_for_election_year_430c2Div(plan, y, FifteenYear)
+        and plan_year_ordinal_430(plan, y, n)
+        and n >= 1 and n <= 15
+        and shortfall_amortization_base_430(plan, y, base)
+        and election_year_equivalent_rate_430c2D(plan, y, r)
+        and r > 0.0;
+    then election_year_level_installment_15_year_430c2Diii(plan, y,
+        div_round(base * r * ((1.0 + r) * (1.0 + r) * (1.0 + r) * (1.0 + r) * (1.0 + r) * (1.0 + r) * (1.0 + r) * (1.0 + r) * (1.0 + r) * (1.0 + r) * (1.0 + r) * (1.0 + r) * (1.0 + r) * (1.0 + r) * (1.0 + r)),
+            ((1.0 + r) * (1.0 + r) * (1.0 + r) * (1.0 + r) * (1.0 + r) * (1.0 + r) * (1.0 + r) * (1.0 + r) * (1.0 + r) * (1.0 + r) * (1.0 + r) * (1.0 + r) * (1.0 + r) * (1.0 + r) * (1.0 + r)) - 1.0,
+            2, "HALF_UP"));
+}
+
+pub relation schedule_for_election_year_430c2Div2(plan: DefinedBenefitPlan, y: TaxableYear, schedule: ShortfallSchedule430c2D) kind empirical {
+    label en unofficial "the schedule the sponsor elected for this election year, case-asserted (one row per election year)";
+}
+
+pub relation same_schedule_for_two_election_years_430c2Div2(plan: DefinedBenefitPlan, y1: TaxableYear, y2: TaxableYear) kind institutional {
+    label en official "section 430(c)(2)(D)(iv)(II): a sponsor electing for 2 eligible plan years must elect the same schedule for both";
+}
+
+@source(IRC_S430_C, relation = formalizes, coverage = exact, quote = "the plan sponsor must elect the same schedule for both years")
+rule SameScheduleForTwoElectionYears430c2Div2(plan: DefinedBenefitPlan, y1: TaxableYear, y2: TaxableYear, s: ShortfallSchedule430c2D) strict {
+    label en official "both years carry the same schedule";
+    when schedule_for_election_year_430c2Div2(plan, y1, s)
+        and schedule_for_election_year_430c2Div2(plan, y2, s)
+        and y1 != y2;
+    then same_schedule_for_two_election_years_430c2Div2(plan, y1, y2);
+}
+
+pub relation election_revocation_requested_430c2Div3(plan: DefinedBenefitPlan, y: TaxableYear) kind empirical {
+    label en unofficial "the sponsor revokes the election for the election year, case-asserted";
+}
+
+pub relation secretary_consented_to_revocation_430c2Div3(plan: DefinedBenefitPlan, y: TaxableYear) kind empirical {
+    label en unofficial "the Secretary consented to the revocation (after giving the PBGC an opportunity to comment), case-asserted";
+}
+
+pub relation election_revocation_effective_430c2Div3(plan: DefinedBenefitPlan, y: TaxableYear) kind institutional {
+    label en official "section 430(c)(2)(D)(iv)(III): the election may be revoked only with the consent of the Secretary";
+}
+
+@source(IRC_S430_C, relation = formalizes, coverage = partial, quote = "may be revoked only with the consent of the Secretary")
+rule ElectionRevocationEffective430c2Div3(plan: DefinedBenefitPlan, y: TaxableYear) strict {
+    label en official "PARTIAL: time, form and manner are the Secretary's; consent is a case fact";
+    when election_revocation_requested_430c2Div3(plan, y)
+        and secretary_consented_to_revocation_430c2Div3(plan, y);
+    then election_revocation_effective_430c2Div3(plan, y);
+}
+
+pub relation election_notice_given_to_participants_430c2Dvi1(plan: DefinedBenefitPlan, y: TaxableYear) kind empirical {
+    label en unofficial "the sponsor gave notice of the election to participants and beneficiaries, case-asserted";
+}
+
+pub relation election_pbgc_informed_430c2Dvi2(plan: DefinedBenefitPlan, y: TaxableYear) kind empirical {
+    label en unofficial "the sponsor informed the PBGC of the election in the manner the Director prescribes, case-asserted";
+}
+
+pub relation election_reporting_requirements_met_430c2Dvi(plan: DefinedBenefitPlan, y: TaxableYear) kind institutional {
+    label en official "section 430(c)(2)(D)(vi): notice to participants and beneficiaries and information to the PBGC";
+}
+
+@source(IRC_S430_C, relation = formalizes, coverage = exact, quote = "A plan sponsor of a plan who makes an election under clause (i) shall")
+rule ElectionReportingRequirementsMet430c2Dvi(plan: DefinedBenefitPlan, y: TaxableYear) strict {
+    label en official "both subclauses";
+    when election_notice_given_to_participants_430c2Dvi1(plan, y)
+        and election_pbgc_informed_430c2Dvi2(plan, y);
+    then election_reporting_requirements_met_430c2Dvi(plan, y);
+}
+
+// =====================================================================
+// (c)(7) Installment acceleration
+// =====================================================================
+
+pub relation otherwise_determined_installment_430c7A(plan: DefinedBenefitPlan, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the shortfall amortization installment otherwise determined and payable under paragraph (2)(D) for the plan year, case-asserted";
+}
+
+pub relation pv_of_installment_and_succeeding_430c7Bi(plan: DefinedBenefitPlan, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the present value of the installment and all succeeding installments for the base, determined without regard to the increase but after application of clause (ii), case-asserted";
+}
+
+pub relation installment_acceleration_amount_430c7C(plan: DefinedBenefitPlan, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 430(c)(7)(C)(i)-(iii): the acceleration (with carryover in) limited by the annual limitation of clause (ii)";
+}
+
+pub relation carryover_in_430c7Ciii1(plan: DefinedBenefitPlan, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the excess installment acceleration amounts carried into this plan year from preceding years, case-asserted (a running ledger; FIFO order per clause (iv) is not reproduced)";
+}
+
+pub relation installments_without_2D_and_c7_430c7Cii1(plan: DefinedBenefitPlan, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the sum of the shortfall amortization installments for the plan year and all preceding plan years in the elected amortization period, determined without regard to paragraph (2)(D) and this paragraph, case-asserted";
+}
+
+pub relation installments_with_2D_and_c7_430c7Cii2(plan: DefinedBenefitPlan, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the sum of those installments determined after application of paragraph (2)(D) (and, for preceding years, of this paragraph), case-asserted";
+}
+
+pub relation installment_acceleration_limit_430c7Cii(plan: DefinedBenefitPlan, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 430(c)(7)(C)(ii): the excess (if any) of the sum of the installments without (2)(D) over the sum after (2)(D)";
+}
+
+@source(IRC_S430_C, relation = formalizes, coverage = exact, quote = "The installment acceleration amount for any plan year shall not exceed the excess (if any) of")
+rule InstallmentAccelerationLimit430c7Cii(plan: DefinedBenefitPlan, y: TaxableYear, without: Money, with_d: Money) strict {
+    label en official "max(0, without - with)";
+    when installments_without_2D_and_c7_430c7Cii1(plan, y, without)
+        and installments_with_2D_and_c7_430c7Cii2(plan, y, with_d);
+    then installment_acceleration_limit_430c7Cii(plan, y, max(0 USD, without - with_d));
+}
+
+@source(IRC_S430_C, relation = formalizes, coverage = partial, quote = "such excess shall be treated as an installment acceleration amount with respect to the succeeding plan year")
+rule InstallmentAccelerationAmount430c7C(plan: DefinedBenefitPlan, y: TaxableYear, before: Money, carried: Money, limit: Money) strict {
+    label en official "PARTIAL: min(acceleration before the cap + carryover in, limit)";
+    when installment_acceleration_before_cap_430c7C(plan, y, before)
+        and carryover_in_430c7Ciii1(plan, y, carried)
+        and installment_acceleration_limit_430c7Cii(plan, y, limit);
+    then installment_acceleration_amount_430c7C(plan, y, min(before + carried, limit));
+}
+
+pub relation carryover_out_430c7Ciii1(plan: DefinedBenefitPlan, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 430(c)(7)(C)(iii)(I): the excess over the limitation is treated as an acceleration amount of the succeeding plan year";
+}
+
+@source(IRC_S430_C, relation = formalizes, coverage = exact, quote = "If the installment acceleration amount for any plan year (determined without regard to clause (ii)) exceeds the limitation under clause (ii)")
+rule CarryoverOut430c7Ciii1(plan: DefinedBenefitPlan, y: TaxableYear, before: Money, carried: Money, limit: Money) strict {
+    label en official "max(0, before + carryover in - limit)";
+    when installment_acceleration_before_cap_430c7C(plan, y, before)
+        and carryover_in_430c7Ciii1(plan, y, carried)
+        and installment_acceleration_limit_430c7Cii(plan, y, limit);
+    then carryover_out_430c7Ciii1(plan, y, max(0 USD, before + carried - limit));
+}
+
+pub relation election_year_ordinal_of_plan_year_430c7(plan: DefinedBenefitPlan, y: TaxableYear, n: Integer) kind empirical {
+    label en unofficial "the plan year's number counted from the election year (1 = the election year), case-asserted";
+}
+
+pub relation carryover_permitted_to_year_430c7Ciii3(plan: DefinedBenefitPlan, y: TaxableYear) kind institutional {
+    label en official "section 430(c)(7)(C)(iii)(III): no amount is carried to a plan year beginning after the first plan year following the last plan year of the restriction period (the second, for 15-year amortization)";
+}
+
+@source(IRC_S430_C, relation = formalizes, coverage = exact, quote = "No amount shall be carried under subclause (I) or (II) to a plan year which begins after the first plan year following the last plan year in the restriction period")
+rule CarryoverPermittedToYearThreeYear430c7Ciii3(plan: DefinedBenefitPlan, y: TaxableYear, n: Integer, len: Integer) strict {
+    label en official "restriction period of 3 years: carry to plan years 1 to 4";
+    when election_year_ordinal_of_plan_year_430c7(plan, y, n)
+        and restriction_period_length_years_430c7F(plan, y, len)
+        and len == 3
+        and n <= 4;
+    then carryover_permitted_to_year_430c7Ciii3(plan, y);
+}
+
+@source(IRC_S430_C, relation = formalizes, coverage = exact, quote = "(or after the second plan year following such last plan year in the case of an election year with respect to which 15-year amortization was elected under paragraph (2)(D))")
+rule CarryoverPermittedToYearFifteenYear430c7Ciii3(plan: DefinedBenefitPlan, y: TaxableYear, n: Integer, len: Integer) strict {
+    label en official "restriction period of 5 years (15-year amortization): carry to plan years 1 to 7";
+    when election_year_ordinal_of_plan_year_430c7(plan, y, n)
+        and restriction_period_length_years_430c7F(plan, y, len)
+        and len == 5
+        and n <= 7;
+    then carryover_permitted_to_year_430c7Ciii3(plan, y);
+}
+
+pub relation increased_installment_430c7A(plan: DefinedBenefitPlan, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 430(c)(7)(A)-(B)(i): the installment increased by the acceleration amount, but not above the present value of that installment and all succeeding installments";
+}
+
+@source(IRC_S430_C, relation = formalizes, coverage = partial, quote = "the shortfall amortization installment otherwise determined and payable under such paragraph for such plan year shall, subject to the limitation under subparagraph (B), be increased by such amount")
+rule IncreasedInstallment430c7A(plan: DefinedBenefitPlan, y: TaxableYear, installment: Money, accel: Money, pv: Money) strict {
+    label en official "PARTIAL: min(installment + acceleration, present value cap); the reverse-order reduction of later installments is (B)(ii)";
+    when otherwise_determined_installment_430c7A(plan, y, installment)
+        and installment_acceleration_amount_430c7C(plan, y, accel)
+        and pv_of_installment_and_succeeding_430c7Bi(plan, y, pv);
+    then increased_installment_430c7A(plan, y, min(installment + accel, pv));
+}
+
+pub relation pv_of_subsequent_installments_after_increase_430c7Bii(plan: DefinedBenefitPlan, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the present value of the subsequent installments after application of this paragraph, case-asserted";
+}
+
+pub relation pv_of_remaining_unamortized_base_430c7Bii(plan: DefinedBenefitPlan, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the present value of the remaining unamortized shortfall amortization base, case-asserted";
+}
+
+pub relation required_reduction_of_subsequent_installments_pv_430c7Bii(plan: DefinedBenefitPlan, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 430(c)(7)(B)(ii): the present value by which subsequent installments must be reduced (in reverse order) to limit their present value to that of the remaining unamortized base";
+}
+
+@source(IRC_S430_C, relation = formalizes, coverage = partial, quote = "subsequent shortfall amortization installments with respect to such base shall, in reverse order of the otherwise required installments, be reduced to the extent necessary")
+rule RequiredReductionOfSubsequentInstallmentsPv430c7Bii(plan: DefinedBenefitPlan, y: TaxableYear, sub: Money, remaining: Money) strict {
+    label en official "PARTIAL: the amount of the present-value reduction max(0, subsequent - remaining); the allocation to particular installments in reverse order is not computed";
+    when pv_of_subsequent_installments_after_increase_430c7Bii(plan, y, sub)
+        and pv_of_remaining_unamortized_base_430c7Bii(plan, y, remaining);
+    then required_reduction_of_subsequent_installments_pv_430c7Bii(plan, y, max(0 USD, sub - remaining));
+}
+
+// (c)(7)(D) Excess employee compensation refinements
+
+pub relation remuneration_includible_for_calendar_year_430c7Di(employee: Person, plan: DefinedBenefitPlan, cal_year: Integer, amount: Money) kind empirical {
+    label en unofficial "the aggregate amount includible in income for remuneration for services performed for the plan sponsor, case-asserted before the adjustments of clauses (ii) to (vi)";
+}
+
+pub relation nqdc_assets_set_aside_430c7Dii(employee: Person, plan: DefinedBenefitPlan, cal_year: Integer, amount: Money) kind empirical {
+    label en unofficial "assets set aside or transferred to a trust or other arrangement for paying nonqualified deferred compensation (section 409A) in the calendar year, not otherwise includible in income that year, case-asserted";
+}
+
+pub relation service_after_february_28_2010_share_430c7Diii(employee: Person, plan: DefinedBenefitPlan, cal_year: Integer, amount: Money) kind empirical {
+    label en unofficial "the part of the remuneration attributable to services performed after February 28, 2010, case-asserted";
+}
+
+pub relation service_recipient_stock_grant_income_430c7Div(employee: Person, plan: DefinedBenefitPlan, cal_year: Integer, amount: Money) kind empirical {
+    label en unofficial "income from the grant after February 28, 2010 of service recipient stock subject to a substantial risk of forfeiture for at least 5 years, case-asserted";
+}
+
+pub relation commission_remuneration_430c7Dv1(employee: Person, plan: DefinedBenefitPlan, cal_year: Integer, amount: Money) kind empirical {
+    label en unofficial "remuneration payable on a commission basis solely on account of income directly generated by the individual, case-asserted";
+}
+
+pub relation existing_contract_remuneration_430c7Dv2(employee: Person, plan: DefinedBenefitPlan, cal_year: Integer, amount: Money) kind empirical {
+    label en unofficial "remuneration under a written binding contract in effect on March 1, 2010 not materially modified before payment, case-asserted";
+}
+
+pub relation remuneration_counted_430c7D(employee: Person, plan: DefinedBenefitPlan, cal_year: Integer, amount: Money) kind institutional {
+    label en official "section 430(c)(7)(D)(i)-(v): the remuneration counted after the set-aside inclusion, the post-2009 service limit and the exceptions";
+}
+
+@source(IRC_S430_C, relation = formalizes, coverage = partial, quote = "the amount of such assets shall be treated as remuneration of the employee includible in income for the calendar year")
+rule RemunerationCounted430c7D(employee: Person, plan: DefinedBenefitPlan, cal_year: Integer, post: Money, setaside: Money, stock: Money, comm: Money, contract: Money) strict {
+    label en official "PARTIAL: (post-2009 service remuneration + amounts set aside) - stock grant exception - commissions - existing contracts, floored at zero";
+    when service_after_february_28_2010_share_430c7Diii(employee, plan, cal_year, post)
+        and nqdc_assets_set_aside_430c7Dii(employee, plan, cal_year, setaside)
+        and service_recipient_stock_grant_income_430c7Div(employee, plan, cal_year, stock)
+        and commission_remuneration_430c7Dv1(employee, plan, cal_year, comm)
+        and existing_contract_remuneration_430c7Dv2(employee, plan, cal_year, contract);
+    then remuneration_counted_430c7D(employee, plan, cal_year, max(0 USD, post + setaside - stock - comm - contract));
+}
+
+pub relation cost_of_living_adjustment_430c7Dvii(cal_year: Integer, cola: Decimal) kind empirical {
+    label en unofficial "the cost-of-living adjustment determined under section 1(f)(3) for the calendar year, substituting calendar year 2009 for 2016 (a fraction, 0.10 = 10 percent), case-asserted";
+}
+
+pub relation excess_compensation_threshold_430c7Dvii(cal_year: Integer, amount: Money) kind institutional {
+    label en official "section 430(c)(7)(D)(i)(II) and (vii): $1,000,000 for a calendar year after 2010, increased by the adjustment and rounded down to the next lowest multiple of $1,000";
+}
+
+@source(IRC_S430_C, relation = formalizes, coverage = exact, quote = "such increase shall be rounded to the next lowest multiple of $1,000")
+rule ExcessCompensationThreshold430c7Dvii(cal_year: Integer, cola: Decimal) strict {
+    label en official "1,000,000 + floor(1,000,000 x cola to thousands); calendar years after 2010";
+    when cost_of_living_adjustment_430c7Dvii(cal_year, cola)
+        and cal_year > 2010;
+    then excess_compensation_threshold_430c7Dvii(cal_year,
+        1000000.00 USD + 1000.00 USD * round(1000000.0 * cola / 1000.0, 0, "FLOOR"));
+}
+
+pub relation employee_includes_self_employed_401c_430c7Dvi(person: Person, cal_year: Integer) kind empirical {
+    label en unofficial "the individual is self-employed and treated as an employee under section 401(c) for the taxable year ending during the calendar year, case-asserted";
+}
+
+pub relation treated_as_employee_for_excess_compensation_430c7Dvi(person: Person, cal_year: Integer) kind institutional {
+    label en official "section 430(c)(7)(D)(vi): a self-employed individual treated as an employee under section 401(c) is an employee (and earned income is compensation)";
+}
+
+@source(IRC_S430_C, relation = formalizes, coverage = exact, quote = "The term \"employee\" includes, with respect to a calendar year, a self-employed individual who is treated as an employee under section 401(c)")
+rule TreatedAsEmployeeForExcessCompensation430c7Dvi(person: Person, cal_year: Integer) strict {
+    label en official "401(c) individual";
+    when employee_includes_self_employed_401c_430c7Dvi(person, cal_year);
+    then treated_as_employee_for_excess_compensation_430c7Dvi(person, cal_year);
+}
+
+// (c)(7)(E) Extraordinary dividends and redemptions: per-item counting
+
+pub relation dividend_or_redemption_item_430c7E(plan: DefinedBenefitPlan, y: TaxableYear, item: Person, amount: Money, on: Date) kind empirical {
+    label en unofficial "a dividend declared (or a stock redemption paid) by the plan sponsor in the plan year, its amount and the date declared or occurring, case-asserted";
+}
+
+pub relation item_paid_within_controlled_group_430c7Eiii(item: Person) kind empirical {
+    label en unofficial "the dividend was paid by one member of a controlled group (section 412(d)(3)) to another member, case-asserted";
+}
+
+pub relation redemption_under_employee_plan_or_by_reason_of_death_430c7Eiv(item: Person) kind empirical {
+    label en unofficial "the redemption is made pursuant to a plan maintained for employees, or on account of the death, disability or termination of employment of an employee or shareholder, case-asserted";
+}
+
+pub relation applicable_preferred_stock_item_430c7Ev(item: Person) kind empirical {
+    label en unofficial "the item concerns applicable preferred stock whose dividends accrue at a specified rate in all events without regard to the sponsor's income, with interest on unpaid dividends, and which was issued before March 1, 2010 (or is held by an ERISA title I plan), case-asserted";
+}
+
+pub relation dividend_or_redemption_counted_430c7E(plan: DefinedBenefitPlan, y: TaxableYear, item: Person, amount: Money) kind institutional {
+    label en official "section 430(c)(7)(E)(i)-(v): the item is counted only if it is after February 28, 2010 and not excepted (intra-group, employee-plan or death/disability/termination redemption, applicable preferred stock)";
+}
+
+@source(IRC_S430_C, relation = formalizes, coverage = exact, quote = "there shall only be taken into account dividends declared, and redemptions occurring, after February 28, 2010")
+rule DividendOrRedemptionCounted430c7E(plan: DefinedBenefitPlan, y: TaxableYear, item: Person, amount: Money, on: Date) strict {
+    label en official "exact boundary: February 28, 2010 itself is not counted, March 1 is; no exception applies";
+    when dividend_or_redemption_item_430c7E(plan, y, item, amount, on)
+        and on > @2010-02-28
+        and not_known(item_paid_within_controlled_group_430c7Eiii(item))
+        and not_known(redemption_under_employee_plan_or_by_reason_of_death_430c7Eiv(item))
+        and not_known(applicable_preferred_stock_item_430c7Ev(item));
+    then dividend_or_redemption_counted_430c7E(plan, y, item, amount);
+}
+
+pub relation controlled_group_member_412d3_430c7Fi(sponsor: Person, member: Person) kind empirical {
+    label en unofficial "the person is a member of the plan sponsor's controlled group (section 412(d)(3)), case-asserted";
+}
+
+pub relation plan_sponsor_for_c7_430c7Fi(sponsor: Person, person: Person) kind institutional {
+    label en official "section 430(c)(7)(F)(i): the plan sponsor includes any member of its controlled group";
+}
+
+@source(IRC_S430_C, relation = formalizes, coverage = exact, quote = "The term \"plan sponsor\" includes any member of the plan sponsor's controlled group")
+rule PlanSponsorForC7430c7Fi(sponsor: Person, member: Person) strict {
+    label en official "controlled group member";
+    when controlled_group_member_412d3_430c7Fi(sponsor, member);
+    then plan_sponsor_for_c7_430c7Fi(sponsor, member);
+}
+
+// =====================================================================
+// (c)(8) 15-year amortization
+// =====================================================================
+
+pub relation plan_year_begins_on_430c8(plan: DefinedBenefitPlan, y: TaxableYear, start: Date) kind empirical {
+    label en unofficial "the first day of the plan year, case-asserted";
+}
+
+pub relation early_election_cutoff_430c8(plan: DefinedBenefitPlan, cutoff: Date) kind empirical {
+    label en unofficial "the earlier date the sponsor elected for the 15-year rule (December 31, 2018, 2019 or 2020), case-asserted";
+}
+
+pub relation fifteen_year_rule_first_cutoff_430c8(plan: DefinedBenefitPlan, cutoff: Date) kind institutional {
+    label en official "section 430(c)(8): the plan years beginning after December 31, 2021, or after the earlier elected date";
+}
+
+@source(IRC_S430_C, relation = formalizes, coverage = exact, quote = "With respect to plan years beginning after December 31, 2021 (or, at the election of the plan sponsor, plan years beginning after December 31, 2018, December 31, 2019, or December 31, 2020)")
+rule FifteenYearRuleFirstCutoffDefault430c8(plan: DefinedBenefitPlan) strict {
+    label en official "default cutoff December 31, 2021";
+    when db_plan_sponsor_430(plan, _)
+        and not_known(early_election_cutoff_430c8_present(plan));
+    then fifteen_year_rule_first_cutoff_430c8(plan, @2021-12-31);
+}
+
+pub relation early_election_cutoff_430c8_present(plan: DefinedBenefitPlan) kind institutional {
+    label en unofficial "helper: an early election date is asserted";
+}
+
+rule EarlyElectionCutoffPresent430c8(plan: DefinedBenefitPlan, cutoff: Date) strict {
+    label en unofficial "derives the helper";
+    when early_election_cutoff_430c8(plan, cutoff);
+    then early_election_cutoff_430c8_present(plan);
+}
+
+@source(IRC_S430_C, relation = formalizes, coverage = exact, quote = "at the election of the plan sponsor, plan years beginning after December 31, 2018, December 31, 2019, or December 31, 2020")
+rule FifteenYearRuleFirstCutoffElected430c8(plan: DefinedBenefitPlan, cutoff: Date) strict {
+    label en official "the elected cutoff (only the three permitted dates)";
+    when early_election_cutoff_430c8(plan, cutoff)
+        and (cutoff == @2018-12-31 or cutoff == @2019-12-31 or cutoff == @2020-12-31);
+    then fifteen_year_rule_first_cutoff_430c8(plan, cutoff);
+}
+
+pub relation shortfall_bases_reduced_to_zero_430c8A(plan: DefinedBenefitPlan, y: TaxableYear) kind institutional {
+    label en official "section 430(c)(8)(A): the shortfall amortization bases for plan years preceding the first plan year of the rule, and their installments, are reduced to zero";
+}
+
+@source(IRC_S430_C, relation = formalizes, coverage = exact, quote = "shall be reduced to zero")
+rule ShortfallBasesReducedToZero430c8A(plan: DefinedBenefitPlan, y: TaxableYear, start: Date, cutoff: Date) strict {
+    label en official "a plan year that begins on or before the cutoff is a preceding year";
+    when plan_year_begins_on_430c8(plan, y, start)
+        and fifteen_year_rule_first_cutoff_430c8(plan, cutoff)
+        and start <= cutoff;
+    then shortfall_bases_reduced_to_zero_430c8A(plan, y);
+}
+
+pub relation fifteen_year_rule_applies_to_year_430c8B(plan: DefinedBenefitPlan, y: TaxableYear) kind institutional {
+    label en official "section 430(c)(8)(B): the 15-plan-year period is substituted for 7 for plan years beginning after the cutoff";
+}
+
+@source(IRC_S430_C, relation = formalizes, coverage = exact, quote = "subparagraphs (A) and (B) of paragraph (2) shall each be applied by substituting \"15-plan-year period\" for \"7-plan-year period\"")
+rule FifteenYearRuleAppliesToYear430c8B(plan: DefinedBenefitPlan, y: TaxableYear, start: Date, cutoff: Date) strict {
+    label en official "a plan year that begins after the cutoff";
+    when plan_year_begins_on_430c8(plan, y, start)
+        and fifteen_year_rule_first_cutoff_430c8(plan, cutoff)
+        and start > cutoff;
+    then fifteen_year_rule_applies_to_year_430c8B(plan, y);
+}
+
+// =====================================================================
+// (e)(1) Waiver amortization charge
+// =====================================================================
+
+pub relation waiver_installment_payable_from_base_years_back_430e(plan: DefinedBenefitPlan, y: TaxableYear, years_back: Integer, amount: Money) kind empirical {
+    label en unofficial "the waiver amortization installment for this plan year with respect to the waiver base of the plan year this many years earlier, case-asserted (one row per preceding base)";
+}
+
+pub relation waiver_amortization_charge_430e1(plan: DefinedBenefitPlan, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 430(e)(1): the aggregate of the waiver amortization installments for the plan year with respect to the waiver bases of the 5 preceding plan years";
+}
+
+@source(IRC_S430_E, relation = formalizes, coverage = exact, quote = "is the aggregate total of the waiver amortization installments for such plan year with respect to the waiver amortization bases for each of the 5 preceding plan years")
+rule WaiverAmortizationCharge430e1(plan: DefinedBenefitPlan, y: TaxableYear) strict {
+    label en official "sum over the 5 preceding bases (1 to 5 years back)";
+    when waiver_installment_payable_from_base_years_back_430e(plan, y, _, _);
+    then waiver_amortization_charge_430e1(plan, y,
+        sum all amt: Money for k: Integer
+            where waiver_installment_payable_from_base_years_back_430e(plan, y, k, amt) and k >= 1 and k <= 5);
+}
+
+// =====================================================================
+// (f) Prefunding balance and funding standard carryover balance
+// =====================================================================
+
+pub relation prefunding_balance_election_made_430f1A(plan: DefinedBenefitPlan) kind empirical {
+    label en unofficial "the plan sponsor of a defined benefit plan (not a multiemployer plan) elects to maintain a prefunding balance, case-asserted";
+}
+
+pub relation prefunding_balance_maintained_430f1A(plan: DefinedBenefitPlan) kind institutional {
+    label en official "section 430(f)(1)(A): the sponsor may elect to maintain a prefunding balance";
+}
+
+@source(IRC_S430_F, relation = formalizes, coverage = exact, quote = "The plan sponsor of a defined benefit plan which is not a multiemployer plan may elect to maintain a prefunding balance.")
+rule PrefundingBalanceMaintained430f1A(plan: DefinedBenefitPlan) strict {
+    label en official "election";
+    when prefunding_balance_election_made_430f1A(plan);
+    then prefunding_balance_maintained_430f1A(plan);
+}
+
+pub relation plan_in_effect_for_2007_plan_year_430f1Bii1(plan: DefinedBenefitPlan) kind empirical {
+    label en unofficial "the plan was in effect for a plan year beginning in 2007, case-asserted";
+}
+
+pub relation funding_standard_account_balance_end_of_2007_year_430f1Bii2(plan: DefinedBenefitPlan, amount: Money) kind empirical {
+    label en unofficial "the balance in the funding standard account under section 412(b) as in effect, at the end of the 2007 plan year, case-asserted";
+}
+
+pub relation carryover_election_made_430f1Bi(plan: DefinedBenefitPlan) kind empirical {
+    label en unofficial "the sponsor elects to maintain a funding standard carryover balance, case-asserted";
+}
+
+pub relation funding_standard_carryover_balance_maintained_430f1B(plan: DefinedBenefitPlan) kind institutional {
+    label en official "section 430(f)(1)(B): for a plan in effect for a 2007 plan year with a positive 2007 funding standard account balance, the sponsor may elect to maintain a carryover balance";
+}
+
+@source(IRC_S430_F, relation = formalizes, coverage = exact, quote = "had a positive balance in the funding standard account under section 412(b) as in effect for such plan year")
+rule FundingStandardCarryoverBalanceMaintained430f1B(plan: DefinedBenefitPlan, balance: Money) strict {
+    label en official "exact boundary: a positive balance (zero does not qualify)";
+    when carryover_election_made_430f1Bi(plan)
+        and plan_in_effect_for_2007_plan_year_430f1Bii1(plan)
+        and funding_standard_account_balance_end_of_2007_year_430f1Bii2(plan, balance)
+        and balance > 0 USD;
+    then funding_standard_carryover_balance_maintained_430f1B(plan);
+}
+
+pub relation carryover_positive_430f3B(plan: DefinedBenefitPlan, y: TaxableYear) kind institutional {
+    label en unofficial "helper: the funding standard carryover balance is greater than zero";
+}
+
+rule CarryoverPositive430f3B(plan: DefinedBenefitPlan, y: TaxableYear, cb: Money) strict {
+    label en unofficial "derives the helper";
+    when funding_standard_carryover_balance_430(plan, y, cb) and cb > 0 USD;
+    then carryover_positive_430f3B(plan, y);
+}
+
+pub relation prefunding_balance_credit_permitted_430f3B(plan: DefinedBenefitPlan, y: TaxableYear) kind institutional {
+    label en official "section 430(f)(3)(B): to the extent the carryover balance is greater than zero, no prefunding balance may be credited";
+}
+
+@source(IRC_S430_F, relation = formalizes, coverage = exact, quote = "no amount of the prefunding balance of such plan may be credited under this paragraph in reducing the minimum required contribution")
+rule PrefundingBalanceCreditPermitted430f3B(plan: DefinedBenefitPlan, y: TaxableYear, pb: Money) strict {
+    label en official "a positive prefunding balance and no positive carryover";
+    when prefunding_balance_430(plan, y, pb) and pb > 0 USD
+        and not_known(carryover_positive_430f3B(plan, y));
+    then prefunding_balance_credit_permitted_430f3B(plan, y);
+}
+
+pub relation plan_maintained_exclusively_by_501c3_430f3Diii(plan: DefinedBenefitPlan) kind empirical {
+    label en unofficial "the plan is maintained exclusively by one or more organizations described in section 501(c)(3), case-asserted";
+}
+
+pub relation ratio_for_credit_limitation_430f3C(plan: DefinedBenefitPlan, y: TaxableYear, ratio: Decimal) kind empirical {
+    label en unofficial "the ratio of the preceding-year plan assets (as reduced under (4)(C)) to the funding target, as a fraction, case-asserted";
+}
+
+pub relation ratio_of_plan_year_beginning_after_aug_31_2007_430f3Di2(plan: DefinedBenefitPlan, ratio: Decimal) kind empirical {
+    label en unofficial "the ratio for the plan year beginning after August 31, 2007 and before September 1, 2008, as determined under the Secretary's rules, case-asserted";
+}
+
+pub relation charity_ratio_for_credit_limitation_430f3D(plan: DefinedBenefitPlan, y: TaxableYear, ratio: Decimal) kind institutional {
+    label en official "section 430(f)(3)(D)(i): for plan years beginning after August 31, 2009 and before September 1, 2011, a charity plan's ratio is the greater of the current ratio and the 2007-2008 ratio";
+}
+
+@source(IRC_S430_F, relation = formalizes, coverage = partial, quote = "the ratio determined under such subparagraph for the preceding plan year of a plan shall be the greater of")
+rule CharityRatioForCreditLimitation430f3D(plan: DefinedBenefitPlan, y: TaxableYear, start: Date, current: Decimal, base: Decimal) strict {
+    label en official "PARTIAL: the valuation-date variation of clause (ii) is not modelled; exact boundaries: a plan year beginning August 31, 2009 or September 1, 2011 is outside";
+    when plan_maintained_exclusively_by_501c3_430f3Diii(plan)
+        and plan_year_begins_on_430c8(plan, y, start)
+        and start > @2009-08-31 and start < @2011-09-01
+        and ratio_for_credit_limitation_430f3C(plan, y, current)
+        and ratio_of_plan_year_beginning_after_aug_31_2007_430f3Di2(plan, base);
+    then charity_ratio_for_credit_limitation_430f3D(plan, y, max(current, base));
+}
+
+pub relation plan_assets_reduced_for_shortfall_base_430f4A(plan: DefinedBenefitPlan, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 430(f)(4)(A): for subsection (c)(5) the value of plan assets is reduced by the prefunding balance, but only if a credit election reducing the minimum required contribution is in effect";
+}
+
+@source(IRC_S430_F, relation = formalizes, coverage = exact, quote = "the value of plan assets is deemed to be such amount, reduced by the amount of the prefunding balance, but only if an election under paragraph (3)")
+rule PlanAssetsReducedForShortfallBase430f4A(plan: DefinedBenefitPlan, y: TaxableYear, assets: Money, pb: Money, credit: Money) strict {
+    label en official "assets - prefunding balance when a positive credit election is in effect";
+    when value_of_plan_assets_430(plan, y, assets)
+        and prefunding_balance_430(plan, y, pb)
+        and balance_credit_elected_430(plan, y, credit)
+        and credit > 0 USD;
+    then plan_assets_reduced_for_shortfall_base_430f4A(plan, y, assets - pb);
+}
+
+@source(IRC_S430_F, relation = formalizes, coverage = exact, quote = "the value of plan assets is deemed to be such amount, reduced by the amount of the prefunding balance, but only if an election under paragraph (3)")
+rule PlanAssetsNotReducedForShortfallBaseWithoutCredit430f4A(plan: DefinedBenefitPlan, y: TaxableYear, assets: Money) strict {
+    label en official "no credit election: no reduction";
+    when value_of_plan_assets_430(plan, y, assets)
+        and not_known(credit_election_present_430f4A(plan, y));
+    then plan_assets_reduced_for_shortfall_base_430f4A(plan, y, assets);
+}
+
+pub relation credit_election_present_430f4A(plan: DefinedBenefitPlan, y: TaxableYear) kind institutional {
+    label en unofficial "helper: a positive credit election is in effect for the plan year";
+}
+
+rule CreditElectionPresent430f4A(plan: DefinedBenefitPlan, y: TaxableYear, credit: Money) strict {
+    label en unofficial "derives the helper";
+    when balance_credit_elected_430(plan, y, credit) and credit > 0 USD;
+    then credit_election_present_430f4A(plan, y);
+}
+
+pub relation binding_pbgc_agreement_for_balance_430f4Bii(plan: DefinedBenefitPlan, y: TaxableYear) kind empirical {
+    label en unofficial "a binding written agreement with the PBGC is in effect that the specified balance is not available to reduce the minimum required contribution for the plan year, case-asserted";
+}
+
+pub relation plan_assets_for_excess_assets_430c4B_430f4Bii(plan: DefinedBenefitPlan, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 430(f)(4)(B)(ii): for subsection (c)(4)(B) the value of plan assets is not reduced by the specified balance if a binding PBGC agreement is in effect";
+}
+
+@source(IRC_S430_F, relation = formalizes, coverage = partial, quote = "the value of plan assets shall not be deemed to be reduced for a plan year by the amount of the specified balance")
+rule PlanAssetsNotReducedPbgcAgreement430f4Bii(plan: DefinedBenefitPlan, y: TaxableYear, assets: Money) strict {
+    label en official "PARTIAL: both balances are treated as the specified balance under the agreement (a single case fact)";
+    when binding_pbgc_agreement_for_balance_430f4Bii(plan, y)
+        and value_of_plan_assets_430(plan, y, assets);
+    then plan_assets_for_excess_assets_430c4B_430f4Bii(plan, y, assets);
+}
+
+pub relation balance_reduction_elected_430f5A(plan: DefinedBenefitPlan, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the amount by which the sponsor elects to reduce the prefunding balance for the plan year, case-asserted";
+}
+
+pub relation prefunding_balance_after_reduction_election_430f5(plan: DefinedBenefitPlan, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 430(f)(5)(A): the prefunding balance reduced by the elected amount, but not below zero, before any determination of the value of plan assets";
+}
+
+@source(IRC_S430_F, relation = formalizes, coverage = exact, quote = "The plan sponsor may elect to reduce by any amount the balance of the prefunding balance and the funding standard carryover balance for any plan year (but not below zero)")
+rule PrefundingBalanceAfterReductionElection430f5(plan: DefinedBenefitPlan, y: TaxableYear, pb: Money, cut: Money) strict {
+    label en official "max(0, balance - reduction); not available while the carryover balance is positive ((B))";
+    when prefunding_balance_430(plan, y, pb)
+        and balance_reduction_elected_430f5A(plan, y, cut)
+        and not_known(carryover_positive_430f3B(plan, y));
+    then prefunding_balance_after_reduction_election_430f5(plan, y, max(0 USD, pb - cut));
+}
+
+pub relation prior_year_prefunding_balance_430f6(plan: DefinedBenefitPlan, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the prefunding balance at the end of the preceding plan year before the first-day adjustments, case-asserted (a beginning balance of zero for the first year)";
+}
+
+pub relation prior_year_prefunding_credited_430f6C(plan: DefinedBenefitPlan, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the amount of the balance credited under paragraph (2) in reducing the minimum required contribution for the preceding plan year, case-asserted";
+}
+
+pub relation prefunding_increase_elected_430f6Bi(plan: DefinedBenefitPlan, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the amount by which the sponsor elects to increase the prefunding balance, case-asserted";
+}
+
+pub relation excess_contributions_interest_adjusted_430f6Bii(plan: DefinedBenefitPlan, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the excess of the preceding year's contributions over its minimum required contribution, adjusted for interest between the first day of the current plan year and the dates the excess contributions were made (using the effective interest rate for the preceding year, contributions first used to satisfy the minimum), case-asserted";
+}
+
+pub relation contributions_required_to_avoid_436_limits_430f6Biii(plan: DefinedBenefitPlan, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the contributions an employer would be required to make under section 436(b), (c) or (e) to avoid a benefit limitation for the preceding plan year, each counted once, case-asserted";
+}
+
+pub relation prefunding_increase_limit_430f6Bi(plan: DefinedBenefitPlan, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 430(f)(6)(B)(i)-(iii): the maximum elected increase: the interest-adjusted excess of prior-year contributions over the minimum, less contributions needed to avoid section 436 limits, not below zero";
+}
+
+@source(IRC_S430_F, relation = formalizes, coverage = exact, quote = "shall be reduced (but not below zero) by the amount of contributions an employer would be required to make under subsection (b), (c), or (e) of section 436")
+rule PrefundingIncreaseLimit430f6Bi(plan: DefinedBenefitPlan, y: TaxableYear, excess: Money, avoid: Money) strict {
+    label en official "max(0, adjusted excess - contributions to avoid limitations)";
+    when excess_contributions_interest_adjusted_430f6Bii(plan, y, excess)
+        and contributions_required_to_avoid_436_limits_430f6Biii(plan, y, avoid);
+    then prefunding_increase_limit_430f6Bi(plan, y, max(0 USD, excess - avoid));
+}
+
+pub relation prefunding_balance_first_day_430f6(plan: DefinedBenefitPlan, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 430(f)(6)(A)-(C): the balance on the first day of a plan year after 2008: the prior balance, increased by the elected amount (capped by the limit) and decreased by the amount credited for the preceding year, not below zero (the (8) investment adjustment is a separate case input)";
+}
+
+@source(IRC_S430_F, relation = formalizes, coverage = partial, quote = "As of the first day of each plan year beginning after 2008, the prefunding balance of a plan shall be increased by the amount elected by the plan sponsor for the plan year")
+rule PrefundingBalanceFirstDay430f6(plan: DefinedBenefitPlan, y: TaxableYear, prior: Money, elected: Money, limit: Money, credited: Money) strict {
+    label en official "PARTIAL: max(0, prior + min(elected, limit) - credited)";
+    when prior_year_prefunding_balance_430f6(plan, y, prior)
+        and prefunding_increase_elected_430f6Bi(plan, y, elected)
+        and prefunding_increase_limit_430f6Bi(plan, y, limit)
+        and prior_year_prefunding_credited_430f6C(plan, y, credited);
+    then prefunding_balance_first_day_430f6(plan, y, max(0 USD, prior + min(elected, limit) - credited));
+}
+
+pub relation carryover_balance_beginning_430f7B(plan: DefinedBenefitPlan, amount: Money) kind institutional {
+    label en official "section 430(f)(7)(B): the beginning balance of the funding standard carryover balance is the positive balance described in (1)(B)(ii)(II)";
+}
+
+@source(IRC_S430_F, relation = formalizes, coverage = exact, quote = "The beginning balance of the funding standard carryover balance shall be the positive balance described in paragraph (1)(B)(ii)(II).")
+rule CarryoverBalanceBeginning430f7B(plan: DefinedBenefitPlan, balance: Money) strict {
+    label en official "the positive 2007 balance";
+    when funding_standard_account_balance_end_of_2007_year_430f1Bii2(plan, balance) and balance > 0 USD;
+    then carryover_balance_beginning_430f7B(plan, balance);
+}
+
+pub relation prior_year_carryover_balance_430f7(plan: DefinedBenefitPlan, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the funding standard carryover balance at the end of the preceding plan year, case-asserted";
+}
+
+pub relation carryover_balance_first_day_430f7C(plan: DefinedBenefitPlan, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 430(f)(7)(C): the carryover balance decreased (not below zero) by the amount credited for the preceding plan year";
+}
+
+@source(IRC_S430_F, relation = formalizes, coverage = partial, quote = "The funding standard carryover balance of a plan shall be decreased (but not below zero) by")
+rule CarryoverBalanceFirstDay430f7C(plan: DefinedBenefitPlan, y: TaxableYear, prior: Money, credited: Money) strict {
+    label en official "PARTIAL: max(0, prior - credited) for plan years after 2008; the elected reduction is (5)(A)";
+    when prior_year_carryover_balance_430f7(plan, y, prior)
+        and prior_year_prefunding_credited_430f6C(plan, y, credited);
+    then carryover_balance_first_day_430f7C(plan, y, max(0 USD, prior - credited));
+}
+
+pub relation regulation_adjustment_for_investment_experience_430f8(plan: DefinedBenefitPlan, y: TaxableYear, adjustment: Money) kind empirical {
+    label en unofficial "the adjustment reflecting the rate of return on plan assets for the preceding plan year (determined on fair market value under the Secretary's regulations), case-asserted";
+}
+
+pub relation prefunding_balance_after_investment_adjustment_430f8(plan: DefinedBenefitPlan, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 430(f)(8): the balance as of the first day of the plan year adjusted for the rate of return";
+}
+
+@source(IRC_S430_F, relation = formalizes, coverage = partial, quote = "the plan sponsor shall, in accordance with regulations prescribed by the Secretary, adjust such balance to reflect the rate of return on plan assets for the preceding plan year")
+rule PrefundingBalanceAfterInvestmentAdjustment430f8(plan: DefinedBenefitPlan, y: TaxableYear, bal: Money, adj: Money) strict {
+    label en official "PARTIAL: balance + the case-asserted adjustment, not below zero";
+    when prefunding_balance_first_day_430f6(plan, y, bal)
+        and regulation_adjustment_for_investment_experience_430f8(plan, y, adj);
+    then prefunding_balance_after_investment_adjustment_430f8(plan, y, max(0 USD, bal + adj));
+}
+
+// =====================================================================
+// (g) Valuation date, assets and contribution receipts
+// =====================================================================
+
+pub relation plan_designated_valuation_date_430g2B(plan: DefinedBenefitPlan, y: TaxableYear) kind empirical {
+    label en unofficial "the plan designated a valuation date other than the first day of the plan year under subparagraph (B), case-asserted";
+}
+
+pub relation valuation_date_general_430g2A(plan: DefinedBenefitPlan, y: TaxableYear, on: Date) kind institutional {
+    label en official "section 430(g)(2)(A): the valuation date is the first day of the plan year unless subparagraph (B) applies";
+}
+
+@source(IRC_S430_G, relation = formalizes, coverage = exact, quote = "the valuation date of a plan for any plan year shall be the first day of the plan year")
+rule ValuationDateGeneral430g2A(plan: DefinedBenefitPlan, y: TaxableYear, start: Date) strict {
+    label en official "first day of the plan year absent a designation";
+    when plan_year_begins_on_430c8(plan, y, start)
+        and not_known(plan_designated_valuation_date_430g2B(plan, y));
+    then valuation_date_general_430g2A(plan, y, start);
+}
+
+pub relation expected_participants_first_plan_year_430g2Ci(plan: DefinedBenefitPlan, y: TaxableYear, count: Integer) kind empirical {
+    label en unofficial "the number of participants the plan is reasonably expected to have on days during its first plan year, case-asserted";
+}
+
+pub relation may_designate_valuation_date_first_year_430g2Ci(plan: DefinedBenefitPlan, y: TaxableYear) kind institutional {
+    label en official "section 430(g)(2)(C)(i): for the first plan year the (B) size test uses the expected number of participants";
+}
+
+@source(IRC_S430_G, relation = formalizes, coverage = exact, quote = "In the case of the first plan year of any plan, subparagraph (B) shall apply to such plan by taking into account the number of participants that the plan is reasonably expected to have on days during such first plan year.")
+rule MayDesignateValuationDateFirstYear430g2Ci(plan: DefinedBenefitPlan, y: TaxableYear, count: Integer) strict {
+    label en official "exact boundary: 100 expected participants qualify, 101 do not";
+    when expected_participants_first_plan_year_430g2Ci(plan, y, count) and count <= 100;
+    then may_designate_valuation_date_first_year_430g2Ci(plan, y);
+}
+
+pub relation averaging_elected_430g3B(plan: DefinedBenefitPlan, y: TaxableYear) kind empirical {
+    label en unofficial "the plan determines the value of plan assets by averaging, case-asserted";
+}
+
+pub relation value_of_plan_assets_by_method_430g3(plan: DefinedBenefitPlan, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 430(g)(3): fair market value, or the averaged value when averaging is permitted and used";
+}
+
+@source(IRC_S430_G, relation = formalizes, coverage = exact, quote = "Except as provided in subparagraph (B), the value of plan assets shall be the fair market value of the assets.")
+rule ValueOfPlanAssetsFairMarketValue430g3A(plan: DefinedBenefitPlan, y: TaxableYear, fmv: Money) strict {
+    label en official "fair market value absent averaging";
+    when fair_market_value_of_assets_430g3(plan, y, fmv)
+        and not_known(averaging_elected_430g3B(plan, y));
+    then value_of_plan_assets_by_method_430g3(plan, y, fmv);
+}
+
+@source(IRC_S430_G, relation = formalizes, coverage = exact, quote = "A plan may determine the value of plan assets on the basis of the averaging of fair market values, but only if such method")
+rule ValueOfPlanAssetsAveraged430g3B(plan: DefinedBenefitPlan, y: TaxableYear, averaged: Money) strict {
+    label en official "averaging only when permitted (module 30 tests the corridor)";
+    when averaging_elected_430g3B(plan, y)
+        and asset_averaging_permitted_430g3B(plan, y)
+        and averaged_asset_value_430g3(plan, y, averaged);
+    then value_of_plan_assets_by_method_430g3(plan, y, averaged);
+}
+
+pub relation assumed_earnings_rate_430g3B(plan: DefinedBenefitPlan, y: TaxableYear, rate: Decimal) kind empirical {
+    label en unofficial "the assumed earnings rate specified by the actuary for adjusting the averaging, case-asserted";
+}
+
+pub relation third_segment_rate_430h2Ciii(plan: DefinedBenefitPlan, y: TaxableYear, rate: Decimal) kind empirical {
+    label en unofficial "the third segment rate applicable under subsection (h)(2)(C)(iii), case-asserted";
+}
+
+pub relation averaging_earnings_assumption_within_cap_430g3B(plan: DefinedBenefitPlan, y: TaxableYear) kind institutional {
+    label en official "section 430(g)(3)(B) last sentence: the assumed earnings rate does not exceed the third segment rate";
+}
+
+@source(IRC_S430_G, relation = formalizes, coverage = exact, quote = "but not in excess of the third segment rate applicable under subsection (h)(2)(C)(iii)")
+rule AveragingEarningsAssumptionWithinCap430g3B(plan: DefinedBenefitPlan, y: TaxableYear, assumed: Decimal, cap: Decimal) strict {
+    label en official "exact boundary: equal to the cap is allowed";
+    when assumed_earnings_rate_430g3B(plan, y, assumed)
+        and third_segment_rate_430h2Ciii(plan, y, cap)
+        and assumed <= cap;
+    then averaging_earnings_assumption_within_cap_430g3B(plan, y);
+}
+
+pub relation contribution_after_valuation_date_for_preceding_year_430g4A(plan: DefinedBenefitPlan, y: TaxableYear, nominal: Money, present_value: Money) kind empirical {
+    label en unofficial "a contribution made after the valuation date for a preceding plan year: its nominal amount and its present value at the valuation date (discounted at the effective interest rate for the preceding year), case-asserted";
+}
+
+pub relation contribution_taken_into_account_as_asset_430g4A(plan: DefinedBenefitPlan, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 430(g)(4)(A): the contribution is an asset as of the valuation date; for plan years beginning after 2008 only its present value";
+}
+
+@source(IRC_S430_G, relation = formalizes, coverage = exact, quote = "in the case of any plan year beginning after 2008, only the present value (determined as of the valuation date) of such contribution may be taken into account")
+rule ContributionTakenIntoAccountAsAssetAfter2008430g4A(plan: DefinedBenefitPlan, y: TaxableYear, start: Date, nominal: Money, pv: Money) strict {
+    label en official "plan years beginning after 2008: the present value";
+    when contribution_after_valuation_date_for_preceding_year_430g4A(plan, y, nominal, pv)
+        and plan_year_begins_on_430c8(plan, y, start)
+        and start > @2008-12-31;
+    then contribution_taken_into_account_as_asset_430g4A(plan, y, pv);
+}
+
+@source(IRC_S430_G, relation = formalizes, coverage = exact, quote = "the contribution shall be taken into account as an asset of the plan as of the valuation date")
+rule ContributionTakenIntoAccountAsAssetBefore2009430g4A(plan: DefinedBenefitPlan, y: TaxableYear, start: Date, nominal: Money, pv: Money) strict {
+    label en official "earlier plan years: the nominal amount";
+    when contribution_after_valuation_date_for_preceding_year_430g4A(plan, y, nominal, pv)
+        and plan_year_begins_on_430c8(plan, y, start)
+        and start <= @2008-12-31;
+    then contribution_taken_into_account_as_asset_430g4A(plan, y, nominal);
+}
+
+pub relation early_current_year_contributions_430g4B(plan: DefinedBenefitPlan, y: TaxableYear, contributions: Money, interest: Money) kind empirical {
+    label en unofficial "contributions for the plan year made during the year before the valuation date, and the interest on them (effective rate for the plan year) between the date of contribution and the valuation date, case-asserted";
+}
+
+pub relation assets_excluding_early_contributions_430g4B(plan: DefinedBenefitPlan, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 430(g)(4)(B): the assets as of the valuation date do not include such contributions and their interest";
+}
+
+@source(IRC_S430_G, relation = formalizes, coverage = exact, quote = "the assets of the plan as of the valuation date shall not include")
+rule AssetsExcludingEarlyContributions430g4B(plan: DefinedBenefitPlan, y: TaxableYear, assets: Money, contrib: Money, interest: Money) strict {
+    label en official "assets - contributions - interest";
+    when value_of_plan_assets_430(plan, y, assets)
+        and early_current_year_contributions_430g4B(plan, y, contrib, interest);
+    then assets_excluding_early_contributions_430g4B(plan, y, assets - contrib - interest);
+}
+
+// =====================================================================
+// (h)(2)(E) Applicable month
+// =====================================================================
+
+pub relation valuation_date_month_430h2E(plan: DefinedBenefitPlan, y: TaxableYear, month: Integer) kind empirical {
+    label en unofficial "the calendar month (1 to 12) that includes the valuation date, case-asserted";
+}
+
+pub relation applicable_month_election_months_before_430h2E(plan: DefinedBenefitPlan, y: TaxableYear, months_before: Integer) kind empirical {
+    label en unofficial "the sponsor elects an applicable month this many months before the valuation date month (0 = no election), case-asserted";
+}
+
+pub relation applicable_month_430h2E(plan: DefinedBenefitPlan, y: TaxableYear, month: Integer) kind institutional {
+    label en official "section 430(h)(2)(E): the month that includes the valuation date or, at the sponsor's election, any of the 4 months that precede it";
+}
+
+@source(IRC_S430_H, relation = formalizes, coverage = exact, quote = "the month which includes the valuation date of such plan for such plan year or, at the election of the plan sponsor, any of the 4 months which precede such month")
+rule ApplicableMonth430h2E(plan: DefinedBenefitPlan, y: TaxableYear, vm: Integer, back: Integer) strict {
+    label en official "exact: back is 0 to 4; the month wraps around the year end (month numbers 1 to 12)";
+    when valuation_date_month_430h2E(plan, y, vm)
+        and applicable_month_election_months_before_430h2E(plan, y, back)
+        and back >= 0 and back <= 4;
+    then applicable_month_430h2E(plan, y, if vm - back >= 1 then vm - back else vm - back + 12);
+}
+
+// =====================================================================
+// (j)(2)-(4) Payment interest, quarterly installments and liquidity
+// =====================================================================
+
+pub relation contribution_payment_made_on_430j2(plan: DefinedBenefitPlan, y: TaxableYear, paid_on: Date) kind empirical {
+    label en unofficial "the date the payment of the minimum required contribution was made, case-asserted";
+}
+
+pub relation valuation_date_of_plan_year_430j2(plan: DefinedBenefitPlan, y: TaxableYear, on: Date) kind empirical {
+    label en unofficial "the valuation date for the plan year, case-asserted";
+}
+
+pub relation payment_adjusted_for_interest_430j2(plan: DefinedBenefitPlan, y: TaxableYear, paid_on: Date, amount: Money) kind institutional {
+    label en official "section 430(j)(2): a payment made on a date other than the valuation date is adjusted for interest accruing between the valuation date and the payment date at the plan's effective interest rate";
+}
+
+@source(IRC_S430_J, relation = formalizes, coverage = partial, quote = "shall be adjusted for interest accruing for the period between the valuation date and the payment date, at the effective rate of interest for the plan for such plan year")
+rule PaymentAdjustedForInterest430j2(plan: DefinedBenefitPlan, y: TaxableYear, paid_on: Date, val: Date, required: Money, r: Decimal) strict {
+    label en official "PARTIAL (JUDGMENT CALL): the required amount x (1 + r x days/365), actual days, simple interest, HALF_UP to the cent";
+    when contribution_payment_made_on_430j2(plan, y, paid_on)
+        and valuation_date_of_plan_year_430j2(plan, y, val)
+        and minimum_required_contribution_430(plan, y, required)
+        and effective_interest_rate_430(plan, y, r)
+        and paid_on >= val;
+    then payment_adjusted_for_interest_430j2(plan, y, paid_on,
+        required + round(required * r * div_round(1.0 * days_between(val, paid_on), 365.0, 10, "HALF_UP"), 2, "HALF_UP"));
+}
+
+pub relation preceding_year_funding_shortfall_positive_430j3A(plan: DefinedBenefitPlan, y: TaxableYear) kind empirical {
+    label en unofficial "the plan has a funding shortfall for the preceding plan year, case-asserted (the 2008 estimation methods are the Secretary's)";
+}
+
+pub relation installment_paid_by_due_date_430j3Bi2(plan: DefinedBenefitPlan, y: TaxableYear, which: QuarterlyInstallmentOrdinal, amount: Money) kind empirical {
+    label en unofficial "the amount of the installment contributed on or before the due date (contributions credited in the order installments are due: clause (iii)), case-asserted";
+}
+
+pub relation installment_underpayment_430j3Bi(plan: DefinedBenefitPlan, y: TaxableYear, which: QuarterlyInstallmentOrdinal, amount: Money) kind institutional {
+    label en official "section 430(j)(3)(B)(i): the underpayment is the excess of the required installment over the amount contributed by the due date";
+}
+
+@source(IRC_S430_J, relation = formalizes, coverage = exact, quote = "the required installment, over")
+rule InstallmentUnderpayment430j3Bi(plan: DefinedBenefitPlan, y: TaxableYear, which: QuarterlyInstallmentOrdinal, required: Money, paid: Money) strict {
+    label en official "max(0, required - paid); required only when the preceding year had a shortfall";
+    when preceding_year_funding_shortfall_positive_430j3A(plan, y)
+        and required_installment_amount_430(plan, y, required)
+        and installment_paid_by_due_date_430j3Bi2(plan, y, which, paid);
+    then installment_underpayment_430j3Bi(plan, y, which, max(0 USD, required - paid));
+}
+
+pub relation underpayment_interest_rate_430j3A(plan: DefinedBenefitPlan, y: TaxableYear, rate: Decimal) kind institutional {
+    label en official "section 430(j)(3)(A): the rate otherwise used under paragraph (2) plus 5 percentage points";
+}
+
+@source(IRC_S430_J, relation = formalizes, coverage = exact, quote = "a rate of interest equal to the rate otherwise used under paragraph (2) plus 5 percentage points")
+rule UnderpaymentInterestRate430j3A(plan: DefinedBenefitPlan, y: TaxableYear, r: Decimal) strict {
+    label en official "r + 0.05";
+    when preceding_year_funding_shortfall_positive_430j3A(plan, y)
+        and effective_interest_rate_430(plan, y, r);
+    then underpayment_interest_rate_430j3A(plan, y, r + 0.05);
+}
+
+pub relation underpayment_contributed_on_430j3Bii(plan: DefinedBenefitPlan, y: TaxableYear, which: QuarterlyInstallmentOrdinal, on: Date) kind empirical {
+    label en unofficial "the date the underpaid portion was contributed to the plan, case-asserted";
+}
+
+pub relation underpayment_interest_430j3(plan: DefinedBenefitPlan, y: TaxableYear, which: QuarterlyInstallmentOrdinal, amount: Money) kind institutional {
+    label en official "section 430(j)(3)(A)-(B): interest on the underpayment from the installment's due date to the date contributed, at the increased rate";
+}
+
+@source(IRC_S430_J, relation = formalizes, coverage = partial, quote = "shall run from the due date for the installment to the date on which such portion is contributed to or under the plan")
+rule UnderpaymentInterest430j3(plan: DefinedBenefitPlan, y: TaxableYear, which: QuarterlyInstallmentOrdinal, under: Money, r: Decimal, due: Date, cured: Date) strict {
+    label en official "PARTIAL (JUDGMENT CALL): underpayment x rate x days/365, actual days, simple interest, HALF_UP to the cent";
+    when installment_underpayment_430j3Bi(plan, y, which, under)
+        and underpayment_interest_rate_430j3A(plan, y, r)
+        and required_installment_due_date_430(plan, y, which, due)
+        and underpayment_contributed_on_430j3Bii(plan, y, which, cured)
+        and cured >= due;
+    then underpayment_interest_430j3(plan, y, which, round(under * r * div_round(1.0 * days_between(due, cured), 365.0, 10, "HALF_UP"), 2, "HALF_UP"));
+}
+
+pub relation c7_increase_amount_430j3F(plan: DefinedBenefitPlan, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the increase in the minimum required contribution by reason of subsection (c)(7), case-asserted";
+}
+
+pub relation minimum_required_contribution_for_installments_430j3F(plan: DefinedBenefitPlan, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 430(j)(3)(F): subparagraph (D) is applied without regard to any increase under subsection (c)(7)";
+}
+
+@source(IRC_S430_J, relation = formalizes, coverage = exact, quote = "Subparagraph (D) shall be applied without regard to any increase under subsection (c)(7).")
+rule MinimumRequiredContributionForInstallments430j3F(plan: DefinedBenefitPlan, y: TaxableYear, mrc: Money, inc: Money) strict {
+    label en official "max(0, mrc - increase)";
+    when minimum_required_contribution_430(plan, y, mrc)
+        and c7_increase_amount_430j3F(plan, y, inc);
+    then minimum_required_contribution_for_installments_430j3F(plan, y, max(0 USD, mrc - inc));
+}
+
+pub relation disbursements_12_months_430j4e(plan: DefinedBenefitPlan, y: TaxableYear, quarter: Integer, amount: Money) kind empirical {
+    label en unofficial "all disbursements from the trust (benefits, annuity purchases, single sums, administrative expenses) for the 12 months ending on the last day of the quarter, case-asserted";
+}
+
+pub relation annuity_and_single_sum_disbursements_12_months_430j4eiv(plan: DefinedBenefitPlan, y: TaxableYear, quarter: Integer, amount: Money) kind empirical {
+    label en unofficial "the purchases of annuities, payments of single sums and other disbursements the Secretary provides for, in the same 12 months, case-asserted";
+}
+
+pub relation adjusted_disbursements_12_months_430j4eiv(plan: DefinedBenefitPlan, y: TaxableYear, quarter: Integer, amount: Money) kind institutional {
+    label en official "section 430(j)(4)(E)(iv): disbursements reduced by the funding target attainment percentage times the annuity/single sum disbursements";
+}
+
+@source(IRC_S430_J, relation = formalizes, coverage = exact, quote = "The term \"adjusted disbursements\" means disbursements from the plan reduced by the product of")
+rule AdjustedDisbursements12Months430j4eiv(plan: DefinedBenefitPlan, y: TaxableYear, quarter: Integer, all: Money, special: Money, ftap: Decimal) strict {
+    label en official "all - ftap x special, HALF_UP to the cent";
+    when disbursements_12_months_430j4e(plan, y, quarter, all)
+        and annuity_and_single_sum_disbursements_12_months_430j4eiv(plan, y, quarter, special)
+        and funding_target_attainment_percentage_430(plan, y, ftap);
+    then adjusted_disbursements_12_months_430j4eiv(plan, y, quarter, all - round(special * ftap, 2, "HALF_UP"));
+}
+
+pub relation base_amount_430j4eii(plan: DefinedBenefitPlan, y: TaxableYear, quarter: Integer, amount: Money) kind institutional {
+    label en official "section 430(j)(4)(E)(ii)(I): 3 times the adjusted disbursements for the 12 months ending on the last day of the quarter";
+}
+
+@source(IRC_S430_J, relation = formalizes, coverage = partial, quote = "an amount equal to 3 times the sum of the adjusted disbursements from the plan for the 12 months ending on the last day of such quarter")
+rule BaseAmount430j4eii(plan: DefinedBenefitPlan, y: TaxableYear, quarter: Integer, adjusted: Money) strict {
+    label en official "PARTIAL: subclause (I); the nonrecurring-circumstances rule of subclause (II) needs the 36-month figure and an actuary's certificate";
+    when adjusted_disbursements_12_months_430j4eiv(plan, y, quarter, adjusted)
+        and not_known(nonrecurring_circumstances_certified_430j4eiiII(plan, y, quarter));
+    then base_amount_430j4eii(plan, y, quarter, adjusted * 3.0);
+}
+
+pub relation nonrecurring_circumstances_certified_430j4eiiII(plan: DefinedBenefitPlan, y: TaxableYear, quarter: Integer) kind empirical {
+    label en unofficial "an enrolled actuary certifies to the satisfaction of the Secretary that the excess is the result of nonrecurring circumstances, case-asserted";
+}
+
+pub relation adjusted_disbursements_36_months_430j4eiiII(plan: DefinedBenefitPlan, y: TaxableYear, quarter: Integer, amount: Money) kind empirical {
+    label en unofficial "the sum of the adjusted disbursements for the 36 months ending on the last day of the quarter, case-asserted";
+}
+
+pub relation base_amount_without_nonrecurring_430j4eiiII(plan: DefinedBenefitPlan, y: TaxableYear, quarter: Integer, amount: Money) kind empirical {
+    label en unofficial "the base amount determined without regard to the amounts related to the nonrecurring circumstances, case-asserted";
+}
+
+@source(IRC_S430_J, relation = formalizes, coverage = exact, quote = "the base amount with respect to such quarter shall be determined without regard to amounts related to those nonrecurring circumstances")
+rule BaseAmountNonrecurring430j4eiiII(plan: DefinedBenefitPlan, y: TaxableYear, quarter: Integer, adjusted: Money, adjusted36: Money, alt: Money) strict {
+    label en official "exact boundary: the special rule applies only if 3 x the 12-month figure exceeds 2 x the 36-month figure (equal does not exceed) and the actuary certifies";
+    when adjusted_disbursements_12_months_430j4eiv(plan, y, quarter, adjusted)
+        and adjusted_disbursements_36_months_430j4eiiII(plan, y, quarter, adjusted36)
+        and nonrecurring_circumstances_certified_430j4eiiII(plan, y, quarter)
+        and base_amount_without_nonrecurring_430j4eiiII(plan, y, quarter, alt)
+        and adjusted * 3.0 > adjusted36 * 2.0;
+    then base_amount_430j4eii(plan, y, quarter, alt);
+}
+
+pub relation liquid_assets_value_430j4ev(plan: DefinedBenefitPlan, y: TaxableYear, quarter: Integer, amount: Money) kind empirical {
+    label en unofficial "the value as of the last day of the quarter of the plan's liquid assets (cash, marketable securities and others the Secretary specifies), case-asserted";
+}
+
+pub relation liquidity_shortfall_430j4ei(plan: DefinedBenefitPlan, y: TaxableYear, quarter: Integer, amount: Money) kind institutional {
+    label en official "section 430(j)(4)(E)(i): the excess of the base amount over the value of liquid assets at the last day of the quarter";
+}
+
+@source(IRC_S430_J, relation = formalizes, coverage = exact, quote = "an amount equal to the excess (as of the last day of the quarter for which such installment is made) of")
+rule LiquidityShortfall430j4ei(plan: DefinedBenefitPlan, y: TaxableYear, quarter: Integer, base: Money, liquid: Money) strict {
+    label en official "max(0, base - liquid assets); zero when there is no excess";
+    when base_amount_430j4eii(plan, y, quarter, base)
+        and liquid_assets_value_430j4ev(plan, y, quarter, liquid);
+    then liquidity_shortfall_430j4ei(plan, y, quarter, max(0 USD, base - liquid));
+}
+
+pub relation liquid_assets_paid_in_installment_430j4a(plan: DefinedBenefitPlan, y: TaxableYear, quarter: Integer, amount: Money) kind empirical {
+    label en unofficial "the value of the liquid assets paid in the installment, case-asserted";
+}
+
+pub relation installment_treated_as_not_paid_liquidity_430j4a(plan: DefinedBenefitPlan, y: TaxableYear, quarter: Integer) kind institutional {
+    label en official "section 430(j)(4)(A): the installment is treated as not paid to the extent the liquid assets paid are less than the liquidity shortfall";
+}
+
+@source(IRC_S430_J, relation = formalizes, coverage = exact, quote = "to the extent that the value of the liquid assets paid in such installment is less than the liquidity shortfall")
+rule InstallmentTreatedAsNotPaidLiquidity430j4a(plan: DefinedBenefitPlan, y: TaxableYear, quarter: Integer, shortfall: Money, paid: Money) strict {
+    label en official "exact boundary: liquid assets paid equal to the shortfall are enough";
+    when liquidity_shortfall_430j4ei(plan, y, quarter, shortfall)
+        and liquid_assets_paid_in_installment_430j4a(plan, y, quarter, paid)
+        and paid < shortfall;
+    then installment_treated_as_not_paid_liquidity_430j4a(plan, y, quarter);
+}
+
+pub relation liquidity_paragraph_applies_430j4b(plan: DefinedBenefitPlan, y: TaxableYear, quarter: Integer) kind institutional {
+    label en official "section 430(j)(4)(B): the paragraph applies to a plan (other than a small plan with a designated valuation date) that must pay installments and has a liquidity shortfall for a quarter";
+}
+
+@source(IRC_S430_J, relation = formalizes, coverage = exact, quote = "is required to pay installments under paragraph (3) for a plan year")
+rule LiquidityParagraphApplies430j4b(plan: DefinedBenefitPlan, y: TaxableYear, quarter: Integer, shortfall: Money) strict {
+    label en official "installments required (preceding-year shortfall), a positive liquidity shortfall, and not a (g)(2)(B) plan";
+    when preceding_year_funding_shortfall_positive_430j3A(plan, y)
+        and liquidity_shortfall_430j4ei(plan, y, quarter, shortfall)
+        and shortfall > 0 USD
+        and not_known(plan_designated_valuation_date_430g2B(plan, y));
+    then liquidity_paragraph_applies_430j4b(plan, y, quarter);
+}
+
+pub relation funding_target_and_expected_increase_430j4d(plan: DefinedBenefitPlan, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the funding target plus the expected increase due to benefits accruing or earned during the plan year, case-asserted";
+}
+
+pub relation assets_and_prior_installments_430j4d(plan: DefinedBenefitPlan, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "plan assets plus the prior installments for the plan year, case-asserted";
+}
+
+pub relation maximum_liquidity_increase_430j4d(plan: DefinedBenefitPlan, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 430(j)(4)(D): the increase of a required installment cannot exceed the amount that brings the funding target attainment percentage to 100 percent";
+}
+
+@source(IRC_S430_J, relation = formalizes, coverage = exact, quote = "in no event shall such increase exceed the amount which, when added to prior installments for the plan year, is necessary to increase the funding target attainment percentage of the plan for the plan year")
+rule MaximumLiquidityIncrease430j4d(plan: DefinedBenefitPlan, y: TaxableYear, target: Money, have: Money) strict {
+    label en official "max(0, target - assets - prior installments)";
+    when funding_target_and_expected_increase_430j4d(plan, y, target)
+        and assets_and_prior_installments_430j4d(plan, y, have);
+    then maximum_liquidity_increase_430j4d(plan, y, max(0 USD, target - have));
+}
+
+// =====================================================================
+// (k)(4)-(6) Lien
+// =====================================================================
+
+pub relation lien_due_date_430k4B(plan: DefinedBenefitPlan, sponsor: Person, y: TaxableYear, due_on: Date) kind empirical {
+    label en unofficial "the due date of the required contribution payment on which the lien arose, case-asserted";
+}
+
+pub relation last_day_of_first_year_plan_ceases_1B_430k4B(plan: DefinedBenefitPlan, sponsor: Person, y: TaxableYear, ends_on: Date) kind empirical {
+    label en unofficial "the last day of the first plan year in which the plan ceases to be described in paragraph (1)(B) (unpaid balance no longer over $1,000,000), case-asserted";
+}
+
+pub relation lien_in_force_on_430k4B(plan: DefinedBenefitPlan, sponsor: Person, y: TaxableYear, on: Date) kind institutional {
+    label en official "section 430(k)(4)(B): the lien arises on the due date and continues until the last day of the first plan year in which the plan ceases to be described in (1)(B), whether or not the plan remains described in paragraph (2)";
+}
+
+@source(IRC_S430_K, relation = formalizes, coverage = exact, quote = "The lien imposed by paragraph (1) shall arise on the due date for the required contribution payment and shall continue until the last day of the first plan year in which the plan ceases to be described in paragraph (1)(B).")
+rule LienInForceOn430k4B(plan: DefinedBenefitPlan, sponsor: Person, y: TaxableYear, on: Date, due: Date, ends: Date) strict {
+    label en official "exact boundaries: in force from the due date and through the last day inclusive";
+    when lien_due_date_430k4B(plan, sponsor, y, due)
+        and last_day_of_first_year_plan_ceases_1B_430k4B(plan, sponsor, y, ends)
+        and lien_query_date_430k4B(plan, sponsor, y, on)
+        and on >= due and on <= ends;
+    then lien_in_force_on_430k4B(plan, sponsor, y, on);
+}
+
+pub relation lien_query_date_430k4B(plan: DefinedBenefitPlan, sponsor: Person, y: TaxableYear, on: Date) kind empirical {
+    label en unofficial "the date for which the lien period is asked about, case-asserted";
+}
+
+pub relation lien_amount_treated_as_taxes_due_430k4C(plan: DefinedBenefitPlan, sponsor: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 430(k)(4)(C): the amount with respect to which the lien is imposed is treated as taxes due and owing the United States";
+}
+
+@source(IRC_S430_K, relation = formalizes, coverage = partial, quote = "shall be treated as taxes due and owing the United States")
+rule LienAmountTreatedAsTaxesDue430k4C(plan: DefinedBenefitPlan, sponsor: Person, y: TaxableYear, amount: Money) strict {
+    label en official "PARTIAL: the rules similar to ERISA section 4068(c)-(e) are external; the amount is the module 18 lien amount";
+    when section430k_lien_amount(plan, sponsor, y, amount);
+    then lien_amount_treated_as_taxes_due_430k4C(plan, sponsor, y, amount);
+}
+
+pub relation enforcer_of_lien_430k5(enforcer: Person, plan: DefinedBenefitPlan) kind empirical {
+    label en unofficial "the person seeking to perfect or enforce the lien, case-asserted";
+}
+
+pub relation enforcer_is_pbgc_430k5(enforcer: Person) kind empirical {
+    label en unofficial "the person is the Pension Benefit Guaranty Corporation, case-asserted";
+}
+
+pub relation enforcer_acts_at_pbgc_direction_430k5(enforcer: Person, plan: DefinedBenefitPlan) kind empirical {
+    label en unofficial "the enforcer is the contributing sponsor (or a controlled group member) acting at the direction of the PBGC, case-asserted";
+}
+
+pub relation lien_enforcement_permitted_430k5(enforcer: Person, plan: DefinedBenefitPlan) kind institutional {
+    label en official "section 430(k)(5): a lien may be perfected and enforced only by the PBGC, or by the contributing sponsor (or a controlled group member) at the PBGC's direction";
+}
+
+@source(IRC_S430_K, relation = formalizes, coverage = exact, quote = "may be perfected and enforced only by the Pension Benefit Guaranty Corporation")
+rule LienEnforcementPermittedByPbgc430k5(enforcer: Person, plan: DefinedBenefitPlan) strict {
+    label en official "the PBGC";
+    when enforcer_of_lien_430k5(enforcer, plan)
+        and enforcer_is_pbgc_430k5(enforcer);
+    then lien_enforcement_permitted_430k5(enforcer, plan);
+}
+
+@source(IRC_S430_K, relation = formalizes, coverage = exact, quote = "or at the direction of the Pension Benefit Guaranty Corporation, by the contributing sponsor")
+rule LienEnforcementPermittedAtPbgcDirection430k5(enforcer: Person, plan: DefinedBenefitPlan) strict {
+    label en official "the sponsor or a controlled group member at the PBGC's direction";
+    when enforcer_of_lien_430k5(enforcer, plan)
+        and enforcer_acts_at_pbgc_direction_430k5(enforcer, plan);
+    then lien_enforcement_permitted_430k5(enforcer, plan);
+}
+
+pub relation required_installment_is_contribution_payment_430k6A(plan: DefinedBenefitPlan, y: TaxableYear, which: QuarterlyInstallmentOrdinal) kind empirical {
+    label en unofficial "the payment is a required installment under paragraph (3) or (4) of subsection (j), case-asserted";
+}
+
+pub relation payment_is_contribution_payment_430k6A(plan: DefinedBenefitPlan, y: TaxableYear, which: QuarterlyInstallmentOrdinal) kind institutional {
+    label en official "section 430(k)(6)(A): a contribution payment includes any required installment under subsection (j)(3) and (4)";
+}
+
+@source(IRC_S430_K, relation = formalizes, coverage = exact, quote = "including any required installment under paragraphs (3) and (4) of subsection (j)")
+rule PaymentIsContributionPayment430k6A(plan: DefinedBenefitPlan, y: TaxableYear, which: QuarterlyInstallmentOrdinal) strict {
+    label en official "required installments";
+    when required_installment_is_contribution_payment_430k6A(plan, y, which);
+    then payment_is_contribution_payment_430k6A(plan, y, which);
+}
+
+pub relation group_treated_as_single_employer_414_430k6C(a: Person, b: Person) kind empirical {
+    label en unofficial "the persons are treated as a single employer under section 414(b), (c), (m) or (o), case-asserted";
+}
+
+pub relation controlled_group_member_for_lien_430k6C(a: Person, b: Person) kind institutional {
+    label en official "section 430(k)(6)(C): controlled group means a group treated as a single employer under section 414(b), (c), (m) and (o)";
+}
+
+@source(IRC_S430_K, relation = formalizes, coverage = exact, quote = "any group treated as a single employer under subsections (b), (c), (m), and (o) of section 414")
+rule ControlledGroupMemberForLien430k6C(a: Person, b: Person) strict {
+    label en official "section 414 group";
+    when group_treated_as_single_employer_414_430k6C(a, b);
+    then controlled_group_member_for_lien_430k6C(a, b);
+}

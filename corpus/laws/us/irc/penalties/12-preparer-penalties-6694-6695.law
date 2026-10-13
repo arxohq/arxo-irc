@@ -1,0 +1,388 @@
+// 26 U.S.C. §§6694-6695 — Tax return preparer penalties. STAGE 2b, third of
+// the seven named `pub` targets: `pub preparer_penalty_6694`.
+//
+// SCOPE AND JUDGMENT CALLS (see report):
+//  - The unit of liability is a NEW LOCAL entity `PreparerEngagement`
+//    ("a return or claim for refund a tax return preparer prepared", the
+//    §6694(a)(1)(A)/(b)(1) subject): neither `us.irc.core::Return` nor
+//    `Claim` carries a "preparer" or "income derived by the preparer"
+//    concept, and the statute's liability runs to EACH position-bearing
+//    document a preparer worked on, which may be either a Return or a
+//    Claim — reifying a single local entity for "the document this
+//    preparer-penalty section is about" avoids duplicating every rule for
+//    the Return/Claim branches.
+//  - §6694(a)(2)'s three-tier "unreasonable position" test is modelled with
+//    THREE separate DECISION-0194 evaluative channels (`substantial_
+//    authority_for_position`, `reasonable_basis_for_disclosed_position`,
+//    `more_likely_than_not_sustained`), keyed by a case-asserted
+//    `position_category_of` classification (general / disclosed / tax
+//    shelter-or-reportable) rather than reusing `07-accuracy-related-
+//    penalty-6662.law`'s `substantial_authority_or_disclosed_with_
+//    reasonable_basis`: that relation is typed to (Person, TaxableYear,
+//    TaxKind) — a TAXPAYER's year-and-kind understatement — while this
+//    section's subject is a PREPARER's position on one document, a
+//    different key shape entirely, so a new channel avoids forcing an
+//    artificial (Person, TaxableYear, TaxKind) tuple onto a preparer
+//    engagement that may not even correspond to one taxable year.
+//  - §6694(a)(3)'s "reasonable cause ... and ... good faith" IS the same
+//    textual standard as §6664(c)(1) (`06-definitions-and-fraud-6663-
+//    6664.law`'s `reasonable_cause_and_good_faith`), applied here to the
+//    PREPARER instead of the taxpayer — REUSED directly (the relation's
+//    first argument is generically typed `Person`).
+//  - §6694(b)(2)'s "willful attempt ... or ... reckless or intentional
+//    disregard" is modelled as ONE DECISION-0194 channel
+//    (`willful_or_reckless_conduct`): the statute presents both prongs as
+//    alternative descriptions of the SAME modality ("conduct described in
+//    this paragraph"), so one evaluative determination covers both,
+//    consistent with how `06-definitions-and-fraud-6663-6664.law` already
+//    treats fraud as a single Secretary/court determination rather than
+//    multiple channels per sub-species of fraudulent conduct.
+//  - §6694(b)(3)'s reduction is modelled exactly as written: it reduces the
+//    (b) penalty by the amount of the (a) penalty ACTUALLY PAID (a case
+//    fact, `amount_paid_under_6694a`), not the amount merely assessed.
+//  - §6694(c) (15%-payment collection-stay litigation sequence) is NOT
+//    modelled — same class of collection-litigation machinery as §6672(c)/
+//    §6673(b) already left unmodelled this pass — TECH_GAP, TECH-GAPS G496.
+//  - §6694(d) (abatement where no understatement) is wired as an ADDITIONAL
+//    `unless` defeater directly on both the (a) and (b) penalty rules
+//    (`final_determination_no_understatement`), not a separate immunity +
+//    priority pair (LDC-E4105 forbids `priority` over a plain calculation
+//    rule — same fix already applied to §6672(a)'s volunteer-board-member
+//    proviso in `10-trust-fund-recovery-6672.law`).
+//  - §6694(e) ("understatement of liability" definition) and (f) (cross-
+//    reference to the section 7701(a)(36) preparer definition) are
+//    NON_NORMATIVE/definitional for this module's purposes: "tax return
+//    preparer" status itself is a case-asserted fact this package does not
+//    derive (owned by `us.irc.definitions`, EXTERNAL_DEPENDENCY).
+//  - §6695(a)-(e) share IDENTICAL structure ($X per failure, a $Y annual
+//    cap PER SUBSECTION, the section 6651-style "reasonable cause and not
+//    due to willful neglect" defeater REUSED from `01-shared.law`) — modelled
+//    as ONE entity (`Section6695Failure`) parametrized by a
+//    `Section6695FailureKind` enum, with the annual cap aggregated
+//    SEPARATELY per kind (each subsection's $25,000/$32,500 cap is its own
+//    bucket, matching the statute's "maximum penalty imposed under THIS
+//    SUBSECTION" language for each of (a)-(e)).
+//  - §6695(f) (check negotiation, no reasonable-cause exception in the
+//    text) and §6695(g) (EITC/HOH/CTC/AOTC due diligence, likewise no
+//    reasonable-cause exception in the text) are separate flat penalties,
+//    each with its OWN annual total (no $25,000-family cap on either, per
+//    the text: (f) says "No limit" per the pinned Rev. Proc. table and (g)
+//    has no cap language at all).
+//  - §6695(h) inflation adjustment: PARTIALLY pinned. `us.irc.
+//    inflation_adjustments` has Rev. Proc. 2024-40 section 2.55 (2026
+//    figures: $65/$32,500 for (a)-(e), $650 for (f) and (g)) — used here.
+//    No Revenue Procedure for calendar years 2015-2025 is pinned in that
+//    package as of this pass, so `PreparerFailureRate` and its siblings
+//    have NO value in that window (MISSING_PARAMETER_VALUE, not the stale
+//    pre-2015 $50/$500 figures) — SOURCE_GAP, same pattern
+//    `estate-gift/annual-exclusion-amount.lawparam.json` already documents
+//    for its own 1999-2024 gap.
+//  - §6696 (rules applicable to §§6694/6695/6695A: burden of proof,
+//    multiple preparers, single-firm-one-preparer rule) and §6695A
+//    (appraiser penalties) are NOT modelled this pass — TECH_GAP,
+//    TECH-GAPS G496.
+
+language "law.core" version "0.2";
+package us.irc.penalties version "0.1.1";
+namespace "urn:us:irc:penalties:clir";
+
+use self::{
+    FailureContext,
+    IRC_S6694_A,
+    IRC_S6694_B,
+    IRC_S6695_A,
+    IRC_S6695_F,
+    IRC_S6695_G,
+    Person,
+    TaxableYear,
+    preparer_engagement_barred_by_6701f2,
+    reasonable_cause_and_good_faith,
+    reasonable_cause_and_no_willful_neglect,
+};
+
+// =============================================================================
+// §6694 — Understatement of taxpayer's liability by tax return preparer
+// =============================================================================
+
+pub entity PreparerEngagement {
+    label en unofficial "a return or claim for refund a tax return preparer prepared, the unit of section 6694/6695 liability";
+}
+relation preparer_engagement_of(e: PreparerEngagement, preparer: Person) kind empirical {
+    label en unofficial "the tax return preparer with respect to this engagement";
+}
+relation income_derived_by_preparer(e: PreparerEngagement, amount: Money) kind empirical {
+    label en official "the income derived (or to be derived) by the tax return preparer with respect to the return or claim";
+}
+
+pub enum PreparerPositionCategory {
+    General;                      // (a)(2)(A)
+    DisclosedNotShelterOrReportable; // (a)(2)(B)
+    TaxShelterOrReportableTransaction; // (a)(2)(C)
+}
+relation preparer_position_category(e: PreparerEngagement, cat: PreparerPositionCategory) kind empirical {
+    label en unofficial "which section 6694(a)(2) sub-test governs the position taken on this engagement";
+}
+pub external judgment relation substantial_authority_for_position(e: PreparerEngagement) {
+    authority Secretary;
+    label en official "there is or was substantial authority for the position";
+}
+pub external judgment relation reasonable_basis_for_disclosed_position(e: PreparerEngagement) {
+    authority Secretary;
+    label en official "there is a reasonable basis for the position";
+}
+pub external judgment relation more_likely_than_not_sustained(e: PreparerEngagement) {
+    authority Secretary;
+    label en official "it is reasonable to believe that the position would more likely than not be sustained on its merits";
+}
+relation preparer_knew_or_should_have_known(e: PreparerEngagement) kind empirical {
+    label en official "knew (or reasonably should have known) of the position";
+}
+
+pub relation unreasonable_position(e: PreparerEngagement) kind institutional {
+    label en unofficial "the position taken is described in section 6694(a)(2) — an 'unreasonable position'";
+}
+@source(IRC_S6694_A, relation = formalizes, coverage = exact, quote = "a position is described in this paragraph unless there is or was substantial authority for the position")
+rule UnreasonablePositionGeneral strict {
+    for e: PreparerEngagement;
+    when preparer_position_category(e, General)
+        and not_known(substantial_authority_for_position(e));
+    then unreasonable_position(e);
+}
+@source(IRC_S6694_A, relation = formalizes, coverage = exact, quote = "the position is described in this paragraph unless there is a reasonable basis for the position")
+rule UnreasonablePositionDisclosed strict {
+    for e: PreparerEngagement;
+    when preparer_position_category(e, DisclosedNotShelterOrReportable)
+        and not_known(reasonable_basis_for_disclosed_position(e));
+    then unreasonable_position(e);
+}
+@source(IRC_S6694_A, relation = formalizes, coverage = exact, quote = "the position is described in this paragraph unless it is reasonable to believe that the position would more likely than not be sustained on its merits")
+rule UnreasonablePositionShelterOrReportable strict {
+    for e: PreparerEngagement;
+    when preparer_position_category(e, TaxShelterOrReportableTransaction)
+        and not_known(more_likely_than_not_sustained(e));
+    then unreasonable_position(e);
+}
+
+relation final_determination_no_understatement(e: PreparerEngagement) kind empirical {
+    label en official "a final administrative determination or a final judicial decision that there was no understatement of liability in the case of any return or claim for refund";
+}
+
+pub relation preparer_penalty_6694a(e: PreparerEngagement, amount: Money) kind institutional {
+    label en official "such tax return preparer shall pay a penalty with respect to each such return or claim in an amount equal to the greater of $1,000 or 50 percent of the income derived (or to be derived) by the tax return preparer with respect to the return or claim";
+}
+@source(IRC_S6694_A, relation = formalizes, coverage = exact, quote = "such tax return preparer shall pay a penalty with respect to each such return or claim in an amount equal to the greater of $1,000 or 50 percent of the income derived (or to be derived) by the tax return preparer with respect to the return or claim")
+rule Section6694aPenalty defeasible {
+    for e: PreparerEngagement;
+    for preparer: Person;
+    for income: Money;
+    for fc: FailureContext;
+    when preparer_engagement_of(e, preparer)
+        and unreasonable_position(e)
+        and preparer_knew_or_should_have_known(e)
+        and income_derived_by_preparer(e, income);
+    then preparer_penalty_6694a(e, max(round(PreparerUnreasonablePositionMinimum, 2, "HALF_UP"), round(income * PreparerUnreasonablePositionRate, 2, "HALF_UP")));
+    unless (reasonable_cause_and_good_faith(preparer, fc) or final_determination_no_understatement(e))
+        and preparer_engagement_of(e, preparer)
+        and unreasonable_position(e)
+        and preparer_knew_or_should_have_known(e)
+        and income_derived_by_preparer(e, income);
+    unless preparer_engagement_barred_by_6701f2(e)
+        and preparer_engagement_of(e, preparer)
+        and unreasonable_position(e)
+        and preparer_knew_or_should_have_known(e)
+        and income_derived_by_preparer(e, income);
+}
+
+// --- (b): willful or reckless conduct ---------------------------------------
+
+pub external judgment relation willful_or_reckless_conduct(e: PreparerEngagement) {
+    authority Secretary;
+    label en official "a willful attempt in any manner to understate the liability for tax on the return or claim, or a reckless or intentional disregard of rules or regulations";
+}
+relation amount_paid_under_6694a(e: PreparerEngagement, amount: Money) kind empirical {
+    label en unofficial "the amount, if any, of the section 6694(a) penalty already PAID by the preparer with respect to this engagement (the (b)(3) reduction reads PAID, not merely assessed)";
+}
+
+pub relation preparer_penalty_6694b_before_reduction(e: PreparerEngagement, amount: Money) kind institutional {
+    label en official "shall pay a penalty with respect to each such return or claim in an amount equal to the greater of $5,000, or 75 percent of the income derived (or to be derived) by the tax return preparer with respect to the return or claim";
+}
+@source(IRC_S6694_B, relation = formalizes, coverage = exact, quote = "shall pay a penalty with respect to each such return or claim in an amount equal to the greater of")
+rule Section6694bPenaltyBeforeReduction defeasible {
+    for e: PreparerEngagement;
+    for preparer: Person;
+    for income: Money;
+    when preparer_engagement_of(e, preparer)
+        and willful_or_reckless_conduct(e)
+        and income_derived_by_preparer(e, income);
+    then preparer_penalty_6694b_before_reduction(e, max(round(PreparerWillfulRecklessMinimum, 2, "HALF_UP"), round(income * PreparerWillfulRecklessRate, 2, "HALF_UP")));
+    unless final_determination_no_understatement(e)
+        and preparer_engagement_of(e, preparer)
+        and willful_or_reckless_conduct(e)
+        and income_derived_by_preparer(e, income);
+    unless preparer_engagement_barred_by_6701f2(e)
+        and preparer_engagement_of(e, preparer)
+        and willful_or_reckless_conduct(e)
+        and income_derived_by_preparer(e, income);
+}
+pub relation preparer_penalty_6694b(e: PreparerEngagement, amount: Money) kind institutional {
+    label en official "The amount of any penalty payable by any person by reason of this subsection for any return or claim for refund shall be reduced by the amount of the penalty paid by such person by reason of subsection (a)";
+}
+@source(IRC_S6694_B, relation = formalizes, coverage = exact, quote = "The amount of any penalty payable by any person by reason of this subsection for any return or claim for refund shall be reduced by the amount of the penalty paid by such person by reason of subsection (a)")
+rule Section6694bReduction defeasible {
+    for e: PreparerEngagement;
+    for before: Money;
+    for paid: Money;
+    when preparer_penalty_6694b_before_reduction(e, before)
+        and amount_paid_under_6694a(e, paid);
+    then preparer_penalty_6694b(e, max(0.00 USD, before - paid));
+}
+@source(IRC_S6694_B, relation = formalizes, coverage = partial, quote = "shall pay a penalty with respect to each such return or claim")
+rule Section6694bNoReductionWhenNothingPaid defeasible {
+    for e: PreparerEngagement;
+    for before: Money;
+    when preparer_penalty_6694b_before_reduction(e, before)
+        and not_known(amount_paid_under_6694a(e, before));
+    then preparer_penalty_6694b(e, before);
+}
+
+pub relation preparer_penalty_6694(e: PreparerEngagement, amount: Money) kind institutional {
+    label en unofficial "the combined section 6694(a)+(b) penalty for this engagement (the named `pub` export)";
+}
+@source(IRC_S6694_A, relation = formalizes, coverage = partial, quote = "such tax return preparer shall pay a penalty")
+rule Section6694CombinedBothApply defeasible {
+    for e: PreparerEngagement;
+    for aAmt: Money;
+    for bAmt: Money;
+    when preparer_penalty_6694a(e, aAmt) and preparer_penalty_6694b(e, bAmt);
+    then preparer_penalty_6694(e, aAmt + bAmt);
+}
+@source(IRC_S6694_A, relation = formalizes, coverage = partial, quote = "such tax return preparer shall pay a penalty")
+rule Section6694CombinedOnlyA defeasible {
+    for e: PreparerEngagement;
+    for aAmt: Money;
+    when preparer_penalty_6694a(e, aAmt) and not_known(preparer_penalty_6694b(e, aAmt));
+    then preparer_penalty_6694(e, aAmt);
+}
+@source(IRC_S6694_B, relation = formalizes, coverage = partial, quote = "shall pay a penalty with respect to each such return or claim")
+rule Section6694CombinedOnlyB defeasible {
+    for e: PreparerEngagement;
+    for bAmt: Money;
+    when preparer_penalty_6694b(e, bAmt) and not_known(preparer_penalty_6694a(e, bAmt));
+    then preparer_penalty_6694(e, bAmt);
+}
+
+// =============================================================================
+// §6695 — Other assessable penalties with respect to the preparation of tax
+// returns for other persons
+// =============================================================================
+
+pub enum Section6695FailureKind {
+    CopyToTaxpayer;       // (a)
+    SignReturn;            // (b)
+    IdentifyingNumber;     // (c)
+    RetainCopyOrList;      // (d)
+    InformationReturns6060; // (e)
+}
+pub entity Section6695Failure {
+    label en unofficial "one occurrence of a section 6695(a)-(e) failure by a tax return preparer";
+}
+relation section_6695_failure_of(f: Section6695Failure, preparer: Person, y: TaxableYear, kind: Section6695FailureKind) kind empirical {
+    label en unofficial "the preparer, calendar year, and which of the (a)-(e) failure kinds this occurrence is";
+}
+
+pub relation section_6695_penalty_per_failure(f: Section6695Failure, amount: Money) kind institutional {
+    label en official "shall pay a penalty of $50 for such failure [or for each such failure], unless it is shown that such failure is due to reasonable cause and not due to willful neglect";
+}
+@source(IRC_S6695_A, relation = formalizes, coverage = partial, quote = "shall pay a penalty of $50 for such failure")
+rule Section6695PenaltyPerFailure defeasible {
+    for f: Section6695Failure;
+    for preparer: Person;
+    for y: TaxableYear;
+    for kind: Section6695FailureKind;
+    for fc: FailureContext;
+    when section_6695_failure_of(f, preparer, y, kind);
+    then section_6695_penalty_per_failure(f, round(PreparerFailureRate, 2, "HALF_UP"));
+    unless reasonable_cause_and_no_willful_neglect(preparer, fc)
+        and section_6695_failure_of(f, preparer, y, kind);
+}
+pub relation section_6695_annual_total(preparer: Person, y: TaxableYear, kind: Section6695FailureKind, amount: Money) kind institutional {
+    label en official "the maximum penalty imposed under this subsection on any person with respect to documents filed during any calendar year shall not exceed $25,000";
+}
+@source(IRC_S6695_A, relation = formalizes, coverage = exact, quote = "The maximum penalty imposed under this subsection on any person with respect to documents filed during any calendar year shall not exceed $25,000")
+rule Section6695AnnualTotal defeasible {
+    for preparer: Person;
+    for y: TaxableYear;
+    for kind: Section6695FailureKind;
+    for f0: Section6695Failure;
+    when section_6695_failure_of(f0, preparer, y, kind);
+    then section_6695_annual_total(preparer, y, kind,
+        min(round(PreparerFailureAnnualCap, 2, "HALF_UP"),
+            sum all amt: Money for f: Section6695Failure where section_6695_failure_of(f, preparer, y, kind) and section_6695_penalty_per_failure(f, amt)));
+}
+
+// --- (f): negotiation of a taxpayer's check ---------------------------------
+
+pub entity NegotiatedCheck {
+    label en unofficial "a check made in respect of taxes imposed by this title, issued to a taxpayer";
+}
+relation check_negotiated_by_preparer(chk: NegotiatedCheck, preparer: Person) kind empirical {
+    label en official "any person who is a tax return preparer who endorses or otherwise negotiates (directly or through an agent) any check";
+}
+relation check_issued_to_taxpayer_other_than_preparer(chk: NegotiatedCheck) kind empirical {
+    label en official "issued to a taxpayer (other than the tax return preparer)";
+}
+relation check_bank_deposit_exception(chk: NegotiatedCheck) kind empirical {
+    label en official "the deposit by a bank (within the meaning of section 581) of the full amount of the check in the taxpayer's account in such bank for the benefit of the taxpayer";
+}
+pub relation check_negotiation_penalty(chk: NegotiatedCheck, amount: Money) kind institutional {
+    label en official "shall pay a penalty of $500 with respect to each such check";
+}
+@source(IRC_S6695_F, relation = formalizes, coverage = exact, quote = "shall pay a penalty of $500 with respect to each such check")
+rule Section6695fPenalty defeasible {
+    for chk: NegotiatedCheck;
+    for preparer: Person;
+    when check_negotiated_by_preparer(chk, preparer)
+        and check_issued_to_taxpayer_other_than_preparer(chk);
+    then check_negotiation_penalty(chk, round(PreparerCheckNegotiationPenalty, 2, "HALF_UP"));
+    unless check_bank_deposit_exception(chk)
+        and check_negotiated_by_preparer(chk, preparer)
+        and check_issued_to_taxpayer_other_than_preparer(chk);
+}
+
+// --- (g): due diligence failure ---------------------------------------------
+
+pub entity DueDiligenceFailure {
+    label en unofficial "one occurrence of a section 6695(g) due-diligence failure by a tax return preparer";
+}
+relation due_diligence_failure_of(f: DueDiligenceFailure, preparer: Person, y: TaxableYear) kind empirical {
+    label en official "fails to comply with due diligence requirements imposed by the Secretary by regulations with respect to determining eligibility to file as head of household, or eligibility for, or the amount of, the credit allowable by section 24, 25A(a)(1), or 32";
+}
+pub relation due_diligence_penalty_per_failure(f: DueDiligenceFailure, amount: Money) kind institutional {
+    label en official "shall pay a penalty of $500 for each such failure";
+}
+@source(IRC_S6695_G, relation = formalizes, coverage = exact, quote = "shall pay a penalty of $500 for each such failure")
+rule Section6695gPenalty strict {
+    for f: DueDiligenceFailure;
+    for preparer: Person;
+    for y: TaxableYear;
+    when due_diligence_failure_of(f, preparer, y);
+    then due_diligence_penalty_per_failure(f, round(PreparerDueDiligenceFailurePenalty, 2, "HALF_UP"));
+}
+
+// --- combined annual §6695 total ---------------------------------------------
+
+pub relation preparer_penalty_6695(preparer: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "the preparer's total annual section 6695 exposure for the calendar year: the sum of the (a)-(e) per-subsection annual totals, plus every (f) check-negotiation penalty and (g) due-diligence penalty for the year (neither of which has a $25,000-family cap)";
+}
+@source(IRC_S6695_A, relation = formalizes, coverage = partial, quote = "shall pay a penalty of $50 for such failure")
+rule Section6695CombinedAnnualTotal defeasible {
+    for preparer: Person;
+    for y: TaxableYear;
+    for kind: Section6695FailureKind;
+    for f0: Section6695Failure;
+    when section_6695_failure_of(f0, preparer, y, kind);
+    then preparer_penalty_6695(preparer, y,
+        (sum all amt: Money for k: Section6695FailureKind where section_6695_annual_total(preparer, y, k, amt))
+        + (sum all amt: Money for chk: NegotiatedCheck where check_negotiated_by_preparer(chk, preparer) and check_negotiation_penalty(chk, amt))
+        + (sum all amt: Money for f: DueDiligenceFailure where due_diligence_failure_of(f, preparer, y) and due_diligence_penalty_per_failure(f, amt)));
+}

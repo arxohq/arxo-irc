@@ -1,0 +1,136 @@
+// Distribution + liability shift + sale as ordered events (stage 4).
+//
+// SCOPE (nonliquidating only; liquidating + deemed is a follow-up).
+//  - A §752(b) deemed distribution inside a money-only nonliquidating
+//    transaction is combined with actual money by the engine (modules 05/06
+//    left the combination to the case). The plain 05 gain/basis rules are
+//    defeated for such transactions by an explicit `unless` on the deemed
+//    relation; transactions without deemed facts are untouched.
+//  - The partner's share of a liability (Reg. §§1.752-1–1.752-3) stays an
+//    asserted case fact, as module 06 declares (EXTERNAL_DEPENDENCY); the
+//    §752(c) FMV cap is computed (module 06).
+//  - Outside basis travels between EVENTS by an explicit link fact plus a
+//    computed carried value — never by re-reading the same before/after
+//    relation.
+
+use self::{
+    IRC_S731_A,
+    IRC_S733,
+    IRC_S741,
+    IRC_S751_A,
+    Partnership,
+    Person,
+    Transaction,
+    amount_realized_attributable_to_hot_assets,
+    deemed_money_distributed_from_liability_decrease,
+    distributed_property_basis,
+    distributee_outside_basis_after_distribution,
+    distributee_outside_basis_before_distribution,
+    distribution_is_liquidating,
+    marketable_security_distributed,
+    money_and_securities_distributed,
+    money_distributed,
+    section_752d_amount_realized,
+};
+
+pub relation seller_outside_basis_before_sale(t: Transaction, seller: Person, pship: Partnership, amount: Money) kind empirical {
+    label en unofficial "the seller's adjusted basis in the partnership interest immediately before the sale (section 741/751/752(d) input) — in a chained scenario carried from a prior distribution by outside_basis_carried_to_sale, not re-asserted blindly";
+}
+pub relation sale_basis_source(t_sale: Transaction, t_dist: Transaction) kind empirical {
+    label en unofficial "the sale's before-basis is sourced from the computed after-basis of the stated prior distribution transaction — the explicit event link";
+}
+pub relation outside_basis_carried_to_sale(t_sale: Transaction, seller: Person, pship: Partnership, amount: Money) kind institutional {
+    label en official "the outside basis carried from the prior distribution's computed after-basis into the sale";
+}
+rule OutsideBasisCarriedToSale(t_sale: Transaction, t_dist: Transaction, seller: Person, pship: Partnership, amount: Money) defeasible {
+    when sale_basis_source(t_sale, t_dist)
+     and distributee_outside_basis_after_distribution(t_dist, pship, seller, amount);
+    then outside_basis_carried_to_sale(t_sale, seller, pship, amount);
+}
+rule OutsideBasisCarriedToSaleWithRelief(t_sale: Transaction, t_dist: Transaction, seller: Person, pship: Partnership, amount: Money) defeasible {
+    when sale_basis_source(t_sale, t_dist)
+     and outside_basis_after_distribution_with_relief(t_dist, pship, seller, amount);
+    then outside_basis_carried_to_sale(t_sale, seller, pship, amount);
+}
+
+@source(IRC_S741, relation = formalizes, coverage = partial, quote = "In the case of a sale or exchange of an interest in a partnership, gain or loss shall be recognized to the transferor partner.")
+pub relation interest_sale_total_gain_computed(t: Transaction, seller: Person, pship: Partnership, amount: Money) kind institutional {
+    label en official "the recognized gain or loss on the sale: the section 752(d) amount realized (cash consideration plus relieved liabilities, computed) minus the outside basis before sale — proceeds are never the gain";
+}
+rule S741TotalGainComputed(t: Transaction, seller: Person, pship: Partnership, realized: Money, basis: Money) strict {
+    when section_752d_amount_realized(t, seller, pship, realized);
+    when seller_outside_basis_before_sale(t, seller, pship, basis);
+    then interest_sale_total_gain_computed(t, seller, pship, realized - basis);
+}
+
+pub relation partner_basis_in_hot_assets_sold(t: Transaction, seller: Person, pship: Partnership, amount: Money) kind empirical {
+    label en unofficial "the seller's share of the partnership's adjusted basis in the hot-asset portion sold (section 751(a) input) — the proportionate valuation is a case fact, the subtraction is computed";
+}
+@source(IRC_S751_A, relation = formalizes, coverage = partial, quote = "shall be considered as an amount realized from the sale or exchange of property other than a capital asset")
+pub relation section_751a_ordinary_computed(t: Transaction, seller: Person, pship: Partnership, amount: Money) kind institutional {
+    label en official "the section 751(a) ordinary component computed: hot-asset amount realized minus the seller's basis in that hot-asset portion (signed — an ordinary loss when negative)";
+}
+rule S751aOrdinaryComputed(t: Transaction, seller: Person, pship: Partnership, hot_realized: Money, hot_basis: Money) strict {
+    when amount_realized_attributable_to_hot_assets(t, seller, pship, hot_realized);
+    when partner_basis_in_hot_assets_sold(t, seller, pship, hot_basis);
+    then section_751a_ordinary_computed(t, seller, pship, hot_realized - hot_basis);
+}
+
+@source(IRC_S741, relation = formalizes, coverage = partial, quote = "Such gain or loss shall be considered as gain or loss from the sale or exchange of a capital asset, except as otherwise provided in section 751 (relating to unrealized receivables and inventory items).")
+pub relation interest_sale_capital_component(t: Transaction, seller: Person, pship: Partnership, amount: Money) kind institutional {
+    label en official "the remaining capital component of the sale: total computed gain minus the computed ordinary hot-asset component (section 741 as limited by section 751)";
+}
+rule S741CapitalRemainder(t: Transaction, seller: Person, pship: Partnership, total: Money, ordinary: Money) strict {
+    when interest_sale_total_gain_computed(t, seller, pship, total);
+    when section_751a_ordinary_computed(t, seller, pship, ordinary);
+    then interest_sale_capital_component(t, seller, pship, total - ordinary);
+}
+
+// --- §752(b) decrease scoped to one transaction ----------------------------
+// Module 06 attaches any asserted share decrease to every money transaction
+// of the partner (correct for single-event scenarios). A chained scenario
+// scopes each decrease to its own transaction instead.
+
+pub relation partner_liability_share_decrease_in_transaction(t: Transaction, partner: Person, pship: Partnership, amount: Money) kind empirical {
+    label en unofficial "the decrease in the partner's share of partnership liabilities effected by the stated transaction (section 752(b)) — the scoped form for multi-event scenarios";
+}
+rule S752bScopedFeedsMoneyDistributed(t: Transaction, partner: Person, pship: Partnership, amount: Money) strict {
+    when partner_liability_share_decrease_in_transaction(t, partner, pship, amount);
+    when money_distributed(t, pship, partner, _);
+    then deemed_money_distributed_from_liability_decrease(t, pship, partner, amount);
+}
+
+// --- §752(b) deemed money combined with actual money (nonliquidating) -----
+
+@source(IRC_S731_A, relation = formalizes, coverage = partial, quote = "gain shall not be recognized to such partner, except to the extent that any money distributed exceeds the adjusted basis of such partner's interest in the partnership immediately before the distribution")
+pub relation distribution_gain_with_liability_relief(t: Transaction, pship: Partnership, partner: Person, amount: Money) kind institutional {
+    label en official "section 731(a)(1) gain where the transaction includes a section 752(b) deemed distribution: actual money plus deemed money plus treated-as-money securities over outside basis (nonliquidating)";
+}
+rule S731aGainWithDeemed(t: Transaction, pship: Partnership, partner: Person, combined: Money, basis: Money, actual: Money, deemed: Money, sec: Money) defeasible {
+    when money_and_securities_distributed(t, pship, partner, combined)
+     and money_distributed(t, pship, partner, actual)
+     and marketable_security_distributed(t, pship, partner, sec)
+     and deemed_money_distributed_from_liability_decrease(t, pship, partner, deemed)
+     and distributee_outside_basis_before_distribution(t, pship, partner, basis);
+    then distribution_gain_with_liability_relief(t, pship, partner, max(0.00 USD, (combined + deemed) - basis));
+}
+rule S731aGainWithDeemedNoSecurities(t: Transaction, pship: Partnership, partner: Person, actual: Money, deemed: Money, basis: Money) defeasible {
+    when money_distributed(t, pship, partner, actual)
+     and deemed_money_distributed_from_liability_decrease(t, pship, partner, deemed)
+     and distributee_outside_basis_before_distribution(t, pship, partner, basis);
+    unless marketable_security_distributed(t, pship, partner, _) and money_distributed(t, pship, partner, actual) and deemed_money_distributed_from_liability_decrease(t, pship, partner, deemed) and distributee_outside_basis_before_distribution(t, pship, partner, basis);
+    then distribution_gain_with_liability_relief(t, pship, partner, max(0.00 USD, (actual + deemed) - basis));
+}
+
+@source(IRC_S733, relation = formalizes, coverage = partial, quote = "the adjusted basis to such partner of his interest in the partnership shall be reduced (but not below zero) by")
+pub relation outside_basis_after_distribution_with_relief(t: Transaction, pship: Partnership, partner: Person, amount: Money) kind institutional {
+    label en official "section 733 outside basis after a nonliquidating money-only transaction that includes section 752(b) relief: before minus actual money minus deemed relief, floored at zero";
+}
+rule S733AfterWithDeemedMoneyOnly(t: Transaction, pship: Partnership, partner: Person, before: Money, actual: Money, deemed: Money) defeasible {
+    when distributee_outside_basis_before_distribution(t, pship, partner, before);
+    when money_distributed(t, pship, partner, actual);
+    when deemed_money_distributed_from_liability_decrease(t, pship, partner, deemed);
+    unless distribution_is_liquidating(t) and distributee_outside_basis_before_distribution(t, pship, partner, before) and money_distributed(t, pship, partner, actual) and deemed_money_distributed_from_liability_decrease(t, pship, partner, deemed);
+    unless distributed_property_basis(t, pship, partner, _, _) and distributee_outside_basis_before_distribution(t, pship, partner, before) and money_distributed(t, pship, partner, actual) and deemed_money_distributed_from_liability_decrease(t, pship, partner, deemed);
+    then outside_basis_after_distribution_with_relief(t, pship, partner, max(0.00 USD, before - actual - deemed));
+}

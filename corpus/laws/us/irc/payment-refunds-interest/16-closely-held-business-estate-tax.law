@@ -1,0 +1,538 @@
+// 26 U.S.C. §6166 — Extension of time for payment of estate tax where estate
+// consists largely of interest in closely held business. Stage 2: the estate-
+// level model that replaces the section-level stub of
+// 02-installments-and-extensions.law (`closely_held_business_*`, kept for its
+// stage-1 scenarios; new coverage rows point here).
+//
+// STRUCTURE
+//   (a)  qualification (35 percent test), election, maximum deferred tax,
+//        number and dates of installments
+//   (b)  interests qualifying as an interest in a closely held business,
+//        value, adjusted gross estate, elections (7), (8), (10), passive assets
+//   (c)  aggregation of two or more businesses
+//   (d)  election time
+//   (e)-(f) deficiency proration; time for payment of interest
+//   (g)  acceleration on disposition or withdrawal, undistributed income,
+//        failure to pay (6-month grace and the 5 percent monthly penalty)
+//   (h)  election in case of a deficiency; (i) direct skips
+//
+// JUDGMENT CALLS AND GAPS
+//  - The estate is a local entity (`DecedentEstate`); values are case facts
+//    (the value "for purposes of chapter 11" is the estate tax owner's
+//    valuation, an external norm). Ownership percentages and holder counts
+//    are stated AFTER the section (b)(2)(C) look-through (indirect ownership
+//    through corporations, partnerships, estates and trusts is a multi-level
+//    chain: TECH-GAPS G2635); the (b)(2)(B) husband-and-wife merger and the
+//    (b)(2)(D) family attribution ARE computed.
+//  - "Equal installments" are rounded to cents HALF_UP with the rounding
+//    remainder ignored (JUDGMENT CALL: the text names no rounding).
+//  - The closely held business amount is the LARGER of (i) the largest
+//    single qualifying interest and (ii) the sum of the qualifying interests
+//    aggregated under (c) (each at least 20 percent of its business): the
+//    executor is entitled to the better reading (INTERPRETATION row, the
+//    statute does not say how a single large interest and an aggregation of
+//    others combine); the maximum is selected with the candidates + "no
+//    strictly larger candidate" idiom (TECH-GAPS G136).
+//  - The holding-company look-through of (b)(8)(A)(i) (deeming a part of the
+//    holding company's stock to be business-company stock, through chains of
+//    holding companies) is TECH-GAPS G2636; the ELECTION and its three
+//    consequences ((ii) date, (iii) zero 2-percent portion, (B)(ii) five
+//    installments) are executable.
+//  - A month or fraction of a month after the payment date ((g)(3)(B)(iii)(II))
+//    is counted with literal one-month steps up to the 6-month grace.
+
+language "law.core" version "0.2";
+package us.irc.payment_refunds_interest version "0.1.1";
+namespace "urn:us:irc:payment_refunds_interest:clir";
+
+use self::{
+    IRC_S6166_A,
+    IRC_S6166_B,
+    IRC_S6166_C,
+    IRC_S6166_D,
+    Person,
+    Secretary,
+    estate_tax_for_6166,
+    installment_extension_ceased,
+    ownership_percent_after_look_through,
+};
+
+entity DecedentEstate : Person { label en unofficial "the estate of a decedent whose estate tax may be paid in installments under §6166"; }
+entity BusinessInterest6166 { label en unofficial "an interest in a trade or business (proprietorship, partnership interest, or stock) included in determining the gross estate"; }
+entity BusinessAsset6166 { label en unofficial "an asset held by the business, classified as used in the trade or business or passive"; }
+enum BusinessInterestKind {
+    Proprietorship;       // (b)(1)(A)
+    PartnershipInterest;  // (b)(1)(B)
+    CorporateStock;       // (b)(1)(C)
+    label en official "§6166(b)(1): a proprietorship interest; a partner's interest in a partnership carrying on a trade or business; stock in a corporation carrying on a trade or business";
+}
+
+// --- estate facts -----------------------------------------------------------
+relation decedent_citizen_or_resident_at_death(e: DecedentEstate) kind empirical { label en official "a decedent who was (at the date of his death) a citizen or resident of the United States"; }
+relation executor_of_estate(e: DecedentEstate, x: Person) kind empirical { label en official "the executor of the estate"; }
+relation gross_estate_value(e: DecedentEstate, v: Money) kind empirical { label en official "the value of the gross estate (value determined for purposes of chapter 11, §6166(b)(4))"; }
+relation deductions_2053_2054_total(e: DecedentEstate, amount: Money) kind empirical { label en official "the sum of the amounts allowable as a deduction under section 2053 or 2054, determined on the basis of the facts and circumstances in existence on the date (including extensions) for filing the return or, if earlier, the date it is filed"; }
+relation estate_tax_2001_net_of_credits(e: DecedentEstate, tax: Money) kind empirical { label en official "the tax imposed by section 2001, reduced by the credits against such tax"; }
+relation estate_tax_return_due_date_with_extensions(e: DecedentEstate, d: Date) kind empirical { label en official "the time prescribed by section 6075(a) for filing the return of tax imposed by section 2001 (including extensions)"; }
+relation estate_tax_payment_date_6151a(e: DecedentEstate, d: Date) kind empirical { label en official "the date prescribed by section 6151(a) for payment of the tax"; }
+
+// --- (b)(6): adjusted gross estate -----------------------------------------
+pub relation adjusted_gross_estate_6166(e: DecedentEstate, amount: Money) kind institutional { label en official "the value of the gross estate reduced by the sum of the amounts allowable as a deduction under section 2053 or 2054"; }
+@source(IRC_S6166_B, relation = formalizes, coverage = exact, quote = "the term, \"adjusted gross estate\" means the value of the gross estate reduced by the sum of the amounts allowable as a deduction under section 2053 or 2054.")
+rule S6166AdjustedGrossEstate strict {
+    for e: DecedentEstate;
+    for gross: Money;
+    for deductions: Money;
+    when gross_estate_value(e, gross) and deductions_2053_2054_total(e, deductions);
+    then adjusted_gross_estate_6166(e, max(0 USD, gross - deductions));
+}
+
+// --- (b)(1), (b)(2): what is an interest in a closely held business --------
+relation interest_included_in_gross_estate_of(i: BusinessInterest6166, e: DecedentEstate) kind empirical { label en official "the interest is included in determining the gross estate of the decedent"; }
+relation business_interest_kind(i: BusinessInterest6166, k: BusinessInterestKind) kind empirical;
+relation business_interest_value(i: BusinessInterest6166, v: Money) kind empirical { label en official "the value of the interest, determined for purposes of chapter 11"; }
+relation business_carries_on_trade_or_business(i: BusinessInterest6166) kind empirical { label en official "the proprietorship, partnership or corporation carries on a trade or business"; }
+relation capital_interest_percent_included_in_gross_estate(i: BusinessInterest6166, percent: Decimal) kind empirical { label en official "the percentage of the total capital interest in the partnership included in determining the gross estate"; }
+relation voting_stock_percent_included_in_gross_estate(i: BusinessInterest6166, percent: Decimal) kind empirical { label en official "the percentage in value of the voting stock of the corporation included in determining the gross estate"; }
+relation raw_holder_count(i: BusinessInterest6166, n: Integer) kind empirical { label en official "the number of partners or shareholders immediately before the decedent's death, before the husband and wife rule"; }
+relation husband_wife_holder_pairs(i: BusinessInterest6166, pairs: Integer) kind empirical { label en official "the number of pairs of spouses holding community property, joint tenancy, tenancy by the entirety, or tenancy in common interests, each pair being one holder"; }
+pub relation holder_count_after_marital_merge(i: BusinessInterest6166, n: Integer) kind institutional { label en official "stock or a partnership interest held by a husband and wife as community property or in joint or common tenancy is treated as owned by one shareholder or one partner"; }
+@source(IRC_S6166_B, relation = formalizes, coverage = exact, quote = "shall be treated as owned by one shareholder or one partner, as the case may be.")
+rule S6166HolderCountMergesSpouses strict {
+    for i: BusinessInterest6166;
+    for raw: Integer;
+    for pairs: Integer;
+    when raw_holder_count(i, raw) and husband_wife_holder_pairs(i, pairs);
+    then holder_count_after_marital_merge(i, max(0, raw - pairs));
+}
+relation spouse_pairs_stated(i: BusinessInterest6166) kind institutional { label en unofficial "helper: a husband-wife pair count is stated for the interest"; }
+rule S6166SpousePairsStated strict {
+    for i: BusinessInterest6166;
+    for pairs: Integer;
+    when husband_wife_holder_pairs(i, pairs);
+    then spouse_pairs_stated(i);
+}
+rule S6166HolderCountWithoutSpousePairs strict {
+    for i: BusinessInterest6166;
+    for raw: Integer;
+    when raw_holder_count(i, raw) and not_known(spouse_pairs_stated(i));
+    then holder_count_after_marital_merge(i, raw);
+}
+relation holding_percent(i: BusinessInterest6166, holder: Person, percent: Decimal) kind empirical { label en official "the percentage of the capital or voting stock held by the holder"; }
+relation holder_is_decedent_or_family_member(holder: Person) kind empirical { label en official "the decedent or a member of his family (within the meaning of section 267(c)(4))"; }
+pub relation percent_owned_by_decedent_and_family(i: BusinessInterest6166, percent: Decimal) kind institutional { label en official "all stock and all partnership interests held by the decedent or by any member of his family shall be treated as owned by the decedent"; }
+@source(IRC_S6166_B, relation = formalizes, coverage = exact, quote = "All stock and all partnership interests held by the decedent or by any member of his family (within the meaning of section 267(c)(4)) shall be treated as owned by the decedent.")
+rule S6166FamilyAttribution strict {
+    for i: BusinessInterest6166;
+    for p0: Person;
+    for x: Decimal;
+    when ownership_percent_after_look_through(i, p0, x) and holder_is_decedent_or_family_member(p0);
+    then percent_owned_by_decedent_and_family(i, sum all pct: Decimal for h: Person where ownership_percent_after_look_through(i, h, pct) and holder_is_decedent_or_family_member(h));
+}
+// The 20 percent test percentage: included in the gross estate, or (with the (b)(7) election, for a
+// partnership capital interest or non-readily-tradable stock) as owned by the decedent after attribution.
+relation executor_elects_b7(e: DecedentEstate) kind empirical { label en official "the executor elects the benefits of paragraph (7) (at such time and in such manner as the Secretary prescribes)"; }
+relation non_readily_tradable_stock(i: BusinessInterest6166) kind empirical { label en official "stock for which, at the time of the decedent's death, there was no market on a stock exchange or in an over-the-counter market"; }
+relation b7_applies_to_interest(i: BusinessInterest6166) kind institutional { label en official "the (b)(7) election covers this interest: a partnership capital interest or non-readily-tradable stock"; }
+rule S6166B7AppliesToPartnership strict {
+    for i: BusinessInterest6166;
+    for e: DecedentEstate;
+    when interest_included_in_gross_estate_of(i, e) and executor_elects_b7(e) and business_interest_kind(i, PartnershipInterest);
+    then b7_applies_to_interest(i);
+}
+rule S6166B7AppliesToNonReadilyTradableStock strict {
+    for i: BusinessInterest6166;
+    for e: DecedentEstate;
+    when interest_included_in_gross_estate_of(i, e) and executor_elects_b7(e) and business_interest_kind(i, CorporateStock) and non_readily_tradable_stock(i);
+    then b7_applies_to_interest(i);
+}
+pub relation twenty_percent_test_percentage(i: BusinessInterest6166, percent: Decimal) kind institutional { label en official "the percentage tested against 20 percent under (b)(1)(B)(i) and (C)(i)"; }
+@source(IRC_S6166_B, relation = formalizes, coverage = partial, quote = "20 percent or more of the total capital interest in such partnership is included in determining the gross estate of the decedent")
+rule S6166TestPercentagePartnershipIncluded strict {
+    for i: BusinessInterest6166;
+    for e: DecedentEstate;
+    for x: Decimal;
+    when interest_included_in_gross_estate_of(i, e) and business_interest_kind(i, PartnershipInterest) and capital_interest_percent_included_in_gross_estate(i, x) and not_known(b7_applies_to_interest(i));
+    then twenty_percent_test_percentage(i, x);
+}
+@source(IRC_S6166_B, relation = formalizes, coverage = partial, quote = "20 percent or more in value of the voting stock of such corporation is included in determining the gross estate of the decedent")
+rule S6166TestPercentageStockIncluded strict {
+    for i: BusinessInterest6166;
+    for e: DecedentEstate;
+    for x: Decimal;
+    when interest_included_in_gross_estate_of(i, e) and business_interest_kind(i, CorporateStock) and voting_stock_percent_included_in_gross_estate(i, x) and not_known(b7_applies_to_interest(i));
+    then twenty_percent_test_percentage(i, x);
+}
+@source(IRC_S6166_B, relation = formalizes, coverage = exact, quote = "any capital interest in a partnership and any non-readily-tradable stock which (after the application of paragraph (2)) is treated as owned by the decedent shall be treated as included in determining the value of the decedent's gross estate")
+rule S6166TestPercentageB7 strict {
+    for i: BusinessInterest6166;
+    for owned: Decimal;
+    when b7_applies_to_interest(i) and percent_owned_by_decedent_and_family(i, owned);
+    then twenty_percent_test_percentage(i, owned);
+}
+pub relation qualifies_as_interest_in_closely_held_business(i: BusinessInterest6166) kind institutional {
+    label en official "an interest in a closely held business within §6166(b)(1)";
+}
+@source(IRC_S6166_B, relation = formalizes, coverage = exact, quote = "(A) an interest as a proprietor in a trade or business carried on as a proprietorship;")
+rule S6166ProprietorshipInterest strict {
+    for i: BusinessInterest6166;
+    for e: DecedentEstate;
+    when interest_included_in_gross_estate_of(i, e) and business_interest_kind(i, Proprietorship) and business_carries_on_trade_or_business(i);
+    then qualifies_as_interest_in_closely_held_business(i);
+}
+@source(IRC_S6166_B, relation = formalizes, coverage = exact, quote = "(i) 20 percent or more of the total capital interest in such partnership is included in determining the gross estate of the decedent, or")
+rule S6166PartnershipTwentyPercent strict {
+    for i: BusinessInterest6166;
+    for x: Decimal;
+    when business_interest_kind(i, PartnershipInterest) and business_carries_on_trade_or_business(i) and twenty_percent_test_percentage(i, x) and x >= 20.0;
+    then qualifies_as_interest_in_closely_held_business(i);
+}
+@source(IRC_S6166_B, relation = formalizes, coverage = exact, quote = "(ii) such partnership had 45 or fewer partners; or")
+rule S6166PartnershipFortyFiveOrFewer strict {
+    for i: BusinessInterest6166;
+    for e: DecedentEstate;
+    for n: Integer;
+    when interest_included_in_gross_estate_of(i, e) and business_interest_kind(i, PartnershipInterest) and business_carries_on_trade_or_business(i) and holder_count_after_marital_merge(i, n) and n <= 45;
+    then qualifies_as_interest_in_closely_held_business(i);
+}
+@source(IRC_S6166_B, relation = formalizes, coverage = exact, quote = "(i) 20 percent or more in value of the voting stock of such corporation is included in determining the gross estate of the decedent, or")
+rule S6166CorporationTwentyPercent strict {
+    for i: BusinessInterest6166;
+    for x: Decimal;
+    when business_interest_kind(i, CorporateStock) and business_carries_on_trade_or_business(i) and twenty_percent_test_percentage(i, x) and x >= 20.0;
+    then qualifies_as_interest_in_closely_held_business(i);
+}
+@source(IRC_S6166_B, relation = formalizes, coverage = exact, quote = "(ii) such corporation had 45 or fewer shareholders.")
+rule S6166CorporationFortyFiveOrFewer strict {
+    for i: BusinessInterest6166;
+    for e: DecedentEstate;
+    for n: Integer;
+    when interest_included_in_gross_estate_of(i, e) and business_interest_kind(i, CorporateStock) and business_carries_on_trade_or_business(i) and holder_count_after_marital_merge(i, n) and n <= 45;
+    then qualifies_as_interest_in_closely_held_business(i);
+}
+
+// --- (b)(9), (b)(10): passive assets and the lending and finance business ----
+relation asset_of_business(a: BusinessAsset6166, i: BusinessInterest6166) kind empirical;
+relation asset_value(a: BusinessAsset6166, v: Money) kind empirical;
+relation asset_used_in_carrying_on_trade_or_business(a: BusinessAsset6166) kind empirical { label en official "an asset used in carrying on a trade or business"; }
+relation asset_used_in_qualifying_lending_and_finance_business(a: BusinessAsset6166) kind empirical { label en official "an asset used in a qualifying lending and finance business"; }
+relation asset_is_stock_in_other_corporation(a: BusinessAsset6166) kind empirical;
+relation stock_treated_as_held_by_decedent_by_b8_election(a: BusinessAsset6166) kind empirical { label en official "(b)(9)(B)(ii)(I) such stock is treated as held by the decedent by reason of an election under paragraph (8)"; }
+relation stock_qualified_under_a1(a: BusinessAsset6166) kind empirical { label en official "(b)(9)(B)(ii)(II) such stock qualified under subsection (a)(1)"; }
+relation stock_in_corporation_owning_20_percent_or_45_or_fewer_shareholders(a: BusinessAsset6166) kind empirical { label en official "(b)(9)(B)(iii)(I) a corporation owns 20 percent or more in value of the voting stock of another corporation, or such other corporation has 45 or fewer shareholders"; }
+relation eighty_percent_of_assets_of_each_corporation_used_in_business(a: BusinessAsset6166) kind empirical { label en official "(b)(9)(B)(iii)(II) 80 percent or more of the value of the assets of each such corporation is attributable to assets used in carrying on a trade or business (the holding corporation's stock in the other is not counted)"; }
+relation executor_elects_b10(e: DecedentEstate) kind empirical { label en official "the executor elects the benefits of paragraph (10)"; }
+relation asset_estate_of(a: BusinessAsset6166, e: DecedentEstate) kind empirical;
+relation asset_treated_as_used_in_business(a: BusinessAsset6166) kind institutional { label en official "an asset used in carrying on a trade or business, or (if paragraph (10) is elected) used in a qualifying lending and finance business"; }
+rule S6166AssetUsedInBusiness strict { for a: BusinessAsset6166; when asset_used_in_carrying_on_trade_or_business(a); then asset_treated_as_used_in_business(a); }
+@source(IRC_S6166_B, relation = formalizes, coverage = exact, quote = "any asset used in a qualifying lending and finance business shall be treated as an asset which is used in carrying on a trade or business.")
+rule S6166AssetUsedInLendingAndFinanceBusiness strict {
+    for a: BusinessAsset6166;
+    for e: DecedentEstate;
+    when asset_estate_of(a, e) and executor_elects_b10(e) and asset_used_in_qualifying_lending_and_finance_business(a);
+    then asset_treated_as_used_in_business(a);
+}
+relation stock_exempt_from_passive_treatment(a: BusinessAsset6166) kind institutional { label en official "stock in another corporation that is not a passive asset: held by the b(8) election and qualifying under (a)(1), or within the active-corporation exception (b)(9)(B)(iii)"; }
+@source(IRC_S6166_B, relation = formalizes, coverage = exact, quote = "(I) such stock is treated as held by the decedent by reason of an election under paragraph (8), and")
+rule S6166StockExemptByB8 strict {
+    for a: BusinessAsset6166;
+    when asset_is_stock_in_other_corporation(a) and stock_treated_as_held_by_decedent_by_b8_election(a) and stock_qualified_under_a1(a);
+    then stock_exempt_from_passive_treatment(a);
+}
+@source(IRC_S6166_B, relation = formalizes, coverage = exact, quote = "then such corporations shall be treated as 1 corporation for purposes of clause (ii).")
+rule S6166StockExemptByActiveCorporationRule strict {
+    for a: BusinessAsset6166;
+    when asset_is_stock_in_other_corporation(a) and stock_in_corporation_owning_20_percent_or_45_or_fewer_shareholders(a) and eighty_percent_of_assets_of_each_corporation_used_in_business(a);
+    then stock_exempt_from_passive_treatment(a);
+}
+pub relation passive_asset_6166(a: BusinessAsset6166) kind institutional { label en official "a passive asset: any asset other than an asset used in carrying on a trade or business, including stock in another corporation unless an exception applies"; }
+@source(IRC_S6166_B, relation = formalizes, coverage = exact, quote = "The term \"passive asset\" means any asset other than an asset used in carrying on a trade or business.")
+rule S6166PassiveAssetNotUsedInBusiness strict {
+    for a: BusinessAsset6166;
+    for i: BusinessInterest6166;
+    when asset_of_business(a, i) and not_known(asset_treated_as_used_in_business(a));
+    then passive_asset_6166(a);
+}
+@source(IRC_S6166_B, relation = formalizes, coverage = exact, quote = "The term \"passive asset\" includes any stock in another corporation unless—")
+rule S6166PassiveAssetStock strict {
+    for a: BusinessAsset6166;
+    for i: BusinessInterest6166;
+    when asset_of_business(a, i) and asset_is_stock_in_other_corporation(a) and not_known(stock_exempt_from_passive_treatment(a));
+    then passive_asset_6166(a);
+}
+relation interest_has_assets(i: BusinessInterest6166) kind institutional { label en unofficial "helper: assets are stated for the interest's business"; }
+rule S6166InterestHasAssets strict { for i: BusinessInterest6166; for a: BusinessAsset6166; when asset_of_business(a, i); then interest_has_assets(i); }
+pub relation interest_value_net_of_passive_assets(i: BusinessInterest6166, v: Money) kind institutional { label en official "the value of the interest excluding the portion attributable to passive assets held by the business"; }
+@source(IRC_S6166_B, relation = formalizes, coverage = exact, quote = "the value of any interest in a closely held business shall not include the value of that portion of such interest which is attributable to passive assets held by the business.")
+relation business_asset_total_value(i: BusinessInterest6166, v: Money) kind institutional { label en unofficial "helper: total value of the business assets stated for the interest"; }
+relation business_passive_asset_value(i: BusinessInterest6166, v: Money) kind institutional { label en unofficial "helper: value of the passive assets of the business"; }
+rule S6166AssetTotalValue strict {
+    for i: BusinessInterest6166;
+    when interest_has_assets(i);
+    then business_asset_total_value(i, sum all t: Money for a: BusinessAsset6166 where asset_of_business(a, i) and asset_value(a, t));
+}
+rule S6166PassiveAssetValue strict {
+    for i: BusinessInterest6166;
+    when interest_has_assets(i);
+    then business_passive_asset_value(i, sum all pv: Money for pa: BusinessAsset6166 where asset_of_business(pa, i) and asset_value(pa, pv) and passive_asset_6166(pa));
+}
+rule S6166ValueNetOfPassiveAssets strict {
+    for i: BusinessInterest6166;
+    for value: Money;
+    for total: Money;
+    for passive: Money;
+    when business_interest_value(i, value) and business_asset_total_value(i, total) and business_passive_asset_value(i, passive) and total > 0 USD;
+    then interest_value_net_of_passive_assets(i, value - div_round(value * (passive / 1.00 USD), total / 1.00 USD, 2, "HALF_UP"));
+}
+rule S6166ValueWithoutAssetsStated strict {
+    for i: BusinessInterest6166;
+    for value: Money;
+    when business_interest_value(i, value) and not_known(interest_has_assets(i));
+    then interest_value_net_of_passive_assets(i, value);
+}
+// (b)(3): farmhouses and other structures of a farming business.
+relation farm_residential_buildings_value(i: BusinessInterest6166, v: Money) kind empirical { label en official "an interest in residential buildings and related improvements on the farm occupied on a regular basis by the owner or lessee or by persons employed to operate or maintain the farm"; }
+relation business_of_farming(i: BusinessInterest6166) kind empirical;
+pub relation interest_value_for_a1(i: BusinessInterest6166, v: Money) kind institutional { label en official "the value of the interest for the 35-percent requirement and the closely held business amount: net of passive assets, plus (for a farming business) farm residential buildings"; }
+@source(IRC_S6166_B, relation = formalizes, coverage = partial, quote = "an interest in a closely held business which is the business of farming includes an interest in residential buildings and related improvements on the farm")
+rule S6166ValueIncludesFarmResidences strict {
+    for i: BusinessInterest6166;
+    for net: Money;
+    for farm: Money;
+    when interest_value_net_of_passive_assets(i, net) and business_of_farming(i) and farm_residential_buildings_value(i, farm);
+    then interest_value_for_a1(i, net + farm);
+}
+rule S6166ValueNotFarming strict {
+    for i: BusinessInterest6166;
+    for net: Money;
+    when interest_value_net_of_passive_assets(i, net) and not_known(business_of_farming(i));
+    then interest_value_for_a1(i, net);
+}
+rule S6166ValueFarmingWithoutResidences strict {
+    for i: BusinessInterest6166;
+    for net: Money;
+    when interest_value_net_of_passive_assets(i, net) and business_of_farming(i) and not_known(farm_residences_stated(i));
+    then interest_value_for_a1(i, net);
+}
+relation farm_residences_stated(i: BusinessInterest6166) kind institutional { label en unofficial "helper: farm residential building value is stated"; }
+rule S6166FarmResidencesStated strict { for i: BusinessInterest6166; for v: Money; when farm_residential_buildings_value(i, v); then farm_residences_stated(i); }
+
+// --- (c): aggregation, and the closely held business amount ------------------
+relation business_percent_included_in_gross_estate(i: BusinessInterest6166, percent: Decimal) kind empirical { label en official "the percentage of the total value of the business included in determining the value of the decedent's gross estate"; }
+relation surviving_spouse_property_percent(i: BusinessInterest6166, percent: Decimal) kind empirical { label en official "the surviving spouse's interest in property held with the decedent as community property or as joint tenants, tenants by the entirety, or tenants in common, treated as included in the gross estate"; }
+relation surviving_spouse_percent_stated(i: BusinessInterest6166) kind institutional { label en unofficial "helper: a surviving-spouse percentage is stated"; }
+rule S6166SurvivingSpousePercentStated strict { for i: BusinessInterest6166; for x: Decimal; when surviving_spouse_property_percent(i, x); then surviving_spouse_percent_stated(i); }
+relation aggregation_percentage(i: BusinessInterest6166, percent: Decimal) kind institutional { label en official "the 20-percent requirement of (c): the value included plus the surviving spouse's community or joint interest"; }
+@source(IRC_S6166_C, relation = formalizes, coverage = exact, quote = "shall be treated as having been included in determining the value of the decedent's gross estate.")
+rule S6166AggregationPercentageWithSpouse strict {
+    for i: BusinessInterest6166;
+    for included: Decimal;
+    for spouse: Decimal;
+    when business_percent_included_in_gross_estate(i, included) and surviving_spouse_property_percent(i, spouse);
+    then aggregation_percentage(i, included + spouse);
+}
+rule S6166AggregationPercentageWithoutSpouse strict {
+    for i: BusinessInterest6166;
+    for included: Decimal;
+    when business_percent_included_in_gross_estate(i, included) and not_known(surviving_spouse_percent_stated(i));
+    then aggregation_percentage(i, included);
+}
+relation aggregatable_interest(i: BusinessInterest6166) kind institutional { label en official "a qualifying interest in a business of which 20 percent or more of the total value is included in the gross estate"; }
+rule S6166AggregatableInterest strict {
+    for i: BusinessInterest6166;
+    for x: Decimal;
+    when qualifies_as_interest_in_closely_held_business(i) and aggregation_percentage(i, x) and x >= 20.0;
+    then aggregatable_interest(i);
+}
+relation closely_held_business_amount_candidate(e: DecedentEstate, v: Money) kind institutional { label en unofficial "a candidate value of the interest that may qualify under (a)(1): a single qualifying interest, or the aggregated interests of (c)"; }
+@source(IRC_S6166_B, relation = formalizes, coverage = partial, quote = "the term \"closely held business amount\" means the value of the interest in a closely held business which qualifies under subsection (a)(1).")
+rule S6166CandidateSingleInterest strict {
+    for e: DecedentEstate;
+    for i: BusinessInterest6166;
+    for v: Money;
+    when interest_included_in_gross_estate_of(i, e) and qualifies_as_interest_in_closely_held_business(i) and interest_value_for_a1(i, v);
+    then closely_held_business_amount_candidate(e, v);
+}
+@source(IRC_S6166_C, relation = formalizes, coverage = exact, quote = "shall be treated as an interest in a single closely held business.")
+rule S6166CandidateAggregatedInterests strict {
+    for e: DecedentEstate;
+    for i: BusinessInterest6166;
+    for j: BusinessInterest6166;
+    when interest_included_in_gross_estate_of(i, e) and interest_included_in_gross_estate_of(j, e) and aggregatable_interest(i) and aggregatable_interest(j) and i != j;
+    then closely_held_business_amount_candidate(e, sum all part: Money for k: BusinessInterest6166 where interest_included_in_gross_estate_of(k, e) and aggregatable_interest(k) and interest_value_for_a1(k, part));
+}
+relation larger_amount_candidate_exists(e: DecedentEstate, v: Money) kind institutional { label en unofficial "helper (TECH-GAPS G136): a strictly larger candidate exists"; }
+rule S6166LargerCandidateExists strict {
+    for e: DecedentEstate;
+    for v: Money;
+    for other: Money;
+    when closely_held_business_amount_candidate(e, v) and closely_held_business_amount_candidate(e, other) and other > v;
+    then larger_amount_candidate_exists(e, v);
+}
+pub relation closely_held_business_amount_6166(e: DecedentEstate, v: Money) kind institutional { label en official "the value of the interest in a closely held business which qualifies under subsection (a)(1) (the larger of the largest single interest and the aggregation of (c))"; }
+rule S6166ClosellyHeldBusinessAmount strict {
+    for e: DecedentEstate;
+    for v: Money;
+    when closely_held_business_amount_candidate(e, v) and not_known(larger_amount_candidate_exists(e, v));
+    then closely_held_business_amount_6166(e, v);
+}
+
+// --- (a)(1): qualification, election, maximum amount, installments ----------
+pub relation estate_qualifies_for_6166(e: DecedentEstate) kind institutional { label en official "the value of an interest in a closely held business included in the gross estate of a citizen or resident decedent exceeds 35 percent of the adjusted gross estate"; }
+@source(IRC_S6166_A, relation = formalizes, coverage = exact, quote = "exceeds 35 percent of the adjusted gross estate")
+rule S6166EstateQualifies strict {
+    for e: DecedentEstate;
+    for amount: Money;
+    for age: Money;
+    when decedent_citizen_or_resident_at_death(e) and closely_held_business_amount_6166(e, amount) and adjusted_gross_estate_6166(e, age) and amount > age * 0.35;
+    then estate_qualifies_for_6166(e);
+}
+relation executor_elects_6166(e: DecedentEstate, made_on: Date) kind empirical { label en official "the executor elects to pay part or all of the tax imposed by section 2001 in 2 or more (but not exceeding 10) equal installments"; }
+relation election_within_time_6166(e: DecedentEstate) kind institutional { label en official "the election is made not later than the time prescribed by section 6075(a) for filing the estate tax return (including extensions)"; }
+@source(IRC_S6166_D, relation = formalizes, coverage = exact, quote = "Any election under subsection (a) shall be made not later than the time prescribed by section 6075(a) for filing the return of tax imposed by section 2001 (including extensions thereof)")
+rule S6166ElectionWithinTime strict {
+    for e: DecedentEstate;
+    for made: Date;
+    for due: Date;
+    when executor_elects_6166(e, made) and estate_tax_return_due_date_with_extensions(e, due) and made <= due;
+    then election_within_time_6166(e);
+}
+relation election_valid_6166(e: DecedentEstate) kind institutional { label en official "the estate qualifies and the election is timely"; }
+rule S6166ElectionValid strict {
+    for e: DecedentEstate;
+    when estate_qualifies_for_6166(e) and election_within_time_6166(e);
+    then election_valid_6166(e);
+}
+relation executor_makes_6166_election(e: DecedentEstate, x: Person, made_on: Date) kind institutional { label en unofficial "helper binding the executor to the election"; }
+rule S6166ExecutorMakesElection strict {
+    for e: DecedentEstate;
+    for x: Person;
+    for made: Date;
+    when executor_elects_6166(e, made) and executor_of_estate(e, x);
+    then executor_makes_6166_election(e, x, made);
+}
+pub relation installment_extension_in_effect(e: DecedentEstate) kind institutional { label en official "the tax may be paid in installments: the provisions of the subtitle apply as though the Secretary were extending the time for payment of the tax"; }
+@source(IRC_S6166_A, relation = formalizes, coverage = exact, quote = "the executor may elect to pay part or all of the tax imposed by section 2001 in 2 or more (but not exceeding 10) equal installments.")
+@source(IRC_S6166_D, relation = formalizes, coverage = exact, quote = "If an election under subsection (a) is made, the provisions of this subtitle shall apply as though the Secretary were extending the time for payment of the tax.")
+rule S6166ExecutorElectionPower strict {
+    for e: DecedentEstate;
+    for x: Person;
+    for made: Date;
+    when executor_makes_6166_election(e, x, made);
+    then power S6166ExecutorElectionPowerOverTaxPayment {
+        holder x;
+        over Secretary;
+        exercise executor_elects_6166(e, made);
+        valid_when election_valid_6166(e);
+        effect create(installment_extension_in_effect(e));
+    };
+}
+pub relation maximum_tax_payable_in_installments(e: DecedentEstate, amount: Money) kind institutional { label en official "the tax imposed by section 2001 (reduced by credits) times the ratio of the closely held business amount to the adjusted gross estate"; }
+@source(IRC_S6166_A, relation = formalizes, coverage = exact, quote = "The maximum amount of tax which may be paid in installments under this subsection shall be an amount which bears the same ratio to the tax imposed by section 2001 (reduced by the credits against such tax) as—")
+rule S6166MaximumTaxInInstallments strict {
+    for e: DecedentEstate;
+    for tax: Money;
+    for cba: Money;
+    for age: Money;
+    when estate_tax_for_6166(e, tax) and closely_held_business_amount_6166(e, cba) and adjusted_gross_estate_6166(e, age) and age > 0 USD;
+    then maximum_tax_payable_in_installments(e, div_round(tax * (cba / 1.00 USD), age / 1.00 USD, 2, "HALF_UP"));
+}
+relation tax_elected_for_installments(e: DecedentEstate, amount: Money) kind empirical { label en official "the part (or all) of the tax the executor elects to pay in installments"; }
+relation installments_elected(e: DecedentEstate, n: Integer) kind empirical { label en official "the number of equal installments elected"; }
+relation elected_tax_within_maximum(e: DecedentEstate) kind institutional { label en official "the tax elected for installments does not exceed the maximum amount"; }
+rule S6166ElectedTaxWithinMaximum strict {
+    for e: DecedentEstate;
+    for elected: Money;
+    for maximum: Money;
+    when tax_elected_for_installments(e, elected) and maximum_tax_payable_in_installments(e, maximum) and elected <= maximum;
+    then elected_tax_within_maximum(e);
+}
+// The number of installments: 2 to 10, or 2 to 5 under (b)(8)(B)(ii) and (b)(10).
+relation executor_elects_b8(e: DecedentEstate) kind empirical { label en official "the executor elects the benefits of paragraph (8)"; }
+relation b8_all_stock_non_readily_tradable(e: DecedentEstate) kind empirical { label en official "(b)(8)(B)(i) all the stock taken into account is non-readily-tradable stock"; }
+relation b8_only_holding_company_stock_non_readily_tradable(e: DecedentEstate) kind empirical { label en official "(b)(8)(B)(ii) the requirements of clause (i) are not met, but all of the stock of each holding company taken into account is non-readily-tradable"; }
+relation five_installment_limit_applies(e: DecedentEstate) kind institutional { label en official "subsection (a)(1) is applied by substituting 5 for 10"; }
+@source(IRC_S6166_B, relation = formalizes, coverage = exact, quote = "then this paragraph shall apply, but subsection (a)(1) shall be applied by substituting \"5\" for \"10\".")
+rule S6166FiveInstallmentsUnderB8 strict {
+    for e: DecedentEstate;
+    when executor_elects_b8(e) and b8_only_holding_company_stock_non_readily_tradable(e) and not_known(b8_all_stock_non_readily_tradable(e));
+    then five_installment_limit_applies(e);
+}
+@source(IRC_S6166_B, relation = formalizes, coverage = exact, quote = "For purposes of applying subsection (a)(1), \"5\" shall be substituted for \"10\".")
+rule S6166FiveInstallmentsUnderB10 strict {
+    for e: DecedentEstate;
+    when executor_elects_b10(e);
+    then five_installment_limit_applies(e);
+}
+pub relation installment_count_limit(e: DecedentEstate, n: Integer) kind institutional { label en official "the maximum number of installments: 10, or 5 where paragraph (8)(B)(ii) or (10) applies"; }
+rule S6166TenInstallmentLimit strict { for e: DecedentEstate; for n0: Integer; when installments_elected(e, n0) and not_known(five_installment_limit_applies(e)); then installment_count_limit(e, 10); }
+rule S6166FiveInstallmentLimit strict { for e: DecedentEstate; when five_installment_limit_applies(e); then installment_count_limit(e, 5); }
+relation installment_count_valid(e: DecedentEstate) kind institutional { label en official "2 or more, not more than the limit"; }
+rule S6166InstallmentCountValid strict {
+    for e: DecedentEstate;
+    for n: Integer;
+    for limit: Integer;
+    when installments_elected(e, n) and installment_count_limit(e, limit) and n >= 2 and n <= limit;
+    then installment_count_valid(e);
+}
+pub relation installment_amount_6166(e: DecedentEstate, amount: Money) kind institutional { label en official "each of the equal installments"; }
+@source(IRC_S6166_A, relation = formalizes, coverage = exact, quote = "in 2 or more (but not exceeding 10) equal installments")
+rule S6166InstallmentAmount strict {
+    for e: DecedentEstate;
+    for elected: Money;
+    for n: Integer;
+    when tax_elected_for_installments(e, elected) and installments_elected(e, n) and installment_count_valid(e) and elected_tax_within_maximum(e);
+    then installment_amount_6166(e, div_round(elected, n * 1.0, 2, "HALF_UP"));
+}
+// (a)(3), (b)(7)(A)(ii), (b)(8)(A)(ii), (b)(10)(A)(ii): the date of the first installment.
+relation first_installment_date_selected(e: DecedentEstate, d: Date) kind empirical { label en official "the date selected by the executor for the first installment"; }
+relation no_five_year_deferral_of_principal(e: DecedentEstate) kind institutional { label en official "the executor is treated as having selected the section 6151(a) date under (b)(7), (b)(8) or (b)(10)"; }
+rule S6166NoDeferralUnderB7 strict { for e: DecedentEstate; when executor_elects_b7(e); then no_five_year_deferral_of_principal(e); }
+rule S6166NoDeferralUnderB8 strict { for e: DecedentEstate; when executor_elects_b8(e); then no_five_year_deferral_of_principal(e); }
+rule S6166NoDeferralUnderB10 strict { for e: DecedentEstate; when executor_elects_b10(e); then no_five_year_deferral_of_principal(e); }
+pub relation first_installment_due_date(e: DecedentEstate, d: Date) kind institutional { label en official "the first installment is paid on or before the date selected by the executor, not more than 5 years after the section 6151(a) date; the section 6151(a) date itself where (b)(7), (8) or (10) is elected"; }
+@source(IRC_S6166_A, relation = formalizes, coverage = exact, quote = "the first installment shall be paid on or before the date selected by the executor which is not more than 5 years after the date prescribed by section 6151(a) for payment of the tax")
+rule S6166FirstInstallmentDueDateSelected strict {
+    for e: DecedentEstate;
+    for selected: Date;
+    for pay: Date;
+    when first_installment_date_selected(e, selected) and estate_tax_payment_date_6151a(e, pay) and selected >= pay and selected <= add_calendar_period(pay, 60 calendar_month) and not_known(no_five_year_deferral_of_principal(e));
+    then first_installment_due_date(e, selected);
+}
+@source(IRC_S6166_B, relation = formalizes, coverage = exact, quote = "the executor shall be treated as having selected under subsection (a)(3) the date prescribed by section 6151(a), and")
+rule S6166FirstInstallmentDueOnPaymentDate strict {
+    for e: DecedentEstate;
+    for pay: Date;
+    when no_five_year_deferral_of_principal(e) and estate_tax_payment_date_6151a(e, pay);
+    then first_installment_due_date(e, pay);
+}
+relation installment_due_date(e: DecedentEstate, k: Integer, d: Date) kind institutional { label en official "the due date of the k-th installment: each succeeding installment is due 1 year after the preceding one"; }
+@source(IRC_S6166_A, relation = formalizes, coverage = exact, quote = "and each succeeding installment shall be paid on or before the date which is 1 year after the date prescribed by this paragraph for payment of the preceding installment.")
+rule S6166InstallmentDate1 strict { for e: DecedentEstate; for d: Date; when first_installment_due_date(e, d); then installment_due_date(e, 1, d); }
+rule S6166InstallmentDate2 strict { for e: DecedentEstate; for d: Date; when first_installment_due_date(e, d); then installment_due_date(e, 2, add_calendar_period(d, 12 calendar_month)); }
+rule S6166InstallmentDate3 strict { for e: DecedentEstate; for d: Date; when first_installment_due_date(e, d); then installment_due_date(e, 3, add_calendar_period(d, 24 calendar_month)); }
+rule S6166InstallmentDate4 strict { for e: DecedentEstate; for d: Date; when first_installment_due_date(e, d); then installment_due_date(e, 4, add_calendar_period(d, 36 calendar_month)); }
+rule S6166InstallmentDate5 strict { for e: DecedentEstate; for d: Date; when first_installment_due_date(e, d); then installment_due_date(e, 5, add_calendar_period(d, 48 calendar_month)); }
+rule S6166InstallmentDate6 strict { for e: DecedentEstate; for d: Date; when first_installment_due_date(e, d); then installment_due_date(e, 6, add_calendar_period(d, 60 calendar_month)); }
+rule S6166InstallmentDate7 strict { for e: DecedentEstate; for d: Date; when first_installment_due_date(e, d); then installment_due_date(e, 7, add_calendar_period(d, 72 calendar_month)); }
+rule S6166InstallmentDate8 strict { for e: DecedentEstate; for d: Date; when first_installment_due_date(e, d); then installment_due_date(e, 8, add_calendar_period(d, 84 calendar_month)); }
+rule S6166InstallmentDate9 strict { for e: DecedentEstate; for d: Date; when first_installment_due_date(e, d); then installment_due_date(e, 9, add_calendar_period(d, 96 calendar_month)); }
+rule S6166InstallmentDate10 strict { for e: DecedentEstate; for d: Date; when first_installment_due_date(e, d); then installment_due_date(e, 10, add_calendar_period(d, 108 calendar_month)); }
+relation installment_paid(e: DecedentEstate, k: Integer) kind empirical { label en official "the k-th installment of the tax is paid"; }
+@source(IRC_S6166_A, relation = formalizes, coverage = exact, quote = "If an election is made under paragraph (1), the first installment shall be paid on or before the date selected by the executor")
+rule S6166DutyToPayInstallment defeasible {
+    for e: DecedentEstate;
+    for x: Person;
+    for k: Integer;
+    for d: Date;
+    for n: Integer;
+    when installment_extension_in_effect(e) and executor_of_estate(e, x) and installments_elected(e, n) and installment_due_date(e, k, d) and k <= n and installment_count_valid(e) and elected_tax_within_maximum(e) and not_known(installment_extension_ceased(e));
+    then duty PayEstateTaxInstallment {
+        bearer x;
+        beneficiary Secretary;
+        goal achievement {
+            condition installment_paid(e, k);
+            window [-infinity, d];
+        }
+    };
+}

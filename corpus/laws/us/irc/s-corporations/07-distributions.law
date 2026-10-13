@@ -1,0 +1,233 @@
+// Section 1368 — Distributions.
+//
+// SCOPE: (a) the gateway (a section 301(c)-type distribution routed to (b)
+// or (c)); (b) no-AE&P corporation: tax-free to basis, then gain; (c)
+// AE&P corporation: AAA first (treated per (b)), then dividend to the
+// extent of AE&P, then treated per (b) again; (d) basis/AAA ordering
+// cross-reference; (e)(1)-(2) AAA definition and redemption adjustment;
+// (e)(3) election to distribute AE&P first, as a power; (f) restricted
+// bank director stock distributions — EXTERNAL_DEPENDENCY (section
+// 1361(f)).
+//
+// MODEL: one distribution event per (shareholder, corporation, date,
+// amount); the AAA balance is a per-(corporation, year) SNAPSHOT (opening
+// AAA plus the year's section 1367-style adjustments, before distributions)
+// rather than a running ledger across the whole "S period" of (e)(2) — same
+// simplification class as the basis snapshot of 06-basis.law.
+
+use self::{
+    Corporation,
+    IRC_S1368_A,
+    IRC_S1368_B,
+    IRC_S1368_C,
+    IRC_S1368_E,
+    Person,
+    TaxableYear,
+    aaa_available_for_distributions,
+    aaa_items_stated,
+    corporation_deductions_excluding_separately_stated,
+    corporation_gross_income,
+    earnings_first_election_in_effect,
+    shareholder_ownership_fraction,
+    shareholder_stock_basis,
+};
+
+pub relation distribution_amount(sh: Person, c: Corporation, on: Date, amount: Money) kind empirical {
+    label en official "the amount of a distribution of property (money, for this stage) by the S corporation to sh with respect to its stock, to which section 301(c) would otherwise apply (section 1368(a))";
+}
+pub relation corporation_has_accumulated_e_and_p(c: Corporation, y: TaxableYear) kind empirical {
+    label en official "the S corporation has accumulated earnings and profits (section 1368(b)/(c) branch test); case-asserted pending a corporations-package contract for the E&P amount";
+}
+pub relation aaa_opening_balance(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the accumulated adjustments account balance at the start of y, before this year's distributions (section 1368(e)(1)); case-asserted (opening snapshot, see module note)";
+}
+pub relation aaa_balance(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the accumulated adjustments account balance available for this year's distributions, before allocating among them (section 1368(e)(1))";
+}
+@source(IRC_S1368_E, quote = "an account of the S corporation which is adjusted for the S period in a manner similar to the adjustments under section 1367")
+rule AaaBalanceFromAdjustments strict {
+    label en official "AAA for the year is the opening AAA plus this year's section-1367-style net adjustment (nonseparately computed income/loss and separately stated items, excluding tax-exempt income; section 1368(e)(1)(A))";
+    for c: Corporation; for y: TaxableYear; for opening: Money; for gi: Money; for ded: Money;
+    when aaa_opening_balance(c, y, opening);
+    when corporation_gross_income(c, y, gi);
+    when corporation_deductions_excluding_separately_stated(c, y, ded);
+    when not_known(aaa_items_stated(c, y));
+    then aaa_balance(c, y, opening + (gi - ded));
+}
+// (e)(1)(C) (a net negative adjustment for the year is disregarded when
+// applying this section to distributions made DURING the year) is applied in
+// `aaa_available_for_distributions` below; (e)(1)(B)'s redemption-proportion
+// adjustment is `aaa_redemption_adjustment`. Both are stage 3
+// (11-... and 13-... modules); `aaa_balance` stays the year's closing
+// figure including the whole net adjustment.
+
+// --- (b): no accumulated E&P — tax-free to basis, then gain ---------------
+
+// ROUTING: subsection (a) sends a distribution to (b) directly (no
+// accumulated E&P) or, per (c), routes sub-amounts derived from the AAA/E&P
+// ceilings to (b) as well. `distribution_amount_subject_to_b` is the single
+// gateway every (b)-shaped amount passes through, so the (b) rules
+// themselves need no `unless` on the E&P branch (the branching happened
+// upstream, in a rule whose head already matches its own `unless` atom).
+pub relation distribution_amount_subject_to_b(sh: Person, c: Corporation, on: Date, amount: Money) kind institutional {
+    label en official "an amount routed to subsection (b)'s tax-free-to-basis-then-gain treatment, either because the corporation has no accumulated E&P (section 1368(a)-(b)) or because it is a sub-amount reached that way under (c)";
+}
+pub relation e_and_p_blocks_direct_b_routing(sh: Person, c: Corporation, on: Date, amount: Money) kind institutional {
+    label en official "the corporation has accumulated E&P for the year of this distribution, so the WHOLE distribution amount does not go directly to (b) (it is routed through (c) instead)";
+}
+rule EAndPBlocksDirectBRouting strict {
+    for sh: Person; for c: Corporation; for on: Date; for amount: Money; for y: TaxableYear;
+    when distribution_amount(sh, c, on, amount);
+    when us.irc.core::year_of(c, y);
+    when corporation_has_accumulated_e_and_p(c, y);
+    then e_and_p_blocks_direct_b_routing(sh, c, on, amount);
+}
+@source(IRC_S1368_A, quote = "shall be treated in the manner provided in subsection (b) or (c), whichever applies")
+rule NoAeAndPDistributionSubjectToBDirectly defeasible {
+    label en official "with no accumulated E&P, the whole distribution is routed to subsection (b) (section 1368(a)-(b))";
+    for sh: Person; for c: Corporation; for on: Date; for amount: Money;
+    when distribution_amount(sh, c, on, amount);
+    unless e_and_p_blocks_direct_b_routing(sh, c, on, amount);
+    then distribution_amount_subject_to_b(sh, c, on, amount);
+}
+rule AaaShareRoutedToB defeasible {
+    label en official "the within-AAA-share portion under (c)(1) is treated per subsection (b) (section 1368(c)(1))";
+    for sh: Person; for c: Corporation; for on: Date; for amount: Money;
+    when distribution_within_aaa_share(sh, c, on, amount);
+    then distribution_amount_subject_to_b(sh, c, on, amount);
+}
+rule RemainderAfterDividendRoutedToB defeasible {
+    label en official "the (c)(3) remainder after the dividend ceiling is treated per subsection (b) again (section 1368(c)(3))";
+    for sh: Person; for c: Corporation; for on: Date; for amount: Money;
+    when distribution_after_dividend_remainder(sh, c, on, amount);
+    then distribution_amount_subject_to_b(sh, c, on, amount);
+}
+
+pub relation distribution_tax_free_portion(sh: Person, c: Corporation, on: Date, amount: Money) kind institutional {
+    label en official "the portion of a (b)-routed amount not includible in gross income because it does not exceed the shareholder's stock basis (section 1368(b)(1))";
+}
+pub relation distribution_gain_portion(sh: Person, c: Corporation, on: Date, amount: Money) kind institutional {
+    label en official "the portion of a (b)-routed amount treated as gain from the sale or exchange of property because it exceeds the shareholder's stock basis (section 1368(b)(2))";
+}
+@source(IRC_S1368_B, quote = "shall not be included in gross income to the extent that it does not exceed the adjusted basis of the stock")
+rule DistributionWithinBasisTaxFree defeasible {
+    label en official "a (b)-routed amount not exceeding stock basis is tax-free to that extent (section 1368(b)(1))";
+    for sh: Person; for c: Corporation; for on: Date; for y: TaxableYear; for amount: Money; for basis: Money;
+    when distribution_amount_subject_to_b(sh, c, on, amount);
+    when us.irc.core::year_of(c, y);
+    when shareholder_stock_basis(sh, c, y, basis);
+    when amount <= basis;
+    then distribution_tax_free_portion(sh, c, on, amount);
+}
+@source(IRC_S1368_B, quote = "If the amount of the distribution exceeds the adjusted basis of the stock, such excess shall be treated as gain from the sale or exchange of property")
+rule DistributionExceedsBasisIsGain defeasible {
+    label en official "a (b)-routed amount exceeding stock basis is tax-free up to basis, gain beyond it (section 1368(b)(1)-(2))";
+    for sh: Person; for c: Corporation; for on: Date; for y: TaxableYear; for amount: Money; for basis: Money;
+    when distribution_amount_subject_to_b(sh, c, on, amount);
+    when us.irc.core::year_of(c, y);
+    when shareholder_stock_basis(sh, c, y, basis);
+    when amount > basis;
+    then distribution_tax_free_portion(sh, c, on, basis);
+}
+rule DistributionExceedsBasisGainAmount defeasible {
+    for sh: Person; for c: Corporation; for on: Date; for y: TaxableYear; for amount: Money; for basis: Money;
+    when distribution_amount_subject_to_b(sh, c, on, amount);
+    when us.irc.core::year_of(c, y);
+    when shareholder_stock_basis(sh, c, y, basis);
+    when amount > basis;
+    then distribution_gain_portion(sh, c, on, amount - basis);
+}
+
+// --- (c): accumulated E&P — AAA first, then dividend, then (b) again -----
+
+pub relation shareholder_share_of_aaa(sh: Person, c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the shareholder's pro rata share of the corporation's AAA balance for y, used as the (c)(1) ceiling for that shareholder's distributions (section 1368(c)(1)); allocation among multiple distributions in the year per (c)(3)'s proportional rule is TECH_GAP — see module note";
+}
+rule ShareholderShareOfAaa defeasible {
+    for sh: Person; for c: Corporation; for y: TaxableYear; for total: Money; for fraction: Decimal;
+    when aaa_available_for_distributions(c, y, total);
+    when shareholder_ownership_fraction(sh, c, y, fraction);
+    then shareholder_share_of_aaa(sh, c, y, total * fraction);
+}
+pub relation distribution_within_aaa_share(sh: Person, c: Corporation, on: Date, amount: Money) kind institutional {
+    label en official "the portion of a distribution not exceeding the shareholder's AAA share, treated per subsection (b) (section 1368(c)(1))";
+}
+pub relation distribution_remaining_after_aaa(sh: Person, c: Corporation, on: Date, amount: Money) kind institutional {
+    label en official "the portion of a distribution remaining after applying the AAA-share ceiling (section 1368(c)(1)-(2))";
+}
+@source(IRC_S1368_C, quote = "That portion of the distribution which does not exceed the accumulated adjustments account shall be treated in the manner provided by subsection (b)")
+rule DistributionWithinAaaShare defeasible {
+    label en official "with accumulated E&P, the portion of a distribution within the shareholder's AAA share is treated per subsection (b) (section 1368(c)(1))";
+    for sh: Person; for c: Corporation; for on: Date; for y: TaxableYear; for amount: Money; for aaaShare: Money;
+    when distribution_amount(sh, c, on, amount);
+    when us.irc.core::year_of(c, y);
+    when corporation_has_accumulated_e_and_p(c, y);
+    when not_known(earnings_first_election_in_effect(c, y));
+    when shareholder_share_of_aaa(sh, c, y, aaaShare);
+    when amount <= aaaShare;
+    then distribution_within_aaa_share(sh, c, on, amount);
+}
+rule DistributionAboveAaaShareRemainder defeasible {
+    for sh: Person; for c: Corporation; for on: Date; for y: TaxableYear; for amount: Money; for aaaShare: Money;
+    when distribution_amount(sh, c, on, amount);
+    when us.irc.core::year_of(c, y);
+    when corporation_has_accumulated_e_and_p(c, y);
+    when not_known(earnings_first_election_in_effect(c, y));
+    when shareholder_share_of_aaa(sh, c, y, aaaShare);
+    when amount > aaaShare;
+    then distribution_within_aaa_share(sh, c, on, aaaShare);
+}
+rule DistributionRemainingAfterAaa defeasible {
+    for sh: Person; for c: Corporation; for on: Date; for y: TaxableYear; for amount: Money; for aaaShare: Money;
+    when distribution_amount(sh, c, on, amount);
+    when us.irc.core::year_of(c, y);
+    when corporation_has_accumulated_e_and_p(c, y);
+    when not_known(earnings_first_election_in_effect(c, y));
+    when shareholder_share_of_aaa(sh, c, y, aaaShare);
+    when amount > aaaShare;
+    then distribution_remaining_after_aaa(sh, c, on, amount - aaaShare);
+}
+
+pub relation shareholder_share_of_ae_and_p(sh: Person, c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the shareholder's pro rata share of the corporation's accumulated earnings and profits, as the (c)(2) dividend ceiling; case-asserted pending a corporations-package contract for the E&P amount";
+}
+pub relation distribution_dividend_portion(sh: Person, c: Corporation, on: Date, amount: Money) kind institutional {
+    label en official "the portion of a distribution, after the AAA ceiling, treated as a dividend to the extent of accumulated E&P (section 1368(c)(2))";
+}
+pub relation distribution_after_dividend_remainder(sh: Person, c: Corporation, on: Date, amount: Money) kind institutional {
+    label en official "the portion of a distribution remaining after the (c)(2) dividend ceiling, treated per subsection (b) again (section 1368(c)(3))";
+}
+@source(IRC_S1368_C, quote = "That portion of the distribution which remains after the application of paragraph (1) shall be treated as a dividend to the extent it does not exceed the accumulated earnings and profits of the S corporation")
+rule DistributionDividendWithinAeAndP defeasible {
+    label en official "the remainder after AAA is a dividend up to the accumulated-E&P ceiling (section 1368(c)(2))";
+    for sh: Person; for c: Corporation; for on: Date; for y: TaxableYear; for remainder: Money; for aeAndPShare: Money;
+    when distribution_remaining_after_aaa(sh, c, on, remainder);
+    when us.irc.core::year_of(c, y);
+    when shareholder_share_of_ae_and_p(sh, c, y, aeAndPShare);
+    when remainder <= aeAndPShare;
+    then distribution_dividend_portion(sh, c, on, remainder);
+}
+rule DistributionDividendCeilingRemainder defeasible {
+    for sh: Person; for c: Corporation; for on: Date; for y: TaxableYear; for remainder: Money; for aeAndPShare: Money;
+    when distribution_remaining_after_aaa(sh, c, on, remainder);
+    when us.irc.core::year_of(c, y);
+    when shareholder_share_of_ae_and_p(sh, c, y, aeAndPShare);
+    when remainder > aeAndPShare;
+    then distribution_dividend_portion(sh, c, on, aeAndPShare);
+}
+rule DistributionAfterDividendRemainder defeasible {
+    label en official "any excess over the dividend ceiling is treated per subsection (b) again (section 1368(c)(3))";
+    for sh: Person; for c: Corporation; for on: Date; for y: TaxableYear; for remainder: Money; for aeAndPShare: Money;
+    when distribution_remaining_after_aaa(sh, c, on, remainder);
+    when us.irc.core::year_of(c, y);
+    when shareholder_share_of_ae_and_p(sh, c, y, aeAndPShare);
+    when remainder > aeAndPShare;
+    then distribution_after_dividend_remainder(sh, c, on, remainder - aeAndPShare);
+}
+// The (c)(3) closing sentence's proportional allocation of AAA among SEVERAL
+// distributions in the year, and (e)(3)'s election to distribute AE&P
+// FIRST (skipping (c)(1)'s AAA-first ordering for the electing year, with
+// all affected shareholders' consent), are TECH_GAP / not modeled as a
+// power in this stage — see the coverage row and TECH-GAPS.md G46. A
+// single distribution per shareholder per year is the scope this stage
+// actually computes end to end.

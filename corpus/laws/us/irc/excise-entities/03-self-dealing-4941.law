@@ -1,0 +1,223 @@
+// Section 4941 — taxes on self-dealing. First full instantiation of the
+// reusable two-tier excise shape (01-excise-act-and-taxable-period.law):
+// (a)(1)/(a)(2) initial taxes, (b)(1)/(b)(2) additional taxes for failure
+// to correct within the taxable period, (c)(1) joint-and-several liability,
+// (c)(2) the $20,000 manager-tax cap, (d)(1)(A)-(F) the self-dealing act
+// classification, (e)(1) taxable period (via the shared module), (e)(2)
+// "amount involved", (e)(3) "correction".
+//
+// SCOPE AND JUDGMENT CALLS:
+//  - (d)(1)(A)-(F): modelled as a case-asserted `self_dealing_act_type`
+//    classification (the statute's own six categories), NOT as a
+//    derivation from lower-level property/exchange/lease facts (those
+//    facts are not in `us.irc.core`'s scope) — the case asserts which of
+//    the six categories the transaction falls into.
+//  - (d)(2) exceptions (A)-(H): NOT modelled this stage (TECH_GAP/
+//    not-done) — a case that wants an exception applied must simply not
+//    assert `self_dealing_act_type` for that transaction; this package
+//    does not test any of the (d)(2) carve-outs itself. Reported as
+//    not-done, not silently absorbed.
+//  - (e)(2) "amount involved": the statute values the (a) initial tax as of
+//    the act date and the (b) additional tax at the highest fair market
+//    value during the taxable period — potentially DIFFERENT amounts. This
+//    module uses a SINGLE case-asserted `self_dealing_amount_involved` for
+//    both, which is exact when the value did not change during the
+//    taxable period and an UNDERSTATEMENT of the (b) tax otherwise —
+//    documented INTERPRETATION, not silently identical to the statute.
+//  - "for each year (or part thereof) in the taxable period" ((a)(1),
+//    (a)(2)): the calendar-arithmetic count of years spanned by an
+//    arbitrary `taxable_period` interval is NOT computed here — the case
+//    asserts the count via `self_dealing_years_in_taxable_period`. TECH_GAP:
+//    counting distinct calendar years (or parts) spanned by a date interval
+//    would need iteration/recursion over calendar years, which the
+//    compiler traps note flags as a likely LDC-E4102 (self-recursive
+//    arithmetic) risk; not attempted this stage.
+//  - (a)(2)/(b)(2) manager tax: "knowing" participation and the "not
+//    willful and due to reasonable cause" exception are DECISION-0194
+//    evaluative elements — modelled as one `external judgment relation`
+//    per element (Secretary is not literally the text's authority here;
+//    the actual adjudicator is whichever court reviews the excise tax, so
+//    `authority TaxCourt` is used, matching the section's own enforcement
+//    forum) rather than a flat case fact.
+//  - (c)(1) joint-and-several liability is modelled as a plain relation
+//    over `initial_tax`/`additional_tax` rows, not as a new institutional
+//    consequence — see `self_dealing_joint_and_several` below.
+//  - Government officials ((d)(1)(F), (d)(2)(G), and the 4946(a)(1)(I)/(c)
+//    "government official" category) are NOT modelled this stage (see
+//    02-disqualified-persons-4946.law header) — a government-official
+//    self-dealing act is treated as an ordinary disqualified-person act by
+//    this module, which OVERSTATES what the statute reaches for the (d)(1)(F)
+//    category alone (an agreement to pay a government official money or
+//    property is self-dealing ONLY via (d)(1)(F), not via (A)-(E), and this
+//    module does not model (d)(1)(F) or (d)(2)(G)'s own exceptions) —
+//    reported as not-done for that one paragraph.
+
+use self::{
+    ExciseAct,
+    ExciseActKind,
+    IRC_S4941_A,
+    IRC_S4941_B,
+    IRC_S4941_C,
+    IRC_S4941_D,
+    IRC_S4941_E,
+    Person,
+    TaxableYear,
+    additional_tax,
+    chapter_42_foundation,
+    corrected_within_taxable_period,
+    disqualified_for_4941,
+    excise_act_kind,
+    foundation_manager,
+    initial_tax,
+    self_dealing_exception_4941d2,
+};
+
+enum SelfDealingActType {
+    SaleExchangeOrLease;
+    LendingOrExtensionOfCredit;
+    FurnishingGoodsServicesOrFacilities;
+    PaymentOfCompensation;
+    TransferOrUseOfIncomeOrAssets;
+    // Stage 3: section 4941(d)(1)(F), an agreement to pay a government official (24-*.law).
+    AgreementToPayGovernmentOfficial;
+}
+
+@source(IRC_S4941_D, coverage = partial, quote = "For purposes of this section, the term \"self-dealing\" means any direct or indirect—")
+pub relation self_dealing_act_type(a: ExciseAct, t: SelfDealingActType) kind empirical {
+    label en unofficial "case-asserted: which of section 4941(d)(1)(A)-(E)'s six categories (excluding (F), government officials — not modelled) the act falls into";
+}
+
+pub relation self_dealing_disqualified_person(a: ExciseAct, p: Person) kind empirical {
+    label en unofficial "the disqualified person on the other side of the self-dealing act";
+}
+pub relation self_dealing_foundation(a: ExciseAct, f: Person) kind empirical {
+    label en unofficial "the private foundation that is a party to the self-dealing act";
+}
+pub relation self_dealing_taxable_year(a: ExciseAct, y: TaxableYear) kind empirical {
+    label en unofficial "the taxable year used to test the foundation's private-foundation status for this act";
+}
+
+@source(IRC_S4941_D, coverage = partial, quote = "(A) sale or exchange, or leasing, of property between a private foundation and a disqualified person")
+pub relation self_dealing_act(a: ExciseAct) kind institutional {
+    label en official "section 4941(d)(1): the transaction is an act of self-dealing between a disqualified person and a private foundation";
+}
+rule SelfDealingActClassification(a: ExciseAct, t: SelfDealingActType, p: Person, f: Person, y: TaxableYear) defeasible {
+    label en official "section 4941(d)(1): a direct or indirect sale/exchange/lease, loan, furnishing of goods/services/facilities, payment of compensation, or transfer/use of income or assets between a disqualified person and a private foundation is an act of self-dealing";
+    when excise_act_kind(a, SelfDealingAct);
+    when self_dealing_act_type(a, t);
+    when self_dealing_disqualified_person(a, p);
+    when self_dealing_foundation(a, f);
+    when disqualified_for_4941(p, f, a);  // Stage 3: section 4946(a)(1)(A)-(D) or (I) (government official), 24-*.law
+    when self_dealing_taxable_year(a, y);
+    when chapter_42_foundation(f, y);  // Stage 2: private foundation or a split-interest trust (4947(a)(2)), not a 4948(b) organization
+    // Stage 3: the section 4941(d)(2) exceptions (B)-(H) and the (d)(1)(F) carve-outs.
+    unless self_dealing_exception_4941d2(a);
+    then self_dealing_act(a);
+}
+
+@source(IRC_S4941_E, coverage = partial, quote = "The term \"amount involved\" means, with respect to any act of self-dealing, the greater of the amount of money and the fair market value of the other property given or the amount of money and the fair market value of the other property received")
+pub relation self_dealing_amount_involved(a: ExciseAct, amount: Money) kind institutional {
+    label en unofficial "section 4941(e)(2): the greater of money/FMV given or received (case-asserted; see module header on the (e)(2)(A)/(B) single-value simplification)";
+}
+
+pub relation self_dealing_years_in_taxable_period(a: ExciseAct, n: Integer) kind empirical {
+    label en unofficial "case-asserted count of taxable years (or parts thereof) within the section 4941(e)(1) taxable period the initial tax multiplies by — see module header TECH_GAP on calendar-year counting";
+}
+
+@source(IRC_S4941_A, coverage = partial, quote = "other than a foundation manager acting only as such")
+pub relation self_dealing_participant_is_manager_acting_only_as_such(a: ExciseAct, p: Person) kind empirical {
+    label en unofficial "p participated in the act ONLY in a foundation-manager capacity, not as a disqualified person in their own right — excludes them from the (a)(1)/(b)(1) disqualified-person tax";
+}
+
+@source(IRC_S4941_A, coverage = partial, quote = "knowing that it is such an act")
+external judgment relation manager_knew_act_was_self_dealing(a: ExciseAct, p: Person) {
+    authority TaxCourt;
+    label en official "section 4941(a)(2): the foundation manager participated knowing that the act was an act of self-dealing";
+}
+@source(IRC_S4941_A, coverage = partial, quote = "unless such participation is not willful and is due to reasonable cause")
+external judgment relation manager_participation_not_willful_and_reasonable_cause(a: ExciseAct, p: Person) {
+    authority TaxCourt;
+    label en official "section 4941(a)(2): the foundation manager's participation was not willful and was due to reasonable cause";
+}
+
+// --- (a): initial (first-tier) taxes ---
+
+@source(IRC_S4941_A, coverage = partial, quote = "There is hereby imposed a tax on each act of self-dealing between a disqualified person and a private foundation. The rate of tax shall be equal to 10 percent of the amount involved with respect to the act of self-dealing for each year (or part thereof) in the taxable period. The tax imposed by this paragraph shall be paid by any disqualified person (other than a foundation manager acting only as such) who participates in the act of self-dealing.")
+rule InitialTaxOnDisqualifiedPerson(a: ExciseAct, p: Person, amount: Money, base: Money, n: Integer) defeasible {
+    label en official "section 4941(a)(1): 10 percent of the amount involved per year (or part thereof) in the taxable period, paid by the participating disqualified person other than a manager acting only as such";
+    when self_dealing_act(a);
+    when self_dealing_disqualified_person(a, p);
+    when self_dealing_amount_involved(a, base);
+    when self_dealing_years_in_taxable_period(a, n);
+    unless self_dealing_participant_is_manager_acting_only_as_such(a, p) and self_dealing_amount_involved(a, base) and self_dealing_years_in_taxable_period(a, n);
+    then initial_tax(a, p, base * SelfDealingInitialTaxRateDisqualifiedPerson * n);
+}
+
+@source(IRC_S4941_A, coverage = partial, quote = "there is hereby imposed on the participation of any foundation manager in an act of self-dealing between a disqualified person and a private foundation, knowing that it is such an act, a tax equal to 5 percent of the amount involved with respect to the act of self-dealing for each year (or part thereof) in the taxable period, unless such participation is not willful and is due to reasonable cause")
+rule InitialTaxOnFoundationManager(a: ExciseAct, p: Person, amount: Money, f: Person, base: Money, n: Integer) defeasible {
+    label en official "section 4941(a)(2): 5 percent of the amount involved per year (or part thereof) in the taxable period, paid by a foundation manager who knowingly participated, capped at $20,000, unless the participation was not willful and due to reasonable cause";
+    when self_dealing_act(a);
+    when foundation_manager(p, f);
+    when self_dealing_foundation(a, f);
+    when manager_knew_act_was_self_dealing(a, p);
+    when self_dealing_amount_involved(a, base);
+    when self_dealing_years_in_taxable_period(a, n);
+    unless manager_participation_not_willful_and_reasonable_cause(a, p) and foundation_manager(p, f) and self_dealing_amount_involved(a, base) and self_dealing_years_in_taxable_period(a, n);
+    then initial_tax(a, p, min(base * SelfDealingInitialTaxRateManager * n, SelfDealingManagerTaxCap));
+}
+
+// --- (b): additional (second-tier) taxes for failure to correct within the taxable period ---
+
+@source(IRC_S4941_B, coverage = partial, quote = "In any case in which an initial tax is imposed by subsection (a)(1) on an act of self-dealing by a disqualified person with a private foundation and the act is not corrected within the taxable period, there is hereby imposed a tax equal to 200 percent of the amount involved. The tax imposed by this paragraph shall be paid by any disqualified person (other than a foundation manager acting only as such) who participated in the act of self-dealing.")
+rule AdditionalTaxOnDisqualifiedPerson(a: ExciseAct, p: Person, amount: Money, base: Money) defeasible {
+    label en official "section 4941(b)(1): if the act is not corrected within the taxable period, 200 percent of the amount involved, paid by the participating disqualified person other than a manager acting only as such";
+    when self_dealing_act(a);
+    when self_dealing_disqualified_person(a, p);
+    when self_dealing_amount_involved(a, base);
+    unless self_dealing_participant_is_manager_acting_only_as_such(a, p) and self_dealing_amount_involved(a, base);
+    unless corrected_within_taxable_period(a) and self_dealing_disqualified_person(a, p) and self_dealing_amount_involved(a, base);
+    then additional_tax(a, p, base * SelfDealingAdditionalTaxRateDisqualifiedPerson);
+}
+
+@source(IRC_S4941_B, coverage = partial, quote = "In any case in which an additional tax is imposed by paragraph (1), if a foundation manager refused to agree to part or all of the correction, there is hereby imposed a tax equal to 50 percent of the amount involved. The tax imposed by this paragraph shall be paid by any foundation manager who refused to agree to part or all of the correction.")
+rule AdditionalTaxOnFoundationManagerRefusingCorrection(a: ExciseAct, p: Person, amount: Money, f: Person, base: Money) defeasible {
+    label en official "section 4941(b)(2): if a foundation manager refused to agree to part or all of the correction, 50 percent of the amount involved, capped at $20,000, paid by that manager";
+    when self_dealing_act(a);
+    when foundation_manager(p, f);
+    when self_dealing_foundation(a, f);
+    when refused_to_agree_to_correction(a, p);
+    when self_dealing_amount_involved(a, base);
+    unless corrected_within_taxable_period(a) and foundation_manager(p, f) and self_dealing_amount_involved(a, base);
+    then additional_tax(a, p, min(base * SelfDealingAdditionalTaxRateManager, SelfDealingManagerTaxCap));
+}
+
+@source(IRC_S4941_B, coverage = partial, quote = "if a foundation manager refused to agree to part or all of the correction")
+pub relation refused_to_agree_to_correction(a: ExciseAct, p: Person) kind empirical {
+    label en unofficial "case-asserted: the foundation manager refused to agree to part or all of the correction of the act";
+}
+
+// --- (c): joint-and-several liability and the manager-tax cap ---
+
+@source(IRC_S4941_C, coverage = partial, quote = "If more than one person is liable under any paragraph of subsection (a) or (b) with respect to any one act of self-dealing, all such persons shall be jointly and severally liable under such paragraph with respect to such act.")
+pub relation self_dealing_jointly_and_severally_liable(a: ExciseAct, p1: Person, p2: Person) kind institutional {
+    label en official "section 4941(c)(1): p1 and p2 are jointly and severally liable for the same paragraph's tax on the same act of self-dealing";
+}
+rule JointAndSeveralInitialTaxDisqualifiedPersons(a: ExciseAct, p1: Person, p2: Person, amount1: Money, amount2: Money) defeasible {
+    label en official "section 4941(c)(1): two disqualified persons both liable under (a)(1) for the same act are jointly and severally liable";
+    when self_dealing_act(a);
+    when initial_tax(a, p1, amount1);
+    when initial_tax(a, p2, amount2);
+    when p1 != p2;
+    then self_dealing_jointly_and_severally_liable(a, p1, p2);
+}
+
+// (c)(2)'s $20,000 cap is applied directly inside InitialTaxOnFoundationManager
+// and AdditionalTaxOnFoundationManagerRefusingCorrection above via `min(...)`
+// — no separate rule is needed for a per-act cap that both manager-tax rules
+// already respect individually. (c)(2) does NOT cap the (a)(1)/(b)(1)
+// disqualified-person taxes, and this module does not cap them.
+
+@source(IRC_S4941_E, coverage = partial, quote = "The terms \"correction\" and \"correct\" mean, with respect to any act of self-dealing, undoing the transaction to the extent possible, but in any case placing the private foundation in a financial position not worse than that in which it would be if the disqualified person were dealing under the highest fiduciary standards.")
+pub relation self_dealing_correction_meets_fiduciary_standard(a: ExciseAct) kind empirical {
+    label en unofficial "case-asserted: the correction undoes the transaction to the extent possible and leaves the foundation no worse off than under the highest fiduciary standard (section 4941(e)(3)) — this module does not itself test the fiduciary-standard comparison; `act_corrected_on` (01-excise-act-and-taxable-period.law) is asserted directly once this holds, consistent with the DECISION-0194 note that an evaluative standard already folded into an empirical case fact must be documented, not hidden";
+}

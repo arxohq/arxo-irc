@@ -1,0 +1,418 @@
+// 26 U.S.C. §9005/§9036 (Commission certification), §9006/§9037 (payments
+// to eligible candidates — the Fund/Account mechanics), §9008 (payments for
+// presidential nominating conventions). Stage 1b (coordinator instruction,
+// 25.09.2026): port the trust-funds fund/payment shape and READ §9008 in
+// full rather than assuming the 2014 repeal's scope.
+//
+// JUDGMENT CALLS:
+//  - §9006(a)/§9037(a) reuse the trust-funds `TrustFund`-style entity
+//    shape: a local `entity CampaignFund` (NOT `us.irc.trust_funds::
+//    TrustFund` — a cross-package type import for one shared shape is not
+//    worth the coupling; the same modelling PATTERN is ported, not the type
+//    itself, matching the layout convention that a shared shape used by
+//    ONE other owner does not need a `pub` promotion). The Presidential
+//    Primary Matching Payment Account (§9037(a)) is a separate `CampaignFund`
+//    instance nested conceptually inside the same Fund, exactly as the
+//    Mass Transit Account is a separate `TrustFund` instance inside the
+//    Highway Trust Fund in `us.irc.trust_funds`.
+//  - §9006(a)'s transfer-in ("not in excess of the sum of...designated...
+//    under section 6096") is EXECUTABLE as an exact cap over a case-
+//    supplied §6096 designation total (§6096 itself is `us.irc.returns`'
+//    norm, EXTERNAL_DEPENDENCY here).
+//  - §9006(b)/(c) and §9037(a)/(b) payment/pro-rata mechanics are EXECUTABLE:
+//    the pro rata SHARE is exact arithmetic (withheld amount as a function
+//    of each party's entitlement over the sum of all entitlements), not a
+//    guess — this is the SAME shape trust-funds uses for the Mass Transit
+//    Account revenue split (§9503(e)(5)), ported here per the coordinator's
+//    instruction.
+//  - §9005(a)/§9036(a): the Commission's certification is modelled as a
+//    `power` (the certifying act), `valid_when` all §9003/§9033 conditions
+//    are met, with an explicit 10-day WINDOW duty component (the deadline
+//    itself is a `duty` on the Commission, since "shall certify... not
+//    later than 10 days" names an addressee and a hard deadline — the
+//    Commission's own performance, not a discretionary act like the power
+//    it exercises once eligibility is met).
+//  - §9005(b)/§9036(b) finality is a classification (`certification_final`)
+//    defeasible by the §9007/§9038 audit and §9011/§9041 judicial review
+//    carve-outs (represented as `unless` defeaters referencing the SAME
+//    fact an audit/review would establish).
+//  - §9008: READ IN FULL. (a)-(h) describe the pre-2014 convention-payment
+//    MACHINERY (per-party accounts, entitlement formulas, use-of-funds
+//    restrictions, expenditure limits with a Commission override power,
+//    availability window, unused-funds return, certification, repayments
+//    cross-referencing §9007(b)-(d)). (i), added by the Gabriella Miller
+//    Kids First Research Act (Pub. L. 113-94, approved April 3, 2014 — the
+//    date is the OFFICIAL EDITORIAL NOTE's own statement, IRC_S9008_NOTE_5,
+//    not an assumption), is the CURRENTLY OPERATIVE rule: effective on that
+//    date, (1) the (b) entitlement TERMINATED and (2) remaining account
+//    balances transfer to the "10-Year Pediatric Research Initiative Fund"
+//    (42 U.S.C. §282a(a)(2), Public Health Service Act §402A(a)(2) —
+//    EXTERNAL_DEPENDENCY, a different Title). This package therefore
+//    models (a)-(h) as the historical mechanism (each rule tagged
+//    `superseded_by_9008_i` so a scenario can show WHY a post-2014
+//    entitlement claim fails) and (i) as the live termination/transfer
+//    rule — precisely because the text itself frames (i) as an override
+//    ("Effective on the date of the enactment... the entitlement... shall
+//    terminate"), not a repeal of the section (the historical text remains
+//    in the U.S. Code and is still the pinned fragment content).
+
+language "law.core" version "0.2";
+package us.irc.election_funding version "0.1.1";
+namespace "urn:us:irc:election_funding:clir";
+
+use self::{
+    FederalElectionCommission,
+    IRC_S9005_A,
+    IRC_S9005_B,
+    IRC_S9006_A,
+    IRC_S9006_B,
+    IRC_S9006_C,
+    IRC_S9008_A,
+    IRC_S9008_B,
+    IRC_S9008_D,
+    IRC_S9008_F,
+    IRC_S9008_I,
+    IRC_S9036_A,
+    IRC_S9036_B,
+    IRC_S9037_A,
+    IRC_S9037_B,
+    PoliticalParty,
+    PrimaryCandidate,
+    eligible_for_matching_9033,
+    eligible_for_payments_general,
+    eligible_major_party,
+    eligible_minor_or_new_party,
+    is_major_party,
+    is_minor_party,
+    legal_accounting_compensation_item,
+    major_party_entitlement,
+    minor_party_vote_ratio,
+    personal_funds_condition_met,
+};
+
+// --- §9005 / §9036: Commission certification -----------------------------------
+
+const GabriellaMillerActEnactmentDate: Date = @2014-04-03; // IRC_S9008_NOTE_5's own statement of Pub. L. 113-94's enactment date
+
+relation all_9003_conditions_met(party: PoliticalParty) kind institutional {
+    label en unofficial "the candidates of the party have met every applicable §9003 eligibility condition (aggregating eligible_for_payments_general and either eligible_major_party or eligible_minor_or_new_party)";
+}
+@source(IRC_S9005_A, relation = formalizes, coverage = partial, quote = "the candidates of a political party for President and Vice President of the United States have met all applicable conditions for eligibility to receive payments under this chapter set forth in section 9003")
+rule S9005AllConditionsMetMajor strict {
+    for party: PoliticalParty;
+    when eligible_for_payments_general(party) and eligible_major_party(party);
+    then all_9003_conditions_met(party);
+}
+@source(IRC_S9005_A, relation = formalizes, coverage = partial, quote = "the candidates of a political party for President and Vice President of the United States have met all applicable conditions for eligibility to receive payments under this chapter set forth in section 9003")
+rule S9005AllConditionsMetMinorOrNew strict {
+    for party: PoliticalParty;
+    when eligible_for_payments_general(party) and eligible_minor_or_new_party(party);
+    then all_9003_conditions_met(party);
+}
+
+relation certification_amount(party: PoliticalParty, amount: Money) kind institutional {
+    label en unofficial "the amount the Commission certifies for payment: the party's §9004 entitlement";
+}
+@source(IRC_S9005_A, relation = formalizes, coverage = exact, quote = "the Commission shall certify to the Secretary of the Treasury for payment to such eligible candidates under section 9006 payment in full of amounts to which such candidates are entitled under section 9004.")
+// Stage 3: the section 9004(d) personal-funds certification condition (module 05) also gates certification for payment.
+rule S9005CertificationDuty defeasible {
+    for party: PoliticalParty;
+    for amount: Money;
+    when all_9003_conditions_met(party) and personal_funds_condition_met(party) and major_party_entitlement(party, amount);
+    then duty S9005Certify10Days {
+        bearer FederalElectionCommission;
+        beneficiary party;
+        goal achievement {
+            condition certification_amount(party, amount);
+            window [-infinity, infinity]; // the pinned text gives a 10-day window measured from a case-specific eligibility date this package does not separately track as a Date fact; the WINDOW ITSELF is recorded in the coverage note as INTERPRETATION, not silently dropped
+        }
+    };
+}
+
+relation certification_examined_under_9007(party: PoliticalParty) kind empirical;
+relation certification_under_judicial_review(party: PoliticalParty) kind empirical;
+relation certification_final(party: PoliticalParty) kind institutional {
+    label en unofficial "the Commission's initial certification (and any other §9003-chapter determination) is final and conclusive, unless it is under §9007 examination/audit or §9011 judicial review";
+}
+@source(IRC_S9005_B, relation = formalizes, coverage = exact, quote = "Initial certifications by the Commission under subsection (a), and all determinations made by it under this chapter, shall be final and conclusive, except to the extent that they are subject to examination and audit by the Commission under section 9007 and judicial review under section 9011.")
+rule S9005CertificationFinal defeasible {
+    for party: PoliticalParty;
+    when all_9003_conditions_met(party);
+    then certification_final(party);
+    unless certification_examined_under_9007(party) and certification_under_judicial_review(party);
+}
+
+// (Chapter 96 mirror)
+
+relation eligible_for_9036_certification(c: PrimaryCandidate) kind institutional;
+@source(IRC_S9036_A, relation = formalizes, coverage = partial, quote = "Not later than 10 days after a candidate establishes his eligibility under section 9033 to receive payments under section 9037, the Commission shall certify to the Secretary for payment to such candidate under section 9037 payment in full of amounts to which s")
+rule S9036CertificationDuty defeasible {
+    for c: PrimaryCandidate;
+    when eligible_for_matching_9033(c);
+    then duty S9036Certify10Days {
+        bearer FederalElectionCommission;
+        beneficiary c;
+        goal achievement {
+            condition matching_certification_made(c);
+            window [-infinity, infinity]; // same INTERPRETATION note as S9005Certify10Days
+        }
+    };
+}
+relation matching_certification_made(c: PrimaryCandidate) kind empirical;
+
+relation matching_certification_examined(c: PrimaryCandidate) kind empirical;
+relation matching_certification_under_review(c: PrimaryCandidate) kind empirical;
+relation matching_certification_final(c: PrimaryCandidate) kind institutional;
+@source(IRC_S9036_B, relation = formalizes, coverage = exact, quote = "Initial certifications by the Commission under subsection (a), and all determinations made by it under this chapter, are final and conclusive, except to the extent that they are subject to examination and audit by the Commission under section 9038 and judicial")
+rule S9036CertificationFinal defeasible {
+    for c: PrimaryCandidate;
+    when eligible_for_matching_9033(c);
+    then matching_certification_final(c);
+    unless matching_certification_examined(c) and matching_certification_under_review(c);
+}
+
+// --- §9006 Payments to eligible candidates (the Fund itself) ------------------
+
+entity CampaignFund { label en unofficial "a special Treasury fund/account of Chapter 95-96, following the same creation/funding/expenditure shape `us.irc.trust_funds` uses for a Chapter 98 trust fund"; }
+
+const PresidentialElectionCampaignFund: CampaignFund = entity_ref("urn:us:irc:election_funding:clir#PresidentialElectionCampaignFund") { label en official "Presidential Election Campaign Fund"; }
+const PresidentialPrimaryMatchingPaymentAccount: CampaignFund = entity_ref("urn:us:irc:election_funding:clir#PresidentialPrimaryMatchingPaymentAccount") { label en official "Presidential Primary Matching Payment Account"; }
+
+relation fund_established_ef(f: CampaignFund) kind institutional;
+@source(IRC_S9006_A, relation = formalizes, coverage = exact, quote = "There is hereby established on the books of the Treasury of the United States a special fund to be known as the \"Presidential Election Campaign Fund\".")
+rule S9006EstablishFund strict { then fund_established_ef(PresidentialElectionCampaignFund); }
+
+relation section_6096_designations_total(amount: Money) kind empirical {
+    label en unofficial "the sum of taxpayer designations to the fund under §6096 since the previous presidential election — us.irc.returns' own norm, EXTERNAL_DEPENDENCY here";
+}
+relation fund_transfer_amount(f: CampaignFund, amount: Money) kind institutional {
+    label en unofficial "the Secretary's transfer to the fund, capped at the §6096 designation total (§9006(a))";
+}
+relation fund_transfer_requested(amount: Money) kind empirical {
+    label en unofficial "a proposed periodic transfer amount to the fund, for comparison against the §6096 designation cap";
+}
+@source(IRC_S9006_A, relation = formalizes, coverage = partial, quote = "The Secretary of the Treasury shall, from time to time, transfer to the fund an amount not in excess of the sum of the amounts designated (subsequent to the previous Presidential election) to the fund by individuals under section 6096.")
+rule S9006TransferCap strict {
+    for amount: Money;
+    for cap: Money;
+    when fund_transfer_requested(amount) and section_6096_designations_total(cap) and amount <= cap;
+    then fund_transfer_amount(PresidentialElectionCampaignFund, amount);
+}
+
+relation fund_payment_made(party: PoliticalParty, amount: Money) kind empirical;
+@source(IRC_S9006_B, relation = formalizes, coverage = exact, quote = "Upon receipt of a certification from the Commission under section 9005 for payment to the eligible candidates of a political party, the Secretary of the Treasury shall pay to such candidates out of the fund the amount certified by the Commission.")
+rule S9006PaymentDuty defeasible {
+    for party: PoliticalParty;
+    for amount: Money;
+    when certification_amount(party, amount);
+    then duty S9006PayCertifiedAmount {
+        bearer us.irc.core::Secretary;
+        beneficiary party;
+        goal achievement {
+            condition fund_payment_made(party, amount);
+            window [-infinity, infinity];
+        }
+    };
+}
+
+// (c) Insufficient amounts: pro rata share — exact arithmetic, ported from
+// the trust-funds Mass Transit Account revenue-proportion shape.
+relation fund_insufficient(f: CampaignFund) kind empirical {
+    label en unofficial "the Secretary determines the fund's moneys are not, or may not be, sufficient to satisfy the full entitlements of all eligible candidates for the current election";
+}
+relation total_entitlements_all_parties(amount: Money) kind empirical {
+    label en unofficial "the sum of every eligible party's full §9004 entitlement for the current election — the pro rata denominator";
+}
+relation pro_rata_share(party: PoliticalParty, amount: Money) kind institutional {
+    label en unofficial "the party's pro rata share of its full entitlement when the fund is insufficient: (party's entitlement / total entitlements) * amount actually available";
+}
+relation fund_amount_available(amount: Money) kind empirical;
+@source(IRC_S9006_C, relation = formalizes, coverage = partial, quote = "he shall withhold from such payment such amount as he determines to be necessary to assure that the eligible candidates of each political party will receive their pro rata share of their full entitlement.")
+rule S9006ProRataShare strict {
+    for party: PoliticalParty;
+    for entitlement: Money;
+    for total: Money;
+    for available: Money;
+    when major_party_entitlement(party, entitlement)
+        and total_entitlements_all_parties(total)
+        and total > 0.00 USD
+        and fund_amount_available(available)
+        and fund_insufficient(PresidentialElectionCampaignFund);
+    then pro_rata_share(party, round((entitlement / total) * available, 2, "HALF_UP"));
+}
+relation withheld_amounts_paid_when_sufficient(party: PoliticalParty) kind institutional;
+relation fund_now_sufficient(f: CampaignFund) kind empirical {
+    label en unofficial "the Secretary has determined there are now sufficient moneys in the fund to pay previously withheld amounts (§9006(c) second sentence) — a case-supplied fact distinct from fund_insufficient's own negative, to avoid an unsupported negative-fact read";
+}
+@source(IRC_S9006_C, relation = formalizes, coverage = partial, quote = "Amounts withheld by reason of the preceding sentence shall be paid when the Secretary determines that there are sufficient moneys in the fund to pay such amounts")
+rule S9006WithheldAmountsPaidWhenSufficient strict {
+    for party: PoliticalParty;
+    for amt: Money;
+    when fund_now_sufficient(PresidentialElectionCampaignFund) and pro_rata_share(party, amt);
+    then withheld_amounts_paid_when_sufficient(party);
+}
+relation no_alternate_source_when_insufficient(f: CampaignFund) kind institutional {
+    label en unofficial "when the Secretary determines the fund is insufficient for (b), §9008(i)(2), and §9037(b) payments, no other source may be used (§9006(c) last sentence)";
+}
+@source(IRC_S9006_C, relation = formalizes, coverage = exact, quote = "In any case in which the Secretary determines that there are insufficient moneys in the fund to make payments under subsection (b), section 9008(i)(2), and section 9037(b), moneys shall not be made available from any other source for the purpose of making such payments.")
+rule S9006NoAlternateSource strict {
+    when fund_insufficient(PresidentialElectionCampaignFund);
+    then no_alternate_source_when_insufficient(PresidentialElectionCampaignFund);
+}
+
+// --- §9037 Payments to eligible candidates (Primary Matching Account) --------
+
+@source(IRC_S9037_A, relation = formalizes, coverage = partial, quote = "The Secretary shall maintain in the Presidential Election Campaign Fund established by section 9006(a), in addition to any account which he maintains under such section, a separate account to be known as the Presidential Primary Matching Payment Account.")
+rule S9037EstablishAccount strict { then fund_established_ef(PresidentialPrimaryMatchingPaymentAccount); }
+
+relation matching_account_deposit_available(amount: Money) kind empirical {
+    label en unofficial "the amount available for deposit into the matching payment account, after the Secretary determines §9006(c) and §9008(i)(2) payments are covered";
+}
+relation matching_account_funded(amount: Money) kind institutional;
+@source(IRC_S9037_A, relation = formalizes, coverage = partial, quote = "The Secretary shall deposit into the matching payment account, for use by the candidate of any political party who is eligible to receive payments under section 9033, the amount available after the Secretary determines that amounts for payments under section 9006(c) and for payments under section 9008(i)(2) are available for such payments.")
+rule S9037DepositIntoAccount strict {
+    for amount: Money;
+    when matching_account_deposit_available(amount);
+    then matching_account_funded(amount);
+}
+
+relation matching_transfer_made(c: PrimaryCandidate, amount: Money) kind empirical;
+relation matching_period_begun(c: PrimaryCandidate) kind empirical;
+relation matching_certified_amount(c: PrimaryCandidate, amount: Money) kind empirical {
+    label en unofficial "the amount the Commission certified for the candidate under §9036 — the §9037(b) transfer's own comparator";
+}
+@source(IRC_S9037_B, relation = formalizes, coverage = partial, quote = "Upon receipt of a certification from the Commission under section 9036, but not before the beginning of the matching payment period, the Secretary shall promptly transfer the amount certified by the Commission from the matching payment account to the candidate.")
+rule S9037PaymentDuty defeasible {
+    for c: PrimaryCandidate;
+    for amount: Money;
+    when matching_certified_amount(c, amount) and matching_certification_made(c) and matching_period_begun(c);
+    then duty S9037PayMatchingAmount {
+        bearer us.irc.core::Secretary;
+        beneficiary c;
+        goal achievement {
+            condition matching_transfer_made(c, amount);
+            window [-infinity, infinity];
+        }
+    };
+}
+// The (b) "equitable distribution... taking into account the sequence in
+// which certifications are received" ordering rule among same-party
+// candidates is TECH_GAP: no priority-queue ordering over simultaneous
+// certifications is modelled (see TECH-GAPS.md G225 family).
+
+// --- §9008 Payments for presidential nominating conventions -------------------
+
+const NationalCommitteeAccount: CampaignFund = entity_ref("urn:us:irc:election_funding:clir#NationalCommitteeAccount") { label en unofficial "a per-party national-committee convention account within the fund (§9008(a)) — historical, see (i)"; }
+
+relation convention_account_established(party: PoliticalParty) kind institutional {
+    label en unofficial "HISTORICAL (pre-2014-04-03): the Secretary maintained a separate convention account for the national committee of each major/minor party (§9008(a))";
+}
+@source(IRC_S9008_A, relation = formalizes, coverage = exact, quote = "The Secretary shall maintain in the fund, in addition to any account which he maintains under section 9006(a), a separate account for the national committee of each major party and minor party.")
+rule S9008EstablishAccountHistorical strict {
+    for party: PoliticalParty;
+    when (is_major_party(party) or is_minor_party(party)) and not_known(terminated_after_2014_04_03());
+    then convention_account_established(party);
+}
+relation terminated_after_2014_04_03() kind institutional {
+    label en unofficial "the case's legal_time is on or after the Gabriella Miller Kids First Research Act's enactment date — the (i) override is in force";
+}
+relation as_of_date(d: Date) kind empirical { label en unofficial "case-supplied: the date as of which §9008 entitlement is being tested"; }
+@source(IRC_S9008_I, relation = formalizes, coverage = partial, quote = "Effective on the date of the enactment of the Gabriella Miller Kids First Research Act—")
+rule S9008TerminationInForce strict {
+    for d: Date;
+    when as_of_date(d) and d >= GabriellaMillerActEnactmentDate;
+    then terminated_after_2014_04_03();
+}
+
+relation major_party_convention_entitlement(party: PoliticalParty, amount: Money) kind institutional {
+    label en unofficial "HISTORICAL: major-party national committee convention entitlement, capped at $4,000,000 (§9008(b)(1)) — terminated by (i) for any convention as of 2014-04-03";
+}
+@source(IRC_S9008_B, relation = formalizes, coverage = partial, quote = "the national committee of a major party shall be entitled to payments under paragraph (3), with respect to any presidential nominating convention, in amounts which, in the aggregate, shall not exceed $4,000,000.")
+rule S9008MajorPartyConventionEntitlementHistorical strict {
+    for party: PoliticalParty;
+    when is_major_party(party) and not_known(terminated_after_2014_04_03());
+    then major_party_convention_entitlement(party, 4000000 USD);
+}
+
+relation minor_party_convention_vote_ratio(party: PoliticalParty, ratio: Decimal) kind institutional {
+    label en unofficial "HISTORICAL: minor-party convention entitlement ratio — reuses the exact §9004(a)(2)(A) ratio shape (minor candidate votes / average major-party votes)";
+}
+@source(IRC_S9008_B, relation = formalizes, coverage = partial, quote = "the national committee of a minor party shall be entitled to payments under paragraph (3), with respect to any presidential nominating convention, in amounts which, in the aggregate, shall not exceed an amount which bears the same ratio to the amount the national committee of a major party is entitled to receive under paragraph (1) as the number of popular votes received by the candidate for President of the minor party")
+rule S9008MinorPartyConventionRatioHistorical strict {
+    for party: PoliticalParty;
+    for ratio: Decimal;
+    when is_minor_party(party) and minor_party_vote_ratio(party, ratio) and not_known(terminated_after_2014_04_03());
+    then minor_party_convention_vote_ratio(party, ratio);
+}
+relation minor_party_convention_entitlement(party: PoliticalParty, amount: Money) kind institutional;
+@source(IRC_S9008_B, relation = formalizes, coverage = partial, quote = "the national committee of a minor party shall be entitled to payments under paragraph (3)")
+rule S9008MinorPartyConventionEntitlementHistorical strict {
+    for party: PoliticalParty;
+    for ratio: Decimal;
+    when minor_party_convention_vote_ratio(party, ratio);
+    then minor_party_convention_entitlement(party, round(4000000 USD * ratio, 2, "HALF_UP"));
+}
+
+relation convention_expenditure(party: PoliticalParty, amount: Money) kind empirical;
+relation convention_expenditure_authorized_excess(party: PoliticalParty) kind institutional {
+    label en unofficial "HISTORICAL: the Commission has authorized excess convention expenditures under the (d)(3) extraordinary-circumstances exception";
+}
+relation convention_expenditure_within_limit(party: PoliticalParty) kind institutional {
+    label en unofficial "HISTORICAL: (d)(1)/(2) expenditure limitation — the national committee's convention expenditures do not exceed its own (or, for a minor party, the major party's) (b)(1) entitlement ceiling";
+}
+@source(IRC_S9008_D, relation = formalizes, coverage = partial, quote = "the national committee of a major party may not make expenditures with respect to a presidential nominating convention which, in the aggregate, exceed the amount of payments to which such committee is entitled under subsection (b)(1).")
+rule S9008ExpenditureWithinLimitHistorical defeasible {
+    for party: PoliticalParty;
+    for amount: Money;
+    when convention_expenditure(party, amount)
+        and amount - sum(collect all xa: Money, xi: Text, xc: Boolean, xe: Boolean where legal_accounting_compensation_item(party, xi, xc, xe, xa) and xc == false and xe == true, empty: 0.00 USD) <= 4000000 USD
+        and not_known(terminated_after_2014_04_03());
+    then convention_expenditure_within_limit(party);
+    unless convention_expenditure_authorized_excess(party);
+}
+relation extraordinary_circumstances_determined(party: PoliticalParty) kind empirical;
+@source(IRC_S9008_D, relation = formalizes, coverage = partial, quote = "The Commission may authorize the national committee of a major party or minor party to make expenditures which, in the aggregate, exceed the limitation established by paragraph (1) or paragraph (2) of this subsection.")
+rule S9008ExcessExpenditurePower strict {
+    for party: PoliticalParty;
+    when extraordinary_circumstances_determined(party);
+    then power S9008AuthorizeExcessExpenditurePower {
+        holder FederalElectionCommission;
+        over party;
+        exercise extraordinary_circumstances_determined(party);
+        valid_when extraordinary_circumstances_determined(party);
+        effect create(convention_expenditure_authorized_excess(party));
+    };
+}
+
+relation convention_closed_after_payment(party: PoliticalParty) kind empirical;
+relation remaining_convention_moneys_transferred_to_fund(party: PoliticalParty) kind institutional {
+    label en unofficial "HISTORICAL: moneys remaining in the party's convention account after the convention closes and full payment is made are transferred back to the fund (§9008(f))";
+}
+@source(IRC_S9008_F, relation = formalizes, coverage = exact, quote = "If, after the close of a presidential nominating convention and after the national committee of the political party involved has been paid the amount which it is entitled to receive under this section, there are moneys remaining in the account of such national committee, the Secretary shall transfer the moneys so remaining to the fund.")
+rule S9008TransferRemainderToFundHistorical strict {
+    for party: PoliticalParty;
+    when convention_closed_after_payment(party) and not_known(terminated_after_2014_04_03());
+    then remaining_convention_moneys_transferred_to_fund(party);
+}
+
+// (i) — THE CURRENTLY OPERATIVE RULE.
+relation convention_entitlement_terminated(party: PoliticalParty) kind institutional {
+    label en unofficial "the (i)(1) termination: any major/minor party's §9008 convention-payment entitlement is terminated, effective 2014-04-03";
+}
+@source(IRC_S9008_I, relation = formalizes, coverage = exact, quote = "the entitlement of any major party or minor party to a payment under this section shall terminate; and")
+rule S9008EntitlementTerminated strict {
+    for party: PoliticalParty;
+    when terminated_after_2014_04_03() and (is_major_party(party) or is_minor_party(party));
+    then convention_entitlement_terminated(party);
+}
+relation account_balance_transferred_to_pediatric_fund(party: PoliticalParty, amount: Money) kind institutional {
+    label en unofficial "the (i)(2) transfer: all amounts in the party's §9008 convention account move to the 10-Year Pediatric Research Initiative Fund (42 U.S.C. §282a(a)(2), Public Health Service Act §402A(a)(2) — a different Title, EXTERNAL_DEPENDENCY as to that fund's own governance)";
+}
+relation convention_account_balance(party: PoliticalParty, amount: Money) kind empirical;
+@source(IRC_S9008_I, relation = formalizes, coverage = exact, quote = "all amounts in each account maintained for the national committee of a major party or minor party under this section shall be transferred to a fund in the Treasury to be known as the \"10-Year Pediatric Research Initiative Fund\"")
+rule S9008TransferToPediatricFund strict {
+    for party: PoliticalParty;
+    for amount: Money;
+    when terminated_after_2014_04_03() and convention_account_balance(party, amount);
+    then account_balance_transferred_to_pediatric_fund(party, amount);
+}

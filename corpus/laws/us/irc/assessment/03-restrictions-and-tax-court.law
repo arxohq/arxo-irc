@@ -1,0 +1,718 @@
+// §6213 (restrictions applicable to deficiencies; petition to Tax Court),
+// §6214 (determinations by Tax Court), §6215 (assessment of deficiency
+// found by Tax Court).
+//
+// METHOD NOTE: the petition window is 90 days (150 if the notice is
+// addressed to a person outside the United States) after the MAILING date
+// (never the document date or the received date), "not counting Saturday,
+// Sunday, or a legal holiday in the District of Columbia as the last day" —
+// computed here by feeding the raw `add_calendar_period` result directly
+// into `us.irc.administration::last_day_rolled` (imported, real `pub`
+// symbol), matching `returns`' idiom of nesting builtin calls in argument
+// position rather than binding an intermediate `==` variable (§190 range
+// restriction, per `returns`' own method note). §6213(a)'s restriction is
+// modeled as an `immunity` of the taxpayer with `protected_effect` the
+// assessment (`us.irc.core::assessment_of`), per the task's framing — the
+// window bound of the immunity IS the petition-window/finality date,
+// letting the engine's own legal-time-vs-window evaluation decide whether
+// the restriction is currently active, rather than this package comparing
+// against "now" itself (there is no such body-level comparator; `window`
+// on a position is the correct surface for it, `a3-surfaces.md` §2).
+//
+// JUDGMENT CALLS AND GAPS (see report):
+//  - The FIRST clause of §6213(a) ("no assessment ... shall be made ...
+//    until such notice has been mailed to the taxpayer") — i.e. the bar
+//    that applies even before any notice is mailed at all whenever the
+//    Secretary is proceeding by the deficiency route — is NOT modeled as a
+//    separate immunity: this package has no clean positive test for "the
+//    Secretary is pursuing the deficiency procedure but has not yet mailed
+//    a notice" without inventing a case fact the statute does not itself
+//    name. Only the two clauses this stage's task text calls out (the
+//    90/150-day window and the pending-Tax-Court-proceeding period) are
+//    modeled. Flagged as INTERPRETATION/scope limitation, not silently
+//    treated as complete.
+//  - §6213(a)'s named exceptions ("except as otherwise provided in section
+//    6851, 6852, or 6861") are typed institutional dependency contracts
+//    (termination/jeopardy assessments, `collection`'s own norm, not yet
+//    formalized) rather than invented rules.
+//  - The Tax Court's injunction power (§6213(a), third sentence) and its
+//    jurisdictional limit (fourth sentence) are modeled as a narrow power
+//    of the Tax Court whose `valid_when` is exactly "a timely petition for
+//    redetermination has been filed", per the text's own restriction.
+//  - §6213(b)(1)'s math-error notice is modeled as producing a case fact
+//    (`math_error_notice_given`) that makes `notice_of_deficiency_valid`
+//    NOT hold for that notice (an `unless` defeater on the ordinary
+//    sufficiency rules of `02-deficiency-and-notice.law` would have
+//    required editing that file's already-`defeasible` rules a second
+//    time for a different concern; instead this module derives
+//    `assessment_restricted` directly without going through
+//    `notice_of_deficiency_valid` for the math-error branch, since (b)(1)
+//    says explicitly the math-error notice "shall not be considered as a
+//    notice of deficiency").
+//  - §6213(b)(2)(A)'s 60-day abatement-request power is modeled with
+//    `valid_when` excluding an assessment made under
+//    `S6201AssessErroneousPrepaymentCreditPower` (§6201(a)(3)'s own
+//    carve-out from this abatement right).
+//  - §6213(b)(5) (assessments under §6201(a)(4), restitution) is modeled by
+//    excluding `S6201AssessRestitution`-triggered assessments from the
+//    §6213(a) petition-window immunity (a restitution assessment is never
+//    a "deficiency" assessment to begin with under §6211, so this is
+//    largely declaratory; modeled anyway since the task's brief lists it).
+//  - §6213(e)/(f) (private-foundation self-dealing excise suspension,
+//    bankruptcy-case suspension of the petition window) are modeled as
+//    typed institutional dependency contracts / narrow rules using
+//    `package.law`'s `bankruptcy_case_pending`/
+//    `debtor_prohibited_from_tax_court_petition` contracts, not computed
+//    from title 11 itself.
+//  - §6213(g)'s "return"/"mathematical or clerical error" definitions are
+//    modeled as an enum with one value per (g)(2)(A)-(V) item, each
+//    anchored to the same subsection-level fragment (the pinned text does
+//    not give per-paragraph fragment ids, per `AGENT-BRIEF.md`); the enum
+//    membership itself is EXECUTABLE (a case asserts which kind of
+//    mathematical-or-clerical error a given notice is based on), the
+//    detailed substantive test behind each of the 24 items (e.g. whether a
+//    specific credit's statutory limit was exceeded) is each credit
+//    section's OWN norm, not re-derived here.
+//  - §6214(b)/(c)'s equitable-recoupment/other-period consideration and the
+//    "second tier tax correction" determination are NON_NORMATIVE for this
+//    stage: they describe HOW the Tax Court reasons internally, not a
+//    testable legal position a case can be asked about from outside the
+//    Court.
+//  - §6214(e) and §6215(b) are pure cross-references — NON_NORMATIVE here.
+
+language "law.core" version "0.2";
+package us.irc.assessment version "0.1.1";
+namespace "urn:us:irc:assessment:clir";
+
+use self::{
+    Assessment,
+    IRC_S6213_A,
+    IRC_S6213_B,
+    IRC_S6213_C,
+    IRC_S6213_D,
+    IRC_S6213_F,
+    IRC_S6214_A,
+    IRC_S6214_D,
+    IRC_S6215_A,
+    Notice,
+    Organ,
+    Person,
+    Proceeding,
+    S6201AssessTax,
+    Secretary,
+    TaxCourt,
+    TaxKind,
+    TaxableYear,
+    debtor_prohibited_from_tax_court_petition,
+    decision_final_on,
+    deficiency_amount,
+    exists_assessment_of,
+    notice_of_deficiency_valid,
+    notice_rescinded,
+    restitution_ordered,
+    secretary_makes_assessment,
+};
+
+// ============================================================================
+// §6213(a) — Petition window and the restriction on assessment
+// ============================================================================
+
+pub relation deficiency_notice_for(n: Notice, p: Person, y: TaxableYear, k: TaxKind) kind empirical {
+    label en unofficial "bridges a `Notice` to the taxable year/tax kind it determines a deficiency for (core's `notice_of` does not carry these)";
+}
+pub relation addressed_outside_united_states(n: Notice) kind empirical {
+    label en official "the notice is addressed to a person outside the United States";
+}
+
+pub relation petition_window_deadline(n: Notice, p: Person, deadline: Date) kind institutional {
+    label en unofficial "the last day (after §7503 weekend/DC-holiday rollover) on which the taxpayer may file a petition with the Tax Court";
+}
+@source(IRC_S6213_A, relation = formalizes, coverage = exact, quote = "Within 90 days, or 150 days if the notice is addressed to a person outside the United States, after the notice of deficiency authorized in section 6212 is mailed (not counting Saturday, Sunday, or a legal holiday in the District of Columbia as the last day), the taxpayer may file a petition with the Tax Court for a redetermination of the deficiency.")
+pub rule S6213PetitionWindowDeadlineDomestic defeasible {
+    for n: Notice;
+    for p: Person;
+    for mailedOn: Date;
+    for deadline: Date;
+    when notice_of_deficiency_valid(n, p)
+        and us.irc.core::mailed_on(n, mailedOn)
+        and not_known(addressed_outside_united_states(n))
+        and us.irc.administration::last_day_rolled(add_calendar_period(mailedOn, 90 calendar_day), deadline);
+    then petition_window_deadline(n, p, deadline);
+}
+@source(IRC_S6213_A, relation = formalizes, coverage = exact, quote = "Within 90 days, or 150 days if the notice is addressed to a person outside the United States, after the notice of deficiency authorized in section 6212 is mailed (not counting Saturday, Sunday, or a legal holiday in the District of Columbia as the last day), the taxpayer may file a petition with the Tax Court for a redetermination of the deficiency.")
+pub rule S6213PetitionWindowDeadlineAbroad defeasible {
+    for n: Notice;
+    for p: Person;
+    for mailedOn: Date;
+    for deadline: Date;
+    when notice_of_deficiency_valid(n, p)
+        and addressed_outside_united_states(n)
+        and us.irc.core::mailed_on(n, mailedOn)
+        and us.irc.administration::last_day_rolled(add_calendar_period(mailedOn, 150 calendar_day), deadline);
+    then petition_window_deadline(n, p, deadline);
+}
+
+pub relation secretary_specifies_petition_deadline_in_notice(n: Notice, d: Date) kind empirical {
+    label en unofficial "the last date specified for filing a petition by the Secretary in the notice of deficiency (§6213(a), last sentence)";
+}
+pub relation petition_filed_timely(pr: Proceeding, n: Notice, p: Person) kind institutional {
+    label en official "any petition filed with the Tax Court on or before the last date specified for filing such petition by the Secretary in the notice of deficiency shall be treated as timely filed";
+}
+@source(IRC_S6213_A, relation = formalizes, coverage = contextual, quote = "the taxpayer may file a petition with the Tax Court for a redetermination of the deficiency.")
+pub rule S6213PetitionTimelyWithinComputedWindow defeasible {
+    for pr: Proceeding;
+    for n: Notice;
+    for p: Person;
+    for filedOn: Date;
+    for deadline: Date;
+    when us.irc.core::proceeding_filed_on(pr, filedOn)
+        and petition_window_deadline(n, p, deadline)
+        and filedOn <= deadline
+        and not_known(notice_rescinded(n, p));
+    then petition_filed_timely(pr, n, p);
+}
+@source(IRC_S6213_A, relation = formalizes, coverage = exact, quote = "Any petition filed with the Tax Court on or before the last date specified for filing such petition by the Secretary in the notice of deficiency shall be treated as timely filed.")
+pub rule S6213PetitionTimelyBySecretarySpecifiedDate defeasible {
+    for pr: Proceeding;
+    for n: Notice;
+    for p: Person;
+    for filedOn: Date;
+    for secDeadline: Date;
+    when us.irc.core::proceeding_filed_on(pr, filedOn)
+        and secretary_specifies_petition_deadline_in_notice(n, secDeadline)
+        and notice_of_deficiency_valid(n, p)
+        and filedOn <= secDeadline;
+    then petition_filed_timely(pr, n, p);
+}
+
+// --- The restriction itself: an immunity of the taxpayer --------------------
+
+pub relation assessment_restricted(p: Person, y: TaxableYear, k: TaxKind) kind institutional {
+    label en unofficial "assessment of a deficiency of this tax kind/year is currently restricted by §6213(a) (petition window open, or a timely petition pending and the Tax Court's decision not yet final)";
+}
+pub relation assessed_under_restitution_power(a: Assessment) kind empirical {
+    label en unofficial "the assessment is made under §6201(a)(4) (restitution), which §6213(b)(5) excludes from the deficiency-notice restriction";
+}
+@source(IRC_S6213_A, relation = formalizes, coverage = exact, quote = "Except as otherwise provided in section 6851, 6852, or 6861 no assessment of a deficiency in respect of any tax imposed by subtitle A, or B, chapter 41, 42, 43, or 44 and no levy or proceeding in court for its collection shall be made, begun, or prosecuted until such notice has been mailed to the taxpayer, nor until the expiration of such 90-day or 150-day period, as the case may be, nor, if a petition has been filed with the Tax Court, until the decision of the Tax Court has become final.")
+pub rule S6213RestrictedDuringPetitionWindow strict {
+    for a: Assessment;
+    for n: Notice;
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for amount: Money;
+    for mailedOn: Date;
+    for deadline: Date;
+    when notice_of_deficiency_valid(n, p)
+        and deficiency_notice_for(n, p, y, k)
+        and us.irc.core::mailed_on(n, mailedOn)
+        and petition_window_deadline(n, p, deadline)
+        and secretary_makes_assessment(a, p, y, k, amount)
+        and not_known(assessed_under_restitution_power(a));
+    then immunity S6213PetitionWindowImmunity {
+        holder p;
+        protected_effect us.irc.core::assessment_of(a, p, y, k, amount);
+        window [mailedOn, deadline];
+    };
+}
+@source(IRC_S6213_A, relation = formalizes, coverage = exact, quote = "nor, if a petition has been filed with the Tax Court, until the decision of the Tax Court has become final.")
+pub rule S6213RestrictedPendingTaxCourtDecisionKnownFinality strict {
+    for a: Assessment;
+    for pr: Proceeding;
+    for n: Notice;
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for amount: Money;
+    for mailedOn: Date;
+    for finalOn: Date;
+    when petition_filed_timely(pr, n, p)
+        and deficiency_notice_for(n, p, y, k)
+        and us.irc.core::mailed_on(n, mailedOn)
+        and decision_final_on(pr, finalOn)
+        and secretary_makes_assessment(a, p, y, k, amount)
+        and not_known(assessed_under_restitution_power(a));
+    then immunity S6213PendingTaxCourtDecisionImmunityBounded {
+        holder p;
+        protected_effect us.irc.core::assessment_of(a, p, y, k, amount);
+        window [mailedOn, finalOn];
+    };
+}
+@source(IRC_S6213_A, relation = formalizes, coverage = exact, quote = "nor, if a petition has been filed with the Tax Court, until the decision of the Tax Court has become final.")
+pub rule S6213RestrictedPendingTaxCourtDecisionOpenEnded defeasible {
+    for a: Assessment;
+    for pr: Proceeding;
+    for n: Notice;
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for amount: Money;
+    for mailedOn: Date;
+    when petition_filed_timely(pr, n, p)
+        and deficiency_notice_for(n, p, y, k)
+        and us.irc.core::mailed_on(n, mailedOn)
+        and secretary_makes_assessment(a, p, y, k, amount)
+        and not_known(assessed_under_restitution_power(a))
+        and not_known(exists_decision_final_date(pr));
+    then immunity S6213PendingTaxCourtDecisionImmunityOpenEnded {
+        holder p;
+        protected_effect us.irc.core::assessment_of(a, p, y, k, amount);
+        window [mailedOn, infinity);
+    };
+}
+relation exists_decision_final_date(pr: Proceeding) kind institutional;
+rule ExistsDecisionFinalDate strict {
+    for pr: Proceeding;
+    for finalOn: Date;
+    when decision_final_on(pr, finalOn);
+    then exists_decision_final_date(pr);
+}
+priority PetitionWindowImmunityOutranksAssessPower {
+    prefer S6213RestrictedDuringPetitionWindow over S6201AssessTax;
+    reason lex_specialis;
+}
+priority PendingDecisionKnownFinalityImmunityOutranksAssessPower {
+    prefer S6213RestrictedPendingTaxCourtDecisionKnownFinality over S6201AssessTax;
+    reason lex_specialis;
+}
+priority PendingDecisionOpenEndedImmunityOutranksAssessPower {
+    prefer S6213RestrictedPendingTaxCourtDecisionOpenEnded over S6201AssessTax;
+    reason lex_specialis;
+}
+
+// --- Injunction power of the Tax Court (and other proper courts) ----------
+
+pub relation secretary_attempts_assessment_during_restriction(p: Person, y: TaxableYear, k: TaxKind) kind empirical {
+    label en unofficial "positive anchor (§190): the Secretary attempts, begins, or prosecutes an assessment/levy/collection proceeding during the §6213(a) restriction";
+}
+pub relation court_enjoins_assessment(court: Organ, p: Person, y: TaxableYear, k: TaxKind) kind empirical;
+pub relation court_orders_refund(court: Organ, p: Person, y: TaxableYear, k: TaxKind, amount: Money) kind empirical;
+@source(IRC_S6213_A, relation = formalizes, coverage = exact, quote = "Notwithstanding the provisions of section 7421(a), the making of such assessment or the beginning of such proceeding or levy during the time such prohibition is in force may be enjoined by a proceeding in the proper court, including the Tax Court, and a refund may be ordered by such court of any amount collected within the period during which the Secretary is prohibited from collecting by levy or through a proceeding in court under the provisions of this subsection.")
+pub rule S6213TaxCourtInjunction strict {
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for pr: Proceeding;
+    for n: Notice;
+    when petition_filed_timely(pr, n, p)
+        and secretary_attempts_assessment_during_restriction(p, y, k);
+    then power S6213TaxCourtInjunctionPower {
+        holder TaxCourt;
+        over Secretary;
+        exercise court_enjoins_assessment(TaxCourt, p, y, k);
+        valid_when petition_filed_timely(pr, n, p);
+        effect create(assessment_enjoined(p, y, k));
+    };
+}
+pub relation assessment_enjoined(p: Person, y: TaxableYear, k: TaxKind) kind institutional;
+@source(IRC_S6213_A, relation = formalizes, coverage = exact, quote = "The Tax Court shall have no jurisdiction to enjoin any action or proceeding or order any refund under this subsection unless a timely petition for a redetermination of the deficiency has been filed and then only in respect of the deficiency that is the subject of such petition.")
+rule S6213TaxCourtInjunctionJurisdictionLimited strict {
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for n: Notice;
+    when deficiency_notice_for(n, p, y, k) and not_known(exists_petition(n, p));
+    then immunity S6213NoInjunctionWithoutTimelyPetitionImmunity {
+        holder p;
+        protected_effect assessment_enjoined(p, y, k);
+        window [-infinity, infinity];
+    };
+}
+
+// ============================================================================
+// §6213(b) — Exceptions
+// ============================================================================
+
+// --- (b)(1) — Mathematical or clerical error --------------------------------
+
+pub enum MathOrClericalErrorKind {
+    ArithmeticError;                       // (g)(2)(A)
+    IncorrectTableUse;                     // (g)(2)(B)
+    InconsistentEntry;                     // (g)(2)(C)
+    OmittedSubstantiatingInformation;      // (g)(2)(D)
+    DeductionOrCreditExceedsStatutoryLimit; // (g)(2)(E)
+    OmittedEarnedIncomeCreditTin;          // (g)(2)(F)
+    EarnedIncomeCreditOnUnpaidSelfEmploymentTax; // (g)(2)(G)
+    OmittedDependentCareOrExemptionTin;    // (g)(2)(H)
+    OmittedChildTaxCreditTin;              // (g)(2)(I)
+    OmittedEducationCreditTin;             // (g)(2)(J)
+    ImproperPriorEarnedIncomeCreditClaim;  // (g)(2)(K)
+    MismatchedCreditAgeTin;                // (g)(2)(L)
+    NoncustodialParentEarnedIncomeCreditClaim; // (g)(2)(M)
+    OmittedCreditRecaptureIncrease;        // (g)(2)(N)
+    ExpiredOrRevokedItin;                  // (g)(2)(O)
+    OmittedChildTaxCreditInformation;      // (g)(2)(P)
+    OmittedAmericanOpportunityCreditInformation; // (g)(2)(Q)
+    OmittedHomeEnergyAuditInformation;     // (g)(2)(R)
+    OmittedEnergyPropertyProductId;        // (g)(2)(S)
+    OmittedCleanVehicleVin;                // (g)(2)(T)
+    OmittedPreviouslyOwnedCleanVehicleVin; // (g)(2)(U)
+    OmittedCommercialCleanVehicleVin;      // (g)(2)(V)
+    OmittedSeniorDeductionSsn;             // (g)(2)(W), Pub. L. 119-21 section 70103(b): SSN required under section 151(d)(5)(C)
+    OmittedDischargeExclusionSsn;          // (g)(2)(X), Pub. L. 119-21 section 70119(b): SSN required under section 108(f)(5)(C)
+    OmittedTipsDeductionSsn;               // (g)(2)(Y), Pub. L. 119-21 section 70201(c): SSN required under section 224(e)
+    OmittedOvertimeDeductionSsn;           // (g)(2)(Z), Pub. L. 119-21 section 70202(d): SSN required under section 225(d)
+    OmittedTrumpAccountSsn;                // (g)(2)(AA), Pub. L. 119-21 section 70204: SSN required under section 6434
+    label en unofficial "the §6213(g)(2) enumerated categories of mathematical or clerical error";
+}
+pub relation math_error_notice_given(n: Notice, p: Person, kind: MathOrClericalErrorKind, correctAmount: Money, mailedOn: Date) kind empirical {
+    label en official "the taxpayer is notified that, on account of a mathematical or clerical error appearing on the return, an amount of tax in excess of that shown on the return is due";
+}
+pub relation math_error_notice_sets_forth_error_and_explanation(n: Notice) kind empirical;
+pub relation math_error_notice_valid(n: Notice, p: Person) kind institutional {
+    label en unofficial "the §6213(b)(1) math-error notice complies with the last-sentence requirement (error alleged and explained)";
+}
+@source(IRC_S6213_B, relation = formalizes, coverage = exact, quote = "Each notice under this paragraph shall set forth the error alleged and an explanation thereof.")
+rule S6213MathErrorNoticeValid strict {
+    label en official "each notice under this paragraph shall set forth the error alleged and an explanation thereof (notices sent on or before 2026-11-25; later notices: 14-public-law-119-revisions.law, Pub. L. 119-39 section 2)";
+    for n: Notice;
+    for p: Person;
+    for kind: MathOrClericalErrorKind;
+    for amount: Money;
+    for mailedOn: Date;
+    when math_error_notice_given(n, p, kind, amount, mailedOn)
+        and math_error_notice_sets_forth_error_and_explanation(n)
+        and mailedOn <= @2026-11-25;
+    then math_error_notice_valid(n, p);
+}
+@source(IRC_S6213_B, relation = formalizes, coverage = exact, quote = "such notice shall not be considered as a notice of deficiency for the purposes of subsection (a) (prohibiting assessment and collection until notice of the deficiency has been mailed), or of section 6212(c)(1) (restricting further deficiency letters), or of section 6512(a) (prohibiting credits or refunds after petition to the Tax Court), and the taxpayer shall have no right to file a petition with the Tax Court based on such notice, nor shall such assessment or collection be prohibited by the provisions of subsection (a) of this section.")
+pub rule S6213MathErrorAssessmentNotRestricted strict {
+    for n: Notice;
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for kind: MathOrClericalErrorKind;
+    for amount: Money;
+    for mailedOn: Date;
+    when math_error_notice_valid(n, p)
+        and deficiency_notice_for(n, p, y, k)
+        and math_error_notice_given(n, p, kind, amount, mailedOn);
+    then math_error_assessment_permitted(p, y, k);
+}
+pub relation math_error_assessment_permitted(p: Person, y: TaxableYear, k: TaxKind) kind institutional;
+
+// --- (b)(2)(A) — 60-day abatement request (power of the taxpayer) ---------
+
+pub relation requests_math_error_abatement(p: Person, n: Notice, requestedOn: Date) kind empirical;
+pub relation math_error_abatement_within_60_days(p: Person, n: Notice, requestedOn: Date, mailedOn: Date) kind institutional {
+    label en unofficial "single-atom `valid_when` helper (§201): the abatement request is filed within 60 days after the math-error notice was sent";
+}
+@source(IRC_S6213_B, relation = formalizes, coverage = exact, quote = "Notwithstanding section 6404(b), a taxpayer may file with the Secretary within 60 days after notice is sent under paragraph (1) a request for an abatement of any assessment specified in such notice")
+rule S6213MathErrorAbatementWithin60Days strict {
+    for p: Person;
+    for n: Notice;
+    for requestedOn: Date;
+    for mailedOn: Date;
+    for kind: MathOrClericalErrorKind;
+    for amount: Money;
+    when requests_math_error_abatement(p, n, requestedOn)
+        and math_error_notice_given(n, p, kind, amount, mailedOn)
+        and requestedOn <= add_calendar_period(mailedOn, 60 calendar_day)
+        and not_known(assessed_under_erroneous_prepayment_credit_power(n));
+    then math_error_abatement_within_60_days(p, n, requestedOn, mailedOn);
+}
+relation assessed_under_erroneous_prepayment_credit_power(n: Notice) kind empirical {
+    label en unofficial "the assessment specified in the notice was made under §6201(a)(3) (erroneous prepayment credit), which §6201(a)(3)'s own last sentence excludes from the (b)(2) abatement right";
+}
+@source(IRC_S6213_B, relation = formalizes, coverage = exact, quote = "upon receipt of such request, the Secretary shall abate the assessment.")
+pub rule S6213AbatementRequest strict {
+    for p: Person;
+    for n: Notice;
+    for requestedOn: Date;
+    for mailedOn: Date;
+    when math_error_abatement_within_60_days(p, n, requestedOn, mailedOn);
+    then power S6213AbatementRequestPower {
+        holder p;
+        over Secretary;
+        exercise requests_math_error_abatement(p, n, requestedOn);
+        valid_when math_error_abatement_within_60_days(p, n, requestedOn, mailedOn);
+        effect create(assessment_abated(p, n));
+    };
+}
+pub relation assessment_abated(p: Person, n: Notice) kind institutional;
+@source(IRC_S6213_B, relation = formalizes, coverage = exact, quote = "Any reassessment of the tax with respect to which an abatement is made under this subparagraph shall be subject to the deficiency procedures prescribed by this subchapter.")
+rule S6213ReassessmentAfterAbatementFollowsDeficiencyProcedures strict {
+    for p: Person;
+    for n: Notice;
+    when assessment_abated(p, n);
+    then reassessment_subject_to_deficiency_procedures(p, n);
+}
+pub relation reassessment_subject_to_deficiency_procedures(p: Person, n: Notice) kind institutional;
+
+@source(IRC_S6213_B, relation = formalizes, coverage = exact, quote = "In the case of any assessment referred to in paragraph (1), notwithstanding paragraph (1), no levy or proceeding in court for the collection of such assessment shall be made, begun, or prosecuted during the period in which such assessment may be abated under this paragraph.")
+pub rule S6213CollectionBlockedDuringAbatementPeriod strict {
+    for a: Assessment;
+    for p: Person;
+    for n: Notice;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for amount: Money;
+    for mailedOn: Date;
+    for kind: MathOrClericalErrorKind;
+    when math_error_notice_given(n, p, kind, amount, mailedOn)
+        and deficiency_notice_for(n, p, y, k)
+        and secretary_makes_assessment(a, p, y, k, amount);
+    then immunity S6213CollectionBlockedDuringAbatementPeriodImmunity {
+        holder p;
+        protected_effect us.irc.core::assessment_of(a, p, y, k, amount);
+        window [mailedOn, add_calendar_period(mailedOn, 60 calendar_day)];
+    };
+}
+
+// --- (b)(3) — Excess §6411 tentative carryback adjustment -------------------
+
+pub relation section6411_amount_exceeds_overassessment(p: Person, y: TaxableYear, excess: Money) kind empirical {
+    label en official "the amount applied, credited, or refunded under section 6411 is in excess of the overassessment attributable to the carryback ... with respect to which such amount was applied, credited, or refunded";
+}
+@source(IRC_S6213_B, relation = formalizes, coverage = exact, quote = "he may assess without regard to the provisions of paragraph (2) the amount of the excess as a deficiency as if it were due to a mathematical or clerical error appearing on the return.")
+pub rule S6213AssessExcessCarrybackAdjustmentAsMathError strict {
+    for a: Assessment;
+    for p: Person;
+    for y: TaxableYear;
+    for excess: Money;
+    when section6411_amount_exceeds_overassessment(p, y, excess)
+        and secretary_makes_assessment(a, p, y, us.irc.core::IncomeCh1, excess);
+    then power S6213AssessExcessCarrybackAdjustmentPower {
+        holder Secretary;
+        over p;
+        exercise secretary_makes_assessment(a, p, y, us.irc.core::IncomeCh1, excess);
+        valid_when section6411_amount_exceeds_overassessment(p, y, excess);
+        effect create(us.irc.core::assessment_of(a, p, y, us.irc.core::IncomeCh1, excess));
+    };
+}
+
+// --- (b)(4) — Payment of a tax may be assessed on receipt ------------------
+
+pub relation amount_paid_as_tax(p: Person, y: TaxableYear, k: TaxKind, amount: Money, paidOn: Date) kind empirical;
+@source(IRC_S6213_B, relation = formalizes, coverage = exact, quote = "Any amount paid as a tax or in respect of a tax may be assessed upon the receipt of such payment notwithstanding the provisions of subsection (a).")
+pub rule S6213AssessOnReceiptOfPayment strict {
+    for a: Assessment;
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for amount: Money;
+    for paidOn: Date;
+    when amount_paid_as_tax(p, y, k, amount, paidOn)
+        and secretary_makes_assessment(a, p, y, k, amount);
+    then power S6213AssessOnReceiptOfPaymentPower {
+        holder Secretary;
+        over p;
+        exercise secretary_makes_assessment(a, p, y, k, amount);
+        valid_when amount_paid_as_tax(p, y, k, amount, paidOn);
+        effect create(us.irc.core::assessment_of(a, p, y, k, amount));
+    };
+}
+priority PaymentReceiptPowerOutranksPetitionWindowImmunity {
+    prefer S6213AssessOnReceiptOfPayment over S6213RestrictedDuringPetitionWindow;
+    reason lex_specialis;
+}
+@source(IRC_S6213_B, relation = formalizes, coverage = exact, quote = "In any case where such amount is paid after the mailing of a notice of deficiency under section 6212, such payment shall not deprive the Tax Court of jurisdiction over such deficiency determined under section 6211 without regard to such assessment.")
+rule S6213PaymentDoesNotDepriveTaxCourtJurisdiction defeasible {
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for pr: Proceeding;
+    for n: Notice;
+    when petition_filed_timely(pr, n, p) and deficiency_notice_for(n, p, y, k);
+    then tax_court_retains_jurisdiction(pr, p, y, k);
+}
+pub relation tax_court_retains_jurisdiction(pr: Proceeding, p: Person, y: TaxableYear, k: TaxKind) kind institutional;
+
+// --- (b)(5) — §6201(a)(4) restitution assessments not restricted ----------
+
+@source(IRC_S6213_B, relation = formalizes, coverage = partial, quote = "such notice shall not be considered as a notice of deficiency for the purposes of subsection (a) (prohibiting assessment and collection until notice of the deficiency has been mailed), section 6212(c)(1) (restricting further deficiency letters), or section 6512(a) (prohibiting credits or refunds after petition to the Tax Court), and")
+rule S6213RestitutionNoticeNotADeficiencyNotice strict {
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for amount: Money;
+    when restitution_ordered(p, y, k, amount);
+    then restitution_assessment_not_restricted(p, y, k, amount);
+}
+pub relation restitution_assessment_not_restricted(p: Person, y: TaxableYear, k: TaxKind, amount: Money) kind institutional;
+
+// ============================================================================
+// §6213(c) — No petition filed: deficiency assessed and paid
+// ============================================================================
+
+pub relation notice_and_demand_given(p: Person, y: TaxableYear, k: TaxKind, amount: Money) kind empirical;
+@source(IRC_S6213_C, relation = formalizes, coverage = exact, quote = "If the taxpayer does not file a petition with the Tax Court within the time prescribed in subsection (a), the deficiency, notice of which has been mailed to the taxpayer, shall be assessed, and shall be paid upon notice and demand from the Secretary.")
+pub rule S6213AssessAfterPetitionWindowExpiresWithoutPetition defeasible {
+    for n: Notice;
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for amount: Money;
+    for deadline: Date;
+    when notice_of_deficiency_valid(n, p)
+        and deficiency_notice_for(n, p, y, k)
+        and deficiency_amount(p, y, k, amount)
+        and petition_window_deadline(n, p, deadline)
+        and not_known(exists_petition(n, p))
+        and not_known(notice_rescinded(n, p));
+    then duty S6213PayAssessedDeficiencyDuty {
+        bearer p;
+        beneficiary Secretary;
+        goal achievement {
+            condition paid_deficiency(p, y, k, amount);
+            window [deadline, infinity);
+        }
+    };
+}
+pub relation paid_deficiency(p: Person, y: TaxableYear, k: TaxKind, amount: Money) kind institutional {
+    label en unofficial "positive existential over `amount_paid_as_tax` (the specific payment date is immaterial to whether the §6213(c) duty was performed)";
+}
+rule PaidDeficiencyExistential strict {
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for amount: Money;
+    for paidOn: Date;
+    when amount_paid_as_tax(p, y, k, amount, paidOn);
+    then paid_deficiency(p, y, k, amount);
+}
+relation exists_petition(n: Notice, p: Person) kind institutional;
+rule ExistsPetition defeasible {
+    for pr: Proceeding;
+    for n: Notice;
+    for p: Person;
+    when petition_filed_timely(pr, n, p);
+    then exists_petition(n, p);
+}
+
+// ============================================================================
+// §6213(d) — Waiver of restrictions (power of the taxpayer)
+// ============================================================================
+
+pub relation signed_written_waiver_filed(p: Person, y: TaxableYear, k: TaxKind, amount: Money) kind empirical {
+    label en official "a signed notice in writing filed with the Secretary, to waive the restrictions provided in subsection (a) on the assessment and collection of the whole or any part of the deficiency";
+}
+@source(IRC_S6213_D, relation = formalizes, coverage = exact, quote = "The taxpayer shall at any time (whether or not a notice of deficiency has been issued) have the right, by a signed notice in writing filed with the Secretary, to waive the restrictions provided in subsection (a) on the assessment and collection of the whole or any part of the deficiency.")
+pub rule S6213WaiveRestrictions strict {
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for amount: Money;
+    when signed_written_waiver_filed(p, y, k, amount);
+    then power S6213WaiveRestrictionsPower {
+        holder p;
+        exercise signed_written_waiver_filed(p, y, k, amount);
+        valid_when signed_written_waiver_filed(p, y, k, amount);
+        effect create(restrictions_waived(p, y, k, amount));
+    };
+}
+pub relation restrictions_waived(p: Person, y: TaxableYear, k: TaxKind, amount: Money) kind institutional;
+priority WaiverOutranksPetitionWindowImmunity {
+    prefer S6213WaiveRestrictions over S6213RestrictedDuringPetitionWindow;
+    reason lex_specialis;
+}
+
+// ============================================================================
+// §6213(f) — Suspension of the petition-filing window in bankruptcy
+// ============================================================================
+
+@source(IRC_S6213_F, relation = formalizes, coverage = exact, quote = "In any case under title 11 of the United States Code, the running of the time prescribed by subsection (a) for filing a petition in the Tax Court with respect to any deficiency shall be suspended for the period during which the debtor is prohibited by reason of such case from filing a petition in the Tax Court with respect to such deficiency, and for 60 days thereafter.")
+pub rule S6213PetitionWindowSuspendedDuringBankruptcyProhibition defeasible {
+    for n: Notice;
+    for p: Person;
+    for prohibitedThrough: Date;
+    for deadline: Date;
+    when petition_window_deadline(n, p, deadline)
+        and debtor_prohibited_from_tax_court_petition(p, prohibitedThrough)
+        and prohibitedThrough > deadline;
+    then petition_window_deadline_suspended(n, p, add_calendar_period(prohibitedThrough, 60 calendar_day));
+}
+pub relation petition_window_deadline_suspended(n: Notice, p: Person, extendedDeadline: Date) kind institutional {
+    label en unofficial "the §6213(a) petition-filing deadline as extended by §6213(f)'s bankruptcy suspension; a consumer reads this instead of `petition_window_deadline` once a bankruptcy prohibition is on the record";
+}
+
+// ============================================================================
+// §6214 — Determinations by Tax Court
+// ============================================================================
+
+pub relation secretary_asserts_greater_deficiency_at_hearing(pr: Proceeding, p: Person, y: TaxableYear, k: TaxKind, amount: Money) kind empirical {
+    label en official "an additional amount, or any addition to the tax should be assessed, if claim therefor is asserted by the Secretary at or before the hearing or a rehearing";
+}
+@source(IRC_S6214_A, relation = formalizes, coverage = exact, quote = "Except as provided by section 7463, the Tax Court shall have jurisdiction to redetermine the correct amount of the deficiency even if the amount so redetermined is greater than the amount of the deficiency, notice of which has been mailed to the taxpayer, and to determine whether any additional amount, or any addition to the tax should be assessed, if claim therefor is asserted by the Secretary at or before the hearing or a rehearing.")
+pub rule S6214TaxCourtJurisdictionToRedetermineGreaterDeficiency strict {
+    for pr: Proceeding;
+    for n: Notice;
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for amount: Money;
+    when petition_filed_timely(pr, n, p)
+        and secretary_asserts_greater_deficiency_at_hearing(pr, p, y, k, amount);
+    then power S6214TaxCourtRedetermineDeficiencyPower {
+        holder TaxCourt;
+        over p;
+        exercise secretary_asserts_greater_deficiency_at_hearing(pr, p, y, k, amount);
+        valid_when petition_filed_timely(pr, n, p);
+        effect create(redetermined_deficiency(pr, p, y, k, amount));
+    };
+}
+pub relation redetermined_deficiency(pr: Proceeding, p: Person, y: TaxableYear, k: TaxKind, amount: Money) kind institutional;
+
+@source(IRC_S6214_D, relation = formalizes, coverage = exact, quote = "For purposes of this chapter, chapter 41, 42, 43, or 44, and subtitles A or B the date on which a decision of the Tax Court becomes final shall be determined according to the provisions of section 7481.")
+rule S6214FinalityGovernedBySection7481 strict {
+    for pr: Proceeding;
+    for finalOn: Date;
+    when decision_final_on(pr, finalOn);
+    then exists_decision_final_date(pr);
+}
+
+// ============================================================================
+// §6215 — Assessment of deficiency found by Tax Court
+// ============================================================================
+
+pub relation tax_court_redetermined_amount(pr: Proceeding, p: Person, y: TaxableYear, k: TaxKind, amount: Money) kind empirical {
+    label en unofficial "the entire amount redetermined as the deficiency by the decision of the Tax Court which has become final";
+}
+@source(IRC_S6215_A, relation = formalizes, coverage = exact, quote = "If the taxpayer files a petition with the Tax Court, the entire amount redetermined as the deficiency by the decision of the Tax Court which has become final shall be assessed and shall be paid upon notice and demand from the Secretary.")
+pub rule S6215AssessFinalTaxCourtDeficiency defeasible {
+    for a: Assessment;
+    for pr: Proceeding;
+    for n: Notice;
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for amount: Money;
+    for finalOn: Date;
+    when petition_filed_timely(pr, n, p)
+        and tax_court_redetermined_amount(pr, p, y, k, amount)
+        and decision_final_on(pr, finalOn);
+    then duty S6215AssessAndDemandFinalDeficiencyDuty {
+        bearer Secretary;
+        beneficiary p;
+        goal achievement {
+            condition exists_assessment_of(p, y, k, amount);
+            window [finalOn, infinity);
+        }
+    };
+}
+pub relation secretary_determined_deficiency_amount(pr: Proceeding, p: Person, y: TaxableYear, k: TaxKind, amount: Money) kind empirical;
+@source(IRC_S6215_A, relation = formalizes, coverage = exact, quote = "No part of the amount determined as a deficiency by the Secretary but disallowed as such by the decision of the Tax Court which has become final shall be assessed or be collected by levy or by proceeding in court with or without assessment.")
+rule S6215DisallowedPortionImmuneFromAssessment strict {
+    for a: Assessment;
+    for pr: Proceeding;
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for secretaryAmount: Money;
+    for tcAmount: Money;
+    for finalOn: Date;
+    when secretary_determined_deficiency_amount(pr, p, y, k, secretaryAmount)
+        and tax_court_redetermined_amount(pr, p, y, k, tcAmount)
+        and secretaryAmount > tcAmount
+        and decision_final_on(pr, finalOn)
+        and secretary_makes_assessment(a, p, y, k, secretaryAmount);
+    then immunity S6215DisallowedPortionImmunity {
+        holder p;
+        protected_effect us.irc.core::assessment_of(a, p, y, k, secretaryAmount);
+        window [finalOn, infinity);
+    };
+}
+priority DisallowedPortionImmunityOutranksAssessPower {
+    prefer S6215DisallowedPortionImmuneFromAssessment over S6201AssessTax;
+    reason lex_specialis;
+}

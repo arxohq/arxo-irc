@@ -1,0 +1,277 @@
+// 26 U.S.C. §§6663-6664 — Fraud penalty and the shared definitions/special
+// rules for the accuracy-related/fraud part (§§6662-6664). §6664's
+// `underpayment` and the reasonable-cause-and-good-faith judgment channel are
+// used by both this module and 07-accuracy-related-penalty-6662.law.
+//
+// JUDGMENT CALLS AND GAPS (see report):
+//  - §6664(a)'s `underpayment` omits "amounts not so shown previously
+//    assessed (or collected without assessment)" (a)(1)(B) and "the amount
+//    of rebates made" (a)(2): neither has a core relation
+//    (`us.irc.core::assessment_of` gives an assessment's amount but not
+//    specifically "amounts not shown on the return", and there is no
+//    "rebate" relation anywhere in this package group). `underpayment` here
+//    is `liability - tax_shown_on_return`, exact for a taxpayer with no
+//    prior assessment and no rebate history (the documented scenario set),
+//    an UNDERSTATEMENT of the true (a)(1)(B)-inclusive figure otherwise —
+//    TECH_GAP.
+//  - §6664(c)(3)'s charitable-deduction-property carve-out and (c)(4)'s
+//    definitions are NOT modelled (qualified appraisal/appraiser cross-
+//    reference §170(f)(11), outside this package's owned sections) —
+//    EXTERNAL_DEPENDENCY / stage-2 candidate.
+//  - §6664(d) (reportable-transaction reasonable cause, keyed to §6662A) is
+//    NOT modelled: §6662A is outside this task's stage-1 scope (not in the
+//    assignment's owned-section list) and stays `unreviewed`/"stage 2".
+//  - The `reasonable_cause_and_good_faith` judgment channel is DELIBERATELY
+//    SEPARATE from `reasonable_cause_and_no_willful_neglect` (01-shared.law):
+//    §6664(c)(1)'s standard ("reasonable cause ... and good faith") is a
+//    textually different two-part test from §6651/6654's ("reasonable cause
+//    ... and not due to willful neglect"), and DECISION-0194 channels do not
+//    collapse two differently-worded statutory standards into one relation
+//    merely because both are "reasonable cause" tests.
+//  - §6663(b)'s burden-of-proof rule is modelled as a DEFEASIBLE rule (the
+//    taxpayer's preponderance showing is an `unless` defeater) rather than an
+//    evaluative judgment channel: the statute itself states a shifting
+//    burden of PROOF, not an open-textured standard delegated to Secretary
+//    or court discretion (contrast reasonable cause) — classified as an
+//    institutional/evidentiary effect, DECISION-0194 §4 boundary.
+
+language "law.core" version "0.2";
+package us.irc.penalties version "0.1.1";
+namespace "urn:us:irc:penalties:clir";
+
+use self::{
+    FailureContext,
+    IRC_S6663_A,
+    IRC_S6663_B,
+    IRC_S6663_C,
+    IRC_S6664_A,
+    IRC_S6664_B,
+    IRC_S6664_C,
+    Person,
+    Return,
+    TaxKind,
+    TaxableYear,
+    charitable_valuation_defense_barred_6664c3,
+    return_prepared_by_secretary_under_6020b,
+    tax_shown_on_return,
+};
+
+// --- §6664(a): underpayment --------------------------------------------------
+
+pub relation underpayment(p: Person, y: TaxableYear, kind: TaxKind, amount: Money) kind institutional {
+    label en official "the term \"underpayment\" means the amount by which any tax imposed by this title exceeds the excess of the sum of the amount shown as the tax by the taxpayer on his return... over the amount of rebates made";
+}
+relation amounts_not_shown_previously_assessed(p: Person, y: TaxableYear, kind: TaxKind, amount: Money) kind empirical {
+    label en official "amounts not so shown previously assessed (or collected without assessment)";
+}
+relation rebates_made(p: Person, y: TaxableYear, kind: TaxKind, amount: Money) kind institutional {
+    label en official "the amount of rebates made (a rebate is so much of an abatement, credit, refund, or other repayment as was made on the ground that the tax imposed was less than the excess of the amount specified in paragraph (1) over the rebates previously made)";
+}
+relation has_previously_assessed_amounts_6664a(p: Person, y: TaxableYear, kind: TaxKind) kind institutional {
+    label en unofficial "amounts not shown were previously assessed for the year (helper for the four cases of the underpayment definition)";
+}
+@source(IRC_S6664_A, relation = formalizes, coverage = partial, quote = "amounts not so shown previously assessed (or collected without assessment)")
+rule Section6664aHasAssessedAmounts strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for a: Money;
+    when amounts_not_shown_previously_assessed(p, y, kind, a);
+    then has_previously_assessed_amounts_6664a(p, y, kind);
+}
+relation has_rebates_6664a(p: Person, y: TaxableYear, kind: TaxKind) kind institutional {
+    label en unofficial "rebates were made for the year (helper for the four cases of the underpayment definition)";
+}
+@source(IRC_S6664_A, relation = formalizes, coverage = partial, quote = "the amount of rebates made")
+rule Section6664aHasRebates strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for a: Money;
+    when rebates_made(p, y, kind, a);
+    then has_rebates_6664a(p, y, kind);
+}
+// The underpayment is the amount by which the tax exceeds the excess of (1) the sum of the amount shown and the
+// previously assessed amounts over (2) the rebates; that excess is floored at zero.
+@source(IRC_S6664_A, relation = formalizes, coverage = partial, quote = "the term \"underpayment\" means the amount by which any tax imposed by this title exceeds the excess of")
+rule Section6664aUnderpayment strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for tax: Money;
+    for shown: Money;
+    for r: Return;
+    when us.irc.core::return_of(r, p, y, kind)
+        and us.irc.core::liability(p, y, kind, tax)
+        and tax_shown_on_return(r, shown)
+        and not_known(has_previously_assessed_amounts_6664a(p, y, kind))
+        and not_known(has_rebates_6664a(p, y, kind));
+    then underpayment(p, y, kind, max(0.00 USD, tax - shown));
+}
+@source(IRC_S6664_A, relation = formalizes, coverage = exact, quote = "amounts not so shown previously assessed (or collected without assessment)")
+rule Section6664aUnderpaymentWithAssessed strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for tax: Money;
+    for shown: Money;
+    for assessed: Money;
+    for r: Return;
+    when us.irc.core::return_of(r, p, y, kind)
+        and us.irc.core::liability(p, y, kind, tax)
+        and tax_shown_on_return(r, shown)
+        and amounts_not_shown_previously_assessed(p, y, kind, assessed)
+        and not_known(has_rebates_6664a(p, y, kind));
+    then underpayment(p, y, kind, max(0.00 USD, tax - (shown + assessed)));
+}
+@source(IRC_S6664_A, relation = formalizes, coverage = exact, quote = "the amount of rebates made")
+rule Section6664aUnderpaymentWithRebates strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for tax: Money;
+    for shown: Money;
+    for rebates: Money;
+    for r: Return;
+    when us.irc.core::return_of(r, p, y, kind)
+        and us.irc.core::liability(p, y, kind, tax)
+        and tax_shown_on_return(r, shown)
+        and rebates_made(p, y, kind, rebates)
+        and not_known(has_previously_assessed_amounts_6664a(p, y, kind));
+    then underpayment(p, y, kind, max(0.00 USD, tax - max(0.00 USD, shown - rebates)));
+}
+@source(IRC_S6664_A, relation = formalizes, coverage = exact, quote = "the amount of rebates made")
+rule Section6664aUnderpaymentWithBoth strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for tax: Money;
+    for shown: Money;
+    for assessed: Money;
+    for rebates: Money;
+    for r: Return;
+    when us.irc.core::return_of(r, p, y, kind)
+        and us.irc.core::liability(p, y, kind, tax)
+        and tax_shown_on_return(r, shown)
+        and amounts_not_shown_previously_assessed(p, y, kind, assessed)
+        and rebates_made(p, y, kind, rebates);
+    then underpayment(p, y, kind, max(0.00 USD, tax - max(0.00 USD, shown + assessed - rebates)));
+}
+
+// --- §6664(b): penalties apply only where a return is filed -----------------
+
+pub relation accuracy_or_fraud_penalty_applicable_to_return(r: Return) kind institutional {
+    label en official "The penalties provided in this part shall apply only in cases where a return of tax is filed (other than a return prepared by the Secretary under the authority of section 6020(b))";
+}
+@source(IRC_S6664_B, relation = formalizes, coverage = exact, quote = "The penalties provided in this part shall apply only in cases where a return of tax is filed (other than a return prepared by the Secretary under the authority of section 6020(b))")
+rule Section6664bAppliesOnlyIfReturnFiled strict {
+    for r: Return;
+    for filed: Date;
+    when us.irc.core::filed_on(r, filed) and not return_prepared_by_secretary_under_6020b(r);
+    then accuracy_or_fraud_penalty_applicable_to_return(r);
+}
+
+// --- §6664(c): reasonable cause and good faith exception --------------------
+
+pub external judgment relation reasonable_cause_and_good_faith(p: Person, failure_context: FailureContext) {
+    authority Secretary;
+    label en official "it is shown that there was a reasonable cause for such portion and that the taxpayer acted in good faith with respect to such portion";
+}
+relation underpayment_attributable_to_economic_substance_or_foreign_asset(p: Person, y: TaxableYear, kind: TaxKind) kind empirical {
+    label en unofficial "the portion of the underpayment is attributable to one or more transactions described in section 6662(b)(6) or to a disallowance described in section 6662(b)(10) (section 6664(c)(2) exception)";
+}
+pub relation reasonable_cause_defense_available(p: Person, y: TaxableYear, kind: TaxKind, failure_context: FailureContext) kind institutional {
+    label en unofficial "the section 6664(c)(1) reasonable-cause-and-good-faith defense is available for this underpayment (not excepted by (c)(2))";
+}
+@source(IRC_S6664_C, relation = formalizes, coverage = partial, quote = "No penalty shall be imposed under section 6662 or 6663 with respect to any portion of an underpayment if it is shown that there was a reasonable cause for such portion and that the taxpayer acted in good faith with respect to such portion")
+rule Section6664cReasonableCauseAvailable defeasible {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for fc: FailureContext;
+    for amount: Money;
+    when reasonable_cause_and_good_faith(p, fc) and underpayment(p, y, kind, amount);
+    then reasonable_cause_defense_available(p, y, kind, fc);
+    unless underpayment_attributable_to_economic_substance_or_foreign_asset(p, y, kind)
+        and reasonable_cause_and_good_faith(p, fc) and underpayment(p, y, kind, amount);
+    unless charitable_valuation_defense_barred_6664c3(p, y, kind)
+        and reasonable_cause_and_good_faith(p, fc) and underpayment(p, y, kind, amount);
+}
+
+// --- §6663: fraud penalty ----------------------------------------------------
+
+pub relation underpayment_attributable_to_fraud(p: Person, y: TaxableYear, kind: TaxKind, amount: Money) kind institutional {
+    label en official "the portion of the underpayment which is attributable to fraud";
+}
+relation secretary_establishes_fraud_on_portion(p: Person, y: TaxableYear, kind: TaxKind, amount: Money) kind empirical {
+    label en unofficial "the Secretary establishes that this portion of an underpayment is attributable to fraud (section 6663(b) burden)";
+}
+relation taxpayer_establishes_portion_not_fraud_by_preponderance(p: Person, y: TaxableYear, kind: TaxKind, amount: Money) kind empirical {
+    label en official "any portion of the underpayment which the taxpayer establishes (by a preponderance of the evidence) is not attributable to fraud";
+}
+@source(IRC_S6663_B, relation = formalizes, coverage = exact, quote = "If the Secretary establishes that any portion of an underpayment is attributable to fraud, the entire underpayment shall be treated as attributable to fraud, except with respect to any portion of the underpayment")
+rule Section6663bBurdenOfProof defeasible {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for total: Money;
+    when secretary_establishes_fraud_on_portion(p, y, kind, total) and underpayment(p, y, kind, total);
+    then underpayment_attributable_to_fraud(p, y, kind, total);
+    unless taxpayer_establishes_portion_not_fraud_by_preponderance(p, y, kind, total) and underpayment(p, y, kind, total);
+}
+rule Section6663bBurdenOfProofPartialRebuttal strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for total: Money;
+    for not_fraud: Money;
+    when secretary_establishes_fraud_on_portion(p, y, kind, total)
+        and taxpayer_establishes_portion_not_fraud_by_preponderance(p, y, kind, not_fraud);
+    then underpayment_attributable_to_fraud(p, y, kind, max(0.00 USD, total - not_fraud));
+}
+
+relation joint_return_spouse_own_fraud(p: Person, y: TaxableYear, kind: TaxKind) kind empirical {
+    label en official "some part of the underpayment is due to the fraud of such spouse";
+}
+relation joint_return(p: Person, y: TaxableYear, kind: TaxKind) kind empirical {
+    label en unofficial "a joint return, for purposes of section 6663(c)";
+}
+pub relation fraud_penalty_applies_to_spouse(p: Person, y: TaxableYear, kind: TaxKind) kind institutional {
+    label en official "In the case of a joint return, this section shall not apply with respect to a spouse unless some part of the underpayment is due to the fraud of such spouse";
+}
+@source(IRC_S6663_C, relation = formalizes, coverage = exact, quote = "In the case of a joint return, this section shall not apply with respect to a spouse unless some part of the underpayment is due to the fraud of such spouse")
+rule Section6663cJointReturnSpouseLimit strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    when joint_return(p, y, kind) and joint_return_spouse_own_fraud(p, y, kind);
+    then fraud_penalty_applies_to_spouse(p, y, kind);
+}
+rule Section6663cNonJointReturnUnrestricted strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for r: Return;
+    when us.irc.core::return_of(r, p, y, kind) and not joint_return(p, y, kind);
+    then fraud_penalty_applies_to_spouse(p, y, kind);
+}
+
+pub relation fraud_penalty(p: Person, y: TaxableYear, kind: TaxKind, amount: Money) kind institutional {
+    label en official "there shall be added to the tax an amount equal to 75 percent of the portion of the underpayment which is attributable to fraud";
+}
+@source(IRC_S6663_A, relation = formalizes, coverage = exact, quote = "there shall be added to the tax an amount equal to 75 percent of the portion of the underpayment which is attributable to fraud")
+rule Section6663aFraudPenalty defeasible {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for fraud_portion: Money;
+    for r: Return;
+    for fc: FailureContext;
+    when underpayment_attributable_to_fraud(p, y, kind, fraud_portion)
+        and fraud_penalty_applies_to_spouse(p, y, kind)
+        and us.irc.core::return_of(r, p, y, kind)
+        and accuracy_or_fraud_penalty_applicable_to_return(r);
+    then fraud_penalty(p, y, kind, round(fraud_portion * FraudPenaltyRate, 2, "HALF_UP"));
+    unless reasonable_cause_defense_available(p, y, kind, fc)
+        and underpayment_attributable_to_fraud(p, y, kind, fraud_portion);
+}

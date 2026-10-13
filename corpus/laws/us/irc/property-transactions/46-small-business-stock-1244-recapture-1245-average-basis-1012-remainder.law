@@ -1,0 +1,502 @@
+// Stage 3b (IRC-07, A05). Section 1244 remainder ((c)(1)(C), (c)(2), (c)(3)(B), (d)); section 1245
+// remainder ((a)(2)(B), (b)(5)-(8)); section 1012 remainder ((c)(2), (d)(2), (d)(3)).
+//
+// Method. The gross-receipts test of 1244(c)(1)(C) is computed from case-supplied receipt
+// totals (with the (c)(2)(B) gains-only netting and the (c)(2)(C) proviso); the period length
+// (5 years, or the substitute period for a new corporation) is derived from the number of taxable
+// years ended. Module 08's stock rule gets a second rule reading the computed test. Module 07's
+// (b)(3) cap reads `tax_exempt_disposition_blocks_cap_1245b3` (the (b)(6)(A) exception).
+
+// =============================================================================
+// Section 1244(c)(1)(C), (c)(2)
+// =============================================================================
+
+use self::{
+    Asset,
+    Corporation,
+    IRC_S1012_C,
+    IRC_S1012_D,
+    IRC_S1244_C,
+    IRC_S1244_D,
+    IRC_S1245_A,
+    IRC_S1245_B,
+    Person,
+    Transaction,
+    depreciation_allowable,
+    depreciation_allowed,
+    disposition_to_tax_exempt_organization_1245b3,
+    domestic_corporation,
+    gain_recognized_without_regard_to_1245,
+    issued_for_money_or_property_other_than_stock_and_securities,
+    section_1244_stock,
+    section_1245_disposition,
+    section_1245_recapture_capped_by_tax_free_transaction,
+    small_business_corporation_1244,
+};
+
+pub relation taxable_years_ended_before_loss_1244(corp: Corporation, sustained_on: Date, years: Integer) kind empirical {
+    label en official "section 1244(c)(2)(A): the number of the corporation's taxable years ending before the date the loss was sustained";
+}
+pub relation gross_receipts_period_kind_1244(corp: Corporation, sustained_on: Date, kind: Integer) kind institutional {
+    label en official "section 1244(c)(2)(A): 5 = the 5 most recent taxable years; 1 to 4 = the taxable years ending before the loss; 0 = the period of existence (less than 1 taxable year)";
+}
+@source(IRC_S1244_C, relation = formalizes, coverage = exact, quote = "if the corporation has not been in existence for 5 taxable years ending before the date the loss on the stock was sustained")
+rule PeriodFiveYearsRule(corp: Corporation, on: Date, years: Integer) strict {
+    label en official "section 1244(c)(1)(C): a corporation with 5 or more taxable years uses the 5 most recent";
+    when taxable_years_ended_before_loss_1244(corp, on, years);
+    when years >= 5;
+    then gross_receipts_period_kind_1244(corp, on, 5);
+}
+rule PeriodSubstituteYearsRule(corp: Corporation, on: Date, years: Integer) strict {
+    label en official "section 1244(c)(2)(A)(i): a corporation with 1 to 4 taxable years uses the taxable years ending before the loss";
+    when taxable_years_ended_before_loss_1244(corp, on, years);
+    when years >= 1;
+    when years < 5;
+    then gross_receipts_period_kind_1244(corp, on, years);
+}
+@source(IRC_S1244_C, relation = formalizes, coverage = exact, quote = "if the corporation has not been in existence for 1 taxable year ending before such date, the period such corporation has been in existence before such date")
+rule PeriodExistenceRule(corp: Corporation, on: Date, years: Integer) strict {
+    label en official "section 1244(c)(2)(A)(ii): a corporation with no completed taxable year uses the period it has been in existence";
+    when taxable_years_ended_before_loss_1244(corp, on, years);
+    when years < 1;
+    then gross_receipts_period_kind_1244(corp, on, 0);
+}
+pub relation receipts_from_active_sources_1244(corp: Corporation, sustained_on: Date, amount: Money) kind empirical {
+    label en official "section 1244(c)(1)(C): gross receipts for the period from sources other than royalties, rents, dividends, interest, annuities and sales or exchanges of stock or securities";
+}
+pub relation receipts_from_passive_sources_1244(corp: Corporation, sustained_on: Date, amount: Money) kind empirical {
+    label en official "section 1244(c)(1)(C): gross receipts for the period from royalties, rents, dividends, interest and annuities";
+}
+pub relation gains_from_stock_or_securities_sales_1244(corp: Corporation, sustained_on: Date, amount: Money) kind empirical {
+    label en official "section 1244(c)(2)(B): the gains from sales or exchanges of stock or securities (only the gains are taken into account as gross receipts)";
+}
+pub relation aggregate_gross_receipts_1244(corp: Corporation, sustained_on: Date, amount: Money) kind institutional {
+    label en official "section 1244(c)(1)(C), (2)(B): the aggregate gross receipts - active, passive, and only the gains from stock and securities sales";
+}
+@source(IRC_S1244_C, relation = formalizes, coverage = exact, quote = "gross receipts from the sales or exchanges of stock or securities shall be taken into account only to the extent of gains therefrom")
+rule AggregateGrossReceiptsRule(corp: Corporation, on: Date, active: Money, passive: Money, gains: Money) defeasible {
+    label en official "section 1244(c)(2)(B): stock and securities sales count only to the extent of gains";
+    when receipts_from_active_sources_1244(corp, on, active);
+    when receipts_from_passive_sources_1244(corp, on, passive);
+    when gains_from_stock_or_securities_sales_1244(corp, on, gains);
+    then aggregate_gross_receipts_1244(corp, on, active + passive + gains);
+}
+pub relation deductions_exceed_gross_income_1244c2C(corp: Corporation, sustained_on: Date) kind empirical {
+    label en official "section 1244(c)(2)(C): for the period the deductions allowed by the chapter (other than by sections 172, 243 and 245) exceed the gross income";
+}
+pub relation gross_receipts_test_satisfied_1244(corp: Corporation, sustained_on: Date) kind institutional {
+    label en official "section 1244(c)(1)(C), (2)(C): the corporation derived more than 50 percent of its aggregate gross receipts from active sources, or the test does not apply";
+}
+@source(IRC_S1244_C, relation = formalizes, coverage = exact, quote = "derived more than 50 percent of its aggregate gross receipts from sources other than royalties, rents, dividends, interests, annuities, and sales or exchanges of stocks or securities")
+rule GrossReceiptsTestComputedRule(corp: Corporation, on: Date, active: Money, total: Money) defeasible {
+    label en official "section 1244(c)(1)(C): active receipts exceed half of the aggregate";
+    when receipts_from_active_sources_1244(corp, on, active);
+    when aggregate_gross_receipts_1244(corp, on, total);
+    when active * 2.0 > total;
+    then gross_receipts_test_satisfied_1244(corp, on);
+}
+@source(IRC_S1244_C, relation = formalizes, coverage = exact, quote = "Paragraph (1)(C) shall not apply with respect to any corporation if")
+rule GrossReceiptsProvisoRule(corp: Corporation, on: Date) defeasible {
+    label en official "section 1244(c)(2)(C): where deductions exceed gross income the test does not apply";
+    when deductions_exceed_gross_income_1244c2C(corp, on);
+    then gross_receipts_test_satisfied_1244(corp, on);
+}
+rule Section1244StockViaComputedTestRule(a: Asset, corp: Corporation, on: Date, issued_on: Date) defeasible {
+    label en official "section 1244(c)(1): stock is section 1244 stock when the computed gross-receipts test is satisfied (module 08 reads the case-asserted outcome)";
+    when domestic_corporation(corp);
+    when small_business_corporation_1244(corp, issued_on);
+    when issued_for_money_or_property_other_than_stock_and_securities(a, corp);
+    when gross_receipts_test_satisfied_1244(corp, on);
+    then section_1244_stock(a, corp);
+}
+
+// =============================================================================
+// Section 1244(c)(3)(B): property contributed
+// =============================================================================
+
+pub relation property_received_by_corporation_basis_1244(corp: Corporation, item: Asset, basis: Money) kind empirical {
+    label en official "section 1244(c)(3)(B): the adjusted basis to the corporation of property (other than money) for determining gain, as of the time the property was received";
+}
+pub relation liability_on_property_received_1244(corp: Corporation, item: Asset, liability: Money) kind empirical {
+    label en official "section 1244(c)(3)(B): any liability to which the property was subject or which was assumed by the corporation";
+}
+pub relation capital_amount_of_property_1244c3B(corp: Corporation, item: Asset, amount: Money) kind institutional {
+    label en official "section 1244(c)(3)(B): the amount taken into account for property - adjusted basis less the liability (no floor at zero: JUDGMENT CALL)";
+}
+@source(IRC_S1244_C, relation = formalizes, coverage = exact, quote = "reduced by any liability to which the property was subject or which was assumed by the corporation")
+rule CapitalAmountOfPropertyRule(corp: Corporation, item: Asset, basis: Money, liability: Money) defeasible {
+    label en official "section 1244(c)(3)(B): basis less the liability";
+    when property_received_by_corporation_basis_1244(corp, item, basis);
+    when liability_on_property_received_1244(corp, item, liability);
+    then capital_amount_of_property_1244c3B(corp, item, basis - liability);
+}
+rule CapitalAmountOfPropertyNoLiabilityRule(corp: Corporation, item: Asset, basis: Money) defeasible {
+    label en official "section 1244(c)(3)(B): the adjusted basis when the property carries no liability";
+    when property_received_by_corporation_basis_1244(corp, item, basis);
+    when not_known(property_has_liability_1244(corp, item));
+    then capital_amount_of_property_1244c3B(corp, item, basis);
+}
+pub relation property_has_liability_1244(corp: Corporation, item: Asset) kind institutional {
+    label en unofficial "guard: some liability fact exists for the property";
+}
+rule PropertyHasLiabilityRule(corp: Corporation, item: Asset, liability: Money) defeasible {
+    label en unofficial "guard rule";
+    when liability_on_property_received_1244(corp, item, liability);
+    then property_has_liability_1244(corp, item);
+}
+
+// =============================================================================
+// Section 1244(d)
+// =============================================================================
+
+pub relation section_1244_stock_issued_for_property(a: Asset) kind empirical {
+    label en official "section 1244(d)(1)(A)(i): section 1244 stock was issued in exchange for property";
+}
+pub relation stock_basis_by_reference_to_property_basis(a: Asset) kind empirical {
+    label en official "section 1244(d)(1)(A)(ii): the basis of the stock is determined by reference to the taxpayer's basis in the property";
+}
+pub relation property_adjusted_basis_before_exchange_1244(a: Asset, amount: Money) kind empirical {
+    label en official "section 1244(d)(1)(A)(iii): the adjusted basis (for determining loss) of the property immediately before the exchange";
+}
+pub relation property_fair_market_value_at_exchange_1244(a: Asset, amount: Money) kind empirical {
+    label en official "section 1244(d)(1)(A)(iii): the fair market value of the property at that time";
+}
+pub relation contribution_basis_reduction_1244d1A(a: Asset, amount: Money) kind institutional {
+    label en official "section 1244(d)(1)(A): the reduction of the stock's basis - the excess of the property's adjusted basis over its fair market value";
+}
+@source(IRC_S1244_D, relation = formalizes, coverage = exact, quote = "the basis of such stock shall be reduced by an amount equal to the excess described in clause (iii)")
+rule ContributionBasisReductionRule(a: Asset, basis: Money, fmv: Money) defeasible {
+    label en official "section 1244(d)(1)(A): the excess of adjusted basis over fair market value reduces the basis of the stock for the loss computation";
+    when section_1244_stock_issued_for_property(a);
+    when stock_basis_by_reference_to_property_basis(a);
+    when property_adjusted_basis_before_exchange_1244(a, basis);
+    when property_fair_market_value_at_exchange_1244(a, fmv);
+    when basis > fmv;
+    then contribution_basis_reduction_1244d1A(a, basis - fmv);
+}
+pub relation stock_basis_for_1244_loss_before_adjustments(p: Person, a: Asset, amount: Money) kind empirical {
+    label en official "the taxpayer's basis in the stock before the section 1244(d)(1) adjustments";
+}
+pub relation basis_after_contribution_reduction_1244d1A(p: Person, a: Asset, amount: Money) kind institutional {
+    label en official "section 1244(d)(1)(A): the stock basis for the loss computation after the reduction";
+}
+rule BasisAfterReductionRule(p: Person, a: Asset, basis: Money, reduction: Money) defeasible {
+    label en official "section 1244(d)(1)(A): basis less the contribution reduction";
+    when stock_basis_for_1244_loss_before_adjustments(p, a, basis);
+    when contribution_basis_reduction_1244d1A(a, reduction);
+    then basis_after_contribution_reduction_1244d1A(p, a, basis - reduction);
+}
+pub relation basis_increase_through_contributions_1244(a: Asset, amount: Money) kind empirical {
+    label en official "section 1244(d)(1)(B): an increase in the basis of the stock through contributions to the capital of the corporation, or otherwise";
+}
+pub relation basis_increase_treated_as_non_1244_stock_1244d1B(a: Asset, amount: Money) kind institutional {
+    label en official "section 1244(d)(1)(B): the increase is allocable to stock that is not section 1244 stock";
+}
+@source(IRC_S1244_D, relation = formalizes, coverage = exact, quote = "any increase in the basis of such stock (through contributions to the capital of the corporation, or otherwise) shall be treated as allocable to stock which is not section 1244 stock")
+rule BasisIncreaseAllocatedRule(a: Asset, amount: Money) defeasible {
+    label en official "section 1244(d)(1)(B): a basis increase is allocated to non-1244 stock";
+    when basis_increase_through_contributions_1244(a, amount);
+    then basis_increase_treated_as_non_1244_stock_1244d1B(a, amount);
+}
+pub relation loss_basis_after_allocation_1244d1B(p: Person, a: Asset, amount: Money) kind institutional {
+    label en official "section 1244(d)(1)(B): the stock basis for the loss computation without the increase";
+}
+rule LossBasisAfterAllocationRule(p: Person, a: Asset, basis: Money, increase: Money) defeasible {
+    label en official "section 1244(d)(1)(B): basis less the increase treated as allocable to non-1244 stock";
+    when stock_basis_for_1244_loss_before_adjustments(p, a, basis);
+    when basis_increase_treated_as_non_1244_stock_1244d1B(a, increase);
+    then loss_basis_after_allocation_1244d1B(p, a, basis - increase);
+}
+pub relation stock_basis_by_reference_to_1244_stock(a: Asset, prior: Asset) kind empirical {
+    label en official "section 1244(d)(2): the basis of the stock is determined in whole or in part by reference to the basis of stock meeting section 1244(c)(1) (other than (C))";
+}
+pub relation received_in_368a1F_reorganization_for(a: Asset, prior: Asset) kind empirical {
+    label en official "section 1244(d)(2): stock received in a section 368(a)(1)(F) reorganization in exchange for stock meeting the requirements";
+}
+pub relation prior_stock_meets_1244c1_A_and_B(prior: Asset) kind empirical {
+    label en official "section 1244(d)(2): the prior stock meets the requirements of subsection (c)(1) other than subparagraph (C)";
+}
+pub relation treated_as_meeting_1244_requirements_1244d2(a: Asset) kind institutional {
+    label en official "section 1244(d)(2): to the extent provided in regulations, the stock is treated as meeting the requirements of subsection (c)(1)";
+}
+@source(IRC_S1244_D, relation = formalizes, coverage = partial, quote = "shall be treated as meeting such requirements")
+rule SuccessorStockByBasisRule(a: Asset, prior: Asset) defeasible {
+    label en official "section 1244(d)(2): substituted-basis successor stock meets the requirements";
+    when stock_basis_by_reference_to_1244_stock(a, prior);
+    when prior_stock_meets_1244c1_A_and_B(prior);
+    then treated_as_meeting_1244_requirements_1244d2(a);
+}
+rule SuccessorStockByReorganizationRule(a: Asset, prior: Asset) defeasible {
+    label en official "section 1244(d)(2): stock received in an F reorganization for qualifying stock meets the requirements";
+    when received_in_368a1F_reorganization_for(a, prior);
+    when prior_stock_meets_1244c1_A_and_B(prior);
+    then treated_as_meeting_1244_requirements_1244d2(a);
+}
+
+// =============================================================================
+// Section 1245(a)(2)(B), (b)(5)-(8)
+// =============================================================================
+
+pub relation depreciation_allowed_proved_less_than_allowable(p: Person, a: Asset) kind empirical {
+    label en official "section 1245(a)(2)(B): the taxpayer establishes by adequate records or other sufficient evidence that the amount allowed was less than the amount allowable";
+}
+pub relation depreciation_addback_1245a2B(p: Person, a: Asset, on: Date, amount: Money) kind institutional {
+    label en official "section 1245(a)(2): the amount added back - the greater of allowed and allowable, or the allowed amount when the taxpayer proves it was less";
+}
+@source(IRC_S1245_A, relation = formalizes, coverage = exact, quote = "the amount added for such period shall be the amount allowed")
+rule AddbackAllowedAtLeastAllowableRule(p: Person, a: Asset, on: Date, allowed: Money, allowable: Money) defeasible {
+    label en official "section 1245(a)(2): allowed not less than allowable - the allowed amount";
+    when depreciation_allowed(p, a, on, allowed);
+    when depreciation_allowable(p, a, on, allowable);
+    when allowed >= allowable;
+    then depreciation_addback_1245a2B(p, a, on, allowed);
+}
+rule AddbackProvedRule(p: Person, a: Asset, on: Date, allowed: Money, allowable: Money) defeasible {
+    label en official "section 1245(a)(2)(B): proved less than allowable - the allowed amount";
+    when depreciation_allowed(p, a, on, allowed);
+    when depreciation_allowable(p, a, on, allowable);
+    when allowed < allowable;
+    when depreciation_allowed_proved_less_than_allowable(p, a);
+    then depreciation_addback_1245a2B(p, a, on, allowed);
+}
+rule AddbackUnprovedRule(p: Person, a: Asset, on: Date, allowed: Money, allowable: Money) defeasible {
+    label en official "section 1245(a)(2)(A): not proved - the allowable amount";
+    when depreciation_allowed(p, a, on, allowed);
+    when depreciation_allowable(p, a, on, allowable);
+    when allowed < allowable;
+    when not_known(depreciation_allowed_proved_less_than_allowable(p, a));
+    then depreciation_addback_1245a2B(p, a, on, allowable);
+}
+pub relation recomputed_basis_with_proof_1245a2B(p: Person, a: Asset, on: Date, amount: Money) kind institutional {
+    label en official "section 1245(a)(2): the recomputed basis using the section 1245(a)(2)(B) addback";
+}
+rule RecomputedBasisWithProofRule(p: Person, a: Asset, on: Date, basis: Money, addback: Money) defeasible {
+    label en official "section 1245(a)(2): adjusted basis plus the addback";
+    when us.irc.core::adjusted_basis(p, a, on, basis);
+    when depreciation_addback_1245a2B(p, a, on, addback);
+    then recomputed_basis_with_proof_1245a2B(p, a, on, basis + addback);
+}
+pub relation disposition_to_511_organization_used_in_unrelated_business(t: Transaction) kind empirical {
+    label en official "section 1245(b)(6)(A): a disposition to an organization described in section 511(a)(2) or 511(b)(2) which uses the property immediately after in an unrelated trade or business (section 513)";
+}
+pub relation second_sentence_1245b3_disapplied_1245b6A(t: Transaction) kind institutional {
+    label en official "section 1245(b)(6)(A): the second sentence of paragraph (3) does not apply to the disposition";
+}
+@source(IRC_S1245_B, relation = formalizes, coverage = exact, quote = "The second sentence of paragraph (3) shall not apply to a disposition of section 1245 property to an organization described in section 511(a)(2) or 511(b)(2)")
+rule SecondSentenceDisapplied1245b6ARule(t: Transaction) defeasible {
+    label en official "section 1245(b)(6)(A): the exception for tax-exempt recipients does not apply where the property is used in an unrelated business";
+    when disposition_to_tax_exempt_organization_1245b3(t);
+    when disposition_to_511_organization_used_in_unrelated_business(t);
+    then second_sentence_1245b3_disapplied_1245b6A(t);
+}
+pub relation tax_exempt_disposition_blocks_cap_1245b3(t: Transaction) kind institutional {
+    label en official "section 1245(b)(3) second sentence, as limited by (b)(6)(A): a disposition to a tax-exempt organization blocks the cap";
+}
+rule TaxExemptBlocksCapRule(t: Transaction) defeasible {
+    label en official "section 1245(b)(3) second sentence: a disposition to a tax-exempt organization is not capped, unless (b)(6)(A) applies";
+    when disposition_to_tax_exempt_organization_1245b3(t);
+    when not_known(second_sentence_1245b3_disapplied_1245b6A(t));
+    then tax_exempt_disposition_blocks_cap_1245b3(t);
+}
+pub relation property_ceases_to_be_used_in_unrelated_business(t: Transaction, prop: Asset, ceased_on: Date) kind empirical {
+    label en official "section 1245(b)(6)(B): the property with respect to which gain was not recognized ceases to be used in an unrelated trade or business of the organization";
+}
+pub relation deemed_disposition_on_cessation_1245b6B(t: Transaction, prop: Asset, on: Date) kind institutional {
+    label en official "section 1245(b)(6)(B): the organization is treated as having disposed of the property on the date of the cessation";
+}
+@source(IRC_S1245_B, relation = formalizes, coverage = exact, quote = "such organization shall be treated for purposes of this section as having disposed of such property on the date of such cessation")
+rule DeemedDispositionOnCessationRule(t: Transaction, prop: Asset, on: Date) defeasible {
+    label en official "section 1245(b)(6)(B): a later change in use is a deemed disposition";
+    when second_sentence_1245b3_disapplied_1245b6A(t);
+    when property_ceases_to_be_used_in_unrelated_business(t, prop, on);
+    then deemed_disposition_on_cessation_1245b6B(t, prop, on);
+}
+pub relation section_1245_property_distributed_by_partnership(t: Transaction, prop: Asset) kind empirical {
+    label en official "section 1245(b)(5)(A): section 1245 property distributed by a partnership to a partner";
+}
+pub relation treated_as_carryover_basis_1245b5A(t: Transaction) kind institutional {
+    label en official "section 1245(b)(5)(A): the basis is deemed determined by reference to the partnership's adjusted basis";
+}
+@source(IRC_S1245_B, relation = formalizes, coverage = exact, quote = "shall be deemed to be determined by reference to the adjusted basis of such property to the partnership")
+rule PartnershipDistributionCarryoverRule(t: Transaction, prop: Asset) defeasible {
+    label en official "section 1245(b)(5)(A): partnership-distributed section 1245 property has a carryover basis for section 1245";
+    when section_1245_property_distributed_by_partnership(t, prop);
+    then treated_as_carryover_basis_1245b5A(t);
+}
+rule Section1245RecaptureCappedByPartnershipDistributionRule(p: Person, t: Transaction, a: Asset, on: Date, amount: Money) defeasible {
+    label en official "section 1245(b)(3) with (b)(5)(A): a partnership distribution is capped at the gain recognized on the transfer";
+    when section_1245_disposition(t, p, a, on);
+    when treated_as_carryover_basis_1245b5A(t);
+    when gain_recognized_without_regard_to_1245(t, amount);
+    when not_known(tax_exempt_disposition_blocks_cap_1245b3(t));
+    then section_1245_recapture_capped_by_tax_free_transaction(p, t, amount);
+}
+pub relation hypothetical_1245_gain_at_fmv_before_distribution(prop: Asset, amount: Money) kind empirical {
+    label en official "section 1245(b)(5)(B)(i): the gain to which subsection (a) would have applied if the property had been sold by the partnership immediately before the distribution at fair market value";
+}
+pub relation gain_to_which_751b_applied(prop: Asset, amount: Money) kind empirical {
+    label en official "section 1245(b)(5)(B)(ii): the amount of that gain to which section 751(b) applied";
+}
+pub relation addback_for_pre_distribution_periods_1245b5B(prop: Asset, amount: Money) kind institutional {
+    label en official "section 1245(b)(5)(B): the adjustments added back for periods before the distribution";
+}
+@source(IRC_S1245_B, relation = formalizes, coverage = exact, quote = "the amount of the adjustments added back for periods before the distribution by the partnership shall be")
+rule PreDistributionAddbackRule(prop: Asset, gain: Money, gain_751b: Money) defeasible {
+    label en official "section 1245(b)(5)(B): the hypothetical gain less the part to which section 751(b) applied";
+    when hypothetical_1245_gain_at_fmv_before_distribution(prop, gain);
+    when gain_to_which_751b_applied(prop, gain_751b);
+    then addback_for_pre_distribution_periods_1245b5B(prop, gain - gain_751b);
+}
+pub relation section_194_adjustments_total(p: Person, a: Asset, amount: Money) kind empirical {
+    label en official "section 1245(b)(7): the adjustments under section 194";
+}
+pub relation section_194_adjustments_on_basis_acquired_before_10th_prior_year(p: Person, a: Asset, amount: Money) kind empirical {
+    label en official "section 1245(b)(7): the part of the section 194 adjustments attributable to amortizable basis acquired before the 10th taxable year preceding the year gain is recognized";
+}
+pub relation section_194_adjustments_counted_1245b7(p: Person, a: Asset, amount: Money) kind institutional {
+    label en official "section 1245(b)(7): the section 194 adjustments taken into account in the recomputed basis";
+}
+@source(IRC_S1245_B, relation = formalizes, coverage = exact, quote = "the taxpayer shall not take into account adjustments under section 194 to the extent such adjustments are attributable to the amortizable basis of the taxpayer acquired before the 10th taxable year preceding")
+rule Section194CountedRule(p: Person, a: Asset, total: Money, old: Money) defeasible {
+    label en official "section 1245(b)(7): the section 194 adjustments less those on basis acquired before the 10th preceding year";
+    when section_194_adjustments_total(p, a, total);
+    when section_194_adjustments_on_basis_acquired_before_10th_prior_year(p, a, old);
+    then section_194_adjustments_counted_1245b7(p, a, total - old);
+}
+pub relation amortizable_197_intangible_disposed(t: Transaction, a: Asset) kind empirical {
+    label en official "section 1245(b)(8)(A): an amortizable section 197 intangible disposed of in the transaction or series of related transactions";
+}
+pub relation adjusted_basis_exceeds_fair_market_value_197(a: Asset) kind empirical {
+    label en official "section 1245(b)(8)(B): the intangible's adjusted basis exceeds its fair market value";
+}
+pub relation treated_as_one_1245_property_1245b8A(t: Transaction, a: Asset) kind institutional {
+    label en official "section 1245(b)(8)(A): the intangible is aggregated with the other intangibles disposed of in the transaction into one section 1245 property";
+}
+@source(IRC_S1245_B, relation = formalizes, coverage = exact, quote = "all such amortizable 197 intangibles shall be treated as 1 section 1245 property for purposes of this section")
+rule Aggregated197Rule(t: Transaction, a: Asset, b: Asset) defeasible {
+    label en official "section 1245(b)(8)(A): more than one amortizable 197 intangible in a transaction are one section 1245 property";
+    when amortizable_197_intangible_disposed(t, a);
+    when amortizable_197_intangible_disposed(t, b);
+    when a != b;
+    when not_known(adjusted_basis_exceeds_fair_market_value_197(a));
+    then treated_as_one_1245_property_1245b8A(t, a);
+}
+
+// =============================================================================
+// Section 1012(c)(2), (d)(2), (d)(3)
+// =============================================================================
+
+pub relation average_basis_stock_acquired_on_1012(p: Person, a: Asset, on: Date) kind empirical {
+    label en official "section 1012(c)(2)(A): stock for which an average basis method is permissible, and the date it was acquired";
+}
+pub relation average_basis_separate_account_1012c2A(p: Person, a: Asset, account: Integer) kind institutional {
+    label en official "section 1012(c)(2)(A): stock acquired before January 1, 2012 is a separate account (1) from stock acquired on or after that date (2)";
+}
+@source(IRC_S1012_C, relation = formalizes, coverage = exact, quote = "which is acquired before January 1, 2012, shall be treated as a separate account from any such stock acquired on or after such date")
+rule SeparateAccountBefore2012Rule(p: Person, a: Asset, on: Date) defeasible {
+    label en official "section 1012(c)(2)(A): pre-2012 average-basis stock is account 1";
+    when average_basis_stock_acquired_on_1012(p, a, on);
+    when on < @2012-01-01;
+    when not_known(ric_single_account_election_applies_1012c2B(p, a));
+    then average_basis_separate_account_1012c2A(p, a, 1);
+}
+rule SeparateAccountFrom2012Rule(p: Person, a: Asset, on: Date) defeasible {
+    label en official "section 1012(c)(2)(A): stock acquired on or after January 1, 2012 is account 2";
+    when average_basis_stock_acquired_on_1012(p, a, on);
+    when on >= @2012-01-01;
+    when not_known(ric_single_account_election_applies_1012c2B(p, a));
+    then average_basis_separate_account_1012c2A(p, a, 2);
+}
+pub relation ric_elects_single_account_for_stockholder(ric: Person, stockholder: Person) kind empirical {
+    label en official "section 1012(c)(2)(B): a regulated investment company elects to have the subparagraph apply to one or more of its stockholders";
+}
+pub relation stock_of_ric_held_by_stockholder(p: Person, a: Asset, ric: Person) kind empirical {
+    label en official "section 1012(c)(2)(B): stock in the regulated investment company held by the stockholder";
+}
+pub relation broker_holds_as_nominee_for(broker: Person, stockholder: Person) kind empirical {
+    label en official "section 1012(c)(2)(B): a broker holding the stock as a nominee";
+}
+pub relation ric_single_account_election_applies_1012c2B(p: Person, a: Asset) kind institutional {
+    label en official "section 1012(c)(2)(B)(i): subparagraph (A) does not apply to the stock";
+}
+@source(IRC_S1012_C, relation = formalizes, coverage = exact, quote = "subparagraph (A) shall not apply with respect to any stock in such regulated investment company held by such stockholders")
+rule RicElectionRule(p: Person, a: Asset, ric: Person) defeasible {
+    label en official "section 1012(c)(2)(B)(i): a regulated investment company election disapplies the separate-account rule";
+    when stock_of_ric_held_by_stockholder(p, a, ric);
+    when ric_elects_single_account_for_stockholder(ric, p);
+    then ric_single_account_election_applies_1012c2B(p, a);
+}
+@source(IRC_S1012_C, relation = formalizes, coverage = exact, quote = "A rule similar to the rule of the preceding sentence shall apply with respect to a broker holding such stock as a nominee")
+rule NomineeBrokerElectionRule(p: Person, a: Asset, ric: Person, broker: Person) defeasible {
+    label en official "section 1012(c)(2)(B): the election rule applies to a broker holding the stock as a nominee";
+    when stock_of_ric_held_by_stockholder(p, a, ric);
+    when broker_holds_as_nominee_for(broker, p);
+    when ric_elects_single_account_for_stockholder(ric, p);
+    then ric_single_account_election_applies_1012c2B(p, a);
+}
+pub relation covered_security_6045g3_1012c2Bii(p: Person, a: Asset) kind institutional {
+    label en official "section 1012(c)(2)(B)(ii): all such stock is treated as a covered security described in section 6045(g)(3) without regard to the date of acquisition";
+}
+@source(IRC_S1012_C, relation = formalizes, coverage = exact, quote = "shall be treated as covered securities described in section 6045(g)(3) without regard to the date of the acquisition of such stock")
+rule CoveredSecurityRule(p: Person, a: Asset) defeasible {
+    label en official "section 1012(c)(2)(B)(ii): stock under the election is a covered security";
+    when ric_single_account_election_applies_1012c2B(p, a);
+    then covered_security_6045g3_1012c2Bii(p, a);
+}
+pub relation basis_in_dividend_reinvestment_plan_before_transfer(a: Asset, amount: Money) kind empirical {
+    label en official "section 1012(d)(2): the stock's basis in the dividend reinvestment plan immediately before the transfer";
+}
+pub relation transfer_fee_adjustment_1012d2(a: Asset, adjustment: Money) kind empirical {
+    label en official "section 1012(d)(2): the proper adjustment for fees or other charges taken into account in connection with the transfer (signed)";
+}
+pub relation cost_basis_in_other_account_1012d2(a: Asset, amount: Money) kind institutional {
+    label en official "section 1012(d)(2): the cost basis in the other account after a transfer out of the plan";
+}
+@source(IRC_S1012_D, relation = formalizes, coverage = exact, quote = "such stock shall have a cost basis in such other account equal to its basis in the dividend reinvestment plan immediately before such transfer")
+rule CostBasisAfterTransferRule(a: Asset, basis: Money, adjustment: Money) defeasible {
+    label en official "section 1012(d)(2): the plan basis carried to the other account, adjusted for transfer fees";
+    when basis_in_dividend_reinvestment_plan_before_transfer(a, basis);
+    when transfer_fee_adjustment_1012d2(a, adjustment);
+    then cost_basis_in_other_account_1012d2(a, basis + adjustment);
+}
+pub relation drp_stock_acquired_on_1012d(p: Person, a: Asset, on: Date) kind empirical {
+    label en official "section 1012(d)(3)(A): stock acquired in connection with a dividend reinvestment plan, and the date it was acquired";
+}
+pub relation drp_stock_separate_account_1012d3A(p: Person, a: Asset, account: Integer) kind institutional {
+    label en official "section 1012(d)(3)(A): rules similar to subsection (c)(2) - separate accounts by the January 1, 2012 date";
+}
+@source(IRC_S1012_D, relation = formalizes, coverage = exact, quote = "Rules similar to the rules of subsection (c)(2) shall apply for purposes of this subsection")
+rule DrpSeparateAccountBeforeRule(p: Person, a: Asset, on: Date) defeasible {
+    label en official "section 1012(d)(3)(A): pre-2012 plan stock is account 1";
+    when drp_stock_acquired_on_1012d(p, a, on);
+    when on < @2012-01-01;
+    when not_known(drp_elects_single_account_1012d3B(p, a));
+    then drp_stock_separate_account_1012d3A(p, a, 1);
+}
+rule DrpSeparateAccountAfterRule(p: Person, a: Asset, on: Date) defeasible {
+    label en official "section 1012(d)(3)(A): plan stock acquired on or after January 1, 2012 is account 2";
+    when drp_stock_acquired_on_1012d(p, a, on);
+    when on >= @2012-01-01;
+    when not_known(drp_elects_single_account_1012d3B(p, a));
+    then drp_stock_separate_account_1012d3A(p, a, 2);
+}
+pub relation drp_election_similar_to_1012c2B(p: Person, a: Asset) kind empirical {
+    label en official "section 1012(d)(3)(B): an election under rules similar to subsection (c)(2)(B) with respect to stock held in connection with a dividend reinvestment plan";
+}
+pub relation drp_elects_single_account_1012d3B(p: Person, a: Asset) kind institutional {
+    label en official "section 1012(d)(3)(B): the election is made";
+}
+rule DrpElectionRule(p: Person, a: Asset) defeasible {
+    label en official "section 1012(d)(3)(B): the election applies to the plan stock";
+    when drp_election_similar_to_1012c2B(p, a);
+    then drp_elects_single_account_1012d3B(p, a);
+}
+pub relation average_basis_method_permissible_for_all_drp_stock_1012d3B(p: Person, a: Asset) kind institutional {
+    label en official "section 1012(d)(3)(B): the average basis method is permissible with respect to all such stock without regard to the date of acquisition";
+}
+@source(IRC_S1012_D, relation = formalizes, coverage = exact, quote = "the average basis method is permissible with respect to all such stock without regard to the date of the acquisition of such stock")
+rule AverageBasisPermissibleAllRule(p: Person, a: Asset) defeasible {
+    label en official "section 1012(d)(3)(B): election permits average basis for all plan stock";
+    when drp_elects_single_account_1012d3B(p, a);
+    then average_basis_method_permissible_for_all_drp_stock_1012d3B(p, a);
+}

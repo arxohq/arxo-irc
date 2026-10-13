@@ -1,0 +1,167 @@
+// Section 4943 — taxes on excess business holdings. Fourth instantiation of
+// the shared shape, but with section 4943's OWN (d)(2) "taxable period"
+// (begins on the first day there are excess holdings; ends on the EARLIER —
+// only two candidates, no "correction" candidate — of notice mailing or
+// assessment). This reuses 01-excise-act-and-taxable-period.law's generic
+// candidate/earliest-of machinery UNCHANGED: the notice/assessment
+// candidate rules are already generic, and simply asserting NO
+// `act_corrected_on` fact for a 4943 act means that candidate source never
+// fires, naturally reducing the earliest-of-three shape to earliest-of-two
+// without any special-casing. "Disposal" of the excess holdings down to the
+// permitted level is modelled by asserting `act_corrected_on` at the
+// disposal date, reusing `corrected_within_taxable_period` for the (b)
+// additional-tax condition.
+//
+// SCOPE:
+//  - (a)(1) 10% initial tax, (a)(2) valued at the greatest-excess-holdings
+//    date (case-asserted single value, not independently computed — same
+//    simplification as section 4941's "amount involved"), (b) 200%
+//    additional tax if excess holdings remain at the close of the taxable
+//    period: modelled.
+//  - (c)(1) "excess business holdings" definition, (c)(2)(A) the 20%
+//    permitted-holdings formula, (c)(2)(A) last sentence (nonvoting stock
+//    treated as permitted when disqualified persons hold ≤20% voting), the
+//    (c)(2)(B) 35%-with-effective-control substitution (DECISION-0194
+//    evaluative "established to the satisfaction of the Secretary"),
+//    (c)(2)(C) the 2% de minimis rule: modelled.
+//  - (c)(6)(A) the 5-year grace period after an involuntary change in
+//    holdings (interest treated as held by a disqualified person, not the
+//    foundation, for the 5 years after the change): modelled as exact date
+//    arithmetic (`add_calendar_period(on, 5 calendar_year)`). (c)(6)(B)
+//    (the increase-only variant) and (c)(7) (the Secretary's discretionary
+//    additional 5-year extension) are NOT modelled — TECH_GAP.
+//  - (c)(3)-(5) (holdings in a partnership/trust/sole proprietorship — the
+//    functional-equivalents-of-corporate-stock formulas), (d)(1)
+//    (constructive/proportionate ownership through an entity), (d)(3)
+//    (the "business enterprise" carve-outs for functionally related and
+//    passive-income businesses), (d)(4) (the section 4975(e)(7) ESOP
+//    carve-out): NOT modelled — TECH_GAP.
+
+use self::{
+    ExciseAct,
+    IRC_S4943_A,
+    IRC_S4943_B,
+    IRC_S4943_C,
+    Person,
+    additional_tax,
+    corrected_within_notice_or_assessment_period,
+    excess_holdings_are_outside_4943,
+    excess_holdings_value_for_initial_tax,
+    initial_tax,
+    substituted_percentage_for_20,
+    substituted_percentage_for_35,
+};
+
+@source(IRC_S4943_C, coverage = partial, quote = "The term \"excess business holdings\" means, with respect to the holdings of any private foundation in any business enterprise, the amount of stock or other interest in the enterprise which the foundation would have to dispose of to a person other than a disqualified person in order for the remaining holdings of the foundation in such enterprise to be permitted holdings.")
+pub relation excess_business_holdings_foundation(a: ExciseAct, f: Person) kind empirical {
+    label en unofficial "the private foundation whose holdings in a business enterprise are being tested";
+}
+pub relation excess_business_holdings_disqualified_persons_voting_percentage(a: ExciseAct, pct: Decimal) kind empirical {
+    label en unofficial "the aggregate percentage of the enterprise's voting stock owned by all disqualified persons together";
+}
+pub relation excess_business_holdings_foundation_voting_percentage(a: ExciseAct, pct: Decimal) kind empirical {
+    label en unofficial "the percentage of the enterprise's voting stock owned by the private foundation";
+}
+@source(IRC_S4943_C, coverage = partial, quote = "the private foundation and all disqualified persons together do not own more than 35 percent of the voting stock of an incorporated business enterprise")
+pub relation foundation_and_disqualified_combined_voting_percentage(a: ExciseAct, pct: Decimal) kind empirical {
+    label en unofficial "section 4943(c)(2)(B)(i): the combined voting percentage of the foundation and all disqualified persons together";
+}
+@source(IRC_S4943_C, coverage = partial, quote = "it is established to the satisfaction of the Secretary that effective control of the corporation is in one or more persons who are not disqualified persons with respect to the foundation")
+external judgment relation effective_control_by_non_disqualified_persons_established(a: ExciseAct) {
+    authority Secretary;
+    label en official "section 4943(c)(2)(B)(ii): established to the satisfaction of the Secretary that effective control is in persons who are not disqualified persons";
+}
+
+relation meets_35_percent_substitution_conditions(a: ExciseAct) kind institutional {
+    label en unofficial "both section 4943(c)(2)(B)(i) (≤35% combined) and (ii) (effective control established) hold, substituting 35% for 20% in the permitted-holdings formula";
+}
+rule Meets35PercentSubstitutionConditions(a: ExciseAct, combined: Decimal, s35: Decimal) defeasible {
+    label en official "section 4943(c)(2)(B): the 35% substitution applies when the combined voting percentage is at most 35% and effective control by non-disqualified persons is established";
+    when foundation_and_disqualified_combined_voting_percentage(a, combined);
+    when substituted_percentage_for_35(a, s35);  // Stage 3: 35 percent, or the substituted percentage of section 4943(c)(4)(A)(i) (28-*.law)
+    when combined <= s35;
+    when effective_control_by_non_disqualified_persons_established(a);
+    then meets_35_percent_substitution_conditions(a);
+}
+
+@source(IRC_S4943_C, coverage = partial, quote = "The permitted holdings of any private foundation in an incorporated business enterprise are—")
+pub relation permitted_holdings_percentage(a: ExciseAct, pct: Decimal) kind institutional {
+    label en official "section 4943(c)(2)(A)/(B): the foundation's permitted holdings percentage of voting stock (20%, or 35% under the (B) substitution) reduced by the disqualified persons' combined percentage";
+}
+rule PermittedHoldingsPercentageStandard(a: ExciseAct, pct: Decimal, dq: Decimal, s20: Decimal) defeasible {
+    label en official "section 4943(c)(2)(A): permitted holdings = 20 percent minus the disqualified persons' combined voting percentage";
+    when excess_business_holdings_disqualified_persons_voting_percentage(a, dq);
+    when substituted_percentage_for_20(a, s20);  // Stage 3: 20 percent, or the section 4943(c)(4) substituted percentage (28-*.law)
+    unless meets_35_percent_substitution_conditions(a) and excess_business_holdings_disqualified_persons_voting_percentage(a, dq) and substituted_percentage_for_20(a, s20);
+    then permitted_holdings_percentage(a, s20 - dq);
+}
+rule PermittedHoldingsPercentageWithSubstitution(a: ExciseAct, pct: Decimal, dq: Decimal, s35: Decimal) defeasible {
+    label en official "section 4943(c)(2)(B): permitted holdings = 35 percent minus the disqualified persons' combined voting percentage, when the substitution conditions are met";
+    when meets_35_percent_substitution_conditions(a);
+    when excess_business_holdings_disqualified_persons_voting_percentage(a, dq);
+    when substituted_percentage_for_35(a, s35);  // Stage 3: 35 percent, or the substituted percentage (28-*.law)
+    then permitted_holdings_percentage(a, s35 - dq);
+}
+
+@source(IRC_S4943_C, coverage = partial, quote = "A private foundation shall not be treated as having excess business holdings in any corporation in which it (together with all other private foundations which are described in section 4946(a)(1)(H)) owns not more than 2 percent of the voting stock and not more than 2 percent in value of all outstanding shares of all classes of stock.")
+pub relation excess_business_holdings_de_minimis_2_percent(a: ExciseAct) kind empirical {
+    label en unofficial "section 4943(c)(2)(C): case-asserted — the foundation (together with related section 4946(a)(1)(H) foundations) owns at most 2 percent of the voting stock and at most 2 percent by value of all outstanding shares";
+}
+
+@source(IRC_S4943_C, coverage = partial, quote = "the amount of stock or other interest in the enterprise which the foundation would have to dispose of to a person other than a disqualified person in order for the remaining holdings of the foundation in such enterprise to be permitted holdings")
+pub relation excess_business_holdings_exist(a: ExciseAct) kind institutional {
+    label en official "section 4943(c)(1): the foundation's voting-stock percentage exceeds its permitted-holdings percentage, and the 2% de minimis rule does not apply";
+}
+rule ExcessBusinessHoldingsExist(a: ExciseAct, fpct: Decimal, permitted: Decimal) defeasible {
+    label en official "section 4943(c)(1)/(2)(C): excess business holdings exist when the foundation's voting percentage exceeds the permitted percentage, unless the 2% de minimis rule applies";
+    when excess_business_holdings_foundation_voting_percentage(a, fpct);
+    when permitted_holdings_percentage(a, permitted);
+    when fpct > permitted;
+    unless excess_business_holdings_de_minimis_2_percent(a);
+    // Stage 2: sections 4943(f)(2), (f)(6), (g) and 4947(b)(3) take the holdings outside the tax.
+    unless excess_holdings_are_outside_4943(a);
+    then excess_business_holdings_exist(a);
+}
+
+pub relation excess_business_holdings_value(a: ExciseAct, amount: Money) kind empirical {
+    label en unofficial "section 4943(a)(2)(B): the value of the excess business holdings as of the date during the taxable year when they were greatest — case-asserted (no independent greatest-value-during-year computation is built, same simplification class as section 4941's 'amount involved')";
+}
+
+@source(IRC_S4943_A, coverage = partial, quote = "There is hereby imposed on the excess business holdings of any private foundation in a business enterprise during any taxable year which ends during the taxable period a tax equal to 10 percent of the value of such holdings.")
+rule InitialTaxOnExcessBusinessHoldings(a: ExciseAct, f: Person, amount: Money, base: Money) defeasible {
+    label en official "section 4943(a)(1): 10 percent of the value of the excess business holdings, paid by the private foundation";
+    when excess_business_holdings_exist(a);
+    when excess_business_holdings_foundation(a, f);
+    when excess_holdings_value_for_initial_tax(a, base);  // Stage 3: section 4943(a)(2)(B) greatest-day value (28-*.law)
+    then initial_tax(a, f, base * ExcessBusinessHoldingsInitialTaxRate);
+}
+@source(IRC_S4943_B, coverage = partial, quote = "In any case in which an initial tax is imposed under subsection (a) with respect to the holdings of a private foundation in any business enterprise, if, at the close of the taxable period with respect to such holdings, the foundation still has excess business holdings in such enterprise, there is hereby imposed a tax equal to 200 percent of such excess business holdings.")
+rule AdditionalTaxOnExcessBusinessHoldings(a: ExciseAct, f: Person, amount: Money, base: Money) defeasible {
+    label en official "section 4943(b): 200 percent of the excess business holdings still held at the close of the taxable period, paid by the private foundation";
+    when excess_business_holdings_exist(a);
+    when excess_business_holdings_foundation(a, f);
+    when excess_business_holdings_value(a, base);
+    unless corrected_within_notice_or_assessment_period(a) and excess_business_holdings_foundation(a, f) and excess_business_holdings_value(a, base);
+    then additional_tax(a, f, base * ExcessBusinessHoldingsAdditionalTaxRate);
+}
+
+// --- (c)(6)(A): the 5-year grace period after an involuntary change ---
+
+@source(IRC_S4943_C, coverage = partial, quote = "there is a change in the holdings in a business enterprise (other than by purchase by the private foundation or by a disqualified person) which causes the private foundation to have")
+pub relation involuntary_change_in_holdings_on(a: ExciseAct, on: Date) kind empirical {
+    label en unofficial "section 4943(c)(6): the date of a change in holdings (other than by purchase by the foundation or a disqualified person) that caused excess business holdings";
+}
+@source(IRC_S4943_C, coverage = partial, quote = "the interest of the foundation in such enterprise (immediately after such change) shall (while held by the foundation) be treated as held by a disqualified person (rather than by the foundation) during the 5-year period beginning on the date of such change in holdings")
+pub relation c6_grace_period_ends(a: ExciseAct, on: Date) kind institutional {
+    label en official "section 4943(c)(6)(A): the 5-year period beginning on the date of the involuntary change ends on that date plus 5 calendar years";
+}
+rule C6GracePeriodEnds(a: ExciseAct, on: Date, changed_on: Date) defeasible {
+    label en official "section 4943(c)(6)(A): the grace period ends 5 calendar years after the date of the involuntary change";
+    when involuntary_change_in_holdings_on(a, changed_on);
+    then c6_grace_period_ends(a, add_calendar_period(changed_on, 5 calendar_year));
+}
+// `as_of` (an arbitrary date of interest) cannot itself be the head of a
+// rule without an independent positive fact establishing it (§190 range
+// restriction) — a scenario tests the grace period directly by comparing
+// its own known date against `c6_grace_period_ends(a, ends)` rather than
+// through a derived `within_c6_grace_period` relation.

@@ -1,0 +1,474 @@
+// 26 U.S.C. §6651 — Failure to file tax return or to pay tax. Exempt from
+// the section 6751(b) supervisory-approval condition (§6751(b)(2)(A)) so
+// this module never references PenaltyDetermination.
+//
+// JUDGMENT CALLS AND GAPS (see report — every point below is a documented
+// simplification, not a silent gap):
+//  - (b)'s netting of the addition BASE against payments/credits is modelled
+//    through ONE dependency-contract fact, `amount_paid_on_or_before(r, cutoff,
+//    amount)` (owner: returns/payment-refunds-interest, pending), taken at
+//    the RETURN'S due date for every paragraph. The statute actually varies
+//    the cutoff per paragraph — (a)(1)/(b)(1) at the due date, (a)(2)/(b)(2)
+//    and (a)(3)/(b)(3) at the BEGINNING OF EACH MONTH the addition accrues
+//    for (so a mid-delinquency payment shrinks the base for later months
+//    only). This package uses the due-date cutoff throughout — exact for a
+//    taxpayer who made no partial payments during the delinquency (the
+//    documented scenario set), an OVERSTATEMENT of the true addition for one
+//    who paid part of the tax mid-delinquency. TECH_GAP: a per-month netting
+//    rule would need `amount_paid_on_or_before` queried at each of the up-to-
+//    12 tracked month-start boundaries, not just once.
+//  - Credits "claimed on the return" ((b)(1)/(b)(2)) are not netted at all:
+//    `us.irc.core` has no "credit claimed" relation (CONTRACT.md's "not in
+//    core" list). TECH_GAP.
+//  - (c)(2) ("amount required to be shown as tax is LESS than amount shown")
+//    is not modelled: this package's (a)(2)/(b)(2) base already uses
+//    `tax_shown_on_return` (the shown amount) directly, which is the value
+//    (c)(2) would substitute FOR — so the substitution is a no-op under this
+//    package's own base choice for the ordinary case, but the true §6651(c)(2)
+//    text is about a DIFFERENT base value (required-to-be-shown, i.e.
+//    `us.irc.core::liability`) being compared against the shown amount; not
+//    reproduced here — classified INTERPRETATION in coverage.
+//  - (d) (1% rate after notice/levy) is modelled only for the case where the
+//    ENTIRE failure-to-pay period at issue falls AFTER the section 6331(d)/
+//    (a) trigger day (`failure_to_pay_wholly_after_6331_trigger`); a period
+//    straddling the trigger day (partly at 0.5%, partly at 1%) is TECH_GAP —
+//    this package does not pro-rate a single accrual period across two
+//    rates.
+//  - (f) fraud: `fraudulent_failure_to_file` is an ordinary empirical
+//    relation, not routed through a DECISION-0194 judgment channel, because
+//    §6663(b) already gives fraud a burden-of-proof institutional effect in
+//    this package's own §6663 module — a case asserting this fact represents
+//    that the Secretary has met that burden (or the point is conceded);
+//    this package does not reproduce a second, competing evaluative channel
+//    for the identical "fraud" finding.
+//  - (g) SFR treatment is realized STRUCTURALLY, not by a separate rule: the
+//    "measurement date" for the (a)(1) clock is an explicit case-supplied
+//    fact (`failure_to_file_measurement_date`), so a scenario for a
+//    Secretary-prepared return under §6020(b) simply supplies the ongoing
+//    (g)(1) date (SFR does not stop the clock) rather than the SFR's own
+//    filing date; (g)(2) is automatically satisfied because the (a)(2)/(a)(3)
+//    bases already read `tax_shown_on_return`/`notice_and_demand_tax_amount`
+//    regardless of who prepared the return.
+//  - (h) (0.25% during an installment agreement) is modelled only for a
+//    period WHOLLY covered by the agreement, same limitation as (d).
+//  - (i)/(j): the 60-day minimum uses the historical A3 dataset
+//    `FailureToFileMinimumAmount` (exact statutory figures with amendment
+//    dates); the (j) COLA increase for years after 2020 is NOT in the pinned
+//    snapshot (Revenue Procedure, not codified text) — SOURCE_GAP, see the
+//    dataset's own note and coverage row 26/6651/j/u1.
+//  - (e) (estimated-tax exception) is modelled as a scope-delimiting
+//    `unless` guard rather than a computed relation: it says this SECTION
+//    does not apply, not that some other fact defeats an otherwise-accruing
+//    addition.
+
+language "law.core" version "0.2";
+package us.irc.penalties version "0.1.1";
+namespace "urn:us:irc:penalties:clir";
+
+use self::{
+    FailureContext,
+    IRC_S6651_A,
+    IRC_S6651_B,
+    IRC_S6651_C,
+    IRC_S6651_D,
+    IRC_S6651_F,
+    IRC_S6651_H,
+    Notice,
+    Person,
+    Return,
+    TaxKind,
+    TaxableYear,
+    amount_paid_on_or_before,
+    calendar_months_or_fraction,
+    months_or_fraction_query,
+    no_payment_addition_under_6658,
+    notice_and_demand_tax_amount,
+    reasonable_cause_and_no_willful_neglect,
+    tax_shown_on_return,
+};
+
+// --- shared facts ------------------------------------------------------------
+
+// Bridge rules: assert the shared months-or-fraction query whenever an
+// anchor/as-of pair this module needs is both known (see 01-shared.law's
+// header note on the range-restriction design of `months_or_fraction_query`).
+rule FailureToFileMonthsQuery strict {
+    for r: Return;
+    for due: Date;
+    for as_of: Date;
+    when us.irc.core::due_date(r, due) and failure_to_file_measurement_date(r, as_of);
+    then months_or_fraction_query(due, as_of);
+}
+rule FailureToPayMonthsQuery strict {
+    for r: Return;
+    for due: Date;
+    for as_of: Date;
+    when us.irc.core::due_date(r, due) and failure_to_pay_measurement_date(r, as_of);
+    then months_or_fraction_query(due, as_of);
+}
+rule FailureToPayOnNoticeMonthsQuery strict {
+    for n: Notice;
+    for mailed: Date;
+    for as_of: Date;
+    when us.irc.core::mailed_on(n, mailed) and failure_to_pay_on_notice_measurement_date(n, as_of);
+    then months_or_fraction_query(mailed, as_of);
+}
+
+
+relation return_is_for_estimated_tax(r: Return) kind empirical {
+    label en unofficial "the return is (or would be) a return of estimated tax required to be paid under section 6654 or 6655, for purposes of the section 6651(e) exception";
+}
+relation return_prepared_by_secretary_under_6020b(r: Return) kind empirical {
+    label en official "any return made by the Secretary under section 6020(b)";
+}
+
+// --- (a)(1)/(b)(1): failure to file -----------------------------------------
+
+pub relation failure_to_file_measurement_date(r: Return, as_of: Date) kind empirical {
+    label en unofficial "the date as of which the section 6651(a)(1) failure-to-file clock is measured: the date the taxpayer actually filed a return that is NOT itself a section 6020(b) Secretary-prepared return, or (if none) the decision date the failure is still open on section 6651(g)(1)";
+}
+pub relation failure_to_file_penalty_base(r: Return, amount: Money) kind institutional {
+    label en official "the amount of tax required to be shown on the return shall be reduced by the amount of any part of the tax which is paid on or before the date prescribed for payment of the tax";
+}
+@source(IRC_S6651_B, relation = formalizes, coverage = partial, quote = "the amount of tax required to be shown on the return shall be reduced by the amount of any part of the tax which is paid on or before the date prescribed for payment of the tax")
+rule FailureToFilePenaltyBase strict {
+    for r: Return;
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for tax: Money;
+    for due: Date;
+    for paid: Money;
+    when us.irc.core::return_of(r, p, y, kind)
+        and us.irc.core::liability(p, y, kind, tax)
+        and us.irc.core::due_date(r, due)
+        and amount_paid_on_or_before(r, due, paid);
+    then failure_to_file_penalty_base(r, max(0.00 USD, tax - paid));
+}
+
+pub relation failure_to_file_addition(r: Return, amount: Money) kind institutional {
+    label en unofficial "the section 6651(a)(1) addition to tax for failure to file, before the section 6651(c)(1) coordination reduction";
+}
+@source(IRC_S6651_A, relation = formalizes, coverage = partial, quote = "5 percent of the amount of such tax if the failure is for not more than 1 month, with an additional 5 percent for each additional month or fraction thereof during which such failure continues, not exceeding 25 percent in the aggregate")
+rule FailureToFileAddition defeasible {
+    for r: Return;
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for fc: FailureContext;
+    for due: Date;
+    for as_of: Date;
+    for base: Money;
+    for n: Integer;
+    when us.irc.core::due_date(r, due)
+        and failure_to_file_measurement_date(r, as_of)
+        and months_or_fraction_query(due, as_of)
+        and failure_to_file_penalty_base(r, base)
+        and calendar_months_or_fraction(due, as_of, n);
+    then failure_to_file_addition(r, min(round(base * FailureToFileRate * n, 2, "HALF_UP"), round(base * FailureToFileCap, 2, "HALF_UP")));
+    unless fraudulent_failure_to_file(r)
+        and us.irc.core::due_date(r, due) and failure_to_file_measurement_date(r, as_of)
+        and failure_to_file_penalty_base(r, base) and calendar_months_or_fraction(due, as_of, n);
+    unless return_is_for_estimated_tax(r)
+        and us.irc.core::due_date(r, due) and failure_to_file_measurement_date(r, as_of)
+        and failure_to_file_penalty_base(r, base) and calendar_months_or_fraction(due, as_of, n);
+    unless reasonable_cause_and_no_willful_neglect(p, fc)
+        and us.irc.core::return_of(r, p, y, kind)
+        and us.irc.core::due_date(r, due) and failure_to_file_measurement_date(r, as_of)
+        and failure_to_file_penalty_base(r, base) and calendar_months_or_fraction(due, as_of, n);
+}
+
+// (f): fraud substitution.
+relation fraudulent_failure_to_file(r: Return) kind empirical {
+    label en official "If any failure to file any return is fraudulent";
+}
+@source(IRC_S6651_F, relation = formalizes, coverage = partial, quote = "by substituting \"15 percent\" for \"5 percent\" each place it appears")
+rule FraudulentFailureToFileAddition defeasible {
+    for r: Return;
+    for due: Date;
+    for as_of: Date;
+    for base: Money;
+    for n: Integer;
+    when fraudulent_failure_to_file(r)
+        and us.irc.core::due_date(r, due)
+        and failure_to_file_measurement_date(r, as_of)
+        and months_or_fraction_query(due, as_of)
+        and failure_to_file_penalty_base(r, base)
+        and calendar_months_or_fraction(due, as_of, n);
+    then failure_to_file_addition(r, min(round(base * FraudulentFailureToFileRate * n, 2, "HALF_UP"), round(base * FraudulentFailureToFileCap, 2, "HALF_UP")));
+    unless return_is_for_estimated_tax(r)
+        and us.irc.core::due_date(r, due) and failure_to_file_measurement_date(r, as_of)
+        and failure_to_file_penalty_base(r, base) and calendar_months_or_fraction(due, as_of, n);
+}
+
+// (a)/(i): 60-day minimum for a return of chapter 1 tax more than 60 days late.
+relation failure_to_file_more_than_60_days_late(r: Return) kind institutional {
+    label en official "In the case of a failure to file a return of tax imposed by chapter 1 within 60 days of the date prescribed for filing of such return";
+}
+@source(IRC_S6651_A, relation = formalizes, coverage = partial, quote = "In the case of a failure to file a return of tax imposed by chapter 1 within 60 days of the date prescribed for filing of such return")
+rule FailureToFileMoreThan60DaysLate strict {
+    for r: Return;
+    for due: Date;
+    for as_of: Date;
+    when us.irc.core::due_date(r, due)
+        and failure_to_file_measurement_date(r, as_of)
+        and days_between(due, as_of) > 60;
+    then failure_to_file_more_than_60_days_late(r);
+}
+pub relation failure_to_file_addition_after_minimum(r: Return, amount: Money) kind institutional {
+    label en unofficial "the section 6651(a)(1) addition after the (a)/(i) 60-day minimum floor, but before the (c)(1) coordination reduction";
+}
+@source(IRC_S6651_A, relation = formalizes, coverage = exact, quote = "the addition to tax under paragraph (1) shall not be less than the lesser of $435 or 100 percent of the amount required to be shown as tax on such return")
+rule FailureToFileMinimumFloor defeasible {
+    for r: Return;
+    for computed: Money;
+    for base: Money;
+    when failure_to_file_addition(r, computed)
+        and failure_to_file_more_than_60_days_late(r)
+        and failure_to_file_penalty_base(r, base)
+        and not fraudulent_failure_to_file(r);
+    then failure_to_file_addition_after_minimum(r, max(computed, min(round(FailureToFileMinimumAmount, 2, "HALF_UP"), base)));
+}
+@source(IRC_S6651_A, relation = formalizes, coverage = contextual, quote = "unless it is shown that such failure is due to reasonable cause and not due to willful neglect")
+rule FailureToFileAdditionNoMinimumNeeded defeasible {
+    for r: Return;
+    for computed: Money;
+    when failure_to_file_addition(r, computed);
+    then failure_to_file_addition_after_minimum(r, computed);
+    unless failure_to_file_more_than_60_days_late(r) and failure_to_file_addition(r, computed);
+}
+rule FraudulentFailureToFileAdditionPassesThrough defeasible {
+    for r: Return;
+    for computed: Money;
+    when failure_to_file_addition(r, computed) and fraudulent_failure_to_file(r);
+    then failure_to_file_addition_after_minimum(r, computed);
+}
+
+// --- (a)(2)/(b)(2): failure to pay tax shown on return ----------------------
+
+pub relation failure_to_pay_measurement_date(r: Return, as_of: Date) kind empirical {
+    label en unofficial "the date as of which the section 6651(a)(2) failure-to-pay clock is measured: the date the tax shown on the return was paid in full, or (if unpaid) the decision date";
+}
+pub relation failure_to_pay_penalty_base(r: Return, amount: Money) kind institutional {
+    label en official "the amount of tax shown on the return shall, for purposes of computing the addition for any month, be reduced by the amount of any part of the tax which is paid on or before the beginning of such month and by the amount of any credit against the tax which may be claimed on the return";
+}
+@source(IRC_S6651_B, relation = formalizes, coverage = partial, quote = "the amount of tax shown on the return shall, for purposes of computing the addition for any month, be reduced by the amount of any part of the tax which is paid on or before the beginning of such month")
+rule FailureToPayPenaltyBase strict {
+    for r: Return;
+    for shown: Money;
+    for due: Date;
+    for paid: Money;
+    when tax_shown_on_return(r, shown)
+        and us.irc.core::due_date(r, due)
+        and amount_paid_on_or_before(r, due, paid);
+    then failure_to_pay_penalty_base(r, max(0.00 USD, shown - paid));
+}
+
+pub relation failure_to_pay_addition(r: Return, amount: Money) kind institutional {
+    label en unofficial "the section 6651(a)(2) addition to tax for failure to pay the tax shown on the return, before the section 6651(c)(1) coordination reduction and before the (d)/(h) rate substitutions";
+}
+@source(IRC_S6651_A, relation = formalizes, coverage = partial, quote = "0.5 percent of the amount of such tax if the failure is for not more than 1 month, with an additional 0.5 percent for each additional month or fraction thereof during which such failure continues, not exceeding 25 percent in the aggregate")
+rule FailureToPayAddition defeasible {
+    for r: Return;
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for fc: FailureContext;
+    for due: Date;
+    for as_of: Date;
+    for base: Money;
+    for n: Integer;
+    when us.irc.core::due_date(r, due)
+        and failure_to_pay_measurement_date(r, as_of)
+        and months_or_fraction_query(due, as_of)
+        and failure_to_pay_penalty_base(r, base)
+        and calendar_months_or_fraction(due, as_of, n);
+    then failure_to_pay_addition(r, min(round(base * FailureToPayRate * n, 2, "HALF_UP"), round(base * FailureToFileCap, 2, "HALF_UP")));
+    unless failure_to_pay_wholly_after_6331_trigger(r)
+        and us.irc.core::due_date(r, due) and failure_to_pay_measurement_date(r, as_of)
+        and failure_to_pay_penalty_base(r, base) and calendar_months_or_fraction(due, as_of, n);
+    unless failure_to_pay_wholly_during_installment_agreement(r)
+        and us.irc.core::due_date(r, due) and failure_to_pay_measurement_date(r, as_of)
+        and failure_to_pay_penalty_base(r, base) and calendar_months_or_fraction(due, as_of, n);
+    unless return_is_for_estimated_tax(r)
+        and us.irc.core::due_date(r, due) and failure_to_pay_measurement_date(r, as_of)
+        and failure_to_pay_penalty_base(r, base) and calendar_months_or_fraction(due, as_of, n);
+    unless reasonable_cause_and_no_willful_neglect(p, fc)
+        and us.irc.core::return_of(r, p, y, kind)
+        and us.irc.core::due_date(r, due) and failure_to_pay_measurement_date(r, as_of)
+        and failure_to_pay_penalty_base(r, base) and calendar_months_or_fraction(due, as_of, n);
+    unless no_payment_addition_under_6658(p, y)
+        and us.irc.core::return_of(r, p, y, kind)
+        and us.irc.core::due_date(r, due) and failure_to_pay_measurement_date(r, as_of)
+        and failure_to_pay_penalty_base(r, base) and calendar_months_or_fraction(due, as_of, n);
+}
+
+// (d): 1 percent after notice under section 6331(d) or demand for immediate
+// payment under section 6331(a) — modelled only for a period WHOLLY after
+// the trigger (see header TECH_GAP note).
+relation failure_to_pay_wholly_after_6331_trigger(r: Return) kind empirical {
+    label en unofficial "the entire section 6651(a)(2) failure-to-pay period at issue for this return falls after the earlier of the section 6331(d) 10-day notice or the section 6331(a) immediate-payment demand (section 6651(d))";
+}
+@source(IRC_S6651_D, relation = formalizes, coverage = exact, quote = "paragraphs (2) and (3) of subsection (a) shall be applied by substituting \"1 percent\" for \"0.5 percent\" each place it appears")
+rule FailureToPayAdditionIncreasedRate defeasible {
+    for r: Return;
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for due: Date;
+    for as_of: Date;
+    for base: Money;
+    for n: Integer;
+    when failure_to_pay_wholly_after_6331_trigger(r)
+        and us.irc.core::due_date(r, due)
+        and failure_to_pay_measurement_date(r, as_of)
+        and months_or_fraction_query(due, as_of)
+        and failure_to_pay_penalty_base(r, base)
+        and calendar_months_or_fraction(due, as_of, n);
+    then failure_to_pay_addition(r, min(round(base * FailureToPayIncreasedRate * n, 2, "HALF_UP"), round(base * FailureToFileCap, 2, "HALF_UP")));
+    unless return_is_for_estimated_tax(r)
+        and us.irc.core::due_date(r, due) and failure_to_pay_measurement_date(r, as_of)
+        and failure_to_pay_penalty_base(r, base) and calendar_months_or_fraction(due, as_of, n);
+    unless no_payment_addition_under_6658(p, y)
+        and us.irc.core::return_of(r, p, y, kind)
+        and us.irc.core::due_date(r, due) and failure_to_pay_measurement_date(r, as_of)
+        and failure_to_pay_penalty_base(r, base) and calendar_months_or_fraction(due, as_of, n);
+}
+
+// (h): 0.25 percent during an individual's installment agreement (return
+// timely filed) — modelled only for a period WHOLLY within the agreement.
+relation failure_to_pay_wholly_during_installment_agreement(r: Return) kind empirical {
+    label en unofficial "the entire section 6651(a)(2) failure-to-pay period at issue for this return falls within a section 6159 installment agreement, and the return was filed by its due date (section 6651(h))";
+}
+@source(IRC_S6651_H, relation = formalizes, coverage = exact, quote = "paragraphs (2) and (3) of subsection (a) shall each be applied by substituting \"0.25\" for \"0.5\" each place it appears for purposes of determining the addition to tax for any month during which an installment agreement under section 6159 is in effect for the payment of such tax")
+rule FailureToPayAdditionInstallmentRate defeasible {
+    for r: Return;
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for filed: Date;
+    for due: Date;
+    for as_of: Date;
+    for base: Money;
+    for n: Integer;
+    when failure_to_pay_wholly_during_installment_agreement(r)
+        and us.irc.core::return_of(r, p, y, kind)
+        and us.irc.core::filed_on(r, filed)
+        and us.irc.core::due_date(r, due)
+        and filed <= due
+        and failure_to_pay_measurement_date(r, as_of)
+        and months_or_fraction_query(due, as_of)
+        and failure_to_pay_penalty_base(r, base)
+        and calendar_months_or_fraction(due, as_of, n);
+    then failure_to_pay_addition(r, min(round(base * FailureToPayInstallmentRate * n, 2, "HALF_UP"), round(base * FailureToFileCap, 2, "HALF_UP")));
+    unless return_is_for_estimated_tax(r)
+        and us.irc.core::due_date(r, due) and failure_to_pay_measurement_date(r, as_of)
+        and failure_to_pay_penalty_base(r, base) and calendar_months_or_fraction(due, as_of, n);
+    unless no_payment_addition_under_6658(p, y)
+        and us.irc.core::return_of(r, p, y, kind)
+        and us.irc.core::due_date(r, due) and failure_to_pay_measurement_date(r, as_of)
+        and failure_to_pay_penalty_base(r, base) and calendar_months_or_fraction(due, as_of, n);
+}
+
+// --- (c)(1): coordination — (a)(1) reduced by (a)(2) for overlapping months -
+
+pub relation failure_to_file_addition_net_of_coordination(r: Return, amount: Money) kind institutional {
+    label en official "the amount of the addition under paragraph (1) of subsection (a) shall be reduced by the amount of the addition under paragraph (2) of subsection (a) for any month (or fraction thereof) to which an addition to tax applies under both paragraphs (1) and (2)";
+}
+@source(IRC_S6651_C, relation = formalizes, coverage = exact, quote = "the amount of the addition under paragraph (1) of subsection (a) shall be reduced by the amount of the addition under paragraph (2) of subsection (a) for any month (or fraction thereof) to which an addition to tax applies under both paragraphs (1) and (2)")
+rule Section6651cCoordinationBoth defeasible {
+    for r: Return;
+    for file_addition: Money;
+    for file_base: Money;
+    for n_file: Integer;
+    for n_pay: Integer;
+    for due: Date;
+    for file_as_of: Date;
+    for pay_as_of: Date;
+    when failure_to_file_addition_after_minimum(r, file_addition)
+        and failure_to_pay_addition_exists(r)
+        and failure_to_file_penalty_base(r, file_base)
+        and us.irc.core::due_date(r, due)
+        and failure_to_file_measurement_date(r, file_as_of)
+        and failure_to_pay_measurement_date(r, pay_as_of)
+        and calendar_months_or_fraction(due, file_as_of, n_file)
+        and calendar_months_or_fraction(due, pay_as_of, n_pay)
+        and not fraudulent_failure_to_file(r);
+    then failure_to_file_addition_net_of_coordination(r,
+        max(0.00 USD, file_addition - round(file_base * FailureToPayRate * (if n_pay < n_file then n_pay else n_file), 2, "HALF_UP")));
+}
+rule Section6651cCoordinationFileOnly defeasible {
+    for r: Return;
+    for file_addition: Money;
+    when failure_to_file_addition_after_minimum(r, file_addition);
+    then failure_to_file_addition_net_of_coordination(r, file_addition);
+    unless failure_to_pay_addition_exists(r) and failure_to_file_addition_after_minimum(r, file_addition);
+}
+relation failure_to_pay_addition_exists(r: Return) kind institutional {
+    label en unofficial "a section 6651(a)(2) addition has been computed for this return (helper for the (c)(1) coordination's fallback branch)";
+}
+rule FailureToPayAdditionExists defeasible {
+    for r: Return;
+    for amount: Money;
+    when failure_to_pay_addition(r, amount);
+    then failure_to_pay_addition_exists(r);
+}
+
+pub relation section_6651_total_addition(r: Return, amount: Money) kind institutional {
+    label en unofficial "the section 6651 addition to tax for the return: failure-to-file (net of the (c)(1) coordination) plus failure-to-pay";
+}
+rule Section6651TotalAddition defeasible {
+    for r: Return;
+    for file_net: Money;
+    for pay: Money;
+    when failure_to_file_addition_net_of_coordination(r, file_net) and failure_to_pay_addition(r, pay);
+    then section_6651_total_addition(r, file_net + pay);
+}
+rule Section6651TotalAdditionFileOnly defeasible {
+    for r: Return;
+    for file_net: Money;
+    when failure_to_file_addition_net_of_coordination(r, file_net);
+    then section_6651_total_addition(r, file_net);
+    unless failure_to_pay_addition_exists(r) and failure_to_file_addition_net_of_coordination(r, file_net);
+}
+
+// --- (a)(3)/(b)(3): failure to pay on notice and demand ---------------------
+
+pub relation failure_to_pay_on_notice_measurement_date(n: Notice, as_of: Date) kind empirical {
+    label en unofficial "the date as of which the section 6651(a)(3) clock is measured: the date the amount was paid, or the decision date if unpaid";
+}
+pub relation failure_to_pay_on_notice_base(n: Notice, amount: Money) kind institutional {
+    label en official "the amount of tax stated in the notice and demand shall, for the purpose of computing the addition for any month, be reduced by the amount of any part of the tax which is paid before the beginning of such month";
+}
+@source(IRC_S6651_B, relation = formalizes, coverage = partial, quote = "the amount of tax stated in the notice and demand shall, for the purpose of computing the addition for any month, be reduced by the amount of any part of the tax which is paid before the beginning of such month")
+rule FailureToPayOnNoticeBase strict {
+    for n: Notice;
+    for stated: Money;
+    for mailed: Date;
+    for paid: Money;
+    when notice_and_demand_tax_amount(n, stated)
+        and us.irc.core::mailed_on(n, mailed)
+        and amount_paid_on_or_before_notice(n, mailed, paid);
+    then failure_to_pay_on_notice_base(n, max(0.00 USD, stated - paid));
+}
+pub relation amount_paid_on_or_before_notice(n: Notice, cutoff: Date, amount: Money) kind institutional {
+    label en unofficial "PENDING (owner: assessment/payment-refunds-interest) — total payments toward the notice-and-demand amount applied on or before the cutoff date";
+}
+
+pub relation failure_to_pay_on_notice_addition(n: Notice, amount: Money) kind institutional {
+    label en unofficial "the section 6651(a)(3) addition to tax for failure to pay within 21 calendar days (10 business days if $100,000 or more) of a notice and demand";
+}
+@source(IRC_S6651_A, relation = formalizes, coverage = partial, quote = "0.5 percent of the amount of such tax if the failure is for not more than 1 month, with an additional 0.5 percent for each additional month or fraction thereof during which such failure continues, not exceeding 25 percent in the aggregate")
+rule FailureToPayOnNoticeAddition strict {
+    for n: Notice;
+    for mailed: Date;
+    for as_of: Date;
+    for base: Money;
+    for m: Integer;
+    when us.irc.core::mailed_on(n, mailed)
+        and failure_to_pay_on_notice_measurement_date(n, as_of)
+        and months_or_fraction_query(mailed, as_of)
+        and failure_to_pay_on_notice_base(n, base)
+        and calendar_months_or_fraction(mailed, as_of, m);
+    then failure_to_pay_on_notice_addition(n, min(round(base * FailureToPayRate * m, 2, "HALF_UP"), round(base * FailureToFileCap, 2, "HALF_UP")));
+}

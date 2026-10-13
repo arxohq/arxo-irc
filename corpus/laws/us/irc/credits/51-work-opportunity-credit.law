@@ -1,0 +1,320 @@
+// Section 51 — Work opportunity credit ("WOTC"). Stage 2 (IRC-06 stage 2,
+// DECISION-0379). `Person`/`Individual`/`TaxableYear` aliases from
+// `package.law`. This module is self-contained within `credits` (no
+// cross-package `pub` needed to reach the headline `work_opportunity_credit`
+// figure), which is why it was chosen among the stage-2 priority list: the
+// same figure is ALSO the pending dependency contract `employment/HANDOFF`
+// names against this package (§§41(h), 45A, 45B, 45C, 45R, 45AA, 51, 1396).
+//
+// Judgment calls (see report for the full list):
+// * The ten targeted-group categories (d)(1)(A)-(J) are modelled as ONE
+//   enum + ONE certification relation `certified_targeted_group_member`,
+//   mirroring the §61(a)/§6334(a) "one relation, N independent defining
+//   facts" idiom — the underlying eligibility tests behind each
+//   certification (family assistance months, veteran discharge dates,
+//   disability, SNAP months, SSI receipt, empowerment-zone residency) are
+//   themselves institutional facts a designated local agency certifies
+//   (§51(d)(13)); this package treats the CERTIFICATE, not the underlying
+//   welfare/veteran record, as the case-supplied fact, the same way
+//   `collection` treats a lien's identity as case-supplied rather than
+//   derived. This is an INTERPRETATION judgment call, noted in coverage.
+// * §51(d)(3)(A)'s four veteran wage-cap tiers (SNAP veteran / recently
+//   discharged with service-connected disability / long-unemployed
+//   service-connected-disabled / long-unemployed non-disabled) are asserted
+//   directly via `qualified_veteran_wage_cap_tier` rather than re-derived
+//   from discharge dates and unemployment-week counts — a second, narrower
+//   INTERPRETATION judgment call (TECH-GAPS G296).
+// * §51(c) "wages" (section 3306(b), without its dollar cap) is read as the
+//   `qualified_first_year_wages`/`qualified_second_year_wages` case facts
+//   directly: this package does not re-run `employment`'s own §3306(b)
+//   exclusion list before crediting it (the dependency runs the OTHER way
+//   per the `employment` HANDOFF entry, so duplicating it here would be
+//   circular); flagged EXTERNAL_DEPENDENCY.
+// * §51(f)'s "more than one-half for trade or business" test and §51(c)(3)'s
+//   labor-dispute exclusion are read as already reflected in the wage case
+//   facts (case authors assert the NET qualifying wage), not separately
+//   derived — TECH_GAP, noted.
+// * §51(h) (agricultural/railway labor special wage definition) is NOT
+//   modelled this pass — EXTERNAL_DEPENDENCY/TECH_GAP on `employment`'s own
+//   §3306(k)/(c)(9)/(d) relations, which this package does not yet import.
+// * §51(k) (successor employers; leased employees) is NON_NORMATIVE for this
+//   pass' operative rule (administrative attribution, not a separate
+//   taxpayer-facing disposition) — TECH_GAP on the successor-employer case.
+
+use self::{
+    IRC_S45P_C,
+    IRC_S51_A,
+    IRC_S51_B,
+    IRC_S51_D,
+    IRC_S51_E,
+    IRC_S51_I,
+    IRC_S51_J,
+    Individual,
+    Person,
+    TaxableYear,
+    compensation_credit_reduction_45p,
+    remuneration_disqualified_51fk,
+};
+
+pub enum TargetedGroupCategory {
+    QualifiedIvARecipient,
+    QualifiedVeteran,
+    QualifiedExFelon,
+    DesignatedCommunityResident,
+    VocationalRehabilitationReferral,
+    QualifiedSummerYouthEmployee,
+    QualifiedSnapRecipient,
+    QualifiedSsiRecipient,
+    LongTermFamilyAssistanceRecipient,
+    QualifiedLongTermUnemploymentRecipient,
+}
+
+@source(IRC_S51_D, quote = "An individual is a member of a targeted group if such individual is—")
+pub relation certified_targeted_group_member(employee: Individual, employer: Person, y: TaxableYear, category: TargetedGroupCategory, hiring_date: Date) kind empirical {
+    label en official "certified by a designated local agency as a member of the named targeted group with respect to this employee and employer (section 51(d)(1), certification mechanics of section 51(d)(13))";
+}
+
+pub relation member_of_targeted_group(employee: Individual, employer: Person, y: TaxableYear) kind institutional {
+    label en official "the employee is a member of a targeted group with respect to the employer for the taxable year (section 51(d)(1))";
+}
+@source(IRC_S51_D, quote = "An individual is a member of a targeted group if such individual is—")
+rule MemberOfTargetedGroup strict {
+    label en official "any certified targeted-group category makes the employee a member of a targeted group";
+    for employee: Individual;
+    for employer: Person;
+    for y: TaxableYear;
+    for category: TargetedGroupCategory;
+    for hiring_date: Date;
+    when certified_targeted_group_member(employee, employer, y, category, hiring_date);
+    then member_of_targeted_group(employee, employer, y);
+}
+
+// Existence flags for the three category-specific wage caps below — the
+// `not_known` idiom of a value-carrying relation requires its own
+// no-argument companion (AGENT-BRIEF's "existence-flag pattern"), never a
+// fresh variable inside `not_known` itself.
+relation is_certified_veteran(employee: Individual, employer: Person, y: TaxableYear) kind institutional;
+rule IsCertifiedVeteran strict {
+    for employee: Individual;
+    for employer: Person;
+    for y: TaxableYear;
+    for hiring_date: Date;
+    when certified_targeted_group_member(employee, employer, y, QualifiedVeteran, hiring_date);
+    then is_certified_veteran(employee, employer, y);
+}
+relation is_certified_summer_youth(employee: Individual, employer: Person, y: TaxableYear) kind institutional;
+rule IsCertifiedSummerYouth strict {
+    for employee: Individual;
+    for employer: Person;
+    for y: TaxableYear;
+    for hiring_date: Date;
+    when certified_targeted_group_member(employee, employer, y, QualifiedSummerYouthEmployee, hiring_date);
+    then is_certified_summer_youth(employee, employer, y);
+}
+relation is_certified_ltfa(employee: Individual, employer: Person, y: TaxableYear) kind institutional;
+rule IsCertifiedLtfa strict {
+    for employee: Individual;
+    for employer: Person;
+    for y: TaxableYear;
+    for hiring_date: Date;
+    when certified_targeted_group_member(employee, employer, y, LongTermFamilyAssistanceRecipient, hiring_date);
+    then is_certified_ltfa(employee, employer, y);
+}
+
+// --- §51(i)(3): minimum hours of service ---------------------------------------
+
+relation hours_of_service(employee: Individual, employer: Person, y: TaxableYear, hours: Decimal) kind empirical {
+    label en official "hours of service performed by the employee for the employer during the qualifying wage period (section 51(i)(3))";
+}
+
+pub relation work_opportunity_credit_rate(employee: Individual, employer: Person, y: TaxableYear, rate: Decimal) kind institutional {
+    label en official "the applicable rate for the employee's qualified first-year wages (section 51(a), reduced by section 51(i)(3)(A))";
+}
+@source(IRC_S51_I, quote = "In the case of an individual who has performed at least 120 hours, but less than 400 hours, of service for the employer, subsection (a) shall be applied by substituting \"25 percent\" for \"40 percent\".")
+rule WorkOpportunityRateReduced(employee: Individual, employer: Person, y: TaxableYear, hours: Decimal) strict {
+    label en official "120-399 hours of service: 25 percent rate";
+    when hours_of_service(employee, employer, y, hours);
+    when hours >= 120.0;
+    when hours < 400.0;
+    then work_opportunity_credit_rate(employee, employer, y, 0.25);
+}
+@source(IRC_S51_A, quote = "the amount of the work opportunity credit determined under this section for the taxable year shall be equal to 40 percent of the qualified first-year wages for such year")
+rule WorkOpportunityRateFull(employee: Individual, employer: Person, y: TaxableYear, hours: Decimal) strict {
+    label en official "at least 400 hours of service: 40 percent rate";
+    when hours_of_service(employee, employer, y, hours);
+    when hours >= 400.0;
+    then work_opportunity_credit_rate(employee, employer, y, 0.40);
+}
+relation performed_at_least_120_hours(employee: Individual, employer: Person, y: TaxableYear) kind institutional {
+    label en official "performed at least 120 hours of service for the employer (section 51(i)(3)(B) threshold)";
+}
+@source(IRC_S51_I, quote = "No wages shall be taken into account under subsection (a) with respect to any individual unless such individual has performed at least 120 hours of service for the employer.")
+rule PerformedAtLeast120Hours(employee: Individual, employer: Person, y: TaxableYear, hours: Decimal) strict {
+    when hours_of_service(employee, employer, y, hours);
+    when hours >= 120.0;
+    then performed_at_least_120_hours(employee, employer, y);
+}
+
+// --- §51(b)/(d)(7)/(e): wage caps ------------------------------------------------
+
+relation qualified_veteran_wage_cap_tier(employee: Individual, employer: Person, y: TaxableYear, cap: Money) kind empirical {
+    label en official "which of section 51(b)(3)'s three enhanced veteran wage caps ($12,000 / $14,000 / $24,000) applies, asserted directly rather than re-derived from the section 51(d)(3)(A) discharge/unemployment sub-tests — INTERPRETATION judgment call, TECH-GAPS G296";
+}
+relation has_veteran_wage_cap_tier(employee: Individual, employer: Person, y: TaxableYear) kind institutional;
+rule HasVeteranWageCapTier(employee: Individual, employer: Person, y: TaxableYear, cap: Money) strict {
+    when qualified_veteran_wage_cap_tier(employee, employer, y, cap);
+    then has_veteran_wage_cap_tier(employee, employer, y);
+}
+
+pub relation qualified_first_year_wage_cap(employee: Individual, employer: Person, y: TaxableYear, cap: Money) kind institutional {
+    label en official "the section 51(b)(3)/(d)(7)(B)(ii)/(e)(1)(B) dollar cap on qualified first-year wages taken into account for this employee";
+}
+@source(IRC_S51_B, quote = "$12,000 per year in the case of any individual who is a qualified veteran by reason of subsection (d)(3)(A)(ii)(I), $14,000 per year in the case of any individual who is a qualified veteran by reason of subsection (d)(3)(A)(iv), and $24,000 per year in the case of any individual who is a qualified veteran by reason of subsection (d)(3)(A)(ii)(II)")
+rule QualifiedFirstYearWageCapVeteran(employee: Individual, employer: Person, y: TaxableYear, cap: Money) strict {
+    when is_certified_veteran(employee, employer, y);
+    when qualified_veteran_wage_cap_tier(employee, employer, y, cap);
+    then qualified_first_year_wage_cap(employee, employer, y, cap);
+}
+@source(IRC_S51_D, quote = "subsection (b)(3) shall be applied by substituting \"$3,000\" for \"$6,000\"")
+rule QualifiedFirstYearWageCapSummerYouth(employee: Individual, employer: Person, y: TaxableYear) strict {
+    label en official "$3,000 cap for a qualified summer youth employee (section 51(d)(7)(B)(ii))";
+    when is_certified_summer_youth(employee, employer, y);
+    when not_known(has_veteran_wage_cap_tier(employee, employer, y));
+    then qualified_first_year_wage_cap(employee, employer, y, 3000.00 USD);
+}
+@source(IRC_S51_E, quote = "in lieu of applying subsection (b)(3), the amount of the qualified first-year wages, and the amount of qualified second-year wages, which may be taken into account with respect to such a recipient shall not exceed $10,000 per year")
+rule QualifiedFirstYearWageCapLtfa(employee: Individual, employer: Person, y: TaxableYear) strict {
+    when is_certified_ltfa(employee, employer, y);
+    then qualified_first_year_wage_cap(employee, employer, y, 10000.00 USD);
+}
+@source(IRC_S51_B, quote = "The amount of the qualified first-year wages which may be taken into account with respect to any individual shall not exceed $6,000 per year")
+rule QualifiedFirstYearWageCapGeneral(employee: Individual, employer: Person, y: TaxableYear) strict {
+    when member_of_targeted_group(employee, employer, y);
+    when not_known(is_certified_veteran(employee, employer, y));
+    when not_known(is_certified_summer_youth(employee, employer, y));
+    when not_known(is_certified_ltfa(employee, employer, y));
+    then qualified_first_year_wage_cap(employee, employer, y, 6000.00 USD);
+}
+
+// --- Ineligible individuals (§51(i)(1)-(2)) --------------------------------------
+
+relation related_individual_51i1(employee: Individual, employer: Person, y: TaxableYear) kind empirical {
+    label en official "bears a section 152(d)(2)(A)-(G) relationship to the taxpayer (or, for a corporation, a more-than-50-percent owner; or is a dependent of the taxpayer/owner) — section 51(i)(1)";
+}
+relation nonqualifying_rehire_51i2(employee: Individual, employer: Person, y: TaxableYear) kind empirical {
+    label en official "previously employed by the employer at any time before the hiring date — section 51(i)(2)";
+}
+
+// --- Election out (§51(j)) --------------------------------------------------------
+
+pub relation section_51_election_not_to_apply(employer: Person, y: TaxableYear) kind institutional {
+    label en official "the taxpayer has elected under section 51(j) to have this section not apply for the taxable year";
+}
+relation section_51_election_filed_on(employer: Person, y: TaxableYear, filed_on: Date) kind empirical;
+relation last_date_prescribed_for_filing_return(employer: Person, y: TaxableYear, due: Date) kind institutional {
+    label en official "the last date prescribed by law for filing the return for the taxable year, determined without regard to extensions — dependency contract, producer: returns/administration";
+}
+relation section_51_election_timely(employer: Person, y: TaxableYear) kind institutional {
+    label en official "the section 51(j) election was filed within the 3-year window measured from the unextended filing deadline (section 51(j)(2)) — the single atom the power's `valid_when` reads";
+}
+rule Section51ElectionTimely(employer: Person, y: TaxableYear, filed_on: Date, due: Date) strict {
+    when section_51_election_filed_on(employer, y, filed_on);
+    when last_date_prescribed_for_filing_return(employer, y, due);
+    when filed_on <= add_calendar_period(due, 3 calendar_year);
+    then section_51_election_timely(employer, y);
+}
+@source(IRC_S51_J, quote = "A taxpayer may elect to have this section not apply for any taxable year.")
+rule Section51ElectionPower strict {
+    for employer: Person;
+    for y: TaxableYear;
+    for filed_on: Date;
+    when section_51_election_filed_on(employer, y, filed_on);
+    then power Section51ElectOut {
+        holder employer;
+        exercise section_51_election_filed_on(employer, y, filed_on);
+        valid_when section_51_election_timely(employer, y);
+        effect section_51_election_not_to_apply(employer, y);
+    };
+}
+
+// --- §51(a): amount of credit -----------------------------------------------------
+
+pub relation work_opportunity_credit_component_before_45p(employee: Individual, employer: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "this employee's contribution to the section 51 work opportunity credit before the section 45P(c) reduction (stage 4)";
+}
+pub relation work_opportunity_credit_component(employee: Individual, employer: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "this employee's contribution to the section 51 work opportunity credit for the taxable year (first-year plus, for a long-term family assistance recipient, second-year wages), reduced by the section 45P credit determined with respect to the employee (section 45P(c))";
+}
+@source(IRC_S45P_C, quote = "The amount of credit otherwise allowable under this chapter with respect to compensation paid to any employee shall be reduced by the credit determined under this section with respect to such employee.")
+rule WorkOpportunityComponentReducedBy45p(employee: Individual, employer: Person, y: TaxableYear, before: Money, reduction: Money) defeasible {
+    label en official "the work opportunity credit for the employee less the section 45P credit for the same employee, not below zero (section 45P(c))";
+    when work_opportunity_credit_component_before_45p(employee, employer, y, before);
+    when compensation_credit_reduction_45p(employer, employee, y, reduction);
+    then work_opportunity_credit_component(employee, employer, y, max(0 USD, before - reduction));
+}
+relation compensation_credit_reduction_45p_present(employee: Individual, employer: Person, y: TaxableYear) kind institutional {
+    label en official "bridge: a section 45P reduction exists for the employee";
+}
+rule CompensationCreditReduction45pPresent(employee: Individual, employer: Person, y: TaxableYear, r: Money) defeasible {
+    label en official "bridge for the absence test";
+    when compensation_credit_reduction_45p(employer, employee, y, r);
+    then compensation_credit_reduction_45p_present(employee, employer, y);
+}
+rule WorkOpportunityComponentNotReducedBy45p(employee: Individual, employer: Person, y: TaxableYear, before: Money) defeasible {
+    label en official "no section 45P credit for the employee: the credit stands";
+    when work_opportunity_credit_component_before_45p(employee, employer, y, before);
+    when not_known(compensation_credit_reduction_45p_present(employee, employer, y));
+    then work_opportunity_credit_component(employee, employer, y, before);
+}
+
+relation qualified_first_year_wages(employee: Individual, employer: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "wages attributable to service during the 1-year period beginning with the day the individual begins work for the employer (section 51(b)(2)), already net of the section 51(c)/(f) wage-definition exclusions (case-asserted — EXTERNAL_DEPENDENCY on employment's own section 3306(b) wage base)";
+}
+relation qualified_second_year_wages(employee: Individual, employer: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "qualified second-year wages of a long-term family assistance recipient (section 51(e)(2))";
+}
+
+@source(IRC_S51_A, quote = "the amount of the work opportunity credit determined under this section for the taxable year shall be equal to 40 percent of the qualified first-year wages for such year")
+rule WorkOpportunityCreditComponentGeneral(employee: Individual, employer: Person, y: TaxableYear, rate: Decimal, wages: Money, cap: Money) strict {
+    label en official "40/25 percent of the capped qualified first-year wages, for a targeted-group member who is not a long-term family assistance recipient (whose second-year wages are added separately below), not excluded by (i)(1)/(2), and who has performed at least 120 hours";
+    when member_of_targeted_group(employee, employer, y)
+        and performed_at_least_120_hours(employee, employer, y)
+        and work_opportunity_credit_rate(employee, employer, y, rate)
+        and qualified_first_year_wages(employee, employer, y, wages)
+        and qualified_first_year_wage_cap(employee, employer, y, cap)
+        and not related_individual_51i1(employee, employer, y)
+        and not nonqualifying_rehire_51i2(employee, employer, y);
+    when not_known(is_certified_ltfa(employee, employer, y));
+    when not_known(remuneration_disqualified_51fk(employee, employer, y));
+    then work_opportunity_credit_component_before_45p(employee, employer, y, round(rate * min(wages, cap), 2, "HALF_UP"));
+}
+
+@source(IRC_S51_E, quote = "the amount of the work opportunity credit determined under this section for the taxable year shall include 50 percent of the qualified second-year wages for such year")
+rule WorkOpportunityCreditComponentLtfa(employee: Individual, employer: Person, y: TaxableYear, rate: Decimal, w1: Money, cap: Money, w2: Money) strict {
+    label en official "for a long-term family assistance recipient: 40/25 percent of capped first-year wages plus 50 percent of capped ($10,000) second-year wages";
+    when is_certified_ltfa(employee, employer, y);
+    when performed_at_least_120_hours(employee, employer, y)
+        and work_opportunity_credit_rate(employee, employer, y, rate)
+        and qualified_first_year_wages(employee, employer, y, w1)
+        and qualified_first_year_wage_cap(employee, employer, y, cap)
+        and qualified_second_year_wages(employee, employer, y, w2)
+        and not related_individual_51i1(employee, employer, y)
+        and not nonqualifying_rehire_51i2(employee, employer, y);
+    when not_known(remuneration_disqualified_51fk(employee, employer, y));
+    then work_opportunity_credit_component_before_45p(employee, employer, y, round(rate * min(w1, cap), 2, "HALF_UP") + round(0.50 * min(w2, 10000.00 USD), 2, "HALF_UP"));
+}
+
+pub relation work_opportunity_credit(employer: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the section 51 work opportunity credit for the taxable year (section 38(b)(2) component of the current year business credit)";
+}
+@source(IRC_S51_A, quote = "the amount of the work opportunity credit determined under this section for the taxable year shall be equal to 40 percent of the qualified first-year wages for such year")
+rule WorkOpportunityCreditTotal defeasible {
+    for employer: Person;
+    for y: TaxableYear;
+    for one_employee: Individual;
+    for one_amount: Money;
+    when work_opportunity_credit_component(one_employee, employer, y, one_amount);
+    then work_opportunity_credit(employer, y,
+        sum all amount: Money for employee: Individual where work_opportunity_credit_component(employee, employer, y, amount));
+    unless section_51_election_not_to_apply(employer, y) and work_opportunity_credit_component(one_employee, employer, y, one_amount);
+}

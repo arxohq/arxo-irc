@@ -1,0 +1,730 @@
+// Section 56A(c) (the general adjustments to adjusted financial statement
+// income), the aggregation and group rules of section 59(k), section 57(b)
+// (straight line recovery of intangibles) and section 59(a)(3)(A) (the
+// simplified section 904 limitation) (stage 3, TECH_GAP reduction,
+// 26.09.2026).
+//
+// SECTION 56A(c) AS A LEDGER. Adjusted financial statement income is the
+// net income or loss set forth on the applicable financial statement
+// adjusted as section 56A provides (section 56A(a)). Each paragraph of
+// subsection (c) names an item that is added, disregarded or replaced. Where
+// the text fixes the DIRECTION and the BASE (partnership share instead of the
+// statement's income, dividends instead of the statement's income from
+// another corporation, depreciation allowed for taxable income in place of
+// the statement's depreciation expense, ...), this module derives the signed
+// adjustment from facts of the case: the statement figures and the tax
+// figures are inputs (EXTERNAL_DEPENDENCY: the financial statement, §§167,
+// 168, 197, 263, 1382, 401, 511-514, 951). Where the text says only
+// "appropriately adjusted" or leaves the rule to regulations (paragraphs (1),
+// (2)(A), (2)(B), (15)) the adjustment enters as `afsi_adjustment_supplied`
+// and the coverage row says so.
+//
+// `afsi_before_nol_deduction` (`55-camt.law`) is DERIVED here as the statement
+// income plus the ledger. A case must not also assert it directly.
+
+use self::{
+    Corporation,
+    DrillingCategory,
+    IRC_S56A_C,
+    IRC_S57_A,
+    IRC_S57_B,
+    IRC_S59_A,
+    IRC_S59_K,
+    Person,
+    TaxableYear,
+    afsi_before_nol_deduction,
+    claims_amt_foreign_tax_credit,
+    excess_intangible_drilling_costs,
+    foreign_parented_multinational_member,
+    has_cfc_chain_year_56Ac3,
+    idc_allowed_regular_tax,
+    pre_credit_tentative_minimum_tax,
+    simplified_904_applies_to_year,
+    simplified_904_limitation_fraction,
+};
+
+type Partnership = us.irc.core::Partnership;
+
+pub enum AfsiAdjustmentKind {
+    StatementPeriod56Ac1;
+    ConsolidatedGroup56Ac2AB;
+    OtherCorporation56Ac2C;
+    Partnership56Ac2D;
+    ForeignIncome56Ac3;
+    ForeignCorporation56Ac4;
+    Taxes56Ac5;
+    DisregardedEntity56Ac6;
+    Cooperative56Ac7;
+    AlaskaNative56Ac8;
+    DirectPayCredits56Ac9;
+    MortgageServicing56Ac10;
+    DefinedBenefit56Ac11;
+    TaxExempt56Ac12;
+    Depreciation56Ac13;
+    WirelessSpectrum56Ac14;
+    SecretaryAdjustment56Ac15;
+}
+
+pub relation applicable_financial_statement_net_income(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the net income or loss set forth on the applicable financial statement of the taxpayer for the taxable year (section 56A(a))";
+}
+pub relation afsi_adjustment(c: Corporation, y: TaxableYear, k: AfsiAdjustmentKind, amount: Money) kind institutional {
+    label en unofficial "the signed amount by which paragraph k of section 56A(c) changes adjusted financial statement income (positive: income increases)";
+}
+pub relation afsi_adjustment_supplied(c: Corporation, y: TaxableYear, k: AfsiAdjustmentKind, amount: Money) kind empirical {
+    label en unofficial "an adjustment the text leaves to appropriate adjustment, regulations or guidance, supplied by the case, signed";
+}
+@source(IRC_S56A_C, relation = formalizes, coverage = partial, quote = "Appropriate adjustments shall be made in adjusted financial statement income in any case in which an applicable financial statement covers a period other than the taxable year.")
+rule AfsiAdjustmentFromOutsideComputation(c: Corporation, y: TaxableYear, k: AfsiAdjustmentKind, amount: Money) strict {
+    label en unofficial "paragraphs (1), (2)(A)-(B) and (15): appropriate adjustments whose amount the text does not fix enter as supplied";
+    when afsi_adjustment_supplied(c, y, k, amount);
+    then afsi_adjustment(c, y, k, amount);
+}
+
+pub relation afsi_adjustments_total(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "the sum of the section 56A(c) adjustments for the year";
+}
+rule AfsiAdjustmentsTotalRule(c: Corporation, y: TaxableYear) strict {
+    when applicable_financial_statement_net_income(c, y, _);
+    then afsi_adjustments_total(c, y, sum(collect all a: Money, k: AfsiAdjustmentKind where afsi_adjustment(c, y, k, a), empty: 0.00 USD));
+}
+@source(IRC_S56A_C, relation = formalizes, coverage = partial, quote = "(c) General adjustments")
+rule AfsiBeforeNolDeductionFromStatement(c: Corporation, y: TaxableYear, statement: Money, adjustments: Money) strict {
+    label en official "section 56A(a), (c): adjusted financial statement income before subsection (d) is the statement's net income adjusted as subsection (c) provides";
+    effective [@2023-01-01, infinity);
+    when applicable_financial_statement_net_income(c, y, statement);
+    when afsi_adjustments_total(c, y, adjustments);
+    then afsi_before_nol_deduction(c, y, statement + adjustments);
+}
+
+// --- (2)(C): other corporations not on the consolidated return -------------------
+
+pub relation statement_income_from_other_corporation(c: Corporation, y: TaxableYear, other: Corporation, amount: Money) kind empirical {
+    label en official "the income of the taxpayer with respect to the other corporation as it is taken into account on the applicable financial statement";
+}
+pub relation dividends_received_from_other_corporation(c: Corporation, y: TaxableYear, other: Corporation, amount: Money) kind empirical {
+    label en official "dividends received from the other corporation (reduced to the extent the Secretary provides)";
+}
+pub relation other_amounts_includible_or_deductible_from_other_corporation(c: Corporation, y: TaxableYear, other: Corporation, amount: Money) kind empirical {
+    label en official "other amounts includible in gross income or deductible as a loss under this chapter with respect to the other corporation (other than amounts required to be included under sections 951 and 951A or as the Secretary provides), signed";
+}
+relation other_corporation_effect(c: Corporation, y: TaxableYear, other: Corporation, delta: Money) kind institutional {
+    label en unofficial "the change from the statement's income to dividends plus other amounts, for one other corporation";
+}
+@source(IRC_S56A_C, relation = formalizes, coverage = exact, quote = "adjusted financial statement income of the taxpayer with respect to such other corporation shall be determined by only taking into account the dividends received from such other corporation")
+rule OtherCorporationEffect(c: Corporation, y: TaxableYear, other: Corporation, statement: Money, dividends: Money, others: Money) strict {
+    label en official "section 56A(c)(2)(C): only dividends and other includible or deductible amounts are taken into account, in place of the statement's income";
+    when statement_income_from_other_corporation(c, y, other, statement);
+    when dividends_received_from_other_corporation(c, y, other, dividends);
+    when other_amounts_includible_or_deductible_from_other_corporation(c, y, other, others);
+    then other_corporation_effect(c, y, other, dividends + others - statement);
+}
+pub relation has_other_corporation_effect(c: Corporation, y: TaxableYear) kind institutional {
+    label en unofficial "at least one other corporation not on the consolidated return has an effect for the year";
+}
+rule HasOtherCorporationEffect(c: Corporation, y: TaxableYear, other: Corporation) strict {
+    when other_corporation_effect(c, y, other, _);
+    then has_other_corporation_effect(c, y);
+}
+rule AfsiAdjustmentOtherCorporation(c: Corporation, y: TaxableYear) strict {
+    label en official "section 56A(c)(2)(C): the sum over the other corporations";
+    when has_other_corporation_effect(c, y);
+    then afsi_adjustment(c, y, OtherCorporation56Ac2C, sum(collect all d: Money, other: Corporation where other_corporation_effect(c, y, other, d), empty: 0.00 USD));
+}
+
+// --- (2)(D): partnerships -----------------------------------------------------------
+
+pub relation income_from_partnership_on_statement(c: Corporation, y: TaxableYear, part: Partnership, amount: Money) kind empirical {
+    label en official "the income of the taxpayer with respect to the partnership as it is taken into account on the applicable financial statement";
+}
+pub relation distributive_share_of_partnership_afsi(c: Corporation, y: TaxableYear, part: Partnership, amount: Money) kind empirical {
+    label en official "the taxpayer's distributive share of the adjusted financial statement income of the partnership";
+}
+relation partnership_effect(c: Corporation, y: TaxableYear, part: Partnership, delta: Money) kind institutional {
+    label en unofficial "the change from the statement's income to the distributive share of the partnership's adjusted financial statement income";
+}
+@source(IRC_S56A_C, relation = formalizes, coverage = exact, quote = "adjusted financial statement income of the taxpayer with respect to such partnership shall be adjusted to only take into account the taxpayer's distributive share of adjusted financial statement income of such partnership.")
+rule PartnershipEffect(c: Corporation, y: TaxableYear, part: Partnership, statement: Money, share: Money) strict {
+    label en official "section 56A(c)(2)(D)(i): only the distributive share of the partnership's adjusted financial statement income is taken into account (the 'except as provided by the Secretary' clause is not modelled)";
+    when income_from_partnership_on_statement(c, y, part, statement);
+    when distributive_share_of_partnership_afsi(c, y, part, share);
+    then partnership_effect(c, y, part, share - statement);
+}
+pub relation has_partnership_effect(c: Corporation, y: TaxableYear) kind institutional {
+    label en unofficial "at least one partnership has an effect for the year";
+}
+rule HasPartnershipEffect(c: Corporation, y: TaxableYear, part: Partnership) strict {
+    when partnership_effect(c, y, part, _);
+    then has_partnership_effect(c, y);
+}
+rule AfsiAdjustmentPartnership(c: Corporation, y: TaxableYear) strict {
+    label en official "section 56A(c)(2)(D)(i): the sum over the partnerships";
+    when has_partnership_effect(c, y);
+    then afsi_adjustment(c, y, Partnership56Ac2D, sum(collect all d: Money, part: Partnership where partnership_effect(c, y, part, d), empty: 0.00 USD));
+}
+
+pub relation partnership_net_income_on_statement(part: Partnership, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the partnership's net income or loss set forth on its applicable financial statement, adjusted under rules similar to the rules of section 56A";
+}
+pub relation partnership_afsi(part: Partnership, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the adjusted financial statement income of a partnership";
+}
+@source(IRC_S56A_C, relation = formalizes, coverage = exact, quote = "the adjusted financial statement income of a partnership shall be the partnership's net income or loss set forth on such partnership's applicable financial statement (adjusted under rules similar to the rules of this section).")
+rule PartnershipAfsiRule(part: Partnership, y: TaxableYear, net: Money) strict {
+    label en official "section 56A(c)(2)(D)(ii): the partnership's net income or loss set forth on its applicable financial statement";
+    when partnership_net_income_on_statement(part, y, net);
+    then partnership_afsi(part, y, net);
+}
+
+// --- (3): items of foreign income of controlled foreign corporations ---------------
+
+pub relation united_states_shareholder_of_cfc(c: Corporation, y: TaxableYear, cfc: Corporation) kind empirical {
+    label en official "the taxpayer is a United States shareholder of the controlled foreign corporation";
+}
+pub relation cfc_pro_rata_share_of_items(c: Corporation, y: TaxableYear, cfc: Corporation, amount: Money) kind empirical {
+    label en official "the taxpayer's pro rata share (determined under rules similar to section 951(a)(2)) of the items taken into account in computing the net income or loss set forth on the applicable financial statement of the controlled foreign corporation (as adjusted), signed";
+}
+pub relation cfc_negative_adjustment_carried_in(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the negative adjustment of the preceding taxable year under paragraph (3)(B)(ii) (the case carries the amount from year to year)";
+}
+pub relation cfc_adjustment_determined(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "the adjustment under subparagraph (A) after the reduction by the preceding year's negative adjustment, before subparagraph (B)(i)";
+}
+pub relation cfc_negative_adjustment(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the negative adjustment of the year (the amount by which the determined adjustment is below zero), which reduces the adjustment of the succeeding year";
+}
+relation has_cfc_shareholding(c: Corporation, y: TaxableYear) kind institutional {
+    label en unofficial "the taxpayer is a United States shareholder of at least one controlled foreign corporation for the year";
+}
+rule HasCfcShareholding(c: Corporation, y: TaxableYear, cfc: Corporation) strict {
+    when united_states_shareholder_of_cfc(c, y, cfc);
+    then has_cfc_shareholding(c, y);
+}
+@source(IRC_S56A_C, relation = formalizes, coverage = exact, quote = "the adjusted financial statement income of such taxpayer with respect to such controlled foreign corporation (as determined under paragraph (2)(C)) shall be adjusted to also take into account such taxpayer's pro rata share")
+rule CfcAdjustmentDetermined(c: Corporation, y: TaxableYear, carried: Money) strict {
+    label en official "section 56A(c)(3)(A), (B)(ii): the pro rata shares of the items of each controlled foreign corporation, reduced by the negative adjustment carried in";
+    when has_cfc_shareholding(c, y);
+    when not_known(has_cfc_chain_year_56Ac3(c, y));
+    when cfc_negative_adjustment_carried_in(c, y, carried);
+    then cfc_adjustment_determined(c, y, sum(collect all a: Money, cfc: Corporation where united_states_shareholder_of_cfc(c, y, cfc) and cfc_pro_rata_share_of_items(c, y, cfc, a), empty: 0.00 USD) - carried);
+}
+@source(IRC_S56A_C, relation = formalizes, coverage = exact, quote = "the adjusted financial statement income of such taxpayer with respect to such controlled foreign corporation (as determined under paragraph (2)(C)) shall be adjusted to also take into account such taxpayer's pro rata share")
+rule CfcAdjustmentDeterminedNoCarryIn(c: Corporation, y: TaxableYear) strict {
+    label en official "section 56A(c)(3)(A): the pro rata shares, when no negative adjustment is carried in";
+    when has_cfc_shareholding(c, y);
+    when not_known(has_cfc_chain_year_56Ac3(c, y));
+    when not_known(has_cfc_negative_carry_in(c, y));
+    then cfc_adjustment_determined(c, y, sum(collect all a: Money, cfc: Corporation where united_states_shareholder_of_cfc(c, y, cfc) and cfc_pro_rata_share_of_items(c, y, cfc, a), empty: 0.00 USD));
+}
+relation has_cfc_negative_carry_in(c: Corporation, y: TaxableYear) kind institutional {
+    label en unofficial "a negative adjustment is asserted as carried in from the preceding year";
+}
+rule HasCfcNegativeCarryIn(c: Corporation, y: TaxableYear) strict {
+    when cfc_negative_adjustment_carried_in(c, y, _);
+    then has_cfc_negative_carry_in(c, y);
+}
+@source(IRC_S56A_C, relation = formalizes, coverage = exact, quote = "(i) no adjustment shall be made under this paragraph for such taxable year, and")
+rule CfcNegativeAdjustmentNoAdjustment(c: Corporation, y: TaxableYear, determined: Money) strict {
+    label en official "section 56A(c)(3)(B)(i): where the adjustment would be negative no adjustment is made for the year, and the negative amount is recorded for the succeeding year";
+    when cfc_adjustment_determined(c, y, determined);
+    when determined < 0 USD;
+    then cfc_negative_adjustment(c, y, 0.00 USD - determined);
+}
+rule CfcNegativeAdjustmentZeroAdjustment(c: Corporation, y: TaxableYear, determined: Money) strict {
+    label en official "section 56A(c)(3)(B)(i): no adjustment (zero) for a year whose adjustment would be negative";
+    when cfc_adjustment_determined(c, y, determined);
+    when determined < 0 USD;
+    then afsi_adjustment(c, y, ForeignIncome56Ac3, 0.00 USD);
+}
+@source(IRC_S56A_C, relation = formalizes, coverage = exact, quote = "adjusted to also take into account such taxpayer's pro rata share (determined under rules similar to the rules under section 951(a)(2)) of items taken into account in computing the net income or loss")
+rule CfcAdjustmentNonNegative(c: Corporation, y: TaxableYear, determined: Money) strict {
+    label en official "section 56A(c)(3)(A): a non-negative adjustment is made";
+    when cfc_adjustment_determined(c, y, determined);
+    when determined >= 0 USD;
+    then afsi_adjustment(c, y, ForeignIncome56Ac3, determined);
+}
+
+// --- (4)-(9): principle, taxes, disregarded entities, cooperatives ------------------
+
+pub relation foreign_corporation_afsi_determined_under_882_principles(c: Corporation, y: TaxableYear) kind institutional {
+    label en official "the adjusted financial statement income of the foreign corporation is determined under the principles of section 882 (effectively connected income)";
+}
+pub relation foreign_corporation_taxpayer(c: Corporation) kind empirical {
+    label en official "the taxpayer is a foreign corporation";
+}
+@source(IRC_S56A_C, relation = formalizes, coverage = exact, quote = "In the case of a foreign corporation, to determine adjusted financial statement income, the principles of section 882 shall apply.")
+rule ForeignCorporationAfsiUnder882(c: Corporation, y: TaxableYear) strict {
+    label en official "section 56A(c)(4): a foreign corporation's adjusted financial statement income is determined under the principles of section 882";
+    when foreign_corporation_taxpayer(c);
+    when applicable_financial_statement_net_income(c, y, _);
+    then foreign_corporation_afsi_determined_under_882_principles(c, y);
+}
+
+pub relation taxes_disregarded_on_statement(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the Federal income taxes and the income, war profits and excess profits taxes (within the meaning of section 901) with respect to a foreign country or possession that are taken into account on the applicable financial statement";
+}
+@source(IRC_S56A_C, relation = formalizes, coverage = partial, quote = "Adjusted financial statement income shall be appropriately adjusted to disregard any Federal income taxes, or income, war profits, or excess profits taxes (within the meaning of section 901) with respect to a foreign country or possession of the United States, which are taken into account on the taxpayer's applicable financial statement.")
+rule AfsiAdjustmentTaxesDisregarded(c: Corporation, y: TaxableYear, taxes: Money) strict {
+    label en official "section 56A(c)(5): the taxes taken into account on the statement are disregarded (added back to the statement's income); the exception 'to the extent provided by the Secretary' and the timing regulations are not modelled";
+    when taxes_disregarded_on_statement(c, y, taxes);
+    then afsi_adjustment(c, y, Taxes56Ac5, taxes);
+}
+
+pub relation disregarded_entity_afsi(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the adjusted financial statement income of a disregarded entity owned by the taxpayer";
+}
+@source(IRC_S56A_C, relation = formalizes, coverage = exact, quote = "Adjusted financial statement income shall be adjusted to take into account any adjusted financial statement income of a disregarded entity owned by the taxpayer.")
+rule AfsiAdjustmentDisregardedEntity(c: Corporation, y: TaxableYear, amount: Money) strict {
+    label en official "section 56A(c)(6): the disregarded entity's adjusted financial statement income is taken into account";
+    when disregarded_entity_afsi(c, y, amount);
+    then afsi_adjustment(c, y, DisregardedEntity56Ac6, amount);
+}
+
+pub relation cooperative_subject_to_section_1381(c: Corporation) kind empirical {
+    label en official "a cooperative to which section 1381 applies";
+}
+pub relation patronage_dividends_not_otherwise_taken_into_account(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the amounts referred to in section 1382(b) (patronage dividends and per-unit retain allocations) to the extent not otherwise taken into account in determining adjusted financial statement income";
+}
+@source(IRC_S56A_C, relation = formalizes, coverage = exact, quote = "the adjusted financial statement income (determined without regard to this paragraph) shall be reduced by the amounts referred to in section 1382(b)")
+rule AfsiAdjustmentCooperative(c: Corporation, y: TaxableYear, amount: Money) strict {
+    label en official "section 56A(c)(7): a cooperative's adjusted financial statement income is reduced by the section 1382(b) amounts";
+    when cooperative_subject_to_section_1381(c);
+    when patronage_dividends_not_otherwise_taken_into_account(c, y, amount);
+    then afsi_adjustment(c, y, Cooperative56Ac7, 0.00 USD - amount);
+}
+
+pub relation alaska_native_cost_recovery_and_depletion_allowed(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "cost recovery and depletion attributable to property the basis of which is determined under section 21(c) of the Alaska Native Claims Settlement Act, allowed for the year";
+}
+pub relation alaska_native_payments_deductible_when_allowed(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "deductions for amounts payable pursuant to section 7(i) or 7(j) of that Act, at the time the deductions are allowed for tax purposes";
+}
+@source(IRC_S56A_C, relation = formalizes, coverage = partial, quote = "Adjusted financial statement income shall be appropriately adjusted to allow—")
+rule AfsiAdjustmentAlaskaNative(c: Corporation, y: TaxableYear, recovery: Money, payments: Money) strict {
+    label en official "section 56A(c)(8): the cost recovery, depletion and section 7(i)/(j) payments are allowed (they reduce adjusted financial statement income); JUDGMENT CALL: the amounts allowed for tax purposes are subtracted in full";
+    when alaska_native_cost_recovery_and_depletion_allowed(c, y, recovery);
+    when alaska_native_payments_deductible_when_allowed(c, y, payments);
+    then afsi_adjustment(c, y, AlaskaNative56Ac8, 0.00 USD - (recovery + payments));
+}
+
+pub relation direct_pay_amount_disregarded(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "an amount treated as a payment against the tax imposed by subtitle A pursuant to an election under section 48D(d) or 6417, to the extent not otherwise taken into account under paragraph (5)";
+}
+@source(IRC_S56A_C, relation = formalizes, coverage = partial, quote = "Adjusted financial statement income shall be appropriately adjusted to disregard any amount treated as a payment against the tax imposed by subtitle A pursuant to an election under section 48D(d) or 6417")
+rule AfsiAdjustmentDirectPay(c: Corporation, y: TaxableYear, amount: Money) strict {
+    label en official "section 56A(c)(9): the amount is disregarded, i.e. subtracted from the statement's income (JUDGMENT CALL on direction: the amount enters the statement as income or a reduction of expense)";
+    when direct_pay_amount_disregarded(c, y, amount);
+    then afsi_adjustment(c, y, DirectPayCredits56Ac9, 0.00 USD - amount);
+}
+
+// --- (10): mortgage servicing -----------------------------------------------------------
+
+pub relation mortgage_servicing_income_recognized_before_gross_income(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the income in connection with a mortgage servicing contract included in the statement's income earlier than when it is included in gross income under any other provision of this chapter";
+}
+@source(IRC_S56A_C, relation = formalizes, coverage = exact, quote = "Adjusted financial statement income shall be adjusted so as not to include any item of income in connection with a mortgage servicing contract any earlier than when such income is included in gross income under any other provision of this chapter.")
+rule AfsiAdjustmentMortgageServicing(c: Corporation, y: TaxableYear, early: Money) strict {
+    label en official "section 56A(c)(10)(A): income recognized earlier than its inclusion in gross income is taken out";
+    when mortgage_servicing_income_recognized_before_gross_income(c, y, early);
+    then afsi_adjustment(c, y, MortgageServicing56Ac10, 0.00 USD - early);
+}
+
+// --- (11): defined benefit plans -----------------------------------------------------------
+
+entity BenefitPlan {
+    label en unofficial "a defined benefit plan of the corporation";
+}
+pub relation plan_is_defined_benefit_plan(plan: BenefitPlan) kind empirical {
+    label en official "a defined benefit plan";
+}
+pub relation plan_is_multiemployer_plan_414f(plan: BenefitPlan) kind empirical {
+    label en official "a multiemployer plan described in section 414(f)";
+}
+pub relation plan_trust_is_exempt_401a_501a(plan: BenefitPlan) kind empirical {
+    label en official "the trust which is part of the plan is an employees' trust described in section 401(a) which is exempt from tax under section 501(a)";
+}
+pub relation plan_is_qualified_foreign_plan_404Ae(plan: BenefitPlan) kind empirical {
+    label en official "a qualified foreign plan (as defined in section 404A(e))";
+}
+pub relation plan_provides_post_employment_benefits_other_than_pension(plan: BenefitPlan) kind empirical {
+    label en official "a defined benefit plan which provides post-employment benefits other than pension benefits";
+}
+pub relation covered_benefit_plan(plan: BenefitPlan) kind institutional {
+    label en official "covered benefit plan (section 56A(c)(11)(B))";
+}
+@source(IRC_S56A_C, relation = formalizes, coverage = exact, quote = "a defined benefit plan (other than a multiemployer plan described in section 414(f)) if the trust which is part of such plan is an employees' trust described in section 401(a) which is exempt from tax under section 501(a),")
+rule CoveredBenefitPlanQualifiedTrust(plan: BenefitPlan) strict {
+    label en official "section 56A(c)(11)(B)(i)";
+    when plan_is_defined_benefit_plan(plan);
+    when not_known(plan_is_multiemployer_plan_414f(plan));
+    when plan_trust_is_exempt_401a_501a(plan);
+    then covered_benefit_plan(plan);
+}
+@source(IRC_S56A_C, relation = formalizes, coverage = exact, quote = "any qualified foreign plan (as defined in section 404A(e)), or")
+rule CoveredBenefitPlanForeignPlan(plan: BenefitPlan) strict {
+    label en official "section 56A(c)(11)(B)(ii)";
+    when plan_is_qualified_foreign_plan_404Ae(plan);
+    then covered_benefit_plan(plan);
+}
+@source(IRC_S56A_C, relation = formalizes, coverage = exact, quote = "any other defined benefit plan which provides post-employment benefits other than pension benefits.")
+rule CoveredBenefitPlanPostEmployment(plan: BenefitPlan) strict {
+    label en official "section 56A(c)(11)(B)(iii)";
+    when plan_is_defined_benefit_plan(plan);
+    when plan_provides_post_employment_benefits_other_than_pension(plan);
+    then covered_benefit_plan(plan);
+}
+pub relation plan_income_and_expense_on_statement(c: Corporation, y: TaxableYear, plan: BenefitPlan, income: Money, expense: Money) kind empirical {
+    label en official "the income, and the cost or expense, that would otherwise be included on the applicable financial statement in connection with the plan";
+}
+pub relation plan_income_included_in_gross_income(c: Corporation, y: TaxableYear, plan: BenefitPlan, amount: Money) kind empirical {
+    label en official "income in connection with the plan that is included in the gross income of the corporation under any other provision of this chapter";
+}
+pub relation plan_deductions_allowed(c: Corporation, y: TaxableYear, plan: BenefitPlan, amount: Money) kind empirical {
+    label en official "deductions allowed under any other provision of this chapter with respect to the plan";
+}
+relation plan_effect(c: Corporation, y: TaxableYear, plan: BenefitPlan, delta: Money) kind institutional {
+    label en unofficial "the change for one covered benefit plan: disregard the statement's income and expense, add the includible income, subtract the allowed deductions";
+}
+@source(IRC_S56A_C, relation = formalizes, coverage = exact, quote = "adjusted to disregard any amount of income, cost, or expense that would otherwise be included on the applicable financial statement in connection with any covered benefit plan,")
+rule PlanEffect(c: Corporation, y: TaxableYear, plan: BenefitPlan, income: Money, expense: Money, gross: Money, deductions: Money) strict {
+    label en official "section 56A(c)(11)(A): disregard the plan's statement income and expense, increase by the income included in gross income, reduce by the deductions allowed (the 'except as otherwise provided in rules prescribed by the Secretary' clause is not modelled)";
+    when covered_benefit_plan(plan);
+    when plan_income_and_expense_on_statement(c, y, plan, income, expense);
+    when plan_income_included_in_gross_income(c, y, plan, gross);
+    when plan_deductions_allowed(c, y, plan, deductions);
+    then plan_effect(c, y, plan, (expense - income) + gross - deductions);
+}
+pub relation has_plan_effect(c: Corporation, y: TaxableYear) kind institutional {
+    label en unofficial "at least one covered benefit plan has an effect for the year";
+}
+rule HasPlanEffect(c: Corporation, y: TaxableYear, plan: BenefitPlan) strict {
+    when plan_effect(c, y, plan, _);
+    then has_plan_effect(c, y);
+}
+rule AfsiAdjustmentDefinedBenefit(c: Corporation, y: TaxableYear) strict {
+    label en official "section 56A(c)(11)(A): the sum over the covered benefit plans";
+    when has_plan_effect(c, y);
+    then afsi_adjustment(c, y, DefinedBenefit56Ac11, sum(collect all d: Money, plan: BenefitPlan where plan_effect(c, y, plan, d), empty: 0.00 USD));
+}
+
+// --- (12): tax-exempt organizations -------------------------------------------------------
+
+pub relation organization_subject_to_tax_under_511(c: Corporation) kind empirical {
+    label en official "an organization subject to tax under section 511";
+}
+pub relation statement_income_of_organization(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the income on the applicable financial statement of the organization";
+}
+pub relation afsi_of_unrelated_trade_or_business(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the adjusted financial statement income of an unrelated trade or business (as defined in section 513) of the organization";
+}
+pub relation afsi_of_debt_financed_property_treated_as_ubti(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the adjusted financial statement income derived from debt-financed property (as defined in section 514) to the extent that the income is treated as unrelated business taxable income";
+}
+@source(IRC_S56A_C, relation = formalizes, coverage = exact, quote = "adjusted financial statement income shall be appropriately adjusted to only take into account any adjusted financial statement income—")
+rule AfsiAdjustmentTaxExempt(c: Corporation, y: TaxableYear, statement: Money, ubi: Money, financed: Money) strict {
+    label en official "section 56A(c)(12): only the unrelated trade or business income and the debt-financed income are taken into account";
+    when organization_subject_to_tax_under_511(c);
+    when statement_income_of_organization(c, y, statement);
+    when afsi_of_unrelated_trade_or_business(c, y, ubi);
+    when afsi_of_debt_financed_property_treated_as_ubti(c, y, financed);
+    then afsi_adjustment(c, y, TaxExempt56Ac12, (ubi + financed) - statement);
+}
+
+// --- (13)-(14): depreciation and wireless spectrum -----------------------------------------
+
+pub relation depreciation_allowed_168_property_for_taxable_income(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "depreciation deductions allowed under section 167 with respect to property to which section 168 applies, to the extent allowed as deductions in computing taxable income for the year";
+}
+pub relation depreciation_expense_on_statement(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "depreciation expense taken into account on the taxpayer's applicable financial statement with respect to such property";
+}
+pub relation idc_deductions_allowed_263c_for_taxable_income(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "any deduction allowed for expenses under section 263(c) (including under section 59(e) or 291(b)(2)) with respect to property described therein, to the extent allowed as deductions in computing taxable income for the year";
+}
+pub relation depletion_expense_on_statement_for_idc(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "depletion expense taken into account on the applicable financial statement with respect to the intangible drilling and development costs of such property";
+}
+@source(IRC_S56A_C, relation = formalizes, coverage = exact, quote = "reduced by depreciation deductions allowed under section 167 with respect to property to which section 168 applies to the extent of the amount allowed as deductions in computing taxable income for the taxable year, and")
+rule AfsiAdjustmentDepreciationBeforeAmendment(c: Corporation, y: TaxableYear, n: Integer, allowed: Money, expense: Money) strict {
+    label en official "section 56A(c)(13), 2024-Edition text: reduced by the depreciation allowed for taxable income, and the statement's depreciation expense disregarded (added back)";
+    effective [@2023-01-01, infinity);
+    when us.irc.core::calendar_year_of(y, n);
+    when n < 2026;
+    when depreciation_allowed_168_property_for_taxable_income(c, y, allowed);
+    when depreciation_expense_on_statement(c, y, expense);
+    then afsi_adjustment(c, y, Depreciation56Ac13, expense - allowed);
+}
+@source(us.irc.temporal::PL119_21_S70523, relation = formalizes, coverage = exact, quote = "any deduction allowed for expenses under section 263(c) (including any deduction for such expenses under section 59(e) or 291(b)(2)) with respect to property described therein to the extent of the amount allowed as deductions in computing taxable income for the year, and")
+rule AfsiAdjustmentDepreciationAfterAmendment(c: Corporation, y: TaxableYear, n: Integer, allowed: Money, expense: Money, idc: Money, depletion: Money) strict {
+    label en official "Pub. L. 119-21 section 70523: for taxable years beginning after December 31, 2025 the reduction also covers the section 263(c) deductions and the statement's depletion expense on the intangible drilling and development costs is disregarded too";
+    effective [@2025-07-04, infinity);
+    when us.irc.core::calendar_year_of(y, n);
+    when n >= 2026;
+    when depreciation_allowed_168_property_for_taxable_income(c, y, allowed);
+    when depreciation_expense_on_statement(c, y, expense);
+    when idc_deductions_allowed_263c_for_taxable_income(c, y, idc);
+    when depletion_expense_on_statement_for_idc(c, y, depletion);
+    then afsi_adjustment(c, y, Depreciation56Ac13, (expense + depletion) - (allowed + idc));
+}
+
+entity WirelessSpectrum {
+    label en unofficial "wireless spectrum of the taxpayer";
+}
+pub relation spectrum_used_by_wireless_carrier_in_trade_or_business(s: WirelessSpectrum) kind empirical {
+    label en official "used in the trade or business of a wireless telecommunications carrier";
+}
+pub relation spectrum_acquired_on(s: WirelessSpectrum, d: Date) kind empirical {
+    label en official "the date the wireless spectrum was acquired";
+}
+pub relation acquired_before_enactment_of_section_56A(s: WirelessSpectrum) kind empirical {
+    label en official "acquired before the date of enactment of section 56A (the date is not pinned in this package's text: the case asserts it)";
+}
+pub relation qualified_wireless_spectrum(s: WirelessSpectrum) kind institutional {
+    label en official "qualified wireless spectrum (section 56A(c)(14)(B))";
+}
+@source(IRC_S56A_C, relation = formalizes, coverage = exact, quote = "was acquired after December 31, 2007, and before the date of enactment of this section.")
+rule QualifiedWirelessSpectrumRule(s: WirelessSpectrum, d: Date) strict {
+    label en official "section 56A(c)(14)(B): wireless spectrum used in a wireless carrier's trade or business, acquired after December 31, 2007 and before the enactment of section 56A";
+    when spectrum_used_by_wireless_carrier_in_trade_or_business(s);
+    when spectrum_acquired_on(s, d);
+    when d > @2007-12-31;
+    when acquired_before_enactment_of_section_56A(s);
+    then qualified_wireless_spectrum(s);
+}
+pub relation amortization_allowed_on_qualified_spectrum(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "amortization deductions allowed under section 197 with respect to qualified wireless spectrum, to the extent allowed as deductions in computing taxable income for the year";
+}
+pub relation amortization_expense_on_statement_for_spectrum(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "amortization expense taken into account on the applicable financial statement with respect to the qualified wireless spectrum";
+}
+@source(IRC_S56A_C, relation = formalizes, coverage = exact, quote = "reduced by amortization deductions allowed under section 197 with respect to qualified wireless spectrum to the extent of the amount allowed as deductions in computing taxable income for the taxable year, and")
+rule AfsiAdjustmentWirelessSpectrum(c: Corporation, y: TaxableYear, allowed: Money, expense: Money) strict {
+    label en official "section 56A(c)(14)(A): reduced by the section 197 amortization allowed, and the statement's amortization expense disregarded";
+    when amortization_allowed_on_qualified_spectrum(c, y, allowed);
+    when amortization_expense_on_statement_for_spectrum(c, y, expense);
+    then afsi_adjustment(c, y, WirelessSpectrum56Ac14, expense - allowed);
+}
+
+// --- Section 59(k)(1)(D), (E)(iii): aggregation and predecessors ------------------------------
+
+pub relation person_afsi_for_year(m: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the adjusted financial statement income of the person for the taxable year, determined without regard to paragraphs (2)(D)(i) and (11) of section 56A(c)";
+}
+pub relation treated_as_single_employer_with(c: Corporation, m: Person, y: TaxableYear) kind empirical {
+    label en official "the person is treated as a single employer with the corporation under subsection (a) or (b) of section 52 (EXTERNAL_DEPENDENCY: section 52)";
+}
+pub relation predecessor_of_corporation(c: Corporation, pred: Person) kind empirical {
+    label en official "the person is a predecessor of the corporation";
+}
+pub relation aggregated_afsi_for_applicable_corporation_test(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the adjusted financial statement income of the corporation for the year for the purpose of determining whether it is an applicable corporation: its own, that of the persons treated as a single employer, and that of its predecessors";
+}
+@source(IRC_S59_K, relation = formalizes, coverage = exact, quote = "all adjusted financial statement income of persons treated as a single employer with such corporation under subsection (a) or (b) of section 52 shall be treated as adjusted financial statement income of such corporation")
+rule AggregatedAfsiForApplicableCorporationTest(c: Corporation, y: TaxableYear, own: Money) strict {
+    label en official "section 59(k)(1)(D), (E)(iii): the corporation's own adjusted financial statement income plus that of every person treated as a single employer and of its predecessors (the predecessor's income for the same taxable year)";
+    effective [@2023-01-01, infinity);
+    when person_afsi_for_year(c, y, own);
+    then aggregated_afsi_for_applicable_corporation_test(c, y, own
+        + sum(collect all a: Money, m: Person where treated_as_single_employer_with(c, m, y) and person_afsi_for_year(m, y, a), empty: 0.00 USD)
+        + sum(collect all b: Money, pr: Person where predecessor_of_corporation(c, pr) and person_afsi_for_year(pr, y, b), empty: 0.00 USD));
+}
+
+// --- Section 59(k)(2)(B)-(C): the foreign-parented multinational group -----------------------
+
+pub relation domestic_corporation_flag(c: Corporation) kind empirical {
+    label en official "a domestic corporation";
+}
+pub relation foreign_corporation_flag(c: Corporation) kind empirical {
+    label en official "a foreign corporation";
+}
+pub relation us_trade_or_business_of_foreign_corporation(tb: Corporation, fc: Corporation) kind empirical {
+    label en official "tb identifies the trade or business within the United States in which the foreign corporation is engaged (the entity the case uses for the separate deemed corporation)";
+}
+pub relation treated_as_wholly_owned_domestic_corporation(tb: Corporation, fc: Corporation) kind institutional {
+    label en official "the trade or business is treated as a separate domestic corporation that is wholly owned by the foreign corporation";
+}
+@source(IRC_S59_K, relation = formalizes, coverage = exact, quote = "if a foreign corporation is engaged in a trade or business within the United States, such trade or business shall be treated as a separate domestic corporation that is wholly owned by the foreign corporation.")
+rule UsTradeOrBusinessIsSeparateDomesticCorporation(tb: Corporation, fc: Corporation) strict {
+    label en official "section 59(k)(2)(C)";
+    when foreign_corporation_flag(fc);
+    when us_trade_or_business_of_foreign_corporation(tb, fc);
+    then treated_as_wholly_owned_domestic_corporation(tb, fc);
+}
+pub relation domestic_corporation_for_group_test(c: Corporation) kind institutional {
+    label en unofficial "a domestic corporation, including a deemed one under paragraph (2)(C)";
+}
+rule DomesticCorporationForGroupTestDirect(c: Corporation) strict {
+    when domestic_corporation_flag(c);
+    then domestic_corporation_for_group_test(c);
+}
+rule DomesticCorporationForGroupTestDeemed(c: Corporation, fc: Corporation) strict {
+    when treated_as_wholly_owned_domestic_corporation(c, fc);
+    then domestic_corporation_for_group_test(c);
+}
+pub relation entities_in_same_applicable_financial_statement(a: Corporation, b: Corporation, y: TaxableYear) kind empirical {
+    label en official "the entities are included in the same applicable financial statement with respect to the year";
+}
+pub relation common_parent_of_entities(a: Corporation, b: Corporation, y: TaxableYear, parent: Corporation) kind empirical {
+    label en official "the common parent of the entities";
+}
+pub relation treated_as_having_foreign_common_parent(a: Corporation, b: Corporation, y: TaxableYear) kind empirical {
+    label en official "there is no common parent and the entities are treated as having a common parent which is a foreign corporation under subparagraph (D) (rules the Secretary prescribes)";
+}
+pub relation foreign_parented_group_pair(a: Corporation, b: Corporation, y: TaxableYear) kind institutional {
+    label en official "a is a domestic corporation and b a foreign corporation of a foreign-parented multinational group for the year";
+}
+@source(IRC_S59_K, relation = formalizes, coverage = exact, quote = "the common parent of such entities is a foreign corporation, or")
+rule ForeignParentedGroupPairByForeignParent(a: Corporation, b: Corporation, y: TaxableYear, parent: Corporation) strict {
+    label en official "section 59(k)(2)(B)(i)-(iii)(I): a domestic and a foreign corporation included in the same applicable financial statement whose common parent is a foreign corporation";
+    when domestic_corporation_for_group_test(a);
+    when foreign_corporation_flag(b);
+    when entities_in_same_applicable_financial_statement(a, b, y);
+    when common_parent_of_entities(a, b, y, parent);
+    when foreign_corporation_flag(parent);
+    then foreign_parented_group_pair(a, b, y);
+}
+@source(IRC_S59_K, relation = formalizes, coverage = exact, quote = "if there is no common parent, the entities are treated as having a common parent which is a foreign corporation under subparagraph (D).")
+rule ForeignParentedGroupPairByTreatedParent(a: Corporation, b: Corporation, y: TaxableYear) strict {
+    label en official "section 59(k)(2)(B)(iii)(II): no common parent, and the entities are treated as having a common parent which is a foreign corporation";
+    when domestic_corporation_for_group_test(a);
+    when foreign_corporation_flag(b);
+    when entities_in_same_applicable_financial_statement(a, b, y);
+    when treated_as_having_foreign_common_parent(a, b, y);
+    then foreign_parented_group_pair(a, b, y);
+}
+@source(IRC_S59_K, relation = formalizes, coverage = exact, quote = "means, with respect to any taxable year, two or more entities if—")
+rule ForeignParentedGroupMemberDomestic(c: Corporation, y: TaxableYear, other: Corporation) strict {
+    label en official "section 59(k)(2)(B): the domestic corporation of a foreign-parented multinational group";
+    when foreign_parented_group_pair(c, other, y);
+    then foreign_parented_multinational_member(c, y);
+}
+rule ForeignParentedGroupMemberForeign(c: Corporation, y: TaxableYear, other: Corporation) strict {
+    label en official "section 59(k)(2)(B): the foreign corporation of a foreign-parented multinational group";
+    when foreign_parented_group_pair(other, c, y);
+    then foreign_parented_multinational_member(c, y);
+}
+
+// --- Section 57(b): straight line recovery of intangibles ------------------------------------
+
+entity DrillingWell {
+    label en unofficial "a well for which intangible drilling and development costs were paid or incurred";
+}
+pub relation well_of_taxpayer(w: DrillingWell, p: Person) kind empirical {
+    label en unofficial "the well belongs to the taxpayer";
+}
+pub relation well_drilling_category(w: DrillingWell, cat: DrillingCategory) kind empirical {
+    label en unofficial "whether the well is an oil and gas well or a geothermal well";
+}
+pub relation well_idc_capitalized(w: DrillingWell, amount: Money) kind empirical {
+    label en official "the intangible drilling and development costs for the well, capitalized";
+}
+pub relation production_begins_in_month(w: DrillingWell, year: Integer, month: Integer) kind empirical {
+    label en official "the month (calendar year and month number) in which production from the well begins";
+}
+pub relation taxpayer_elects_57b2(w: DrillingWell) kind empirical {
+    label en official "the taxpayer elects with respect to the intangible drilling and development costs for the well (the exercise)";
+}
+pub relation method_permitted_for_cost_depletion(w: DrillingWell) kind empirical {
+    label en official "the method selected is one which would be permitted for purposes of determining cost depletion with respect to the well";
+}
+pub relation cost_depletion_method_amount(w: DrillingWell, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the amount for the year under the selected cost depletion method (EXTERNAL_DEPENDENCY: sections 611-613)";
+}
+pub relation election_57b2_in_effect(w: DrillingWell) kind institutional {
+    label en official "the election under section 57(b)(2) applies to the well (the effect of the power)";
+}
+pub relation election_57b2_made(w: DrillingWell) kind institutional {
+    label en official "a valid election under section 57(b)(2) was made for the well (computational twin of the power's effect)";
+}
+
+@source(IRC_S57_B, relation = formalizes, coverage = exact, quote = "If the taxpayer elects with respect to the intangible drilling and development costs for any well, the term \"straight line recovery of intangibles\" means any method which would be permitted for purposes of determining cost depletion")
+rule TaxpayerMayElectCostDepletionMethodForIdc defeasible {
+    label en official "section 57(b)(2): the taxpayer may elect, for the intangible drilling and development costs of a well, a method permitted for cost depletion instead of 120-month ratable amortization";
+    for w: DrillingWell;
+    for p: Person;
+    when well_of_taxpayer(w, p);
+    then power Elect57b2CostDepletionMethod {
+        holder p; over w;
+        exercise taxpayer_elects_57b2(w);
+        valid_when method_permitted_for_cost_depletion(w);
+        effect create(election_57b2_in_effect(w));
+        window [-infinity, infinity];
+    };
+}
+@source(IRC_S57_B, relation = formalizes, coverage = exact, quote = "which is selected by the taxpayer for purposes of subsection (a)(2).")
+rule Election57b2Made(w: DrillingWell) strict {
+    label en official "section 57(b)(2): an election with a permitted method is valid (computational twin of the power's effect)";
+    when taxpayer_elects_57b2(w);
+    when method_permitted_for_cost_depletion(w);
+    then election_57b2_made(w);
+}
+
+pub relation well_recovery_of_intangibles(w: DrillingWell, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the straight line recovery of intangibles for the well and the taxable year: the ratable amortization over 120 months from the month production begins, or the elected cost depletion method";
+}
+@source(IRC_S57_B, relation = formalizes, coverage = exact, quote = "means (except in the case of an election under paragraph (2)) ratable amortization of such costs over the 120-month period beginning with the month in which production from such well begins.")
+rule WellRecoveryRatable120Months(w: DrillingWell, y: TaxableYear, cost: Money, py: Integer, pm: Integer, n: Integer) strict {
+    label en official "section 57(b)(1): the costs over the 120 months from the production month; months of the calendar year within the period times cost / 120 (calendar-year taxpayers; cents HALF_UP: JUDGMENT CALL)";
+    when well_idc_capitalized(w, cost);
+    when production_begins_in_month(w, py, pm);
+    when us.irc.core::calendar_year_of(y, n);
+    when not_known(election_57b2_made(w));
+    then well_recovery_of_intangibles(w, y, div_round(cost * max(0, min(py * 12 + pm + 120, n * 12 + 13) - max(py * 12 + pm, n * 12 + 1)), 120.0, 2, "HALF_UP"));
+}
+@source(IRC_S57_B, relation = formalizes, coverage = exact, quote = "means any method which would be permitted for purposes of determining cost depletion with respect to such well and which is selected by the taxpayer for purposes of subsection (a)(2).")
+rule WellRecoveryElectedMethod(w: DrillingWell, y: TaxableYear, amount: Money) strict {
+    label en official "section 57(b)(2): the elected cost depletion method";
+    when election_57b2_made(w);
+    when cost_depletion_method_amount(w, y, amount);
+    then well_recovery_of_intangibles(w, y, amount);
+}
+pub relation idc_if_capitalized_from_wells(p: Person, y: TaxableYear, cat: DrillingCategory, amount: Money) kind institutional {
+    label en official "the amount which would have been allowable for the taxable year if the costs of the wells of the category had been capitalized and straight line recovery of intangibles had been used";
+}
+pub relation has_well_of_category(p: Person, cat: DrillingCategory) kind institutional {
+    label en unofficial "the taxpayer has a well of the category";
+}
+rule HasWellOfCategory(p: Person, cat: DrillingCategory, w: DrillingWell) strict {
+    when well_of_taxpayer(w, p);
+    when well_drilling_category(w, cat);
+    then has_well_of_category(p, cat);
+}
+@source(IRC_S57_A, relation = formalizes, coverage = partial, quote = "the amount which would have been allowable for the taxable year if such costs had been capitalized and straight line recovery of intangibles (as defined in subsection (b)) had been used with respect to such costs.")
+rule IdcIfCapitalizedFromWells(p: Person, y: TaxableYear, cat: DrillingCategory) strict {
+    label en official "section 57(a)(2)(B)(ii) with (b): the sum over the wells of the category of the straight line recovery of intangibles";
+    when has_well_of_category(p, cat);
+    when us.irc.core::calendar_year_of(y, _);
+    then idc_if_capitalized_from_wells(p, y, cat, sum(collect all a: Money, w: DrillingWell where well_of_taxpayer(w, p) and well_drilling_category(w, cat) and well_recovery_of_intangibles(w, y, a), empty: 0.00 USD));
+}
+@source(IRC_S57_A, relation = formalizes, coverage = exact, quote = "For purposes of subparagraph (A), the amount of the excess intangible drilling costs arising in the taxable year is the excess of—")
+rule ExcessIntangibleDrillingCostsFromWells(p: Person, y: TaxableYear, cat: DrillingCategory, allowed: Money, slr: Money) strict {
+    label en official "section 57(a)(2)(B): excess IDC over the straight line recovery derived from the wells (the alternative to the case-supplied figure; a case must use one channel)";
+    when idc_allowed_regular_tax(p, y, cat, allowed);
+    when idc_if_capitalized_from_wells(p, y, cat, slr);
+    then excess_intangible_drilling_costs(p, y, cat, max(0.00 USD, allowed - slr));
+}
+
+// --- Section 59(a)(3)(A): the simplified limitation ---------------------------------------------
+
+pub relation amt_ftc_section_904_on_amti_basis(p: Person, y: TaxableYear) kind institutional {
+    label en official "section 904 is applied on the basis of alternative minimum taxable income instead of taxable income (paragraph (1)(B)), which the election of paragraph (3) displaces";
+}
+@source(IRC_S59_A, relation = formalizes, coverage = exact, quote = "(i) subparagraph (B) of paragraph (1) shall not apply, and")
+rule AmtFtcSection904OnAmtiBasis(p: Person, y: TaxableYear) strict {
+    label en official "section 59(a)(1)(B) and (3)(A)(i): the AMTI basis applies unless the simplified election applies to the year";
+    when claims_amt_foreign_tax_credit(p, y);
+    when not_known(simplified_904_applies_to_year(p, y));
+    then amt_ftc_section_904_on_amti_basis(p, y);
+}
+pub relation simplified_904_limitation_amount(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the limitation of section 904 under the election: the pre-credit tentative minimum tax times the proportion of foreign-source taxable income to alternative minimum taxable income";
+}
+@source(IRC_S59_A, relation = formalizes, coverage = exact, quote = "the limitation of section 904 shall be based on the proportion which—")
+rule Simplified904LimitationAmount(p: Person, y: TaxableYear, tmt: Money, fraction: Decimal) strict {
+    label en official "section 59(a)(3)(A)(ii) with (1)(A): the pre-credit tentative minimum tax is the tax against which the credit is taken, multiplied by the proportion";
+    when pre_credit_tentative_minimum_tax(p, y, tmt);
+    when simplified_904_limitation_fraction(p, y, fraction);
+    then simplified_904_limitation_amount(p, y, round(tmt * fraction, 2, "HALF_UP"));
+}

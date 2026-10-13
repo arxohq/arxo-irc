@@ -1,0 +1,337 @@
+// 26 U.S.C. §§2101-2108 — estate tax on nonresidents not citizens of the
+// United States. Stage-2b module of `us.irc.estate_gift` (B01/IRC-11).
+// Publishes `pub nonresident_taxable_estate`.
+//
+// SCOPE per the coordinator's priority: §2101 imposition/computation, §2102
+// unified credit (the $13,000 pinned figure) and the sections 2012/2013
+// credit cross-reference, §2103 gross estate (US-situs subset), §2104/§2105
+// situs rules (stock, the 3-year/revocable-transfer rule, debt obligations,
+// portfolio debt/bank deposits, life insurance, art on loan), §2106 taxable
+// estate (pro rata expenses/charitable/marital/state-death-tax deductions
+// and the (b) return-filed condition).
+//
+// NOT MODELLED this pass (TECH_GAP/NON_NORMATIVE, TECH-GAPS.md G479):
+// §2102(b)(2) possession-of-the-US special credit (section 2209), §2102(b)(3)
+// treaty coordination, §2105(d) RIC look-through proportion, §2106(a)(2)'s
+// own (A)-(F) sub-rules (read as a case-supplied combined amount), §2107
+// (expatriation-to-avoid-tax rates, long superseded in operative effect by
+// section 877A's covered-expatriate regime — see 14-covered-expatriate-
+// 2801.law), §2108 (Puerto Rico/possessions special rules).
+//
+// JUDGMENT CALLS:
+//  - "Entire gross estate wherever situated" (section 2102(b)(3)(A) proviso
+//    aside, and section 2106(a)(1)/(4)'s ratio denominators) is read as this
+//    package's OWN generic `gross_estate` relation (03-gross-estate-
+//    inclusions.law), which already sums every asserted `gross_estate_item`
+//    without any situs filter — exactly the "wherever situated" figure.
+//  - The section 2106(a)(2) charitable and (a)(3) marital deduction AMOUNTS
+//    are read as case-asserted facts (`nonresident_charitable_deduction`,
+//    `nonresident_marital_deduction`), reflecting sections 2055(e)/2056's
+//    own substantive tests without re-deriving them a second time against a
+//    US-situs-only asset set — a documented simplification, not a silent
+//    drop (those tests ARE modelled generically for citizens in 04-
+//    deductions.law and 10-charitable-marital-deductions.law).
+//  - Section 2106(b)'s condition ("no deduction ... under paragraphs (1) and
+//    (2) ... unless the executor includes [the worldwide value] in the
+//    return") is applied LITERALLY: paragraphs (1)-(2) (expenses/charitable)
+//    are barred absent disclosure, while (3)-(4) (marital/state death tax)
+//    are NOT conditioned on it, exactly as the text's own paragraph
+//    reference says.
+
+language "law.core" version "0.2";
+package us.irc.estate_gift version "0.1.1";
+namespace "urn:us:irc:estate_gift:clir";
+
+use self::{
+    Asset,
+    Estate,
+    IRC_S2101_A,
+    IRC_S2101_B,
+    IRC_S2102_A,
+    IRC_S2102_B,
+    IRC_S2103,
+    IRC_S2104_A,
+    IRC_S2104_B,
+    IRC_S2104_C,
+    IRC_S2106_A,
+    IRC_S2106_B,
+    Person,
+    adjusted_taxable_gifts,
+    bracket_2001c,
+    date_of_death,
+    decedent_citizen_or_resident,
+    gross_estate,
+    gross_estate_item,
+    has_adjusted_taxable_gifts,
+    nonresident_credit_after_gift_credit_reduction,
+    section_2107b_stock_included_value,
+    total_estate_deductions,
+    total_gift_tax_credit_2012,
+    total_prior_transfer_credit,
+};
+
+// --- Threshold: nonresident not a citizen -----------------------------------
+
+@source(IRC_S2101_A, relation = formalizes, coverage = partial, quote = "every decedent nonresident not a citizen of the United States")
+pub relation nonresident_not_citizen(e: Estate) kind institutional {
+    label en official "the decedent is a nonresident not a citizen of the United States (chapter 11, subchapter B)";
+}
+rule NonresidentNotCitizenRule(e: Estate) defeasible {
+    when date_of_death(e, _);
+    when not_known(decedent_citizen_or_resident(e));
+    then nonresident_not_citizen(e);
+}
+
+// --- §2104/§2105: situs of property -----------------------------------------
+
+pub enum NonresidentPropertyKind {
+    StockInDomesticCorporation;      // 2104(a) -> US
+    StockInForeignCorporation;       // absence of (a) -> not US
+    DebtOfUsPersonOrGovernment;      // 2104(c) -> US
+    PortfolioDebtOrExemptBankDeposit;// 2105(b) -> not US
+    LifeInsuranceProceeds;           // 2105(a) -> not US
+    ArtOnLoanForExhibition;          // 2105(c) -> not US
+    TangiblePropertyLocatedInUs;     // baseline (not itself codified in 2104/2105) -> US
+    OtherPropertyWithoutUnitedStates;// case-asserted foreign property -> not US
+}
+pub relation nonresident_property_classified(item: Asset, kind: NonresidentPropertyKind) kind empirical {
+    label en unofficial "the situs classification a case assigns to item, per the section 2104/2105 categories";
+}
+pub relation nonresident_transfer_situs_us(item: Asset) kind empirical {
+    label en unofficial "item was property of which the decedent made a transfer within the meaning of sections 2035-2038, situated in the United States either at the time of the transfer or at the decedent's death (section 2104(b))";
+}
+
+@source(IRC_S2104_A, relation = formalizes, coverage = exact, quote = "shares of stock owned and held by a nonresident not a citizen of the United States shall be deemed property within the United States only if issued by a domestic corporation")
+pub relation property_situated_in_us(item: Asset) kind institutional {
+    label en official "item is deemed property within the United States for subchapter B situs purposes (sections 2104-2105)";
+}
+rule PropertySitusStockDomesticRule(item: Asset) defeasible {
+    when nonresident_property_classified(item, StockInDomesticCorporation);
+    then property_situated_in_us(item);
+}
+@source(IRC_S2104_C, relation = formalizes, coverage = partial, quote = "owned and held by a nonresident not a citizen of the United States shall be deemed property within the United States")
+rule PropertySitusDebtRule(item: Asset) defeasible {
+    when nonresident_property_classified(item, DebtOfUsPersonOrGovernment);
+    then property_situated_in_us(item);
+}
+rule PropertySitusTangibleRule(item: Asset) defeasible {
+    when nonresident_property_classified(item, TangiblePropertyLocatedInUs);
+    then property_situated_in_us(item);
+}
+@source(IRC_S2104_B, relation = formalizes, coverage = exact, quote = "any property of which the decedent has made a transfer, by trust or otherwise, within the meaning of sections 2035 to 2038, inclusive, shall be deemed to be situated in the United States, if so situated either at the time of the transfer or at the time of the decedent's death")
+rule PropertySitusTransferRule(item: Asset) defeasible {
+    when nonresident_transfer_situs_us(item);
+    then property_situated_in_us(item);
+}
+// StockInForeignCorporation, PortfolioDebtOrExemptBankDeposit,
+// LifeInsuranceProceeds, ArtOnLoanForExhibition and
+// OtherPropertyWithoutUnitedStates produce NO `property_situated_in_us` fact
+// (sections 2104(a)'s negative implication, 2105(a)/(b)/(c) exclusions) —
+// absence, not an explicit "not situated" rule, mirroring this package's
+// established closed-world idiom.
+
+// --- §2103: gross estate (US-situs subset) ----------------------------------
+
+@source(IRC_S2103, relation = formalizes, coverage = exact, quote = "the value of the gross estate of every decedent nonresident not a citizen of the United States shall be that part of his gross estate (determined as provided in section 2031) which at the time of his death is situated in the United States")
+pub relation us_situs_gross_estate(e: Estate, amount: Money) kind institutional {
+    label en official "the section 2103 gross estate: the US-situs part of the decedent's gross estate (section 2031)";
+}
+rule UsSitusGrossEstateRule(e: Estate) defeasible {
+    when nonresident_not_citizen(e);
+    when gross_estate_item(e, _, _);
+    then us_situs_gross_estate(e,
+        sum(collect all v: Money, item: Asset where gross_estate_item(e, item, v) and property_situated_in_us(item), empty: 0.00 USD)
+        + sum(collect all w: Money, corp: Person where section_2107b_stock_included_value(e, corp, w), empty: 0.00 USD));
+}
+relation has_gross_estate_item_2103(e: Estate) kind institutional;
+rule HasGrossEstateItem2103Rule(e: Estate) defeasible {
+    when gross_estate_item(e, _, _);
+    then has_gross_estate_item_2103(e);
+}
+rule UsSitusGrossEstateNoItemsRule(e: Estate) defeasible {
+    when nonresident_not_citizen(e);
+    when not_known(has_gross_estate_item_2103(e));
+    then us_situs_gross_estate(e, 0.00 USD);
+}
+
+// --- §2106: taxable estate ---------------------------------------------------
+
+@source(IRC_S2106_B, relation = formalizes, coverage = exact, quote = "No deduction shall be allowed under paragraphs (1) and (2) of subsection (a) in the case of a nonresident not a citizen of the United States unless the executor includes in the return required to be filed under section 6018 the value at the time of his death of that part of the gross estate of such nonresident not situated in the United States")
+pub relation worldwide_gross_estate_disclosed_on_return(e: Estate) kind empirical {
+    label en official "the executor included the value of the decedent's non-US-situs gross estate on the section 6018 return (section 2106(b))";
+}
+
+pub relation nonresident_pro_rata_expenses_deduction(e: Estate, amount: Money) kind institutional {
+    label en official "section 2106(a)(1): that proportion of the section 2053/2054 deductions which the US-situs gross estate bears to the entire gross estate wherever situated";
+}
+rule NonresidentProRataExpensesDeductionRule(e: Estate, us_situs: Money, worldwide: Money, ded: Money) defeasible {
+    when worldwide_gross_estate_disclosed_on_return(e);
+    when us_situs_gross_estate(e, us_situs);
+    when gross_estate(e, worldwide) and worldwide > 0.00 USD;
+    when total_estate_deductions(e, ded);
+    // One proportion, one rounding (TECH-GAPS G499, 26.09.2026).
+    then nonresident_pro_rata_expenses_deduction(e, div_round(ded * (us_situs / 1.00 USD), worldwide / 1.00 USD, 2, "HALF_UP"));
+}
+relation has_total_estate_deductions_2106(e: Estate) kind institutional;
+rule HasTotalEstateDeductions2106Rule(e: Estate) defeasible {
+    when total_estate_deductions(e, _);
+    then has_total_estate_deductions_2106(e);
+}
+rule NonresidentProRataExpensesDeductionNoDeductionsRule(e: Estate) defeasible {
+    when worldwide_gross_estate_disclosed_on_return(e);
+    when not_known(has_total_estate_deductions_2106(e));
+    then nonresident_pro_rata_expenses_deduction(e, 0.00 USD);
+}
+
+pub relation nonresident_charitable_deduction(e: Estate, amount: Money) kind empirical {
+    label en unofficial "the section 2106(a)(2) deduction for US-situs bequests to the described public/charitable/religious uses, already reflecting the (2)(A)-(F) sub-rules (the section 2055(e) split-interest disallowance cross-reference of (2)(E), the death-taxes-payable-out-of-bequest reduction of (2)(C), the gross-estate-value cap of (2)(D)) — case-asserted, module header judgment call";
+}
+pub relation nonresident_marital_deduction(e: Estate, amount: Money) kind empirical {
+    label en unofficial "the section 2106(a)(3) deduction: the amount that would be deductible under section 2056's principles with respect to US-situs property — case-asserted, module header judgment call";
+}
+pub relation state_death_taxes_paid_on_us_situs_property(e: Estate, amount: Money) kind empirical {
+    label en unofficial "State death taxes paid on property included in the US-situs gross estate under section 2103 (section 2106(a)(4)'s numerator input)";
+}
+
+@source(IRC_S2106_A, relation = formalizes, coverage = partial, quote = "The amount which bears the same ratio to the State death taxes as the value of the property, as determined for purposes of this chapter, upon which State death taxes were paid and which is included in the gross estate under section 2103 bears to the value of the total gross estate under section 2103")
+pub relation nonresident_state_death_tax_deduction(e: Estate, amount: Money) kind institutional {
+    label en official "section 2106(a)(4): the State-death-tax deduction, ratioed by US-situs property upon which such taxes were paid over the total US-situs gross estate";
+}
+rule NonresidentStateDeathTaxDeductionRule(e: Estate, paid: Money, us_situs: Money) defeasible {
+    when state_death_taxes_paid_on_us_situs_property(e, paid);
+    when us_situs_gross_estate(e, us_situs) and us_situs > 0.00 USD;
+    then nonresident_state_death_tax_deduction(e, round(paid, 2, "HALF_UP"));
+}
+relation has_state_death_tax_2106(e: Estate) kind institutional;
+rule HasStateDeathTax2106Rule(e: Estate) defeasible {
+    when state_death_taxes_paid_on_us_situs_property(e, _);
+    then has_state_death_tax_2106(e);
+}
+
+pub relation nonresident_total_deductions(e: Estate, amount: Money) kind institutional {
+    label en unofficial "the sum of whichever section 2106(a) deductions apply to this estate";
+}
+rule NonresidentTotalDeductionsFullRule(e: Estate, exp: Money, char: Money, marital: Money, state: Money) defeasible {
+    when nonresident_pro_rata_expenses_deduction(e, exp);
+    when nonresident_charitable_deduction(e, char);
+    when nonresident_marital_deduction(e, marital);
+    when nonresident_state_death_tax_deduction(e, state);
+    then nonresident_total_deductions(e, exp + char + marital + state);
+}
+rule NonresidentTotalDeductionsNotDisclosedRule(e: Estate, marital: Money, state: Money) defeasible {
+    when not_known(worldwide_gross_estate_disclosed_on_return(e));
+    when nonresident_marital_deduction(e, marital);
+    when nonresident_state_death_tax_deduction(e, state);
+    then nonresident_total_deductions(e, marital + state);
+}
+rule NonresidentTotalDeductionsNotDisclosedNoStateRule(e: Estate, marital: Money) defeasible {
+    when not_known(worldwide_gross_estate_disclosed_on_return(e));
+    when nonresident_marital_deduction(e, marital);
+    when not_known(has_state_death_tax_2106(e));
+    then nonresident_total_deductions(e, marital);
+}
+relation has_nonresident_deductions(e: Estate) kind institutional;
+rule HasNonresidentDeductionsRule(e: Estate) defeasible {
+    when nonresident_total_deductions(e, _);
+    then has_nonresident_deductions(e);
+}
+
+@source(IRC_S2106_A, relation = formalizes, coverage = partial, quote = "the value of the taxable estate of every decedent nonresident not a citizen of the United States shall be determined by deducting from the value of that part of his gross estate which at the time of his death is situated in the United States")
+pub relation nonresident_taxable_estate(e: Estate, amount: Money) kind institutional {
+    label en official "the section 2106 taxable estate of a nonresident not a citizen: the section 2103 US-situs gross estate, less the section 2106(a) deductions (subject to the (b) disclosure condition)";
+}
+rule NonresidentTaxableEstateWithDeductionsRule(e: Estate, gross: Money, ded: Money) defeasible {
+    when us_situs_gross_estate(e, gross);
+    when nonresident_total_deductions(e, ded);
+    then nonresident_taxable_estate(e, max(0.00 USD, gross - ded));
+}
+rule NonresidentTaxableEstateNoDeductionsRule(e: Estate, gross: Money) defeasible {
+    when us_situs_gross_estate(e, gross);
+    when not_known(has_nonresident_deductions(e));
+    then nonresident_taxable_estate(e, gross);
+}
+
+// --- §2101: imposition and computation of tax -------------------------------
+
+pub relation tentative_tax_on_amount(base: Money, tax: Money) kind institutional {
+    label en unofficial "a tentative tax computed under section 2001(c) on an arbitrary base amount (a generic, non-Estate-keyed lookup against `bracket_2001c`, needed because section 2101(b) computes TWO different tentative-tax bases for the same estate)";
+}
+rule TentativeTaxOnAmountRule(base: Money, lower: Money, base_tax: Money, rate: Decimal) defeasible {
+    when bracket_2001c(base, lower, base_tax, rate);
+    then tentative_tax_on_amount(base, base_tax + rate * (base - lower));
+}
+
+@source(IRC_S2101_A, relation = formalizes, coverage = exact, quote = "a tax is hereby imposed on the transfer of the taxable estate (determined as provided in section 2106) of every decedent nonresident not a citizen of the United States")
+pub relation nonresident_estate_tax_imposed(e: Estate) kind institutional {
+    label en official "section 2101(a): a tax is imposed on the taxable estate of every nonresident-not-citizen decedent, except as provided in section 2107";
+}
+rule NonresidentEstateTaxImposedRule(e: Estate) defeasible {
+    when nonresident_not_citizen(e);
+    when not_known(section_2107_applies(e));
+    then nonresident_estate_tax_imposed(e);
+}
+relation section_2107_applies(e: Estate) kind institutional {
+    label en unofficial "section 2107 (expatriation to avoid tax) applies instead of section 2101 — NOT modelled this pass (module header); a case never asserts the underlying fact, so this always reads not_known and section 2101 governs by default, matching the general case";
+}
+
+@source(IRC_S2101_B, relation = formalizes, coverage = exact, quote = "The tax imposed by this section shall be the amount equal to the excess (if any) of")
+pub relation nonresident_estate_tax_before_credit(e: Estate, amount: Money) kind institutional {
+    label en official "section 2101(b): a tentative tax on (taxable estate + adjusted taxable gifts) minus a tentative tax on the adjusted taxable gifts alone";
+}
+rule NonresidentEstateTaxBeforeCreditWithGiftsRule(e: Estate, taxable: Money, gifts: Money, t1: Money, t2: Money) defeasible {
+    when nonresident_estate_tax_imposed(e);
+    when nonresident_taxable_estate(e, taxable);
+    when adjusted_taxable_gifts(e, gifts);
+    when tentative_tax_on_amount(taxable + gifts, t1);
+    when tentative_tax_on_amount(gifts, t2);
+    then nonresident_estate_tax_before_credit(e, max(0.00 USD, t1 - t2));
+}
+rule NonresidentEstateTaxBeforeCreditNoGiftsRule(e: Estate, taxable: Money, t1: Money) defeasible {
+    when nonresident_estate_tax_imposed(e);
+    when nonresident_taxable_estate(e, taxable);
+    when not_known(has_adjusted_taxable_gifts(e));
+    when tentative_tax_on_amount(taxable, t1);
+    then nonresident_estate_tax_before_credit(e, t1);
+}
+
+// --- §2102: credits -----------------------------------------------------------
+
+const NonresidentUnifiedCreditAmount: Money = 13000.00 USD;
+
+@source(IRC_S2102_B, relation = formalizes, coverage = partial, quote = "A credit of $13,000 shall be allowed against the tax imposed by section 2101")
+pub relation nonresident_unified_credit(e: Estate, amount: Money) kind institutional {
+    label en official "section 2102(b)(1): a $13,000 credit against the section 2101 tax (the (b)(2) possession-of-the-US and (b)(3) treaty special rules are NOT modelled this pass, module header)";
+}
+rule NonresidentUnifiedCreditRule(e: Estate, before: Money, credit: Money) defeasible {
+    label en official "the credit, reduced by the section 2505 credit allowed for the decedent's gifts, never more than the tax (section 2102(b)(1)-(4))";
+    when nonresident_estate_tax_before_credit(e, before);
+    when nonresident_credit_after_gift_credit_reduction(e, credit);
+    then nonresident_unified_credit(e, min(credit, before));
+}
+
+@source(IRC_S2102_A, relation = formalizes, coverage = exact, quote = "The tax imposed by section 2101 shall be credited with the amounts determined in accordance with sections 2012 and 2013")
+pub relation nonresident_estate_tax(e: Estate, amount: Money) kind institutional {
+    label en official "the section 2101 tax after the section 2102(b) unified credit and the sections 2012/2013 credits (section 2102(a))";
+}
+rule NonresidentEstateTaxWithOtherCreditsRule(e: Estate, before: Money, unified: Money, c12: Money, c13: Money) defeasible {
+    when nonresident_estate_tax_before_credit(e, before);
+    when nonresident_unified_credit(e, unified);
+    when total_gift_tax_credit_2012(e, c12);
+    when total_prior_transfer_credit(e, c13);
+    then nonresident_estate_tax(e, max(0.00 USD, before - min(unified + c12 + c13, before)));
+}
+relation has_2012_or_2013_credit(e: Estate) kind institutional;
+rule Has2012Or2013CreditRule(e: Estate) defeasible {
+    when total_gift_tax_credit_2012(e, _);
+    then has_2012_or_2013_credit(e);
+}
+rule Has2012Or2013CreditFromPriorTransferRule(e: Estate) defeasible {
+    when total_prior_transfer_credit(e, _);
+    then has_2012_or_2013_credit(e);
+}
+rule NonresidentEstateTaxUnifiedCreditOnlyRule(e: Estate, before: Money, unified: Money) defeasible {
+    when nonresident_estate_tax_before_credit(e, before);
+    when nonresident_unified_credit(e, unified);
+    when not_known(has_2012_or_2013_credit(e));
+    then nonresident_estate_tax(e, max(0.00 USD, before - min(unified, before)));
+}

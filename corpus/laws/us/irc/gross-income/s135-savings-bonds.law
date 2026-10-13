@@ -1,0 +1,202 @@
+// Section 135 — Income from United States savings bonds used to pay higher
+// education tuition and fees. Stage 2d (IRC-06). Scope: (a) general
+// exclusion, (b)(1) the proceeds-exceed-expenses applicable-fraction
+// limitation, (b)(2)(A) the MAGI phase-out (SOURCE_GAP on the base dollar
+// amounts, per the coordinator's own framing — see note below), (c)(1)-(3)
+// definitions (qualified U.S. savings bond, qualified higher education
+// expenses, eligible educational institution), (d)(1)-(3) the expense-
+// reduction coordination rules and the joint-return requirement. NOT
+// reached: (b)(2)(B)-(C) (the COLA computation and $50/$25 rounding rule
+// itself — moot given the SOURCE_GAP on the base amounts), (c)(4)
+// (modified AGI cross-reference definition, same shape as section 86(b)'s
+// already-modelled MAGI computation but not wired to it this pass), (d)(4)
+// (regulatory authority, non_normative).
+//
+// SOURCE_GAP: section 135(b)(2)(A)'s $40,000/$60,000 phase-out base amounts
+// are indexed for inflation every year since 1990 ((b)(2)(B)); no
+// `us.irc.inflation_adjustments` pub relation exists for section 135 (that
+// package's `package.law` has no executable content at all — confirmed by
+// inspection, same finding as sections 125(i)/127/129 above). Per the
+// coordinator's own instruction ("base amounts → SOURCE_GAP"), this module
+// does NOT hardcode either the 1990 statutory floor or a fabricated current
+// figure: the phase-out threshold is a case-asserted empirical fact instead,
+// and the coverage row for (b)(2)(A) is marked SOURCE_GAP.
+
+// =====================================================================
+// §135(c): definitions
+// =====================================================================
+
+use self::{
+    IRC_S135_A,
+    IRC_S135_B,
+    IRC_S135_C,
+    IRC_S135_D,
+    Individual,
+    TaxableYear,
+};
+
+pub relation qualified_us_savings_bond_135c1(bond: us.irc.core::Asset, issued_on: Date, owner_age_at_issuance: Integer) kind empirical {
+    label en official "a United States savings bond issued after December 31, 1989 to an individual who had attained age 24 before the date of issuance, at discount under 31 U.S.C. 3105 (section 135(c)(1))";
+}
+pub relation qualified_us_savings_bond_135c1_eligible(bond: us.irc.core::Asset) kind institutional {
+    label en official "the bond meets the section 135(c)(1) age/date conditions";
+}
+@source(IRC_S135_C, quote = "The term \"qualified United States savings bond\" means any United States savings bond issued—\n(A) after December 31, 1989,\n(B) to an individual who has attained age 24 before the date of issuance, and\n(C) at discount under section 3105 of title 31, United States Code.")
+rule QualifiedUsSavingsBondEligible(bond: us.irc.core::Asset, issued_on: Date, owner_age: Integer) strict {
+    label en official "section 135(c)(1)(A)-(C)";
+    when qualified_us_savings_bond_135c1(bond, issued_on, owner_age);
+    when issued_on > @1989-12-31;
+    when owner_age >= 24;
+    then qualified_us_savings_bond_135c1_eligible(bond);
+}
+
+pub relation eligible_educational_institution_135c3(institution: us.irc.core::Organ) kind empirical {
+    label en official "an eligible educational institution within the meaning of section 529(e)(5) (section 135(c)(3))";
+}
+pub relation qualified_higher_education_expenses_135c2(p: Individual, y: TaxableYear, student: Individual, amount: Money) kind empirical {
+    label en official "tuition and fees required for the enrollment or attendance of the taxpayer, spouse, or a section 151 dependent, at an eligible educational institution — not for sports/games/hobbies courses outside a degree program, but including qualified section 529/Coverdell contributions (section 135(c)(2)(A)-(C))";
+}
+
+// =====================================================================
+// §135(a)/(b)(1): the exclusion and the proceeds-exceed-expenses fraction
+// =====================================================================
+
+pub relation qualified_bonds_redeemed_proceeds(p: Individual, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the aggregate proceeds of qualified United States savings bonds redeemed by the taxpayer during the taxable year (section 135(a),(b)(1)(A)(i))";
+}
+pub relation savings_bond_income_exclusion_before_limits(p: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the amount excludable from gross income under section 135(a) without regard to the (b) limitations — the interest portion of the redeemed proceeds";
+}
+relation savings_bond_interest_portion_of_proceeds(p: Individual, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the portion of the redeemed proceeds representing accrued interest, i.e. the amount that WOULD be includible in gross income by reason of the redemption absent section 135 (case-asserted; this package does not itself compute bond-discount accretion)";
+}
+@source(IRC_S135_A, quote = "no amount shall be includible in gross income by reason of the redemption during such year of any qualified United States savings bond")
+rule SavingsBondIncomeExclusionBeforeLimits(p: Individual, y: TaxableYear, interest: Money) strict {
+    label en official "section 135(a), before the (b) limitations";
+    when savings_bond_interest_portion_of_proceeds(p, y, interest);
+    when not_known(savings_bond_exclusion_barred_by_135d3(p, y)); // G6404 wiring: §135(d)(3)
+    then savings_bond_income_exclusion_before_limits(p, y, interest);
+}
+// G6404 wiring, §135(d)(3): a married taxpayer (section 7703) may claim the exclusion only on a joint
+// return; a married taxpayer whose filing status for the year is married filing separately is barred.
+// JUDGMENT CALL: the statutory "file a joint return" is read as `filing_status(p, y, Joint)` of
+// `us.irc.income_individual`; the bar is the complement for a married taxpayer (status MarriedSeparate).
+relation savings_bond_exclusion_barred_by_135d3(p: Individual, y: TaxableYear) kind institutional {
+    label en official "section 135(d)(3): the taxpayer is married (section 7703) and does not file a joint return with the spouse for the taxable year, so section 135 does not apply";
+}
+rule SavingsBondExclusionBarredForMarriedFilingSeparately(p: Individual, y: TaxableYear) strict {
+    label en official "section 135(d)(3): a married taxpayer filing separately is barred from the exclusion";
+    when married_joint_return_required_135d3(p, y);
+    when us.irc.income_individual::filing_status(p, y, us.irc.income_individual::MarriedSeparate);
+    then savings_bond_exclusion_barred_by_135d3(p, y);
+}
+
+pub relation savings_bond_applicable_fraction_135b1(p: Individual, y: TaxableYear, fraction: Decimal) kind institutional {
+    label en official "the (b)(1)(B) applicable fraction: qualified higher education expenses paid, divided by aggregate qualified-bond proceeds redeemed (section 135(b)(1)(B))";
+}
+@source(IRC_S135_B, quote = "the term \"applicable fraction\" means the fraction the numerator of which is the amount described in subparagraph (A)(ii) and the denominator of which is the amount described in subparagraph (A)(i)")
+rule SavingsBondApplicableFractionComputed(p: Individual, y: TaxableYear, proceeds: Money, expenses: Money) strict {
+    label en official "section 135(b)(1)(B)";
+    when qualified_bonds_redeemed_proceeds(p, y, proceeds);
+    when qualified_higher_education_expenses_after_reduction_135d(p, y, expenses);
+    when proceeds > 0.00 USD;
+    then savings_bond_applicable_fraction_135b1(p, y, expenses / proceeds);
+}
+
+pub relation savings_bond_exclusion_after_proceeds_limit_135b1(p: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the (a) exclusion capped by the (b)(1) applicable fraction when redeemed proceeds exceed qualified higher education expenses";
+}
+@source(IRC_S135_B, quote = "the amount excludable from gross income under subsection (a) shall not exceed the applicable fraction of the amount excludable from gross income under subsection (a) without regard to this subsection")
+rule SavingsBondExclusionCappedByProceedsExcess(p: Individual, y: TaxableYear, proceeds: Money, expenses: Money, before_limit: Money, fraction: Decimal) strict {
+    label en official "section 135(b)(1)(A): applies only when proceeds exceed expenses";
+    when qualified_bonds_redeemed_proceeds(p, y, proceeds);
+    when qualified_higher_education_expenses_after_reduction_135d(p, y, expenses);
+    when proceeds > expenses;
+    when savings_bond_income_exclusion_before_limits(p, y, before_limit);
+    when savings_bond_applicable_fraction_135b1(p, y, fraction);
+    then savings_bond_exclusion_after_proceeds_limit_135b1(p, y, round(before_limit * fraction, 2, "HALF_UP"));
+}
+@source(IRC_S135_A, quote = "no amount shall be includible in gross income by reason of the redemption during such year of any qualified United States savings bond")
+rule SavingsBondExclusionNoProceedsExcess(p: Individual, y: TaxableYear, proceeds: Money, expenses: Money, before_limit: Money) strict {
+    label en official "section 135(b)(1) does not reduce the exclusion when expenses meet or exceed proceeds";
+    when qualified_bonds_redeemed_proceeds(p, y, proceeds);
+    when qualified_higher_education_expenses_after_reduction_135d(p, y, expenses);
+    when proceeds <= expenses;
+    when savings_bond_income_exclusion_before_limits(p, y, before_limit);
+    then savings_bond_exclusion_after_proceeds_limit_135b1(p, y, before_limit);
+}
+
+// --- §135(b)(2)(A): MAGI phase-out ------------------------------------------
+
+pub relation magi_135(p: Individual, y: TaxableYear, amount: Money) kind empirical {
+    label en official "modified adjusted gross income for section 135 purposes (section 135(c)(4)) — case-asserted; the cross-reference computation itself (AGI without regard to this section and sections 85(c),137,221,911,931,933, after 86/469/219) is not derived this pass";
+}
+pub relation savings_bond_magi_phaseout_base_amount_135b2A(p: Individual, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the section 135(b)(2)(A) base amount ($40,000, or $60,000 on a joint return, as indexed for inflation since 1990 under (b)(2)(B)) — SOURCE_GAP: no `us.irc.inflation_adjustments` value is pinned for section 135; a case must supply the correct dollar figure for its own year";
+}
+pub relation savings_bond_exclusion_before_phaseout(p: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en official "helper: the section 135 exclusion amount before the (b)(2) MAGI phase-out is applied (i.e. after (b)(1))";
+}
+rule SavingsBondExclusionBeforePhaseout(p: Individual, y: TaxableYear, amount: Money) strict {
+    label en official "helper wiring (b)(1)'s result into the (b)(2) phase-out below";
+    when savings_bond_exclusion_after_proceeds_limit_135b1(p, y, amount);
+    then savings_bond_exclusion_before_phaseout(p, y, amount);
+}
+pub relation savings_bond_exclusion_after_magi_phaseout_135b2(p: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the final section 135 exclusion, after the (b)(2)(A) MAGI phase-out";
+}
+@source(IRC_S135_B, quote = "If the modified adjusted gross income of the taxpayer for the taxable year exceeds $40,000 ($60,000 in the case of a joint return), the amount which would (but for this paragraph) be excludable from gross income")
+rule SavingsBondExclusionMagiPhasedOut(p: Individual, y: TaxableYear, magi: Money, base: Money, before_phaseout: Money) strict {
+    label en official "section 135(b)(2)(A): the phase-out formula is not itself fully specified by this quote (the statute continues with a ratio over a $15,000 range, at (c)/(b)(2) generally) — this pass treats MAGI at or below the base amount as producing NO reduction, and MAGI above the base amount as a TECH_GAP (the phase-out RATIO computation over the $15,000 range is not modelled — see TECH-GAPS)";
+    when magi_135(p, y, magi);
+    when savings_bond_magi_phaseout_base_amount_135b2A(p, y, base);
+    when magi <= base;
+    when savings_bond_exclusion_before_phaseout(p, y, before_phaseout);
+    then savings_bond_exclusion_after_magi_phaseout_135b2(p, y, before_phaseout);
+}
+
+// =====================================================================
+// §135(d): coordination and joint-return requirement
+// =====================================================================
+
+relation expenses_reduced_by_scholarship_or_va_or_other_tax_free_educational_benefit(p: Individual, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the aggregate of (A) a section 117 qualified scholarship, (B) a title 38 VA educational assistance allowance, (C) a tax-free non-gift educational payment, and (D) a section 529(b) qualified tuition program payment/waiver/reimbursement, taken into account for the same education (section 135(d)(1)(A)-(D))";
+}
+relation expenses_reduced_by_25A_credit_or_529_530_exclusion(p: Individual, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the aggregate of amounts taken into account in determining a section 25A credit, or the section 529(c)(3)(B)/530(d)(2) exclusions, for the same expenses (section 135(d)(2)(A)-(B))";
+}
+pub relation qualified_higher_education_expenses_after_reduction_135d(p: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en official "qualified higher education expenses under section 135(a), reduced by the (d)(1) and (d)(2) coordination amounts";
+}
+@source(IRC_S135_D, quote = "The amount of qualified higher education expenses otherwise taken into account under subsection (a) with respect to the education of an individual shall be reduced")
+rule QualifiedHigherEducationExpensesAfterReduction(p: Individual, y: TaxableYear, student: Individual, raw: Money, reduction1: Money, reduction2: Money) strict {
+    label en official "section 135(d)(1)-(2): both coordination reductions applied";
+    when qualified_higher_education_expenses_135c2(p, y, student, raw);
+    when expenses_reduced_by_scholarship_or_va_or_other_tax_free_educational_benefit(p, y, reduction1);
+    when expenses_reduced_by_25A_credit_or_529_530_exclusion(p, y, reduction2);
+    when raw > reduction1 + reduction2;
+    then qualified_higher_education_expenses_after_reduction_135d(p, y, round(raw - (reduction1 + reduction2), 2, "HALF_UP"));
+}
+relation no_educational_benefit_reductions(p: Individual, y: TaxableYear, student: Individual) kind empirical {
+    label en official "there are no (d)(1)/(d)(2) reduction amounts for this individual's education (case-asserted \"none\", this package's explicit-zero convention)";
+}
+@source(IRC_S135_A, quote = "In the case of an individual who pays qualified higher education expenses during the taxable year")
+rule QualifiedHigherEducationExpensesNoReduction(p: Individual, y: TaxableYear, student: Individual, raw: Money) strict {
+    label en official "no coordination reduction applies";
+    when qualified_higher_education_expenses_135c2(p, y, student, raw);
+    when no_educational_benefit_reductions(p, y, student);
+    then qualified_higher_education_expenses_after_reduction_135d(p, y, raw);
+}
+
+pub relation married_joint_return_required_135d3(p: Individual, y: TaxableYear) kind institutional {
+    label en official "a married taxpayer (section 7703) may claim the section 135 exclusion only if the taxpayer and spouse file a joint return for the taxable year (section 135(d)(3))";
+}
+relation married_within_7703(p: Individual, y: TaxableYear) kind empirical {
+    label en official "the taxpayer is a married individual within the meaning of section 7703 (section 135(d)(3))";
+}
+@source(IRC_S135_D, quote = "If the taxpayer is a married individual (within the meaning of section 7703), this section shall apply only if the taxpayer and his spouse file a joint return for the taxable year.")
+rule MarriedJointReturnRequired(p: Individual, y: TaxableYear) strict {
+    label en official "section 135(d)(3)";
+    when married_within_7703(p, y);
+    then married_joint_return_required_135d3(p, y);
+}

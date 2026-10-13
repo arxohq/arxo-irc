@@ -1,0 +1,535 @@
+// Deductions -- final TECH_GAP pass (26.09.2026, DECISION-0379, implemented_unverified): G4400 (section 250(b)(5)(C)(i), a sale of property is a sale of
+// each of its components), G4401 (section 250(b)(5)(D)(ii), the affiliated group without regard to section 1504(b)(2), (3)), G3900 (sections 263(g)(4)(A), 263(h)(6): (h)
+// applies before (g)), G3901 (section 263(g)(4)(B): (g) applies after sections 1277 and 1282), G3902 (section 280G(d)(4): present value at 120 percent of the
+// applicable Federal rate compounded semiannually).
+//
+// G4400. The components of a sold item are case facts with their income; the related-party test is applied to EACH component (`component_related_sale_lacks_foreign_use_250b5c`);
+// an item with components is no longer judged as a whole (the rule of module stage2c gets a `not_known` guard); the foreign-derived income of the item is the sum of the
+// income of the components that pass.
+// G4401. The affiliated group is derived over the ownership relation of module stage2c (more than 50 percent of vote and value) from a common parent in a bounded chain of
+// THREE levels below the parent; NO corporation is excluded: the exclusions of section 1504(b)(2) (insurance companies) and (b)(3) (foreign corporations) are disregarded
+// by construction (there is no exclusion rule to disregard), which the scenarios show with a foreign subsidiary at the second level. A deeper chain is outside the bound.
+// G3900/G3901. The order of application is a chain: the amounts that (h) disallows for a short sale and the interest deferred by section 1277 or 1282 (an asserted
+// amount: EXTERNAL_DEPENDENCY on the owner of those sections, whose outputs are keyed to debt instruments) are removed from the amounts to which (g) applies
+// (`straddle_prior_reductions_263g4`, read by the excess rule of module 263). JUDGMENT CALL: the removal is from the (2)(A) sum of the property.
+// G3902. The present value of a payment that is contingent on the change is `amount / ((1 + s)^k x (1 + s x stub/182.5))`, s = 120 percent of the applicable Federal rate / 2
+// (a case fact per corporation: the rate of section 1274(d) is published, not derived), k the whole six-month periods between the change and the payment (table 0..40, by
+// add_calendar_period), stub the days after them (simple interest for the part-period: JUDGMENT CALL; the half-year is 182.5 days); the factor by binary exponentiation
+// unrolled to 6 bits, each product rounded to 12 places HALF_UP. A payment more than 20 years after the change is outside the bound.
+
+language "law.core" version "0.2";
+package us.irc.deductions version "0.1.1";
+namespace "urn:us:irc:deductions:clir";
+
+use self::{
+    Corporation,
+    IRC_S250_B,
+    IRC_S263_G,
+    IRC_S280G_D,
+    Person,
+    TaxableYear,
+    change_in_ownership_or_control_date,
+    payment_contingent_on_change_in_control,
+    present_value_of_payment,
+    related_party_by_ownership_250b5d,
+    sale_to_related_party_not_united_states_person_250,
+    short_sale_payment_disallowed_263h,
+    straddle_interest_on_debt_to_carry_property,
+};
+
+// ===================== G4400 =====================
+
+pub relation sold_property_component_250(c: Corporation, y: TaxableYear, item: Integer, comp: Integer) kind empirical {
+    label en official "the property sold in the item is treated as a sale of each of its components (section 250(b)(5)(C)(i), last sentence): a component of the property — case fact";
+}
+pub relation component_income_250(c: Corporation, y: TaxableYear, item: Integer, comp: Integer, amount: Money) kind empirical {
+    label en official "the income of the item attributable to the component — case fact";
+}
+pub relation component_ultimately_sold_or_used_for_unrelated_non_us_person_250(c: Corporation, y: TaxableYear, item: Integer, comp: Integer) kind empirical {
+    label en official "the component is ultimately sold by a related party, or used by a related party in connection with property which is sold or the provision of services, to an unrelated party who is not a United States person (section 250(b)(5)(C)(i)(I))";
+}
+pub relation item_has_components_250(c: Corporation, y: TaxableYear, item: Integer) kind institutional {
+    label en official "components of the item are supplied (bridge)";
+}
+@source(IRC_S250_B, quote = "For purposes of this clause, a sale of property shall be treated as a sale of each of the components thereof.")
+rule ItemHasComponents250(c: Corporation, y: TaxableYear, item: Integer, comp: Integer) strict {
+    label en official "bridge for the absence test";
+    when sold_property_component_250(c, y, item, comp);
+    then item_has_components_250(c, y, item);
+}
+pub relation component_related_sale_lacks_foreign_use_250b5c(c: Corporation, y: TaxableYear, item: Integer, comp: Integer) kind institutional {
+    label en official "a sale of the component to a related non-United States person is not for a foreign use without the ultimate sale of the component to an unrelated non-United States person";
+}
+@source(IRC_S250_B, quote = "For purposes of this clause, a sale of property shall be treated as a sale of each of the components thereof.")
+rule ComponentRelatedSaleLacksForeignUse250(c: Corporation, y: TaxableYear, item: Integer, comp: Integer) strict {
+    label en official "the test of (C)(i) applied to each component";
+    when sale_to_related_party_not_united_states_person_250(c, y, item);
+    when sold_property_component_250(c, y, item, comp);
+    when not_known(component_ultimately_sold_or_used_for_unrelated_non_us_person_250(c, y, item, comp));
+    then component_related_sale_lacks_foreign_use_250b5c(c, y, item, comp);
+}
+pub relation foreign_use_component_income_250(c: Corporation, y: TaxableYear, item: Integer, amount: Money) kind institutional {
+    label en official "the income of the item attributable to the components that are not barred by the related-party rule of (C)(i)";
+}
+@source(IRC_S250_B, quote = "For purposes of this clause, a sale of property shall be treated as a sale of each of the components thereof.")
+rule ForeignUseComponentIncome250(c: Corporation, y: TaxableYear, item: Integer, comp0: Integer) strict {
+    label en official "sum of the component incomes that pass";
+    when sold_property_component_250(c, y, item, comp0);
+    then foreign_use_component_income_250(c, y, item, sum(collect all a: Money, k: Integer where component_income_250(c, y, item, k, a) and not_known(component_related_sale_lacks_foreign_use_250b5c(c, y, item, k)), empty: 0.00 USD));
+}
+
+// ===================== G4401 =====================
+
+pub relation common_parent_250b5d(root: Corporation, y: TaxableYear) kind empirical {
+    label en official "the corporation is the common parent of an affiliated group of section 1504(a) determined with more than 50 percent for at least 80 percent (section 250(b)(5)(D)(i)) — case fact";
+}
+pub relation group_level_1_250b5d(root: Corporation, m: Corporation, y: TaxableYear) kind institutional {
+    label en official "a corporation directly owned to more than 50 percent (vote and value) by the common parent";
+}
+@source(IRC_S250_B, quote = "(ii) without regard to paragraphs (2) and (3) of section 1504(b).")
+rule GroupLevel1250b5d(root: Corporation, m: Corporation, y: TaxableYear) strict {
+    label en official "level 1 of the chain of includible corporations (section 1504(a)(1)(B) with more than 50 percent), no corporation excluded by section 1504(b)(2), (3)";
+    when common_parent_250b5d(root, y);
+    when related_party_by_ownership_250b5d(root, m, y);
+    then group_level_1_250b5d(root, m, y);
+}
+pub relation group_level_2_250b5d(root: Corporation, m: Corporation, y: TaxableYear) kind institutional {
+    label en official "a corporation owned to more than 50 percent by a level 1 corporation";
+}
+@source(IRC_S250_B, quote = "(ii) without regard to paragraphs (2) and (3) of section 1504(b).")
+rule GroupLevel2250b5d(root: Corporation, m1: Corporation, m: Corporation, y: TaxableYear) strict {
+    label en official "level 2";
+    when group_level_1_250b5d(root, m1, y);
+    when related_party_by_ownership_250b5d(m1, m, y);
+    then group_level_2_250b5d(root, m, y);
+}
+pub relation group_level_3_250b5d(root: Corporation, m: Corporation, y: TaxableYear) kind institutional {
+    label en official "a corporation owned to more than 50 percent by a level 2 corporation";
+}
+@source(IRC_S250_B, quote = "(ii) without regard to paragraphs (2) and (3) of section 1504(b).")
+rule GroupLevel3250b5d(root: Corporation, m1: Corporation, m: Corporation, y: TaxableYear) strict {
+    label en official "level 3";
+    when group_level_2_250b5d(root, m1, y);
+    when related_party_by_ownership_250b5d(m1, m, y);
+    then group_level_3_250b5d(root, m, y);
+}
+pub relation group_member_250b5d(root: Corporation, m: Corporation, y: TaxableYear) kind institutional {
+    label en official "a member of the affiliated group of the common parent: the parent or a corporation at level 1, 2 or 3 (the exclusions of section 1504(b)(2), (3) disregarded)";
+}
+@source(IRC_S250_B, quote = "(ii) without regard to paragraphs (2) and (3) of section 1504(b).")
+rule GroupMemberParent250b5d(root: Corporation, y: TaxableYear) strict {
+    label en official "the common parent";
+    when common_parent_250b5d(root, y);
+    then group_member_250b5d(root, root, y);
+}
+rule GroupMemberLevel1250b5d(root: Corporation, m: Corporation, y: TaxableYear) strict { label en official "level 1"; when group_level_1_250b5d(root, m, y); then group_member_250b5d(root, m, y); }
+rule GroupMemberLevel2250b5d(root: Corporation, m: Corporation, y: TaxableYear) strict { label en official "level 2"; when group_level_2_250b5d(root, m, y); then group_member_250b5d(root, m, y); }
+rule GroupMemberLevel3250b5d(root: Corporation, m: Corporation, y: TaxableYear) strict { label en official "level 3"; when group_level_3_250b5d(root, m, y); then group_member_250b5d(root, m, y); }
+pub relation related_within_group_250b5d(a: Corporation, b: Corporation, y: TaxableYear) kind institutional {
+    label en official "two corporations that are members of the same affiliated group of section 250(b)(5)(D)";
+}
+@source(IRC_S250_B, quote = "(ii) without regard to paragraphs (2) and (3) of section 1504(b).")
+rule RelatedWithinGroup250b5d(root: Corporation, a: Corporation, b: Corporation, y: TaxableYear) strict {
+    label en official "a and b are members of the group of a common parent";
+    when group_member_250b5d(root, a, y);
+    when group_member_250b5d(root, b, y);
+    then related_within_group_250b5d(a, b, y);
+}
+
+// ===================== G3900 / G3901 =====================
+
+pub relation straddle_property_is_short_sale_263g4(prop: Integer, sale: Integer) kind empirical {
+    label en official "the personal property that is part of the straddle is the short sale (section 263(g)(4)(A), (h)(6)) — case fact";
+}
+pub relation interest_deferred_under_1277_or_1282_263g4B(p: Person, y: TaxableYear, prop: Integer, amount: Money) kind empirical {
+    label en official "the interest that section 1277 or 1282 defers with respect to the obligation (section 263(g)(4)(B): (g) applies after those sections) — asserted amount, the sections belong to the property transactions package (EXTERNAL_DEPENDENCY)";
+}
+pub relation straddle_prior_reductions_263g4(p: Person, y: TaxableYear, prop: Integer, amount: Money) kind institutional {
+    label en official "the amounts removed from the carrying amounts of the property before section 263(g) applies: the interest deferred by section 1277 or 1282 and, for a short sale, the payments that section 263(h) disallows";
+}
+@source(IRC_S263_G, quote = "In the case of any short sale, this subsection shall be applied after subsection (h).")
+rule StraddlePriorReductions263g4(p: Person, y: TaxableYear, prop: Integer, a0: Money) defeasible {
+    label en official "(h) first for a short sale, sections 1277 and 1282 first for an obligation, then (g)";
+    when straddle_interest_on_debt_to_carry_property(p, y, prop, a0);
+    then straddle_prior_reductions_263g4(p, y, prop,
+        sum(collect all d: Money where interest_deferred_under_1277_or_1282_263g4B(p, y, prop, d), empty: 0.00 USD)
+        + sum(collect all x: Money, sa: Integer where straddle_property_is_short_sale_263g4(prop, sa) and short_sale_payment_disallowed_263h(p, y, sa, x), empty: 0.00 USD));
+}
+
+// ===================== G3902 =====================
+
+pub relation payment_date_280g(p: Person, corp: Person, item: Integer, on: Date) kind empirical {
+    label en official "the date on which the contingent payment is made (after the change) — case fact";
+}
+pub relation applicable_federal_rate_for_change_280g(corp: Person, rate: Decimal) kind empirical {
+    label en official "the applicable Federal rate determined under section 1274(d) for the change date, an annual rate as a fraction (published by the Secretary: EXTERNAL_DEPENDENCY) — case fact";
+}
+pub relation semiannual_period_reached_280g(p: Person, corp: Person, item: Integer, j: Integer, boundary: Date) kind institutional {
+    label en official "the j-th six-month period after the change ends on or before the payment date, at the boundary date";
+}
+@source(IRC_S280G_D, quote = "Present value shall be determined by using a discount rate equal to 120 percent of the applicable Federal rate (determined under section 1274(d)), compounded semiannually.")
+rule SemiannualPeriodReached280gJ1(p: Person, corp: Person, item: Integer, pay: Date, changed: Date) strict {
+    label en official "add_calendar_period(change, 6 calendar_month) <= payment date";
+    when payment_date_280g(p, corp, item, pay);
+    when change_in_ownership_or_control_date(corp, changed);
+    when add_calendar_period(changed, 6 calendar_month) <= pay;
+    then semiannual_period_reached_280g(p, corp, item, 1, add_calendar_period(changed, 6 calendar_month));
+}
+@source(IRC_S280G_D, quote = "Present value shall be determined by using a discount rate equal to 120 percent of the applicable Federal rate (determined under section 1274(d)), compounded semiannually.")
+rule SemiannualPeriodReached280gJ2(p: Person, corp: Person, item: Integer, pay: Date, changed: Date) strict {
+    label en official "add_calendar_period(change, 12 calendar_month) <= payment date";
+    when payment_date_280g(p, corp, item, pay);
+    when change_in_ownership_or_control_date(corp, changed);
+    when add_calendar_period(changed, 12 calendar_month) <= pay;
+    then semiannual_period_reached_280g(p, corp, item, 2, add_calendar_period(changed, 12 calendar_month));
+}
+@source(IRC_S280G_D, quote = "Present value shall be determined by using a discount rate equal to 120 percent of the applicable Federal rate (determined under section 1274(d)), compounded semiannually.")
+rule SemiannualPeriodReached280gJ3(p: Person, corp: Person, item: Integer, pay: Date, changed: Date) strict {
+    label en official "add_calendar_period(change, 18 calendar_month) <= payment date";
+    when payment_date_280g(p, corp, item, pay);
+    when change_in_ownership_or_control_date(corp, changed);
+    when add_calendar_period(changed, 18 calendar_month) <= pay;
+    then semiannual_period_reached_280g(p, corp, item, 3, add_calendar_period(changed, 18 calendar_month));
+}
+@source(IRC_S280G_D, quote = "Present value shall be determined by using a discount rate equal to 120 percent of the applicable Federal rate (determined under section 1274(d)), compounded semiannually.")
+rule SemiannualPeriodReached280gJ4(p: Person, corp: Person, item: Integer, pay: Date, changed: Date) strict {
+    label en official "add_calendar_period(change, 24 calendar_month) <= payment date";
+    when payment_date_280g(p, corp, item, pay);
+    when change_in_ownership_or_control_date(corp, changed);
+    when add_calendar_period(changed, 24 calendar_month) <= pay;
+    then semiannual_period_reached_280g(p, corp, item, 4, add_calendar_period(changed, 24 calendar_month));
+}
+@source(IRC_S280G_D, quote = "Present value shall be determined by using a discount rate equal to 120 percent of the applicable Federal rate (determined under section 1274(d)), compounded semiannually.")
+rule SemiannualPeriodReached280gJ5(p: Person, corp: Person, item: Integer, pay: Date, changed: Date) strict {
+    label en official "add_calendar_period(change, 30 calendar_month) <= payment date";
+    when payment_date_280g(p, corp, item, pay);
+    when change_in_ownership_or_control_date(corp, changed);
+    when add_calendar_period(changed, 30 calendar_month) <= pay;
+    then semiannual_period_reached_280g(p, corp, item, 5, add_calendar_period(changed, 30 calendar_month));
+}
+@source(IRC_S280G_D, quote = "Present value shall be determined by using a discount rate equal to 120 percent of the applicable Federal rate (determined under section 1274(d)), compounded semiannually.")
+rule SemiannualPeriodReached280gJ6(p: Person, corp: Person, item: Integer, pay: Date, changed: Date) strict {
+    label en official "add_calendar_period(change, 36 calendar_month) <= payment date";
+    when payment_date_280g(p, corp, item, pay);
+    when change_in_ownership_or_control_date(corp, changed);
+    when add_calendar_period(changed, 36 calendar_month) <= pay;
+    then semiannual_period_reached_280g(p, corp, item, 6, add_calendar_period(changed, 36 calendar_month));
+}
+@source(IRC_S280G_D, quote = "Present value shall be determined by using a discount rate equal to 120 percent of the applicable Federal rate (determined under section 1274(d)), compounded semiannually.")
+rule SemiannualPeriodReached280gJ7(p: Person, corp: Person, item: Integer, pay: Date, changed: Date) strict {
+    label en official "add_calendar_period(change, 42 calendar_month) <= payment date";
+    when payment_date_280g(p, corp, item, pay);
+    when change_in_ownership_or_control_date(corp, changed);
+    when add_calendar_period(changed, 42 calendar_month) <= pay;
+    then semiannual_period_reached_280g(p, corp, item, 7, add_calendar_period(changed, 42 calendar_month));
+}
+@source(IRC_S280G_D, quote = "Present value shall be determined by using a discount rate equal to 120 percent of the applicable Federal rate (determined under section 1274(d)), compounded semiannually.")
+rule SemiannualPeriodReached280gJ8(p: Person, corp: Person, item: Integer, pay: Date, changed: Date) strict {
+    label en official "add_calendar_period(change, 48 calendar_month) <= payment date";
+    when payment_date_280g(p, corp, item, pay);
+    when change_in_ownership_or_control_date(corp, changed);
+    when add_calendar_period(changed, 48 calendar_month) <= pay;
+    then semiannual_period_reached_280g(p, corp, item, 8, add_calendar_period(changed, 48 calendar_month));
+}
+@source(IRC_S280G_D, quote = "Present value shall be determined by using a discount rate equal to 120 percent of the applicable Federal rate (determined under section 1274(d)), compounded semiannually.")
+rule SemiannualPeriodReached280gJ9(p: Person, corp: Person, item: Integer, pay: Date, changed: Date) strict {
+    label en official "add_calendar_period(change, 54 calendar_month) <= payment date";
+    when payment_date_280g(p, corp, item, pay);
+    when change_in_ownership_or_control_date(corp, changed);
+    when add_calendar_period(changed, 54 calendar_month) <= pay;
+    then semiannual_period_reached_280g(p, corp, item, 9, add_calendar_period(changed, 54 calendar_month));
+}
+@source(IRC_S280G_D, quote = "Present value shall be determined by using a discount rate equal to 120 percent of the applicable Federal rate (determined under section 1274(d)), compounded semiannually.")
+rule SemiannualPeriodReached280gJ10(p: Person, corp: Person, item: Integer, pay: Date, changed: Date) strict {
+    label en official "add_calendar_period(change, 60 calendar_month) <= payment date";
+    when payment_date_280g(p, corp, item, pay);
+    when change_in_ownership_or_control_date(corp, changed);
+    when add_calendar_period(changed, 60 calendar_month) <= pay;
+    then semiannual_period_reached_280g(p, corp, item, 10, add_calendar_period(changed, 60 calendar_month));
+}
+@source(IRC_S280G_D, quote = "Present value shall be determined by using a discount rate equal to 120 percent of the applicable Federal rate (determined under section 1274(d)), compounded semiannually.")
+rule SemiannualPeriodReached280gJ11(p: Person, corp: Person, item: Integer, pay: Date, changed: Date) strict {
+    label en official "add_calendar_period(change, 66 calendar_month) <= payment date";
+    when payment_date_280g(p, corp, item, pay);
+    when change_in_ownership_or_control_date(corp, changed);
+    when add_calendar_period(changed, 66 calendar_month) <= pay;
+    then semiannual_period_reached_280g(p, corp, item, 11, add_calendar_period(changed, 66 calendar_month));
+}
+@source(IRC_S280G_D, quote = "Present value shall be determined by using a discount rate equal to 120 percent of the applicable Federal rate (determined under section 1274(d)), compounded semiannually.")
+rule SemiannualPeriodReached280gJ12(p: Person, corp: Person, item: Integer, pay: Date, changed: Date) strict {
+    label en official "add_calendar_period(change, 72 calendar_month) <= payment date";
+    when payment_date_280g(p, corp, item, pay);
+    when change_in_ownership_or_control_date(corp, changed);
+    when add_calendar_period(changed, 72 calendar_month) <= pay;
+    then semiannual_period_reached_280g(p, corp, item, 12, add_calendar_period(changed, 72 calendar_month));
+}
+@source(IRC_S280G_D, quote = "Present value shall be determined by using a discount rate equal to 120 percent of the applicable Federal rate (determined under section 1274(d)), compounded semiannually.")
+rule SemiannualPeriodReached280gJ13(p: Person, corp: Person, item: Integer, pay: Date, changed: Date) strict {
+    label en official "add_calendar_period(change, 78 calendar_month) <= payment date";
+    when payment_date_280g(p, corp, item, pay);
+    when change_in_ownership_or_control_date(corp, changed);
+    when add_calendar_period(changed, 78 calendar_month) <= pay;
+    then semiannual_period_reached_280g(p, corp, item, 13, add_calendar_period(changed, 78 calendar_month));
+}
+@source(IRC_S280G_D, quote = "Present value shall be determined by using a discount rate equal to 120 percent of the applicable Federal rate (determined under section 1274(d)), compounded semiannually.")
+rule SemiannualPeriodReached280gJ14(p: Person, corp: Person, item: Integer, pay: Date, changed: Date) strict {
+    label en official "add_calendar_period(change, 84 calendar_month) <= payment date";
+    when payment_date_280g(p, corp, item, pay);
+    when change_in_ownership_or_control_date(corp, changed);
+    when add_calendar_period(changed, 84 calendar_month) <= pay;
+    then semiannual_period_reached_280g(p, corp, item, 14, add_calendar_period(changed, 84 calendar_month));
+}
+@source(IRC_S280G_D, quote = "Present value shall be determined by using a discount rate equal to 120 percent of the applicable Federal rate (determined under section 1274(d)), compounded semiannually.")
+rule SemiannualPeriodReached280gJ15(p: Person, corp: Person, item: Integer, pay: Date, changed: Date) strict {
+    label en official "add_calendar_period(change, 90 calendar_month) <= payment date";
+    when payment_date_280g(p, corp, item, pay);
+    when change_in_ownership_or_control_date(corp, changed);
+    when add_calendar_period(changed, 90 calendar_month) <= pay;
+    then semiannual_period_reached_280g(p, corp, item, 15, add_calendar_period(changed, 90 calendar_month));
+}
+@source(IRC_S280G_D, quote = "Present value shall be determined by using a discount rate equal to 120 percent of the applicable Federal rate (determined under section 1274(d)), compounded semiannually.")
+rule SemiannualPeriodReached280gJ16(p: Person, corp: Person, item: Integer, pay: Date, changed: Date) strict {
+    label en official "add_calendar_period(change, 96 calendar_month) <= payment date";
+    when payment_date_280g(p, corp, item, pay);
+    when change_in_ownership_or_control_date(corp, changed);
+    when add_calendar_period(changed, 96 calendar_month) <= pay;
+    then semiannual_period_reached_280g(p, corp, item, 16, add_calendar_period(changed, 96 calendar_month));
+}
+@source(IRC_S280G_D, quote = "Present value shall be determined by using a discount rate equal to 120 percent of the applicable Federal rate (determined under section 1274(d)), compounded semiannually.")
+rule SemiannualPeriodReached280gJ17(p: Person, corp: Person, item: Integer, pay: Date, changed: Date) strict {
+    label en official "add_calendar_period(change, 102 calendar_month) <= payment date";
+    when payment_date_280g(p, corp, item, pay);
+    when change_in_ownership_or_control_date(corp, changed);
+    when add_calendar_period(changed, 102 calendar_month) <= pay;
+    then semiannual_period_reached_280g(p, corp, item, 17, add_calendar_period(changed, 102 calendar_month));
+}
+@source(IRC_S280G_D, quote = "Present value shall be determined by using a discount rate equal to 120 percent of the applicable Federal rate (determined under section 1274(d)), compounded semiannually.")
+rule SemiannualPeriodReached280gJ18(p: Person, corp: Person, item: Integer, pay: Date, changed: Date) strict {
+    label en official "add_calendar_period(change, 108 calendar_month) <= payment date";
+    when payment_date_280g(p, corp, item, pay);
+    when change_in_ownership_or_control_date(corp, changed);
+    when add_calendar_period(changed, 108 calendar_month) <= pay;
+    then semiannual_period_reached_280g(p, corp, item, 18, add_calendar_period(changed, 108 calendar_month));
+}
+@source(IRC_S280G_D, quote = "Present value shall be determined by using a discount rate equal to 120 percent of the applicable Federal rate (determined under section 1274(d)), compounded semiannually.")
+rule SemiannualPeriodReached280gJ19(p: Person, corp: Person, item: Integer, pay: Date, changed: Date) strict {
+    label en official "add_calendar_period(change, 114 calendar_month) <= payment date";
+    when payment_date_280g(p, corp, item, pay);
+    when change_in_ownership_or_control_date(corp, changed);
+    when add_calendar_period(changed, 114 calendar_month) <= pay;
+    then semiannual_period_reached_280g(p, corp, item, 19, add_calendar_period(changed, 114 calendar_month));
+}
+@source(IRC_S280G_D, quote = "Present value shall be determined by using a discount rate equal to 120 percent of the applicable Federal rate (determined under section 1274(d)), compounded semiannually.")
+rule SemiannualPeriodReached280gJ20(p: Person, corp: Person, item: Integer, pay: Date, changed: Date) strict {
+    label en official "add_calendar_period(change, 120 calendar_month) <= payment date";
+    when payment_date_280g(p, corp, item, pay);
+    when change_in_ownership_or_control_date(corp, changed);
+    when add_calendar_period(changed, 120 calendar_month) <= pay;
+    then semiannual_period_reached_280g(p, corp, item, 20, add_calendar_period(changed, 120 calendar_month));
+}
+@source(IRC_S280G_D, quote = "Present value shall be determined by using a discount rate equal to 120 percent of the applicable Federal rate (determined under section 1274(d)), compounded semiannually.")
+rule SemiannualPeriodReached280gJ21(p: Person, corp: Person, item: Integer, pay: Date, changed: Date) strict {
+    label en official "add_calendar_period(change, 126 calendar_month) <= payment date";
+    when payment_date_280g(p, corp, item, pay);
+    when change_in_ownership_or_control_date(corp, changed);
+    when add_calendar_period(changed, 126 calendar_month) <= pay;
+    then semiannual_period_reached_280g(p, corp, item, 21, add_calendar_period(changed, 126 calendar_month));
+}
+@source(IRC_S280G_D, quote = "Present value shall be determined by using a discount rate equal to 120 percent of the applicable Federal rate (determined under section 1274(d)), compounded semiannually.")
+rule SemiannualPeriodReached280gJ22(p: Person, corp: Person, item: Integer, pay: Date, changed: Date) strict {
+    label en official "add_calendar_period(change, 132 calendar_month) <= payment date";
+    when payment_date_280g(p, corp, item, pay);
+    when change_in_ownership_or_control_date(corp, changed);
+    when add_calendar_period(changed, 132 calendar_month) <= pay;
+    then semiannual_period_reached_280g(p, corp, item, 22, add_calendar_period(changed, 132 calendar_month));
+}
+@source(IRC_S280G_D, quote = "Present value shall be determined by using a discount rate equal to 120 percent of the applicable Federal rate (determined under section 1274(d)), compounded semiannually.")
+rule SemiannualPeriodReached280gJ23(p: Person, corp: Person, item: Integer, pay: Date, changed: Date) strict {
+    label en official "add_calendar_period(change, 138 calendar_month) <= payment date";
+    when payment_date_280g(p, corp, item, pay);
+    when change_in_ownership_or_control_date(corp, changed);
+    when add_calendar_period(changed, 138 calendar_month) <= pay;
+    then semiannual_period_reached_280g(p, corp, item, 23, add_calendar_period(changed, 138 calendar_month));
+}
+@source(IRC_S280G_D, quote = "Present value shall be determined by using a discount rate equal to 120 percent of the applicable Federal rate (determined under section 1274(d)), compounded semiannually.")
+rule SemiannualPeriodReached280gJ24(p: Person, corp: Person, item: Integer, pay: Date, changed: Date) strict {
+    label en official "add_calendar_period(change, 144 calendar_month) <= payment date";
+    when payment_date_280g(p, corp, item, pay);
+    when change_in_ownership_or_control_date(corp, changed);
+    when add_calendar_period(changed, 144 calendar_month) <= pay;
+    then semiannual_period_reached_280g(p, corp, item, 24, add_calendar_period(changed, 144 calendar_month));
+}
+@source(IRC_S280G_D, quote = "Present value shall be determined by using a discount rate equal to 120 percent of the applicable Federal rate (determined under section 1274(d)), compounded semiannually.")
+rule SemiannualPeriodReached280gJ25(p: Person, corp: Person, item: Integer, pay: Date, changed: Date) strict {
+    label en official "add_calendar_period(change, 150 calendar_month) <= payment date";
+    when payment_date_280g(p, corp, item, pay);
+    when change_in_ownership_or_control_date(corp, changed);
+    when add_calendar_period(changed, 150 calendar_month) <= pay;
+    then semiannual_period_reached_280g(p, corp, item, 25, add_calendar_period(changed, 150 calendar_month));
+}
+@source(IRC_S280G_D, quote = "Present value shall be determined by using a discount rate equal to 120 percent of the applicable Federal rate (determined under section 1274(d)), compounded semiannually.")
+rule SemiannualPeriodReached280gJ26(p: Person, corp: Person, item: Integer, pay: Date, changed: Date) strict {
+    label en official "add_calendar_period(change, 156 calendar_month) <= payment date";
+    when payment_date_280g(p, corp, item, pay);
+    when change_in_ownership_or_control_date(corp, changed);
+    when add_calendar_period(changed, 156 calendar_month) <= pay;
+    then semiannual_period_reached_280g(p, corp, item, 26, add_calendar_period(changed, 156 calendar_month));
+}
+@source(IRC_S280G_D, quote = "Present value shall be determined by using a discount rate equal to 120 percent of the applicable Federal rate (determined under section 1274(d)), compounded semiannually.")
+rule SemiannualPeriodReached280gJ27(p: Person, corp: Person, item: Integer, pay: Date, changed: Date) strict {
+    label en official "add_calendar_period(change, 162 calendar_month) <= payment date";
+    when payment_date_280g(p, corp, item, pay);
+    when change_in_ownership_or_control_date(corp, changed);
+    when add_calendar_period(changed, 162 calendar_month) <= pay;
+    then semiannual_period_reached_280g(p, corp, item, 27, add_calendar_period(changed, 162 calendar_month));
+}
+@source(IRC_S280G_D, quote = "Present value shall be determined by using a discount rate equal to 120 percent of the applicable Federal rate (determined under section 1274(d)), compounded semiannually.")
+rule SemiannualPeriodReached280gJ28(p: Person, corp: Person, item: Integer, pay: Date, changed: Date) strict {
+    label en official "add_calendar_period(change, 168 calendar_month) <= payment date";
+    when payment_date_280g(p, corp, item, pay);
+    when change_in_ownership_or_control_date(corp, changed);
+    when add_calendar_period(changed, 168 calendar_month) <= pay;
+    then semiannual_period_reached_280g(p, corp, item, 28, add_calendar_period(changed, 168 calendar_month));
+}
+@source(IRC_S280G_D, quote = "Present value shall be determined by using a discount rate equal to 120 percent of the applicable Federal rate (determined under section 1274(d)), compounded semiannually.")
+rule SemiannualPeriodReached280gJ29(p: Person, corp: Person, item: Integer, pay: Date, changed: Date) strict {
+    label en official "add_calendar_period(change, 174 calendar_month) <= payment date";
+    when payment_date_280g(p, corp, item, pay);
+    when change_in_ownership_or_control_date(corp, changed);
+    when add_calendar_period(changed, 174 calendar_month) <= pay;
+    then semiannual_period_reached_280g(p, corp, item, 29, add_calendar_period(changed, 174 calendar_month));
+}
+@source(IRC_S280G_D, quote = "Present value shall be determined by using a discount rate equal to 120 percent of the applicable Federal rate (determined under section 1274(d)), compounded semiannually.")
+rule SemiannualPeriodReached280gJ30(p: Person, corp: Person, item: Integer, pay: Date, changed: Date) strict {
+    label en official "add_calendar_period(change, 180 calendar_month) <= payment date";
+    when payment_date_280g(p, corp, item, pay);
+    when change_in_ownership_or_control_date(corp, changed);
+    when add_calendar_period(changed, 180 calendar_month) <= pay;
+    then semiannual_period_reached_280g(p, corp, item, 30, add_calendar_period(changed, 180 calendar_month));
+}
+@source(IRC_S280G_D, quote = "Present value shall be determined by using a discount rate equal to 120 percent of the applicable Federal rate (determined under section 1274(d)), compounded semiannually.")
+rule SemiannualPeriodReached280gJ31(p: Person, corp: Person, item: Integer, pay: Date, changed: Date) strict {
+    label en official "add_calendar_period(change, 186 calendar_month) <= payment date";
+    when payment_date_280g(p, corp, item, pay);
+    when change_in_ownership_or_control_date(corp, changed);
+    when add_calendar_period(changed, 186 calendar_month) <= pay;
+    then semiannual_period_reached_280g(p, corp, item, 31, add_calendar_period(changed, 186 calendar_month));
+}
+@source(IRC_S280G_D, quote = "Present value shall be determined by using a discount rate equal to 120 percent of the applicable Federal rate (determined under section 1274(d)), compounded semiannually.")
+rule SemiannualPeriodReached280gJ32(p: Person, corp: Person, item: Integer, pay: Date, changed: Date) strict {
+    label en official "add_calendar_period(change, 192 calendar_month) <= payment date";
+    when payment_date_280g(p, corp, item, pay);
+    when change_in_ownership_or_control_date(corp, changed);
+    when add_calendar_period(changed, 192 calendar_month) <= pay;
+    then semiannual_period_reached_280g(p, corp, item, 32, add_calendar_period(changed, 192 calendar_month));
+}
+@source(IRC_S280G_D, quote = "Present value shall be determined by using a discount rate equal to 120 percent of the applicable Federal rate (determined under section 1274(d)), compounded semiannually.")
+rule SemiannualPeriodReached280gJ33(p: Person, corp: Person, item: Integer, pay: Date, changed: Date) strict {
+    label en official "add_calendar_period(change, 198 calendar_month) <= payment date";
+    when payment_date_280g(p, corp, item, pay);
+    when change_in_ownership_or_control_date(corp, changed);
+    when add_calendar_period(changed, 198 calendar_month) <= pay;
+    then semiannual_period_reached_280g(p, corp, item, 33, add_calendar_period(changed, 198 calendar_month));
+}
+@source(IRC_S280G_D, quote = "Present value shall be determined by using a discount rate equal to 120 percent of the applicable Federal rate (determined under section 1274(d)), compounded semiannually.")
+rule SemiannualPeriodReached280gJ34(p: Person, corp: Person, item: Integer, pay: Date, changed: Date) strict {
+    label en official "add_calendar_period(change, 204 calendar_month) <= payment date";
+    when payment_date_280g(p, corp, item, pay);
+    when change_in_ownership_or_control_date(corp, changed);
+    when add_calendar_period(changed, 204 calendar_month) <= pay;
+    then semiannual_period_reached_280g(p, corp, item, 34, add_calendar_period(changed, 204 calendar_month));
+}
+@source(IRC_S280G_D, quote = "Present value shall be determined by using a discount rate equal to 120 percent of the applicable Federal rate (determined under section 1274(d)), compounded semiannually.")
+rule SemiannualPeriodReached280gJ35(p: Person, corp: Person, item: Integer, pay: Date, changed: Date) strict {
+    label en official "add_calendar_period(change, 210 calendar_month) <= payment date";
+    when payment_date_280g(p, corp, item, pay);
+    when change_in_ownership_or_control_date(corp, changed);
+    when add_calendar_period(changed, 210 calendar_month) <= pay;
+    then semiannual_period_reached_280g(p, corp, item, 35, add_calendar_period(changed, 210 calendar_month));
+}
+@source(IRC_S280G_D, quote = "Present value shall be determined by using a discount rate equal to 120 percent of the applicable Federal rate (determined under section 1274(d)), compounded semiannually.")
+rule SemiannualPeriodReached280gJ36(p: Person, corp: Person, item: Integer, pay: Date, changed: Date) strict {
+    label en official "add_calendar_period(change, 216 calendar_month) <= payment date";
+    when payment_date_280g(p, corp, item, pay);
+    when change_in_ownership_or_control_date(corp, changed);
+    when add_calendar_period(changed, 216 calendar_month) <= pay;
+    then semiannual_period_reached_280g(p, corp, item, 36, add_calendar_period(changed, 216 calendar_month));
+}
+@source(IRC_S280G_D, quote = "Present value shall be determined by using a discount rate equal to 120 percent of the applicable Federal rate (determined under section 1274(d)), compounded semiannually.")
+rule SemiannualPeriodReached280gJ37(p: Person, corp: Person, item: Integer, pay: Date, changed: Date) strict {
+    label en official "add_calendar_period(change, 222 calendar_month) <= payment date";
+    when payment_date_280g(p, corp, item, pay);
+    when change_in_ownership_or_control_date(corp, changed);
+    when add_calendar_period(changed, 222 calendar_month) <= pay;
+    then semiannual_period_reached_280g(p, corp, item, 37, add_calendar_period(changed, 222 calendar_month));
+}
+@source(IRC_S280G_D, quote = "Present value shall be determined by using a discount rate equal to 120 percent of the applicable Federal rate (determined under section 1274(d)), compounded semiannually.")
+rule SemiannualPeriodReached280gJ38(p: Person, corp: Person, item: Integer, pay: Date, changed: Date) strict {
+    label en official "add_calendar_period(change, 228 calendar_month) <= payment date";
+    when payment_date_280g(p, corp, item, pay);
+    when change_in_ownership_or_control_date(corp, changed);
+    when add_calendar_period(changed, 228 calendar_month) <= pay;
+    then semiannual_period_reached_280g(p, corp, item, 38, add_calendar_period(changed, 228 calendar_month));
+}
+@source(IRC_S280G_D, quote = "Present value shall be determined by using a discount rate equal to 120 percent of the applicable Federal rate (determined under section 1274(d)), compounded semiannually.")
+rule SemiannualPeriodReached280gJ39(p: Person, corp: Person, item: Integer, pay: Date, changed: Date) strict {
+    label en official "add_calendar_period(change, 234 calendar_month) <= payment date";
+    when payment_date_280g(p, corp, item, pay);
+    when change_in_ownership_or_control_date(corp, changed);
+    when add_calendar_period(changed, 234 calendar_month) <= pay;
+    then semiannual_period_reached_280g(p, corp, item, 39, add_calendar_period(changed, 234 calendar_month));
+}
+@source(IRC_S280G_D, quote = "Present value shall be determined by using a discount rate equal to 120 percent of the applicable Federal rate (determined under section 1274(d)), compounded semiannually.")
+rule SemiannualPeriodReached280gJ40(p: Person, corp: Person, item: Integer, pay: Date, changed: Date) strict {
+    label en official "add_calendar_period(change, 240 calendar_month) <= payment date";
+    when payment_date_280g(p, corp, item, pay);
+    when change_in_ownership_or_control_date(corp, changed);
+    when add_calendar_period(changed, 240 calendar_month) <= pay;
+    then semiannual_period_reached_280g(p, corp, item, 40, add_calendar_period(changed, 240 calendar_month));
+}
+pub relation present_value_computed_280g(p: Person, corp: Person, item: Integer, amount: Money) kind institutional {
+    label en official "the present value of the contingent payment at the change date at 120 percent of the applicable Federal rate compounded semiannually, whole six-month periods compounded, the part-period simple; cents HALF_UP";
+}
+@source(IRC_S280G_D, quote = "Present value shall be determined by using a discount rate equal to 120 percent of the applicable Federal rate (determined under section 1274(d)), compounded semiannually.")
+rule PresentValueComputed280g(p: Person, corp: Person, item: Integer, amount: Money, pay: Date, changed: Date, afr: Decimal) strict {
+    label en official "amount / ((1 + s)^k x (1 + s x stub/182.5)), s = 1.2 x AFR / 2";
+    when payment_contingent_on_change_in_control(p, corp, item, amount);
+    when payment_date_280g(p, corp, item, pay);
+    when change_in_ownership_or_control_date(corp, changed);
+    when applicable_federal_rate_for_change_280g(corp, afr);
+    when pay >= changed;
+    then present_value_computed_280g(p, corp, item, div_round(amount,
+        (let s: Decimal = div_round(1.2 * afr, 2.0, 12, "HALF_UP") in
+         let k: Integer = count(collect all j: Integer, b: Date where semiannual_period_reached_280g(p, corp, item, j, b)) in
+         let f1: Decimal = 1.0 + s in let f2: Decimal = round(f1 * f1, 12, "HALF_UP") in let f4: Decimal = round(f2 * f2, 12, "HALF_UP") in let f8: Decimal = round(f4 * f4, 12, "HALF_UP") in let f16: Decimal = round(f8 * f8, 12, "HALF_UP") in let f32: Decimal = round(f16 * f16, 12, "HALF_UP") in
+         let g1: Decimal = if k mod 2 >= 1 then f1 else 1.0 in
+         let g2: Decimal = round(g1 * (if k mod 4 >= 2 then f2 else 1.0), 12, "HALF_UP") in
+         let g3: Decimal = round(g2 * (if k mod 8 >= 4 then f4 else 1.0), 12, "HALF_UP") in
+         let g4: Decimal = round(g3 * (if k mod 16 >= 8 then f8 else 1.0), 12, "HALF_UP") in
+         let g5: Decimal = round(g4 * (if k mod 32 >= 16 then f16 else 1.0), 12, "HALF_UP") in
+         let g6: Decimal = round(g5 * (if k mod 64 >= 32 then f32 else 1.0), 12, "HALF_UP") in
+         let last: Date = if k == 0 then changed else max(collect all b2: Date, j2: Integer where semiannual_period_reached_280g(p, corp, item, j2, b2)) in
+         round(g6 * (1.0 + s * div_round(days_between(last, pay) * 1.0, 182.5, 12, "HALF_UP")), 12, "HALF_UP")), 2, "HALF_UP"));
+}
+relation has_present_value_computed_280g(p: Person, corp: Person, item: Integer) kind institutional {
+    label en official "bridge for the absence test";
+}
+rule HasPresentValueComputed280g(p: Person, corp: Person, item: Integer, pv: Money) strict {
+    label en official "bridge for the absence test";
+    when present_value_computed_280g(p, corp, item, pv);
+    then has_present_value_computed_280g(p, corp, item);
+}
+pub relation present_value_for_280g(p: Person, corp: Person, item: Integer, amount: Money) kind institutional {
+    label en official "the present value the section 280G tests read: computed where the payment date and the rate are supplied, else asserted";
+}
+rule PresentValueFor280gComputed(p: Person, corp: Person, item: Integer, pv: Money) strict {
+    label en official "the computed present value";
+    when present_value_computed_280g(p, corp, item, pv);
+    then present_value_for_280g(p, corp, item, pv);
+}
+rule PresentValueFor280gAsserted(p: Person, corp: Person, item: Integer, pv: Money) strict {
+    label en official "the asserted present value (the earlier channel)";
+    when present_value_of_payment(p, corp, item, pv);
+    when not_known(has_present_value_computed_280g(p, corp, item));
+    then present_value_for_280g(p, corp, item, pv);
+}

@@ -1,0 +1,829 @@
+// Section 457A(c)(1)(B)(i), (c)(2): the interest on the underpayments that
+// would have occurred (stage 4, DECISION-0379 with deontics). Closes G4803.
+//
+// TECHNIQUE (stated): BOUNDED UNROLLING, the same Horner chain as module 50.
+// The years from the interest start year (the taxable year in which the
+// compensation was first deferred or, if later, the first year not subject to a
+// substantial risk of forfeiture) up to the year in which the compensation is
+// includible under (c)(1)(A) are walked from return due date to return due
+// date. At the start of each period the underpayment "that would have occurred"
+// for the year is added to a running balance; during the period the balance
+// grows by the daily factor (1 + r/365)^days of the section 6621 underpayment
+// rate plus 1 percentage point (the rate of module 41), compounded daily
+// (section 6622; JUDGMENT CALL: 365-day denominator). The interest is the final
+// balance minus the sum of the underpayments. Module 49 supplies the factor.
+// DEPTH: at most 10 periods between the start year and the inclusion year;
+// a longer deferral gets NO interest here (NEITHER), never a wrong number.
+//
+// JUDGMENT CALLS: (1) the underpayment of each year (the tax that inclusion in
+// the start year would have produced, section 1/11 tax function of the tax
+// owner) is a CASE-SUPPLIED amount per year; (2) each underpayment accrues from
+// the return due date (without extensions) of its year to the return due date
+// of the year of inclusion (the statute names no end date); (3) the rate is
+// that of the year in which the period begins; (4) the balance is rounded to
+// cents HALF_UP at the end of each period.
+
+use self::{
+    IRC_S457A_C,
+    Person,
+    TaxableYear,
+    additional_tax_of_twenty_percent_457Ac1Bii,
+    compensation_amount_not_determinable_when_otherwise_includible_457Ac1,
+    compensation_includible_when_determinable_457Ac1A,
+    first_year_without_substantial_risk_of_forfeiture_457A,
+    growth_factor,
+    growth_request,
+    interest_rate_of_underpayment_plus_one_point_457Ac2,
+    plan_of_nonqualified_entity_457A,
+    preceding_taxable_year_465,
+    return_due_date_without_extensions_460b7B,
+};
+
+pub relation first_taxable_year_deferred_457Ac2(plan: Integer, y: TaxableYear) kind empirical {
+    label en official "the taxable year in which the compensation was first deferred (section 457A(c)(2))";
+}
+pub relation hypothetical_underpayment_457Ac2(plan: Integer, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the underpayment of tax for the year that would have occurred had the deferred compensation been includible in the start year (section 457A(c)(2)); the tax function is applied outside this package";
+}
+pub relation interest_start_year_457Ac2(plan: Integer, y: TaxableYear) kind institutional {
+    label en official "the year from which interest runs: the taxable year in which the compensation was first deferred or, if later, the first taxable year in which it is not subject to a substantial risk of forfeiture (section 457A(c)(2))";
+}
+@source(IRC_S457A_C, quote = "for the taxable year in which first deferred or, if later, the first taxable year in which such deferred compensation is not subject to a substantial risk of forfeiture.")
+rule InterestStartYearIsDeferralYearWhenNotEarlier(plan: Integer, yd: TaxableYear, ys: TaxableYear, dd: Date, ds: Date) defeasible {
+    label en official "the year of first deferral is the start year when it is not before the first year without a substantial risk (section 457A(c)(2))";
+    when first_taxable_year_deferred_457Ac2(plan, yd);
+    when first_year_without_substantial_risk_of_forfeiture_457A(plan, ys);
+    when us.irc.core::begins(yd, dd);
+    when us.irc.core::begins(ys, ds);
+    when dd >= ds;
+    then interest_start_year_457Ac2(plan, yd);
+}
+rule InterestStartYearIsFirstYearWithoutRiskWhenLater(plan: Integer, yd: TaxableYear, ys: TaxableYear, dd: Date, ds: Date) defeasible {
+    label en official "the first year without a substantial risk is the start year when it is later (section 457A(c)(2))";
+    when first_taxable_year_deferred_457Ac2(plan, yd);
+    when first_year_without_substantial_risk_of_forfeiture_457A(plan, ys);
+    when us.irc.core::begins(yd, dd);
+    when us.irc.core::begins(ys, ds);
+    when dd < ds;
+    then interest_start_year_457Ac2(plan, ys);
+}
+pub relation inclusion_year_of_undeterminable_compensation_457Ac1A(plan: Integer, y: TaxableYear) kind institutional {
+    label en official "the taxable year in which the not-determinable compensation is includible (bridge for the walk)";
+}
+rule InclusionYearFromDeterminability(plan: Integer, y: TaxableYear, amount: Money) defeasible {
+    label en official "the year of section 457A(c)(1)(A)";
+    when compensation_includible_when_determinable_457Ac1A(plan, y, amount);
+    then inclusion_year_of_undeterminable_compensation_457Ac1A(plan, y);
+}
+relation underpayment_year_request_457Ac2(plan: Integer, y: TaxableYear) kind institutional {
+    label en official "the chain asks for the underpayment of a year (arithmetic helper)";
+}
+pub relation underpayment_of_year_457Ac2(plan: Integer, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the underpayment of the year, zero when none is asserted";
+}
+pub relation underpayment_of_year_asserted_457Ac2(plan: Integer, y: TaxableYear) kind institutional {
+    label en official "an underpayment is asserted for the year";
+}
+rule UnderpaymentAsserted(plan: Integer, y: TaxableYear, amount: Money) defeasible {
+    label en official "an asserted amount exists";
+    when hypothetical_underpayment_457Ac2(plan, y, amount);
+    then underpayment_of_year_asserted_457Ac2(plan, y);
+}
+rule UnderpaymentOfYearFromFact(plan: Integer, y: TaxableYear, amount: Money) defeasible {
+    label en official "the asserted underpayment of the year (section 457A(c)(2))";
+    when underpayment_year_request_457Ac2(plan, y);
+    when hypothetical_underpayment_457Ac2(plan, y, amount);
+    then underpayment_of_year_457Ac2(plan, y, amount);
+}
+rule UnderpaymentOfYearNone(plan: Integer, y: TaxableYear) defeasible {
+    label en official "a year without an asserted underpayment counts zero";
+    when underpayment_year_request_457Ac2(plan, y);
+    when not_known(underpayment_of_year_asserted_457Ac2(plan, y));
+    then underpayment_of_year_457Ac2(plan, y, 0.00 USD);
+}
+rule UnderpaymentRequestFirst(plan: Integer, y0: TaxableYear) defeasible {
+    label en official "ask for the start year's underpayment";
+    when interest_start_year_457Ac2(plan, y0);
+    then underpayment_year_request_457Ac2(plan, y0);
+}
+pub relation interest_on_underpayments_457Ac2(plan: Integer, y: TaxableYear, interest: Money) kind institutional {
+    label en official "the interest determined under paragraph (2) for the taxable year of inclusion y: the underpayments of the years from the start year, compounded daily at the underpayment rate plus 1 percentage point, minus the underpayments themselves; depth: at most 10 periods (stated bound)";
+}
+relation interest_balance_at_inclusion_457Ac2(plan: Integer, y: TaxableYear, balance: Money, principal: Money) kind institutional {
+    label en official "the compounded balance at the return due date of the inclusion year and the sum of the underpayments";
+}
+
+relation interest_level_457A_0(plan: Integer, y: TaxableYear) kind institutional {
+    label en official "level 0: the period after the year number 1 from the start year is reached (calendar walk)";
+}
+relation interest_final_period_457A_0(plan: Integer, y: TaxableYear, y_incl: TaxableYear, step: Decimal, days: Integer) kind institutional {
+    label en official "level 0: the next year is the year of inclusion; the daily step and the days of the last period";
+}
+relation interest_full_period_457A_0(plan: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) kind institutional {
+    label en official "level 0: the next year is not yet the year of inclusion; the daily step and the days of the period";
+}
+relation interest_state_457A_0(plan: Integer, y: TaxableYear, balance: Money, principal: Money) kind institutional {
+    label en official "level 0: the balance at the start of the period after year number 1, with the sum of the underpayments so far";
+}
+relation interest_level_457A_1(plan: Integer, y: TaxableYear) kind institutional {
+    label en official "level 1: the period after the year number 2 from the start year is reached (calendar walk)";
+}
+relation interest_final_period_457A_1(plan: Integer, y: TaxableYear, y_incl: TaxableYear, step: Decimal, days: Integer) kind institutional {
+    label en official "level 1: the next year is the year of inclusion; the daily step and the days of the last period";
+}
+relation interest_full_period_457A_1(plan: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) kind institutional {
+    label en official "level 1: the next year is not yet the year of inclusion; the daily step and the days of the period";
+}
+relation interest_state_457A_1(plan: Integer, y: TaxableYear, balance: Money, principal: Money) kind institutional {
+    label en official "level 1: the balance at the start of the period after year number 2, with the sum of the underpayments so far";
+}
+relation interest_level_457A_2(plan: Integer, y: TaxableYear) kind institutional {
+    label en official "level 2: the period after the year number 3 from the start year is reached (calendar walk)";
+}
+relation interest_final_period_457A_2(plan: Integer, y: TaxableYear, y_incl: TaxableYear, step: Decimal, days: Integer) kind institutional {
+    label en official "level 2: the next year is the year of inclusion; the daily step and the days of the last period";
+}
+relation interest_full_period_457A_2(plan: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) kind institutional {
+    label en official "level 2: the next year is not yet the year of inclusion; the daily step and the days of the period";
+}
+relation interest_state_457A_2(plan: Integer, y: TaxableYear, balance: Money, principal: Money) kind institutional {
+    label en official "level 2: the balance at the start of the period after year number 3, with the sum of the underpayments so far";
+}
+relation interest_level_457A_3(plan: Integer, y: TaxableYear) kind institutional {
+    label en official "level 3: the period after the year number 4 from the start year is reached (calendar walk)";
+}
+relation interest_final_period_457A_3(plan: Integer, y: TaxableYear, y_incl: TaxableYear, step: Decimal, days: Integer) kind institutional {
+    label en official "level 3: the next year is the year of inclusion; the daily step and the days of the last period";
+}
+relation interest_full_period_457A_3(plan: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) kind institutional {
+    label en official "level 3: the next year is not yet the year of inclusion; the daily step and the days of the period";
+}
+relation interest_state_457A_3(plan: Integer, y: TaxableYear, balance: Money, principal: Money) kind institutional {
+    label en official "level 3: the balance at the start of the period after year number 4, with the sum of the underpayments so far";
+}
+relation interest_level_457A_4(plan: Integer, y: TaxableYear) kind institutional {
+    label en official "level 4: the period after the year number 5 from the start year is reached (calendar walk)";
+}
+relation interest_final_period_457A_4(plan: Integer, y: TaxableYear, y_incl: TaxableYear, step: Decimal, days: Integer) kind institutional {
+    label en official "level 4: the next year is the year of inclusion; the daily step and the days of the last period";
+}
+relation interest_full_period_457A_4(plan: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) kind institutional {
+    label en official "level 4: the next year is not yet the year of inclusion; the daily step and the days of the period";
+}
+relation interest_state_457A_4(plan: Integer, y: TaxableYear, balance: Money, principal: Money) kind institutional {
+    label en official "level 4: the balance at the start of the period after year number 5, with the sum of the underpayments so far";
+}
+relation interest_level_457A_5(plan: Integer, y: TaxableYear) kind institutional {
+    label en official "level 5: the period after the year number 6 from the start year is reached (calendar walk)";
+}
+relation interest_final_period_457A_5(plan: Integer, y: TaxableYear, y_incl: TaxableYear, step: Decimal, days: Integer) kind institutional {
+    label en official "level 5: the next year is the year of inclusion; the daily step and the days of the last period";
+}
+relation interest_full_period_457A_5(plan: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) kind institutional {
+    label en official "level 5: the next year is not yet the year of inclusion; the daily step and the days of the period";
+}
+relation interest_state_457A_5(plan: Integer, y: TaxableYear, balance: Money, principal: Money) kind institutional {
+    label en official "level 5: the balance at the start of the period after year number 6, with the sum of the underpayments so far";
+}
+relation interest_level_457A_6(plan: Integer, y: TaxableYear) kind institutional {
+    label en official "level 6: the period after the year number 7 from the start year is reached (calendar walk)";
+}
+relation interest_final_period_457A_6(plan: Integer, y: TaxableYear, y_incl: TaxableYear, step: Decimal, days: Integer) kind institutional {
+    label en official "level 6: the next year is the year of inclusion; the daily step and the days of the last period";
+}
+relation interest_full_period_457A_6(plan: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) kind institutional {
+    label en official "level 6: the next year is not yet the year of inclusion; the daily step and the days of the period";
+}
+relation interest_state_457A_6(plan: Integer, y: TaxableYear, balance: Money, principal: Money) kind institutional {
+    label en official "level 6: the balance at the start of the period after year number 7, with the sum of the underpayments so far";
+}
+relation interest_level_457A_7(plan: Integer, y: TaxableYear) kind institutional {
+    label en official "level 7: the period after the year number 8 from the start year is reached (calendar walk)";
+}
+relation interest_final_period_457A_7(plan: Integer, y: TaxableYear, y_incl: TaxableYear, step: Decimal, days: Integer) kind institutional {
+    label en official "level 7: the next year is the year of inclusion; the daily step and the days of the last period";
+}
+relation interest_full_period_457A_7(plan: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) kind institutional {
+    label en official "level 7: the next year is not yet the year of inclusion; the daily step and the days of the period";
+}
+relation interest_state_457A_7(plan: Integer, y: TaxableYear, balance: Money, principal: Money) kind institutional {
+    label en official "level 7: the balance at the start of the period after year number 8, with the sum of the underpayments so far";
+}
+relation interest_level_457A_8(plan: Integer, y: TaxableYear) kind institutional {
+    label en official "level 8: the period after the year number 9 from the start year is reached (calendar walk)";
+}
+relation interest_final_period_457A_8(plan: Integer, y: TaxableYear, y_incl: TaxableYear, step: Decimal, days: Integer) kind institutional {
+    label en official "level 8: the next year is the year of inclusion; the daily step and the days of the last period";
+}
+relation interest_full_period_457A_8(plan: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) kind institutional {
+    label en official "level 8: the next year is not yet the year of inclusion; the daily step and the days of the period";
+}
+relation interest_state_457A_8(plan: Integer, y: TaxableYear, balance: Money, principal: Money) kind institutional {
+    label en official "level 8: the balance at the start of the period after year number 9, with the sum of the underpayments so far";
+}
+relation interest_level_457A_9(plan: Integer, y: TaxableYear) kind institutional {
+    label en official "level 9: the period after the year number 10 from the start year is reached (calendar walk)";
+}
+relation interest_final_period_457A_9(plan: Integer, y: TaxableYear, y_incl: TaxableYear, step: Decimal, days: Integer) kind institutional {
+    label en official "level 9: the next year is the year of inclusion; the daily step and the days of the last period";
+}
+relation interest_full_period_457A_9(plan: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) kind institutional {
+    label en official "level 9: the next year is not yet the year of inclusion; the daily step and the days of the period";
+}
+relation interest_state_457A_9(plan: Integer, y: TaxableYear, balance: Money, principal: Money) kind institutional {
+    label en official "level 9: the balance at the start of the period after year number 10, with the sum of the underpayments so far";
+}
+rule InterestLevel0(plan: Integer, y0: TaxableYear) defeasible {
+    label en official "the walk starts at the interest start year (section 457A(c)(2))";
+    when interest_start_year_457Ac2(plan, y0);
+    then interest_level_457A_0(plan, y0);
+}
+rule InterestState0(plan: Integer, y0: TaxableYear, d0: Money) defeasible {
+    label en official "the balance starts with the start year's underpayment (section 457A(c)(2))";
+    when interest_start_year_457Ac2(plan, y0);
+    when underpayment_of_year_457Ac2(plan, y0, d0);
+    then interest_state_457A_0(plan, y0, d0, d0);
+}
+rule InterestFinalPeriod0(plan: Integer, p: Person, y: TaxableYear, y_incl: TaxableYear, due: Date, due_incl: Date, r: Decimal) defeasible {
+    label en official "the next year is the year of inclusion: daily interest up to its return due date at the underpayment rate plus 1 point (section 457A(c)(2))";
+    when interest_level_457A_0(plan, y);
+    when plan_of_nonqualified_entity_457A(plan, p);
+    when preceding_taxable_year_465(y, y_incl);
+    when inclusion_year_of_undeterminable_compensation_457Ac1A(plan, y_incl);
+    when return_due_date_without_extensions_460b7B(p, y, due);
+    when return_due_date_without_extensions_460b7B(p, y_incl, due_incl);
+    when interest_rate_of_underpayment_plus_one_point_457Ac2(y, r);
+    then interest_final_period_457A_0(plan, y, y_incl, div_round(r, 365.0, 12, "HALF_UP"), days_between(due, due_incl));
+}
+rule InterestFullPeriod0(plan: Integer, p: Person, y: TaxableYear, y_next: TaxableYear, due: Date, due_next: Date, r: Decimal) defeasible {
+    label en official "the next year is not the year of inclusion: daily interest for the whole period (section 457A(c)(2))";
+    when interest_level_457A_0(plan, y);
+    when plan_of_nonqualified_entity_457A(plan, p);
+    when preceding_taxable_year_465(y, y_next);
+    when not_known(inclusion_year_of_undeterminable_compensation_457Ac1A(plan, y_next));
+    when return_due_date_without_extensions_460b7B(p, y, due);
+    when return_due_date_without_extensions_460b7B(p, y_next, due_next);
+    when interest_rate_of_underpayment_plus_one_point_457Ac2(y, r);
+    then interest_full_period_457A_0(plan, y, y_next, div_round(r, 365.0, 12, "HALF_UP"), days_between(due, due_next));
+}
+rule InterestRequestFinal0(plan: Integer, y: TaxableYear, y_incl: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the daily growth factor of the last period";
+    when interest_final_period_457A_0(plan, y, y_incl, step, days);
+    then growth_request(step, days);
+}
+rule InterestRequestFull0(plan: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the daily growth factor of the full period";
+    when interest_full_period_457A_0(plan, y, y_next, step, days);
+    then growth_request(step, days);
+}
+rule InterestRequestNextUnderpayment0(plan: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the next year's underpayment";
+    when interest_full_period_457A_0(plan, y, y_next, step, days);
+    then underpayment_year_request_457Ac2(plan, y_next);
+}
+rule InterestBalanceAtInclusion0(plan: Integer, y: TaxableYear, y_incl: TaxableYear, bal: Money, prin: Money, step: Decimal, days: Integer, f: Decimal) defeasible {
+    label en official "the final balance: the balance grown over the last period, rounded to cents HALF_UP (JUDGMENT CALL)";
+    when interest_state_457A_0(plan, y, bal, prin);
+    when interest_final_period_457A_0(plan, y, y_incl, step, days);
+    when growth_factor(step, days, f);
+    then interest_balance_at_inclusion_457Ac2(plan, y_incl, round(bal * f, 2, "HALF_UP"), prin);
+}
+rule InterestLevel1(plan: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "the walk moves to the next period";
+    when interest_full_period_457A_0(plan, y, y_next, step, days);
+    then interest_level_457A_1(plan, y_next);
+}
+rule InterestState1From0(plan: Integer, y: TaxableYear, y_next: TaxableYear, bal: Money, prin: Money, step: Decimal, days: Integer, f: Decimal, dn: Money) defeasible {
+    label en official "the balance grown over the full period plus the next year's underpayment starts the next level (section 457A(c)(2))";
+    when interest_state_457A_0(plan, y, bal, prin);
+    when interest_full_period_457A_0(plan, y, y_next, step, days);
+    when growth_factor(step, days, f);
+    when underpayment_of_year_457Ac2(plan, y_next, dn);
+    then interest_state_457A_1(plan, y_next, round(bal * f, 2, "HALF_UP") + dn, prin + dn);
+}
+rule InterestFinalPeriod1(plan: Integer, p: Person, y: TaxableYear, y_incl: TaxableYear, due: Date, due_incl: Date, r: Decimal) defeasible {
+    label en official "the next year is the year of inclusion: daily interest up to its return due date at the underpayment rate plus 1 point (section 457A(c)(2))";
+    when interest_level_457A_1(plan, y);
+    when plan_of_nonqualified_entity_457A(plan, p);
+    when preceding_taxable_year_465(y, y_incl);
+    when inclusion_year_of_undeterminable_compensation_457Ac1A(plan, y_incl);
+    when return_due_date_without_extensions_460b7B(p, y, due);
+    when return_due_date_without_extensions_460b7B(p, y_incl, due_incl);
+    when interest_rate_of_underpayment_plus_one_point_457Ac2(y, r);
+    then interest_final_period_457A_1(plan, y, y_incl, div_round(r, 365.0, 12, "HALF_UP"), days_between(due, due_incl));
+}
+rule InterestFullPeriod1(plan: Integer, p: Person, y: TaxableYear, y_next: TaxableYear, due: Date, due_next: Date, r: Decimal) defeasible {
+    label en official "the next year is not the year of inclusion: daily interest for the whole period (section 457A(c)(2))";
+    when interest_level_457A_1(plan, y);
+    when plan_of_nonqualified_entity_457A(plan, p);
+    when preceding_taxable_year_465(y, y_next);
+    when not_known(inclusion_year_of_undeterminable_compensation_457Ac1A(plan, y_next));
+    when return_due_date_without_extensions_460b7B(p, y, due);
+    when return_due_date_without_extensions_460b7B(p, y_next, due_next);
+    when interest_rate_of_underpayment_plus_one_point_457Ac2(y, r);
+    then interest_full_period_457A_1(plan, y, y_next, div_round(r, 365.0, 12, "HALF_UP"), days_between(due, due_next));
+}
+rule InterestRequestFinal1(plan: Integer, y: TaxableYear, y_incl: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the daily growth factor of the last period";
+    when interest_final_period_457A_1(plan, y, y_incl, step, days);
+    then growth_request(step, days);
+}
+rule InterestRequestFull1(plan: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the daily growth factor of the full period";
+    when interest_full_period_457A_1(plan, y, y_next, step, days);
+    then growth_request(step, days);
+}
+rule InterestRequestNextUnderpayment1(plan: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the next year's underpayment";
+    when interest_full_period_457A_1(plan, y, y_next, step, days);
+    then underpayment_year_request_457Ac2(plan, y_next);
+}
+rule InterestBalanceAtInclusion1(plan: Integer, y: TaxableYear, y_incl: TaxableYear, bal: Money, prin: Money, step: Decimal, days: Integer, f: Decimal) defeasible {
+    label en official "the final balance: the balance grown over the last period, rounded to cents HALF_UP (JUDGMENT CALL)";
+    when interest_state_457A_1(plan, y, bal, prin);
+    when interest_final_period_457A_1(plan, y, y_incl, step, days);
+    when growth_factor(step, days, f);
+    then interest_balance_at_inclusion_457Ac2(plan, y_incl, round(bal * f, 2, "HALF_UP"), prin);
+}
+rule InterestLevel2(plan: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "the walk moves to the next period";
+    when interest_full_period_457A_1(plan, y, y_next, step, days);
+    then interest_level_457A_2(plan, y_next);
+}
+rule InterestState2From1(plan: Integer, y: TaxableYear, y_next: TaxableYear, bal: Money, prin: Money, step: Decimal, days: Integer, f: Decimal, dn: Money) defeasible {
+    label en official "the balance grown over the full period plus the next year's underpayment starts the next level (section 457A(c)(2))";
+    when interest_state_457A_1(plan, y, bal, prin);
+    when interest_full_period_457A_1(plan, y, y_next, step, days);
+    when growth_factor(step, days, f);
+    when underpayment_of_year_457Ac2(plan, y_next, dn);
+    then interest_state_457A_2(plan, y_next, round(bal * f, 2, "HALF_UP") + dn, prin + dn);
+}
+rule InterestFinalPeriod2(plan: Integer, p: Person, y: TaxableYear, y_incl: TaxableYear, due: Date, due_incl: Date, r: Decimal) defeasible {
+    label en official "the next year is the year of inclusion: daily interest up to its return due date at the underpayment rate plus 1 point (section 457A(c)(2))";
+    when interest_level_457A_2(plan, y);
+    when plan_of_nonqualified_entity_457A(plan, p);
+    when preceding_taxable_year_465(y, y_incl);
+    when inclusion_year_of_undeterminable_compensation_457Ac1A(plan, y_incl);
+    when return_due_date_without_extensions_460b7B(p, y, due);
+    when return_due_date_without_extensions_460b7B(p, y_incl, due_incl);
+    when interest_rate_of_underpayment_plus_one_point_457Ac2(y, r);
+    then interest_final_period_457A_2(plan, y, y_incl, div_round(r, 365.0, 12, "HALF_UP"), days_between(due, due_incl));
+}
+rule InterestFullPeriod2(plan: Integer, p: Person, y: TaxableYear, y_next: TaxableYear, due: Date, due_next: Date, r: Decimal) defeasible {
+    label en official "the next year is not the year of inclusion: daily interest for the whole period (section 457A(c)(2))";
+    when interest_level_457A_2(plan, y);
+    when plan_of_nonqualified_entity_457A(plan, p);
+    when preceding_taxable_year_465(y, y_next);
+    when not_known(inclusion_year_of_undeterminable_compensation_457Ac1A(plan, y_next));
+    when return_due_date_without_extensions_460b7B(p, y, due);
+    when return_due_date_without_extensions_460b7B(p, y_next, due_next);
+    when interest_rate_of_underpayment_plus_one_point_457Ac2(y, r);
+    then interest_full_period_457A_2(plan, y, y_next, div_round(r, 365.0, 12, "HALF_UP"), days_between(due, due_next));
+}
+rule InterestRequestFinal2(plan: Integer, y: TaxableYear, y_incl: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the daily growth factor of the last period";
+    when interest_final_period_457A_2(plan, y, y_incl, step, days);
+    then growth_request(step, days);
+}
+rule InterestRequestFull2(plan: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the daily growth factor of the full period";
+    when interest_full_period_457A_2(plan, y, y_next, step, days);
+    then growth_request(step, days);
+}
+rule InterestRequestNextUnderpayment2(plan: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the next year's underpayment";
+    when interest_full_period_457A_2(plan, y, y_next, step, days);
+    then underpayment_year_request_457Ac2(plan, y_next);
+}
+rule InterestBalanceAtInclusion2(plan: Integer, y: TaxableYear, y_incl: TaxableYear, bal: Money, prin: Money, step: Decimal, days: Integer, f: Decimal) defeasible {
+    label en official "the final balance: the balance grown over the last period, rounded to cents HALF_UP (JUDGMENT CALL)";
+    when interest_state_457A_2(plan, y, bal, prin);
+    when interest_final_period_457A_2(plan, y, y_incl, step, days);
+    when growth_factor(step, days, f);
+    then interest_balance_at_inclusion_457Ac2(plan, y_incl, round(bal * f, 2, "HALF_UP"), prin);
+}
+rule InterestLevel3(plan: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "the walk moves to the next period";
+    when interest_full_period_457A_2(plan, y, y_next, step, days);
+    then interest_level_457A_3(plan, y_next);
+}
+rule InterestState3From2(plan: Integer, y: TaxableYear, y_next: TaxableYear, bal: Money, prin: Money, step: Decimal, days: Integer, f: Decimal, dn: Money) defeasible {
+    label en official "the balance grown over the full period plus the next year's underpayment starts the next level (section 457A(c)(2))";
+    when interest_state_457A_2(plan, y, bal, prin);
+    when interest_full_period_457A_2(plan, y, y_next, step, days);
+    when growth_factor(step, days, f);
+    when underpayment_of_year_457Ac2(plan, y_next, dn);
+    then interest_state_457A_3(plan, y_next, round(bal * f, 2, "HALF_UP") + dn, prin + dn);
+}
+rule InterestFinalPeriod3(plan: Integer, p: Person, y: TaxableYear, y_incl: TaxableYear, due: Date, due_incl: Date, r: Decimal) defeasible {
+    label en official "the next year is the year of inclusion: daily interest up to its return due date at the underpayment rate plus 1 point (section 457A(c)(2))";
+    when interest_level_457A_3(plan, y);
+    when plan_of_nonqualified_entity_457A(plan, p);
+    when preceding_taxable_year_465(y, y_incl);
+    when inclusion_year_of_undeterminable_compensation_457Ac1A(plan, y_incl);
+    when return_due_date_without_extensions_460b7B(p, y, due);
+    when return_due_date_without_extensions_460b7B(p, y_incl, due_incl);
+    when interest_rate_of_underpayment_plus_one_point_457Ac2(y, r);
+    then interest_final_period_457A_3(plan, y, y_incl, div_round(r, 365.0, 12, "HALF_UP"), days_between(due, due_incl));
+}
+rule InterestFullPeriod3(plan: Integer, p: Person, y: TaxableYear, y_next: TaxableYear, due: Date, due_next: Date, r: Decimal) defeasible {
+    label en official "the next year is not the year of inclusion: daily interest for the whole period (section 457A(c)(2))";
+    when interest_level_457A_3(plan, y);
+    when plan_of_nonqualified_entity_457A(plan, p);
+    when preceding_taxable_year_465(y, y_next);
+    when not_known(inclusion_year_of_undeterminable_compensation_457Ac1A(plan, y_next));
+    when return_due_date_without_extensions_460b7B(p, y, due);
+    when return_due_date_without_extensions_460b7B(p, y_next, due_next);
+    when interest_rate_of_underpayment_plus_one_point_457Ac2(y, r);
+    then interest_full_period_457A_3(plan, y, y_next, div_round(r, 365.0, 12, "HALF_UP"), days_between(due, due_next));
+}
+rule InterestRequestFinal3(plan: Integer, y: TaxableYear, y_incl: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the daily growth factor of the last period";
+    when interest_final_period_457A_3(plan, y, y_incl, step, days);
+    then growth_request(step, days);
+}
+rule InterestRequestFull3(plan: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the daily growth factor of the full period";
+    when interest_full_period_457A_3(plan, y, y_next, step, days);
+    then growth_request(step, days);
+}
+rule InterestRequestNextUnderpayment3(plan: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the next year's underpayment";
+    when interest_full_period_457A_3(plan, y, y_next, step, days);
+    then underpayment_year_request_457Ac2(plan, y_next);
+}
+rule InterestBalanceAtInclusion3(plan: Integer, y: TaxableYear, y_incl: TaxableYear, bal: Money, prin: Money, step: Decimal, days: Integer, f: Decimal) defeasible {
+    label en official "the final balance: the balance grown over the last period, rounded to cents HALF_UP (JUDGMENT CALL)";
+    when interest_state_457A_3(plan, y, bal, prin);
+    when interest_final_period_457A_3(plan, y, y_incl, step, days);
+    when growth_factor(step, days, f);
+    then interest_balance_at_inclusion_457Ac2(plan, y_incl, round(bal * f, 2, "HALF_UP"), prin);
+}
+rule InterestLevel4(plan: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "the walk moves to the next period";
+    when interest_full_period_457A_3(plan, y, y_next, step, days);
+    then interest_level_457A_4(plan, y_next);
+}
+rule InterestState4From3(plan: Integer, y: TaxableYear, y_next: TaxableYear, bal: Money, prin: Money, step: Decimal, days: Integer, f: Decimal, dn: Money) defeasible {
+    label en official "the balance grown over the full period plus the next year's underpayment starts the next level (section 457A(c)(2))";
+    when interest_state_457A_3(plan, y, bal, prin);
+    when interest_full_period_457A_3(plan, y, y_next, step, days);
+    when growth_factor(step, days, f);
+    when underpayment_of_year_457Ac2(plan, y_next, dn);
+    then interest_state_457A_4(plan, y_next, round(bal * f, 2, "HALF_UP") + dn, prin + dn);
+}
+rule InterestFinalPeriod4(plan: Integer, p: Person, y: TaxableYear, y_incl: TaxableYear, due: Date, due_incl: Date, r: Decimal) defeasible {
+    label en official "the next year is the year of inclusion: daily interest up to its return due date at the underpayment rate plus 1 point (section 457A(c)(2))";
+    when interest_level_457A_4(plan, y);
+    when plan_of_nonqualified_entity_457A(plan, p);
+    when preceding_taxable_year_465(y, y_incl);
+    when inclusion_year_of_undeterminable_compensation_457Ac1A(plan, y_incl);
+    when return_due_date_without_extensions_460b7B(p, y, due);
+    when return_due_date_without_extensions_460b7B(p, y_incl, due_incl);
+    when interest_rate_of_underpayment_plus_one_point_457Ac2(y, r);
+    then interest_final_period_457A_4(plan, y, y_incl, div_round(r, 365.0, 12, "HALF_UP"), days_between(due, due_incl));
+}
+rule InterestFullPeriod4(plan: Integer, p: Person, y: TaxableYear, y_next: TaxableYear, due: Date, due_next: Date, r: Decimal) defeasible {
+    label en official "the next year is not the year of inclusion: daily interest for the whole period (section 457A(c)(2))";
+    when interest_level_457A_4(plan, y);
+    when plan_of_nonqualified_entity_457A(plan, p);
+    when preceding_taxable_year_465(y, y_next);
+    when not_known(inclusion_year_of_undeterminable_compensation_457Ac1A(plan, y_next));
+    when return_due_date_without_extensions_460b7B(p, y, due);
+    when return_due_date_without_extensions_460b7B(p, y_next, due_next);
+    when interest_rate_of_underpayment_plus_one_point_457Ac2(y, r);
+    then interest_full_period_457A_4(plan, y, y_next, div_round(r, 365.0, 12, "HALF_UP"), days_between(due, due_next));
+}
+rule InterestRequestFinal4(plan: Integer, y: TaxableYear, y_incl: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the daily growth factor of the last period";
+    when interest_final_period_457A_4(plan, y, y_incl, step, days);
+    then growth_request(step, days);
+}
+rule InterestRequestFull4(plan: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the daily growth factor of the full period";
+    when interest_full_period_457A_4(plan, y, y_next, step, days);
+    then growth_request(step, days);
+}
+rule InterestRequestNextUnderpayment4(plan: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the next year's underpayment";
+    when interest_full_period_457A_4(plan, y, y_next, step, days);
+    then underpayment_year_request_457Ac2(plan, y_next);
+}
+rule InterestBalanceAtInclusion4(plan: Integer, y: TaxableYear, y_incl: TaxableYear, bal: Money, prin: Money, step: Decimal, days: Integer, f: Decimal) defeasible {
+    label en official "the final balance: the balance grown over the last period, rounded to cents HALF_UP (JUDGMENT CALL)";
+    when interest_state_457A_4(plan, y, bal, prin);
+    when interest_final_period_457A_4(plan, y, y_incl, step, days);
+    when growth_factor(step, days, f);
+    then interest_balance_at_inclusion_457Ac2(plan, y_incl, round(bal * f, 2, "HALF_UP"), prin);
+}
+rule InterestLevel5(plan: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "the walk moves to the next period";
+    when interest_full_period_457A_4(plan, y, y_next, step, days);
+    then interest_level_457A_5(plan, y_next);
+}
+rule InterestState5From4(plan: Integer, y: TaxableYear, y_next: TaxableYear, bal: Money, prin: Money, step: Decimal, days: Integer, f: Decimal, dn: Money) defeasible {
+    label en official "the balance grown over the full period plus the next year's underpayment starts the next level (section 457A(c)(2))";
+    when interest_state_457A_4(plan, y, bal, prin);
+    when interest_full_period_457A_4(plan, y, y_next, step, days);
+    when growth_factor(step, days, f);
+    when underpayment_of_year_457Ac2(plan, y_next, dn);
+    then interest_state_457A_5(plan, y_next, round(bal * f, 2, "HALF_UP") + dn, prin + dn);
+}
+rule InterestFinalPeriod5(plan: Integer, p: Person, y: TaxableYear, y_incl: TaxableYear, due: Date, due_incl: Date, r: Decimal) defeasible {
+    label en official "the next year is the year of inclusion: daily interest up to its return due date at the underpayment rate plus 1 point (section 457A(c)(2))";
+    when interest_level_457A_5(plan, y);
+    when plan_of_nonqualified_entity_457A(plan, p);
+    when preceding_taxable_year_465(y, y_incl);
+    when inclusion_year_of_undeterminable_compensation_457Ac1A(plan, y_incl);
+    when return_due_date_without_extensions_460b7B(p, y, due);
+    when return_due_date_without_extensions_460b7B(p, y_incl, due_incl);
+    when interest_rate_of_underpayment_plus_one_point_457Ac2(y, r);
+    then interest_final_period_457A_5(plan, y, y_incl, div_round(r, 365.0, 12, "HALF_UP"), days_between(due, due_incl));
+}
+rule InterestFullPeriod5(plan: Integer, p: Person, y: TaxableYear, y_next: TaxableYear, due: Date, due_next: Date, r: Decimal) defeasible {
+    label en official "the next year is not the year of inclusion: daily interest for the whole period (section 457A(c)(2))";
+    when interest_level_457A_5(plan, y);
+    when plan_of_nonqualified_entity_457A(plan, p);
+    when preceding_taxable_year_465(y, y_next);
+    when not_known(inclusion_year_of_undeterminable_compensation_457Ac1A(plan, y_next));
+    when return_due_date_without_extensions_460b7B(p, y, due);
+    when return_due_date_without_extensions_460b7B(p, y_next, due_next);
+    when interest_rate_of_underpayment_plus_one_point_457Ac2(y, r);
+    then interest_full_period_457A_5(plan, y, y_next, div_round(r, 365.0, 12, "HALF_UP"), days_between(due, due_next));
+}
+rule InterestRequestFinal5(plan: Integer, y: TaxableYear, y_incl: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the daily growth factor of the last period";
+    when interest_final_period_457A_5(plan, y, y_incl, step, days);
+    then growth_request(step, days);
+}
+rule InterestRequestFull5(plan: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the daily growth factor of the full period";
+    when interest_full_period_457A_5(plan, y, y_next, step, days);
+    then growth_request(step, days);
+}
+rule InterestRequestNextUnderpayment5(plan: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the next year's underpayment";
+    when interest_full_period_457A_5(plan, y, y_next, step, days);
+    then underpayment_year_request_457Ac2(plan, y_next);
+}
+rule InterestBalanceAtInclusion5(plan: Integer, y: TaxableYear, y_incl: TaxableYear, bal: Money, prin: Money, step: Decimal, days: Integer, f: Decimal) defeasible {
+    label en official "the final balance: the balance grown over the last period, rounded to cents HALF_UP (JUDGMENT CALL)";
+    when interest_state_457A_5(plan, y, bal, prin);
+    when interest_final_period_457A_5(plan, y, y_incl, step, days);
+    when growth_factor(step, days, f);
+    then interest_balance_at_inclusion_457Ac2(plan, y_incl, round(bal * f, 2, "HALF_UP"), prin);
+}
+rule InterestLevel6(plan: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "the walk moves to the next period";
+    when interest_full_period_457A_5(plan, y, y_next, step, days);
+    then interest_level_457A_6(plan, y_next);
+}
+rule InterestState6From5(plan: Integer, y: TaxableYear, y_next: TaxableYear, bal: Money, prin: Money, step: Decimal, days: Integer, f: Decimal, dn: Money) defeasible {
+    label en official "the balance grown over the full period plus the next year's underpayment starts the next level (section 457A(c)(2))";
+    when interest_state_457A_5(plan, y, bal, prin);
+    when interest_full_period_457A_5(plan, y, y_next, step, days);
+    when growth_factor(step, days, f);
+    when underpayment_of_year_457Ac2(plan, y_next, dn);
+    then interest_state_457A_6(plan, y_next, round(bal * f, 2, "HALF_UP") + dn, prin + dn);
+}
+rule InterestFinalPeriod6(plan: Integer, p: Person, y: TaxableYear, y_incl: TaxableYear, due: Date, due_incl: Date, r: Decimal) defeasible {
+    label en official "the next year is the year of inclusion: daily interest up to its return due date at the underpayment rate plus 1 point (section 457A(c)(2))";
+    when interest_level_457A_6(plan, y);
+    when plan_of_nonqualified_entity_457A(plan, p);
+    when preceding_taxable_year_465(y, y_incl);
+    when inclusion_year_of_undeterminable_compensation_457Ac1A(plan, y_incl);
+    when return_due_date_without_extensions_460b7B(p, y, due);
+    when return_due_date_without_extensions_460b7B(p, y_incl, due_incl);
+    when interest_rate_of_underpayment_plus_one_point_457Ac2(y, r);
+    then interest_final_period_457A_6(plan, y, y_incl, div_round(r, 365.0, 12, "HALF_UP"), days_between(due, due_incl));
+}
+rule InterestFullPeriod6(plan: Integer, p: Person, y: TaxableYear, y_next: TaxableYear, due: Date, due_next: Date, r: Decimal) defeasible {
+    label en official "the next year is not the year of inclusion: daily interest for the whole period (section 457A(c)(2))";
+    when interest_level_457A_6(plan, y);
+    when plan_of_nonqualified_entity_457A(plan, p);
+    when preceding_taxable_year_465(y, y_next);
+    when not_known(inclusion_year_of_undeterminable_compensation_457Ac1A(plan, y_next));
+    when return_due_date_without_extensions_460b7B(p, y, due);
+    when return_due_date_without_extensions_460b7B(p, y_next, due_next);
+    when interest_rate_of_underpayment_plus_one_point_457Ac2(y, r);
+    then interest_full_period_457A_6(plan, y, y_next, div_round(r, 365.0, 12, "HALF_UP"), days_between(due, due_next));
+}
+rule InterestRequestFinal6(plan: Integer, y: TaxableYear, y_incl: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the daily growth factor of the last period";
+    when interest_final_period_457A_6(plan, y, y_incl, step, days);
+    then growth_request(step, days);
+}
+rule InterestRequestFull6(plan: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the daily growth factor of the full period";
+    when interest_full_period_457A_6(plan, y, y_next, step, days);
+    then growth_request(step, days);
+}
+rule InterestRequestNextUnderpayment6(plan: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the next year's underpayment";
+    when interest_full_period_457A_6(plan, y, y_next, step, days);
+    then underpayment_year_request_457Ac2(plan, y_next);
+}
+rule InterestBalanceAtInclusion6(plan: Integer, y: TaxableYear, y_incl: TaxableYear, bal: Money, prin: Money, step: Decimal, days: Integer, f: Decimal) defeasible {
+    label en official "the final balance: the balance grown over the last period, rounded to cents HALF_UP (JUDGMENT CALL)";
+    when interest_state_457A_6(plan, y, bal, prin);
+    when interest_final_period_457A_6(plan, y, y_incl, step, days);
+    when growth_factor(step, days, f);
+    then interest_balance_at_inclusion_457Ac2(plan, y_incl, round(bal * f, 2, "HALF_UP"), prin);
+}
+rule InterestLevel7(plan: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "the walk moves to the next period";
+    when interest_full_period_457A_6(plan, y, y_next, step, days);
+    then interest_level_457A_7(plan, y_next);
+}
+rule InterestState7From6(plan: Integer, y: TaxableYear, y_next: TaxableYear, bal: Money, prin: Money, step: Decimal, days: Integer, f: Decimal, dn: Money) defeasible {
+    label en official "the balance grown over the full period plus the next year's underpayment starts the next level (section 457A(c)(2))";
+    when interest_state_457A_6(plan, y, bal, prin);
+    when interest_full_period_457A_6(plan, y, y_next, step, days);
+    when growth_factor(step, days, f);
+    when underpayment_of_year_457Ac2(plan, y_next, dn);
+    then interest_state_457A_7(plan, y_next, round(bal * f, 2, "HALF_UP") + dn, prin + dn);
+}
+rule InterestFinalPeriod7(plan: Integer, p: Person, y: TaxableYear, y_incl: TaxableYear, due: Date, due_incl: Date, r: Decimal) defeasible {
+    label en official "the next year is the year of inclusion: daily interest up to its return due date at the underpayment rate plus 1 point (section 457A(c)(2))";
+    when interest_level_457A_7(plan, y);
+    when plan_of_nonqualified_entity_457A(plan, p);
+    when preceding_taxable_year_465(y, y_incl);
+    when inclusion_year_of_undeterminable_compensation_457Ac1A(plan, y_incl);
+    when return_due_date_without_extensions_460b7B(p, y, due);
+    when return_due_date_without_extensions_460b7B(p, y_incl, due_incl);
+    when interest_rate_of_underpayment_plus_one_point_457Ac2(y, r);
+    then interest_final_period_457A_7(plan, y, y_incl, div_round(r, 365.0, 12, "HALF_UP"), days_between(due, due_incl));
+}
+rule InterestFullPeriod7(plan: Integer, p: Person, y: TaxableYear, y_next: TaxableYear, due: Date, due_next: Date, r: Decimal) defeasible {
+    label en official "the next year is not the year of inclusion: daily interest for the whole period (section 457A(c)(2))";
+    when interest_level_457A_7(plan, y);
+    when plan_of_nonqualified_entity_457A(plan, p);
+    when preceding_taxable_year_465(y, y_next);
+    when not_known(inclusion_year_of_undeterminable_compensation_457Ac1A(plan, y_next));
+    when return_due_date_without_extensions_460b7B(p, y, due);
+    when return_due_date_without_extensions_460b7B(p, y_next, due_next);
+    when interest_rate_of_underpayment_plus_one_point_457Ac2(y, r);
+    then interest_full_period_457A_7(plan, y, y_next, div_round(r, 365.0, 12, "HALF_UP"), days_between(due, due_next));
+}
+rule InterestRequestFinal7(plan: Integer, y: TaxableYear, y_incl: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the daily growth factor of the last period";
+    when interest_final_period_457A_7(plan, y, y_incl, step, days);
+    then growth_request(step, days);
+}
+rule InterestRequestFull7(plan: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the daily growth factor of the full period";
+    when interest_full_period_457A_7(plan, y, y_next, step, days);
+    then growth_request(step, days);
+}
+rule InterestRequestNextUnderpayment7(plan: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the next year's underpayment";
+    when interest_full_period_457A_7(plan, y, y_next, step, days);
+    then underpayment_year_request_457Ac2(plan, y_next);
+}
+rule InterestBalanceAtInclusion7(plan: Integer, y: TaxableYear, y_incl: TaxableYear, bal: Money, prin: Money, step: Decimal, days: Integer, f: Decimal) defeasible {
+    label en official "the final balance: the balance grown over the last period, rounded to cents HALF_UP (JUDGMENT CALL)";
+    when interest_state_457A_7(plan, y, bal, prin);
+    when interest_final_period_457A_7(plan, y, y_incl, step, days);
+    when growth_factor(step, days, f);
+    then interest_balance_at_inclusion_457Ac2(plan, y_incl, round(bal * f, 2, "HALF_UP"), prin);
+}
+rule InterestLevel8(plan: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "the walk moves to the next period";
+    when interest_full_period_457A_7(plan, y, y_next, step, days);
+    then interest_level_457A_8(plan, y_next);
+}
+rule InterestState8From7(plan: Integer, y: TaxableYear, y_next: TaxableYear, bal: Money, prin: Money, step: Decimal, days: Integer, f: Decimal, dn: Money) defeasible {
+    label en official "the balance grown over the full period plus the next year's underpayment starts the next level (section 457A(c)(2))";
+    when interest_state_457A_7(plan, y, bal, prin);
+    when interest_full_period_457A_7(plan, y, y_next, step, days);
+    when growth_factor(step, days, f);
+    when underpayment_of_year_457Ac2(plan, y_next, dn);
+    then interest_state_457A_8(plan, y_next, round(bal * f, 2, "HALF_UP") + dn, prin + dn);
+}
+rule InterestFinalPeriod8(plan: Integer, p: Person, y: TaxableYear, y_incl: TaxableYear, due: Date, due_incl: Date, r: Decimal) defeasible {
+    label en official "the next year is the year of inclusion: daily interest up to its return due date at the underpayment rate plus 1 point (section 457A(c)(2))";
+    when interest_level_457A_8(plan, y);
+    when plan_of_nonqualified_entity_457A(plan, p);
+    when preceding_taxable_year_465(y, y_incl);
+    when inclusion_year_of_undeterminable_compensation_457Ac1A(plan, y_incl);
+    when return_due_date_without_extensions_460b7B(p, y, due);
+    when return_due_date_without_extensions_460b7B(p, y_incl, due_incl);
+    when interest_rate_of_underpayment_plus_one_point_457Ac2(y, r);
+    then interest_final_period_457A_8(plan, y, y_incl, div_round(r, 365.0, 12, "HALF_UP"), days_between(due, due_incl));
+}
+rule InterestFullPeriod8(plan: Integer, p: Person, y: TaxableYear, y_next: TaxableYear, due: Date, due_next: Date, r: Decimal) defeasible {
+    label en official "the next year is not the year of inclusion: daily interest for the whole period (section 457A(c)(2))";
+    when interest_level_457A_8(plan, y);
+    when plan_of_nonqualified_entity_457A(plan, p);
+    when preceding_taxable_year_465(y, y_next);
+    when not_known(inclusion_year_of_undeterminable_compensation_457Ac1A(plan, y_next));
+    when return_due_date_without_extensions_460b7B(p, y, due);
+    when return_due_date_without_extensions_460b7B(p, y_next, due_next);
+    when interest_rate_of_underpayment_plus_one_point_457Ac2(y, r);
+    then interest_full_period_457A_8(plan, y, y_next, div_round(r, 365.0, 12, "HALF_UP"), days_between(due, due_next));
+}
+rule InterestRequestFinal8(plan: Integer, y: TaxableYear, y_incl: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the daily growth factor of the last period";
+    when interest_final_period_457A_8(plan, y, y_incl, step, days);
+    then growth_request(step, days);
+}
+rule InterestRequestFull8(plan: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the daily growth factor of the full period";
+    when interest_full_period_457A_8(plan, y, y_next, step, days);
+    then growth_request(step, days);
+}
+rule InterestRequestNextUnderpayment8(plan: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the next year's underpayment";
+    when interest_full_period_457A_8(plan, y, y_next, step, days);
+    then underpayment_year_request_457Ac2(plan, y_next);
+}
+rule InterestBalanceAtInclusion8(plan: Integer, y: TaxableYear, y_incl: TaxableYear, bal: Money, prin: Money, step: Decimal, days: Integer, f: Decimal) defeasible {
+    label en official "the final balance: the balance grown over the last period, rounded to cents HALF_UP (JUDGMENT CALL)";
+    when interest_state_457A_8(plan, y, bal, prin);
+    when interest_final_period_457A_8(plan, y, y_incl, step, days);
+    when growth_factor(step, days, f);
+    then interest_balance_at_inclusion_457Ac2(plan, y_incl, round(bal * f, 2, "HALF_UP"), prin);
+}
+rule InterestLevel9(plan: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "the walk moves to the next period";
+    when interest_full_period_457A_8(plan, y, y_next, step, days);
+    then interest_level_457A_9(plan, y_next);
+}
+rule InterestState9From8(plan: Integer, y: TaxableYear, y_next: TaxableYear, bal: Money, prin: Money, step: Decimal, days: Integer, f: Decimal, dn: Money) defeasible {
+    label en official "the balance grown over the full period plus the next year's underpayment starts the next level (section 457A(c)(2))";
+    when interest_state_457A_8(plan, y, bal, prin);
+    when interest_full_period_457A_8(plan, y, y_next, step, days);
+    when growth_factor(step, days, f);
+    when underpayment_of_year_457Ac2(plan, y_next, dn);
+    then interest_state_457A_9(plan, y_next, round(bal * f, 2, "HALF_UP") + dn, prin + dn);
+}
+rule InterestFinalPeriod9(plan: Integer, p: Person, y: TaxableYear, y_incl: TaxableYear, due: Date, due_incl: Date, r: Decimal) defeasible {
+    label en official "the next year is the year of inclusion: daily interest up to its return due date at the underpayment rate plus 1 point (section 457A(c)(2))";
+    when interest_level_457A_9(plan, y);
+    when plan_of_nonqualified_entity_457A(plan, p);
+    when preceding_taxable_year_465(y, y_incl);
+    when inclusion_year_of_undeterminable_compensation_457Ac1A(plan, y_incl);
+    when return_due_date_without_extensions_460b7B(p, y, due);
+    when return_due_date_without_extensions_460b7B(p, y_incl, due_incl);
+    when interest_rate_of_underpayment_plus_one_point_457Ac2(y, r);
+    then interest_final_period_457A_9(plan, y, y_incl, div_round(r, 365.0, 12, "HALF_UP"), days_between(due, due_incl));
+}
+rule InterestFullPeriod9(plan: Integer, p: Person, y: TaxableYear, y_next: TaxableYear, due: Date, due_next: Date, r: Decimal) defeasible {
+    label en official "the next year is not the year of inclusion: daily interest for the whole period (section 457A(c)(2))";
+    when interest_level_457A_9(plan, y);
+    when plan_of_nonqualified_entity_457A(plan, p);
+    when preceding_taxable_year_465(y, y_next);
+    when not_known(inclusion_year_of_undeterminable_compensation_457Ac1A(plan, y_next));
+    when return_due_date_without_extensions_460b7B(p, y, due);
+    when return_due_date_without_extensions_460b7B(p, y_next, due_next);
+    when interest_rate_of_underpayment_plus_one_point_457Ac2(y, r);
+    then interest_full_period_457A_9(plan, y, y_next, div_round(r, 365.0, 12, "HALF_UP"), days_between(due, due_next));
+}
+rule InterestRequestFinal9(plan: Integer, y: TaxableYear, y_incl: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the daily growth factor of the last period";
+    when interest_final_period_457A_9(plan, y, y_incl, step, days);
+    then growth_request(step, days);
+}
+rule InterestRequestFull9(plan: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the daily growth factor of the full period";
+    when interest_full_period_457A_9(plan, y, y_next, step, days);
+    then growth_request(step, days);
+}
+rule InterestRequestNextUnderpayment9(plan: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the next year's underpayment";
+    when interest_full_period_457A_9(plan, y, y_next, step, days);
+    then underpayment_year_request_457Ac2(plan, y_next);
+}
+rule InterestBalanceAtInclusion9(plan: Integer, y: TaxableYear, y_incl: TaxableYear, bal: Money, prin: Money, step: Decimal, days: Integer, f: Decimal) defeasible {
+    label en official "the final balance: the balance grown over the last period, rounded to cents HALF_UP (JUDGMENT CALL)";
+    when interest_state_457A_9(plan, y, bal, prin);
+    when interest_final_period_457A_9(plan, y, y_incl, step, days);
+    when growth_factor(step, days, f);
+    then interest_balance_at_inclusion_457Ac2(plan, y_incl, round(bal * f, 2, "HALF_UP"), prin);
+}
+@source(IRC_S457A_C, quote = "the interest determined under this paragraph for any taxable year is the amount of interest at the underpayment rate under section 6621 plus 1 percentage point on the underpayments that would have occurred")
+rule InterestOnUnderpaymentsIsBalanceMinusPrincipal(plan: Integer, y: TaxableYear, bal: Money, prin: Money) defeasible {
+    label en official "interest = compounded balance - sum of the underpayments (section 457A(c)(2))";
+    when interest_balance_at_inclusion_457Ac2(plan, y, bal, prin);
+    then interest_on_underpayments_457Ac2(plan, y, bal - prin);
+}
+pub relation interest_added_to_tax_457Ac1Bi(plan: Integer, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the tax of the year of inclusion is increased by the amount of interest determined under paragraph (2) (section 457A(c)(1)(B)(i))";
+}
+@source(IRC_S457A_C, quote = "(i) the amount of interest determined under paragraph (2), and")
+rule TaxIncreasedByInterestOfParagraph2(plan: Integer, y: TaxableYear, interest: Money) defeasible {
+    label en official "the interest of paragraph (2) increases the tax of the year of inclusion (section 457A(c)(1)(B)(i))";
+    when compensation_amount_not_determinable_when_otherwise_includible_457Ac1(plan);
+    when interest_on_underpayments_457Ac2(plan, y, interest);
+    then interest_added_to_tax_457Ac1Bi(plan, y, interest);
+}
+pub relation total_additional_tax_457Ac1B(plan: Integer, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the increase of the tax of the year of inclusion: the interest of (B)(i) plus 20 percent of the compensation of (B)(ii) (section 457A(c)(1)(B))";
+}
+rule TotalAdditionalTaxIsInterestPlusTwentyPercent(plan: Integer, y: TaxableYear, interest: Money, twenty: Money) defeasible {
+    label en official "interest + 20 percent (section 457A(c)(1)(B))";
+    when interest_added_to_tax_457Ac1Bi(plan, y, interest);
+    when additional_tax_of_twenty_percent_457Ac1Bii(plan, y, twenty);
+    then total_additional_tax_457Ac1B(plan, y, interest + twenty);
+}
+

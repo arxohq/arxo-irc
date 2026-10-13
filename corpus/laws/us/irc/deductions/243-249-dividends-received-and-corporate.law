@@ -1,0 +1,674 @@
+// Sections 243-249 — special deductions for corporations: dividends received
+// (§243), foreign dividends (§245, §245A), the §246 disallowances and the §246(b)
+// aggregate limit, debt-financed portfolio stock (§246A), Native Corporation
+// settlement-trust contributions (§247), organizational expenditures (§248) and
+// the bond-repurchase premium denial (§249). §244 is repealed.
+// Stage 2 (IRC-06 continuation). Editions: the pinned 2024 text; §245A applies to
+// distributions after December 31, 2017 (statutory note), modelled as an
+// `effective` window.
+//
+// Modelling conventions of this module (recorded, not hidden):
+//  * percentages are exact decimals; a reduction that is a ratio of two Money
+//    amounts is written `div_round(base * (a / 1.00 USD), b / 1.00 USD, 2, "HALF_UP")`
+//    (one rounding). Where the statute names no rounding, cents HALF_UP is a
+//    JUDGMENT CALL of the corpus convention.
+//  * an aggregate over per-dividend derived amounts is a runtime subset limitation
+//    (§111): the §246(b) tier totals are asserted inputs (TECH_GAPS G2700).
+//  * status relations of other owners (United States shareholder, §1504 affiliated
+//    group, §951 CFC, §901 credit) are asserted case facts of this package until
+//    the owners publish them (EXTERNAL_DEPENDENCY rows).
+
+// --- §243(a): the base percentages -------------------------------------------
+
+use self::{
+    Corporation,
+    IRC_S243_A,
+    IRC_S243_B,
+    IRC_S243_C,
+    IRC_S243_E,
+    IRC_S245A_A,
+    IRC_S245A_D,
+    IRC_S245A_E,
+    IRC_S245_A,
+    IRC_S245_B,
+    IRC_S246A_A,
+    IRC_S246A_C,
+    IRC_S246_A,
+    IRC_S246_B,
+    IRC_S246_C,
+    IRC_S247_B,
+    IRC_S247_C,
+    IRC_S247_E,
+    IRC_S248_A,
+    IRC_S249_A,
+    TaxableYear,
+    deduction_under_245a_or_245b_denied_for_fsc_earnings,
+    distribution_not_qualifying_dividend_243b3bii,
+    dividend_amount_for_deduction,
+    fhlb_dividend_portion_exists,
+    interest_limit_applies_246A,
+    native_corporation_section_247_election_revoked,
+    organizational_election_untimely,
+    related_payments_extent_measured,
+    subsection_245a_not_applicable_by_treaty_election,
+};
+
+pub relation dividend_received_by_corporation(c: Corporation, y: TaxableYear, item: Integer, amount: Money) kind empirical {
+    label en official "an amount received by a corporation as a dividend (the item is the per-dividend index of the return)";
+}
+pub relation dividend_from_domestic_corporation_subject_to_tax(c: Corporation, y: TaxableYear, item: Integer) kind empirical {
+    label en official "the dividend is received from a domestic corporation which is subject to taxation under chapter 1 (section 243(a))";
+}
+pub relation dividend_from_foreign_corporation_out_of_us_taxed_earnings(c: Corporation, y: TaxableYear, item: Integer) kind empirical {
+    label en official "the dividend is from a foreign corporation out of earnings and profits accumulated by a domestic corporation while it was subject to taxation under chapter 1 or corresponding prior law (section 243(e))";
+}
+pub relation dividend_received_by_small_business_investment_company(c: Corporation, y: TaxableYear, item: Integer) kind empirical {
+    label en official "the dividend is received by a small business investment company operating under the Small Business Investment Act of 1958 (section 243(a)(2))";
+}
+pub relation dividend_from_20_percent_owned_corporation(c: Corporation, y: TaxableYear, item: Integer) kind institutional {
+    label en official "the dividend is from a corporation 20 percent or more of the stock of which (by vote and value, disregarding section 1504(a)(4) stock) is owned by the taxpayer (section 243(c)(2))";
+}
+pub relation distribution_not_treated_as_dividend_243d(c: Corporation, y: TaxableYear, item: Integer) kind empirical {
+    label en official "the distribution is an amount allowed as a deduction under section 591 or a dividend from a real estate investment trust qualifying under part II of subchapter M, which is not treated as a dividend for section 243(a) (section 243(d)(1),(3))";
+}
+
+pub relation dividend_eligible_for_243_source(c: Corporation, y: TaxableYear, item: Integer) kind institutional {
+    label en official "the dividend counts as a dividend from a domestic corporation subject to tax for section 243(a), including the section 243(e) foreign-corporation look-through, and is not a section 243(d)(1)/(3) excluded distribution";
+}
+@source(IRC_S243_E, quote = "shall be treated as a dividend from a domestic corporation which is subject to taxation under this chapter")
+rule DividendEligibleDomesticSource(c: Corporation, y: TaxableYear, item: Integer) strict {
+    label en official "a dividend from a taxable domestic corporation is a section 243(a) dividend unless section 243(d)(1) or (3) excludes it (section 243(a),(d))";
+    when dividend_from_domestic_corporation_subject_to_tax(c, y, item);
+    when not_known(distribution_not_treated_as_dividend_243d(c, y, item));
+    then dividend_eligible_for_243_source(c, y, item);
+}
+@source(IRC_S243_E, quote = "shall be treated as a dividend from a domestic corporation which is subject to taxation under this chapter")
+rule DividendEligibleForeignLookThroughSource(c: Corporation, y: TaxableYear, item: Integer) strict {
+    label en official "a dividend of a foreign corporation out of earnings accumulated by a domestic corporation while taxable under chapter 1 is treated as from a domestic corporation (section 243(e))";
+    when dividend_from_foreign_corporation_out_of_us_taxed_earnings(c, y, item);
+    when not_known(distribution_not_treated_as_dividend_243d(c, y, item));
+    then dividend_eligible_for_243_source(c, y, item);
+}
+
+// --- §243(b): qualifying dividends (affiliated group, 100 percent) ------------
+
+pub relation member_of_same_affiliated_group_at_close_of_day_received(c: Corporation, y: TaxableYear, item: Integer) kind empirical {
+    label en official "at the close of the day the dividend is received the recipient is a member of the same affiliated group (section 1504(a) with sections 1504(b)(2) and (c) disregarded) as the distributing corporation (section 243(b)(1)(A),(2)(A))";
+}
+pub relation dividend_out_of_earnings_of_year_of_continuous_affiliation(c: Corporation, y: TaxableYear, item: Integer) kind empirical {
+    label en official "the dividend is distributed out of earnings and profits of a taxable year of the distributor which ends after December 31, 1963 and on each day of which distributor and recipient were members of the affiliated group (section 243(b)(1)(B))";
+}
+pub relation group_inconsistent_foreign_tax_treatment(c: Corporation, y: TaxableYear, item: Integer) kind empirical {
+    label en official "for a taxable year including the day of receipt, one or more group members choose the benefits of section 901 while one or more others claim a deduction for taxes otherwise creditable under section 901 (section 243(b)(2)(B))";
+}
+pub relation affiliated_group_includes_life_insurance_company(c: Corporation, y: TaxableYear, item: Integer) kind empirical {
+    label en official "the affiliated group includes one or more insurance companies taxed under section 801 (section 243(b)(3)(A))";
+}
+pub relation life_insurance_group_election_in_effect(c: Corporation, y: TaxableYear) kind institutional {
+    label en official "the section 243(b)(3) election is in effect for the affiliated group for the taxable year in which the dividend is received";
+}
+pub relation makes_life_insurance_group_election(c: Corporation, y: TaxableYear) kind empirical {
+    label en official "the common parent makes the section 243(b)(3)(C) election";
+}
+@source(IRC_S243_B, quote = "An election under this paragraph shall be made by the common parent of the affiliated group")
+rule LifeInsuranceGroupElectionPower(c: Corporation, y: TaxableYear) strict {
+    label en official "the common parent of an affiliated group including life insurance companies has the power to elect the section 243(b)(3) treatment, binding on all members and revocable only with the Secretary's consent (section 243(b)(3)(C))";
+    when makes_life_insurance_group_election(c, y);
+    then power LifeInsuranceGroupElection243b3 {
+        holder c;
+        over y;
+        exercise makes_life_insurance_group_election(c, y);
+        valid_when makes_life_insurance_group_election(c, y);
+        effect create(life_insurance_group_election_in_effect(c, y));
+        window [@1964-01-01, infinity);
+    };
+}
+
+pub relation qualifying_dividend_243b(c: Corporation, y: TaxableYear, item: Integer) kind institutional {
+    label en official "the dividend is a qualifying dividend of section 243(b)(1): received within the same affiliated group, out of earnings of a year of continuous affiliation, with consistent foreign tax treatment and (for groups including life insurance companies) an election in effect";
+}
+@source(IRC_S243_B, quote = "if at the close of the day on which such dividend is received, such corporation is a member of the same affiliated group as the corporation distributing such dividend, and")
+rule QualifyingDividendOrdinaryGroup(c: Corporation, y: TaxableYear, item: Integer) strict {
+    label en official "a dividend between members of one affiliated group out of earnings of a year of continuous affiliation is a qualifying dividend, unless the group is inconsistent on foreign taxes or (for a life-insurance group) has no election (section 243(b)(1)-(3))";
+    when member_of_same_affiliated_group_at_close_of_day_received(c, y, item);
+    when dividend_out_of_earnings_of_year_of_continuous_affiliation(c, y, item);
+    when not_known(group_inconsistent_foreign_tax_treatment(c, y, item));
+    when not_known(affiliated_group_includes_life_insurance_company(c, y, item));
+    then qualifying_dividend_243b(c, y, item);
+}
+@source(IRC_S243_B, quote = "no dividend by any member of such group shall be treated as a qualifying dividend unless an election under this paragraph is in effect")
+rule QualifyingDividendLifeInsuranceGroupWithElection(c: Corporation, y: TaxableYear, item: Integer) strict {
+    label en official "in a group including life insurance companies a dividend qualifies only where the section 243(b)(3) election is in effect (section 243(b)(3)(A)); the rule reads the exercise fact `makes_life_insurance_group_election` and not the power's effect relation, because a strict rule cannot read a status produced by a §127 power effect (LDC-E4103) — the exercise has no validity condition beyond the common parent's act, so the two coincide";
+    when member_of_same_affiliated_group_at_close_of_day_received(c, y, item);
+    when dividend_out_of_earnings_of_year_of_continuous_affiliation(c, y, item);
+    when not_known(group_inconsistent_foreign_tax_treatment(c, y, item));
+    when affiliated_group_includes_life_insurance_company(c, y, item);
+    when makes_life_insurance_group_election(c, y);
+    when not_known(distribution_not_qualifying_dividend_243b3bii(c, y, item));
+    then qualifying_dividend_243b(c, y, item);
+}
+
+// --- §243(a),(c): the percentage of the deduction ------------------------------
+
+pub relation dividends_received_deduction_percentage_243(c: Corporation, y: TaxableYear, item: Integer, percentage: Decimal) kind institutional {
+    label en official "the percentage of the dividend allowed as a deduction under section 243(a) (50, 65 for a 20-percent owned corporation, or 100)";
+}
+@source(IRC_S243_A, quote = "50 percent, in the case of dividends other than dividends described in paragraph (2) or (3);")
+rule DividendsReceivedPercentageFifty(c: Corporation, y: TaxableYear, item: Integer) strict {
+    label en official "50 percent of an ordinary dividend from a taxable domestic corporation (section 243(a)(1))";
+    when dividend_eligible_for_243_source(c, y, item);
+    when not_known(dividend_received_by_small_business_investment_company(c, y, item));
+    when not_known(qualifying_dividend_243b(c, y, item));
+    when not_known(dividend_from_20_percent_owned_corporation(c, y, item));
+    then dividends_received_deduction_percentage_243(c, y, item, 0.50);
+}
+@source(IRC_S243_C, quote = "subsection (a)(1) shall be applied by substituting \"65 percent\" for \"50 percent\"")
+rule DividendsReceivedPercentageSixtyFive(c: Corporation, y: TaxableYear, item: Integer) strict {
+    label en official "65 percent of a dividend from a 20-percent owned corporation (section 243(c)(1))";
+    when dividend_eligible_for_243_source(c, y, item);
+    when dividend_from_20_percent_owned_corporation(c, y, item);
+    when not_known(dividend_received_by_small_business_investment_company(c, y, item));
+    when not_known(qualifying_dividend_243b(c, y, item));
+    then dividends_received_deduction_percentage_243(c, y, item, 0.65);
+}
+@source(IRC_S243_A, quote = "100 percent, in the case of dividends received by a small business investment company")
+rule DividendsReceivedPercentageHundredSbic(c: Corporation, y: TaxableYear, item: Integer) strict {
+    label en official "100 percent of a dividend received by a small business investment company (section 243(a)(2))";
+    when dividend_eligible_for_243_source(c, y, item);
+    when dividend_received_by_small_business_investment_company(c, y, item);
+    then dividends_received_deduction_percentage_243(c, y, item, 1.00);
+}
+@source(IRC_S243_A, quote = "100 percent, in the case of qualifying dividends (as defined in subsection (b)(1)).")
+rule DividendsReceivedPercentageHundredQualifying(c: Corporation, y: TaxableYear, item: Integer) strict {
+    label en official "100 percent of a qualifying dividend (section 243(a)(3))";
+    when dividend_eligible_for_243_source(c, y, item);
+    when qualifying_dividend_243b(c, y, item);
+    when not_known(dividend_received_by_small_business_investment_company(c, y, item));
+    then dividends_received_deduction_percentage_243(c, y, item, 1.00);
+}
+
+// --- §246(a),(c),(d): disallowance --------------------------------------------
+
+pub relation payor_exempt_under_501_or_521_in_current_or_preceding_year(c: Corporation, y: TaxableYear, item: Integer) kind empirical {
+    label en official "the distributing corporation, for its taxable year of distribution or the next preceding one, is exempt from tax under section 501 or 521 (section 246(a)(1))";
+}
+pub relation dividend_claimed_under_245a(c: Corporation, y: TaxableYear, item: Integer) kind empirical {
+    label en official "the deduction is claimed under section 245A (foreign-source portion of a dividend from a specified 10-percent owned foreign corporation)";
+}
+pub relation preference_stock_dividend_for_over_366_days(c: Corporation, y: TaxableYear, item: Integer) kind empirical {
+    label en official "the stock has preference in dividends and the dividends received are attributable to periods aggregating in excess of 366 days (section 246(c)(2))";
+}
+pub relation days_held_in_holding_window_246c(c: Corporation, y: TaxableYear, item: Integer, days: Integer) kind institutional {
+    label en official "the number of days the share was held during the holding window, the day of disposition counted and the day of acquisition not (section 246(c)(3)(A)), after the reduction for periods of diminished risk of loss (section 246(c)(4))";
+}
+pub relation status_not_maintained_throughout_holding_period_246c5(c: Corporation, y: TaxableYear, item: Integer) kind empirical {
+    label en official "the foreign corporation was not a specified 10-percent owned foreign corporation, or the taxpayer not a United States shareholder, at all times during the holding period (section 246(c)(5)(B))";
+}
+pub relation obligated_to_make_related_payments_246c1b(c: Corporation, y: TaxableYear, item: Integer) kind empirical {
+    label en official "to the extent the taxpayer is under an obligation (short sale or otherwise) to make related payments with respect to positions in substantially similar or related property (section 246(c)(1)(B))";
+}
+
+pub relation holding_period_threshold_days_246c(c: Corporation, y: TaxableYear, item: Integer, days: Integer) kind institutional {
+    label en official "the holding period threshold in days that section 246(c) sets for the dividend: 45, 90 for preference stock over 366 days, 365 for section 245A";
+}
+@source(IRC_S246_C, quote = "which is held by the taxpayer for 45 days or less during the 91-day period beginning on the date which is 45 days before")
+rule HoldingThresholdOrdinary(c: Corporation, y: TaxableYear, item: Integer) strict {
+    label en official "the ordinary holding threshold is 45 days (section 246(c)(1)(A))";
+    when dividend_received_by_corporation(c, y, item, _);
+    when not_known(preference_stock_dividend_for_over_366_days(c, y, item));
+    when not_known(dividend_claimed_under_245a(c, y, item));
+    then holding_period_threshold_days_246c(c, y, item, 45);
+}
+@source(IRC_S246_C, quote = "paragraph (1)(A) shall be applied—")
+rule HoldingThresholdPreference(c: Corporation, y: TaxableYear, item: Integer) strict {
+    label en official "for preference stock with dividends attributable to more than 366 days the threshold is 90 days in a 181-day period (section 246(c)(2))";
+    when dividend_received_by_corporation(c, y, item, _);
+    when preference_stock_dividend_for_over_366_days(c, y, item);
+    when not_known(dividend_claimed_under_245a(c, y, item));
+    then holding_period_threshold_days_246c(c, y, item, 90);
+}
+@source(IRC_S246_C, quote = "by substituting \"365 days\" for \"45 days\" each place it appears")
+rule HoldingThresholdSection245A(c: Corporation, y: TaxableYear, item: Integer) strict {
+    label en official "for section 245A the threshold is 365 days in a 731-day period and the preference-stock rule does not apply (section 246(c)(5)(A))";
+    when dividend_received_by_corporation(c, y, item, _);
+    when dividend_claimed_under_245a(c, y, item);
+    then holding_period_threshold_days_246c(c, y, item, 365);
+}
+
+pub relation dividends_received_deduction_disallowed_246(c: Corporation, y: TaxableYear, item: Integer) kind institutional {
+    label en official "no deduction under section 243, 245 or 245A is allowed for the dividend by reason of section 246(a) or (c)";
+}
+@source(IRC_S246_A, quote = "shall not apply to any dividend from a corporation which, for the taxable year of the corporation in which the distribution is made, or for the next preceding taxable year of the corporation, is a corporation exempt from tax under section 501")
+rule DisallowedDistributorExempt(c: Corporation, y: TaxableYear, item: Integer) strict {
+    label en official "no dividends-received deduction for a dividend from a corporation exempt under section 501 or 521 (section 246(a)(1))";
+    when payor_exempt_under_501_or_521_in_current_or_preceding_year(c, y, item);
+    when not_known(fhlb_dividend_portion_exists(c, y, item));
+    then dividends_received_deduction_disallowed_246(c, y, item);
+}
+@source(IRC_S246_C, quote = "No deduction shall be allowed under section 243")
+rule DisallowedHoldingPeriodNotMet(c: Corporation, y: TaxableYear, item: Integer, held: Integer, threshold: Integer) strict {
+    label en official "no deduction where the share was held for the threshold number of days or less within the holding window (section 246(c)(1)(A),(2),(5)(A))";
+    when days_held_in_holding_window_246c(c, y, item, held);
+    when holding_period_threshold_days_246c(c, y, item, threshold);
+    when held <= threshold;
+    then dividends_received_deduction_disallowed_246(c, y, item);
+}
+@source(IRC_S246_C, quote = "the taxpayer shall be treated as holding the stock referred to in paragraph (1) for any period only if—")
+rule DisallowedStatusNotMaintained(c: Corporation, y: TaxableYear, item: Integer) strict {
+    label en official "for section 245A the stock counts as held only for periods in which the foreign corporation remained a specified 10-percent owned foreign corporation and the taxpayer a United States shareholder (section 246(c)(5)(B))";
+    when dividend_claimed_under_245a(c, y, item);
+    when status_not_maintained_throughout_holding_period_246c5(c, y, item);
+    then dividends_received_deduction_disallowed_246(c, y, item);
+}
+@source(IRC_S246_C, quote = "to the extent that the taxpayer is under an obligation (whether pursuant to a short sale or otherwise) to make related payments")
+rule DisallowedRelatedPaymentsObligation(c: Corporation, y: TaxableYear, item: Integer) strict {
+    label en official "no deduction for a dividend to the extent of a related-payments obligation (section 246(c)(1)(B)); the whole item is denied here because the extent is not measured (TECH_GAPS G2701)";
+    when obligated_to_make_related_payments_246c1b(c, y, item);
+    when not_known(related_payments_extent_measured(c, y, item));
+    then dividends_received_deduction_disallowed_246(c, y, item);
+}
+
+// --- §243(a)(1): the per-dividend deduction -----------------------------------
+
+pub relation dividends_received_deduction_243_item(c: Corporation, y: TaxableYear, item: Integer, amount: Money) kind institutional {
+    label en official "the section 243(a) deduction for one dividend before the section 246(b) aggregate limitation and after section 246A";
+}
+@source(IRC_S243_A, quote = "there shall be allowed as a deduction an amount equal to the following percentages of the amount received as dividends from a domestic corporation")
+rule DividendsReceivedDeductionItem(c: Corporation, y: TaxableYear, item: Integer, amount: Money, pct: Decimal) strict {
+    label en official "the deduction is the section 243 percentage of the dividend, unless section 246 disallows it or section 246A reduces it for debt-financed portfolio stock (section 243(a))";
+    when dividend_amount_for_deduction(c, y, item, amount);
+    when dividends_received_deduction_percentage_243(c, y, item, pct);
+    when not_known(dividends_received_deduction_disallowed_246(c, y, item));
+    when not_known(debt_financed_portfolio_stock(c, y, item));
+    then dividends_received_deduction_243_item(c, y, item, round(amount * pct, 2, "HALF_UP"));
+}
+
+// --- §246A: debt-financed portfolio stock --------------------------------------
+
+pub relation stock_is_portfolio_stock(c: Corporation, y: TaxableYear, item: Integer) kind institutional {
+    label en official "the stock is portfolio stock: the taxpayer does not own at least 50 percent of vote and value (or 20 percent with at most 5 corporate shareholders holding 50 percent) as of the beginning of the ex-dividend date (section 246A(c)(2)-(4))";
+}
+pub relation portfolio_indebtedness_at_some_time_in_base_period(c: Corporation, y: TaxableYear, item: Integer) kind institutional {
+    label en official "at some time during the base period there is indebtedness directly attributable to investment in the portfolio stock, including short-sale proceeds (section 246A(c)(1),(d)(3))";
+}
+pub relation average_portfolio_indebtedness(c: Corporation, y: TaxableYear, item: Integer, amount: Money) kind empirical {
+    label en official "the average amount of portfolio indebtedness with respect to the stock during the base period, determined under regulations (section 246A(d)(1)(A))";
+}
+pub relation average_adjusted_basis_of_portfolio_stock(c: Corporation, y: TaxableYear, item: Integer, amount: Money) kind empirical {
+    label en official "the average adjusted basis of the stock during the base period, determined under regulations (section 246A(d)(1)(B))";
+}
+pub relation debt_financed_portfolio_stock(c: Corporation, y: TaxableYear, item: Integer) kind institutional {
+    label en official "the dividend is on debt financed portfolio stock, and is not a qualifying dividend or a small business investment company dividend (section 246A(b),(c)(1))";
+}
+@source(IRC_S246A_C, quote = "The term \"debt financed portfolio stock\" means any portfolio stock if at some time during the base period there is portfolio indebtedness with respect to such stock.")
+rule DebtFinancedPortfolioStockRule(c: Corporation, y: TaxableYear, item: Integer) strict {
+    label en official "portfolio stock with portfolio indebtedness at some time in the base period is debt financed portfolio stock, unless the dividend is one of the 100-percent dividends excluded by section 246A(b)";
+    when stock_is_portfolio_stock(c, y, item);
+    when portfolio_indebtedness_at_some_time_in_base_period(c, y, item);
+    when not_known(qualifying_dividend_243b(c, y, item));
+    when not_known(dividend_received_by_small_business_investment_company(c, y, item));
+    then debt_financed_portfolio_stock(c, y, item);
+}
+@source(IRC_S246A_A, quote = "there shall be substituted for the percentage which (but for this subsection) would be used in determining the amount of the deduction allowable under section 243 or 245(a) a percentage equal to the product of—")
+rule DividendsReceivedDeductionDebtFinanced(c: Corporation, y: TaxableYear, item: Integer, amount: Money, pct: Decimal, debt: Money, basis: Money) strict {
+    label en official "the percentage is the base percentage multiplied by 100 percent minus the average indebtedness percentage (average portfolio indebtedness over average adjusted basis) (section 246A(a),(d)(1)); the deduction is computed with one rounding";
+    when dividend_amount_for_deduction(c, y, item, amount);
+    when dividends_received_deduction_percentage_243(c, y, item, pct);
+    when debt_financed_portfolio_stock(c, y, item);
+    when average_portfolio_indebtedness(c, y, item, debt);
+    when average_adjusted_basis_of_portfolio_stock(c, y, item, basis);
+    when basis > 0.00 USD;
+    when not_known(dividends_received_deduction_disallowed_246(c, y, item));
+    when not_known(interest_limit_applies_246A(c, y, item));
+    then dividends_received_deduction_243_item(c, y, item,
+        div_round(amount * pct * (max(0.00 USD, basis - debt) / 1.00 USD), basis / 1.00 USD, 2, "HALF_UP"));
+}
+
+// --- §246(b): aggregate limitation ---------------------------------------------
+
+pub relation taxable_income_for_246b_limitation(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "taxable income computed without regard to sections 172, 199A, 243(a)(1), 245(a),(b) and 250, any section 1059 adjustment and any capital loss carryback under section 1212(a)(1) (section 246(b)(1))";
+}
+pub relation net_operating_loss_year_246b2(c: Corporation, y: TaxableYear) kind empirical {
+    label en official "the taxable year has a net operating loss as determined under section 172 (section 246(b)(2))";
+}
+pub relation tentative_deductions_from_20_percent_owned_corporations(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the sum of the section 243(a)(1), 245(a) and 245(b) deductions for dividends from 20-percent owned corporations before the limitation (an asserted total: aggregates over derived amounts are a runtime subset limitation, section 111)";
+}
+pub relation tentative_deductions_from_other_corporations(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the sum of the section 243(a)(1), 245(a) and 245(b) deductions for dividends not from 20-percent owned corporations before the limitation (an asserted total)";
+}
+pub relation dividends_from_20_percent_owned_corporations_total(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the aggregate amount of dividends from 20-percent owned corporations, by which taxable income is reduced for the second tier (section 246(b)(3)(B))";
+}
+pub relation dividends_received_deduction_allowed_20_percent_tier(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the section 243(a)(1), 245(a),(b) deductions for dividends from 20-percent owned corporations after the 65-percent-of-taxable-income limitation";
+}
+pub relation dividends_received_deduction_allowed_other_tier(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the section 243(a)(1), 245(a),(b) deductions for other dividends after the 50-percent limitation on taxable income reduced by dividends from 20-percent owned corporations";
+}
+@source(IRC_S246_B, quote = "the percentage determined under this paragraph shall be 65 percent")
+rule Limit246bTwentyPercentTier(c: Corporation, y: TaxableYear, tentative: Money, ti: Money) strict {
+    label en official "the deductions for dividends from 20-percent owned corporations may not exceed 65 percent of taxable income (section 246(b)(1),(3)(A)), except for a year with a net operating loss (section 246(b)(2))";
+    when tentative_deductions_from_20_percent_owned_corporations(c, y, tentative);
+    when taxable_income_for_246b_limitation(c, y, ti);
+    when not_known(net_operating_loss_year_246b2(c, y));
+    then dividends_received_deduction_allowed_20_percent_tier(c, y, min(tentative, round(max(0.00 USD, ti) * 0.65, 2, "HALF_UP")));
+}
+@source(IRC_S246_B, quote = "Paragraph (1) shall not apply for any taxable year for which there is a net operating loss")
+rule Limit246bTwentyPercentTierNolYear(c: Corporation, y: TaxableYear, tentative: Money) strict {
+    label en official "in a year with a net operating loss the section 246(b)(1) limitation does not apply (section 246(b)(2))";
+    when tentative_deductions_from_20_percent_owned_corporations(c, y, tentative);
+    when net_operating_loss_year_246b2(c, y);
+    then dividends_received_deduction_allowed_20_percent_tier(c, y, tentative);
+}
+@source(IRC_S246_B, quote = "the taxable income shall be reduced by the aggregate amount of dividends from 20-percent owned corporations")
+rule Limit246bOtherTier(c: Corporation, y: TaxableYear, tentative: Money, ti: Money, div20: Money) strict {
+    label en official "the deductions for other dividends may not exceed 50 percent of taxable income reduced by the aggregate dividends from 20-percent owned corporations (section 246(b)(3)(B))";
+    when tentative_deductions_from_other_corporations(c, y, tentative);
+    when taxable_income_for_246b_limitation(c, y, ti);
+    when dividends_from_20_percent_owned_corporations_total(c, y, div20);
+    when not_known(net_operating_loss_year_246b2(c, y));
+    then dividends_received_deduction_allowed_other_tier(c, y, min(tentative, round(max(0.00 USD, ti - div20) * 0.50, 2, "HALF_UP")));
+}
+@source(IRC_S246_B, quote = "Paragraph (1) shall not apply for any taxable year for which there is a net operating loss")
+rule Limit246bOtherTierNolYear(c: Corporation, y: TaxableYear, tentative: Money) strict {
+    label en official "in a year with a net operating loss the limitation does not apply to the second tier either (section 246(b)(2))";
+    when tentative_deductions_from_other_corporations(c, y, tentative);
+    when net_operating_loss_year_246b2(c, y);
+    then dividends_received_deduction_allowed_other_tier(c, y, tentative);
+}
+
+// --- §245: dividends from foreign corporations ----------------------------------
+
+pub relation dividend_from_qualified_10_percent_owned_foreign_corporation(c: Corporation, y: TaxableYear, item: Integer) kind institutional {
+    label en official "the dividend is from a qualified 10-percent owned foreign corporation: a foreign corporation other than a passive foreign investment company of which at least 10 percent of vote and value is owned by the taxpayer (section 245(a)(2))";
+}
+pub relation post_1986_undistributed_us_earnings(c: Corporation, y: TaxableYear, item: Integer, amount: Money) kind institutional {
+    label en official "the post-1986 undistributed U.S. earnings: the part of the foreign corporation's accumulated earnings attributable to effectively connected income or to dividends from 80-percent-owned domestic corporations (section 245(a)(5))";
+}
+pub relation post_1986_undistributed_earnings(c: Corporation, y: TaxableYear, item: Integer, amount: Money) kind institutional {
+    label en official "the post-1986 undistributed earnings of the foreign corporation, computed under sections 964(a) and 986, at the close of its year of distribution and without diminution by that year's dividends (section 245(a)(4))";
+}
+pub relation dividend_treated_as_section_1248_amount(c: Corporation, y: TaxableYear, item: Integer) kind empirical {
+    label en official "the amount is treated as a dividend under section 1248 and is therefore not a dividend for section 245(a) (section 245(a)(11))";
+}
+pub relation dividends_received_deduction_245a_item(c: Corporation, y: TaxableYear, item: Integer, amount: Money) kind institutional {
+    label en official "the section 245(a) deduction for the U.S.-source portion of one dividend from a qualified 10-percent owned foreign corporation, before the section 246(b) limitation";
+}
+@source(IRC_S245_A, quote = "there shall be allowed as a deduction an amount equal to the percent (specified in section 243 for the taxable year) of the U.S.-source portion of such dividends")
+rule DividendsReceivedDeduction245a(c: Corporation, y: TaxableYear, item: Integer, amount: Money, pct: Decimal, us_earn: Money, total_earn: Money) strict {
+    label en official "the section 245(a) deduction is the section 243 percentage (50, or 65 for a 20-percent owned corporation) of the U.S.-source portion, the dividend times post-1986 undistributed U.S. earnings over post-1986 undistributed earnings (section 245(a)(1),(3)); one rounding";
+    when dividend_amount_for_deduction(c, y, item, amount);
+    when dividend_from_qualified_10_percent_owned_foreign_corporation(c, y, item);
+    when section_243_percentage_for_245a(c, y, item, pct);
+    when post_1986_undistributed_us_earnings(c, y, item, us_earn);
+    when post_1986_undistributed_earnings(c, y, item, total_earn);
+    when total_earn > 0.00 USD;
+    when not_known(dividend_treated_as_section_1248_amount(c, y, item));
+    when not_known(dividends_received_deduction_disallowed_246(c, y, item));
+    when not_known(subsection_245a_not_applicable_by_treaty_election(c, y, item));
+    when not_known(deduction_under_245a_or_245b_denied_for_fsc_earnings(c, y, item));
+    then dividends_received_deduction_245a_item(c, y, item,
+        div_round(amount * pct * (us_earn / 1.00 USD), total_earn / 1.00 USD, 2, "HALF_UP"));
+}
+pub relation section_243_percentage_for_245a(c: Corporation, y: TaxableYear, item: Integer, percentage: Decimal) kind institutional {
+    label en official "the percent specified in section 243 for the taxable year that section 245(a)(1) applies to a foreign dividend: 50, or 65 for a dividend from a 20-percent owned corporation";
+}
+@source(IRC_S243_A, quote = "50 percent, in the case of dividends other than dividends described in paragraph (2) or (3);")
+rule Section243PercentageForForeignDividendFifty(c: Corporation, y: TaxableYear, item: Integer) strict {
+    label en official "section 245(a) applies 50 percent to a foreign dividend that is not from a 20-percent owned corporation (sections 243(a)(1), 245(a)(1))";
+    when dividend_from_qualified_10_percent_owned_foreign_corporation(c, y, item);
+    when not_known(dividend_from_20_percent_owned_corporation(c, y, item));
+    then section_243_percentage_for_245a(c, y, item, 0.50);
+}
+@source(IRC_S243_C, quote = "subsection (a)(1) shall be applied by substituting \"65 percent\" for \"50 percent\"")
+rule Section243PercentageForForeignDividendSixtyFive(c: Corporation, y: TaxableYear, item: Integer) strict {
+    label en official "section 245(a) applies 65 percent to a foreign dividend from a 20-percent owned corporation (sections 243(c)(1), 245(a)(1))";
+    when dividend_from_qualified_10_percent_owned_foreign_corporation(c, y, item);
+    when dividend_from_20_percent_owned_corporation(c, y, item);
+    then section_243_percentage_for_245a(c, y, item, 0.65);
+}
+
+pub relation owns_all_stock_of_foreign_corporation_for_year_of_dividend(c: Corporation, y: TaxableYear, item: Integer) kind empirical {
+    label en official "the domestic corporation, for its year of receipt, owns directly or indirectly all outstanding stock of the foreign corporation (section 245(b)(1))";
+}
+pub relation dividend_out_of_year_of_full_ownership_and_all_income_effectively_connected(c: Corporation, y: TaxableYear, item: Integer) kind empirical {
+    label en official "the dividend is paid out of earnings of a year in which all its stock was owned by the domestic recipient and all its gross income from all sources was effectively connected with a U.S. trade or business (section 245(b)(2))";
+}
+pub relation section_1562_election_effective_for_245b(c: Corporation, y: TaxableYear, item: Integer) kind empirical {
+    label en official "an election under section 1562 is effective for the recipient's year of receipt or the foreign corporation's year of the earnings (section 245(b)(3))";
+}
+pub relation dividends_received_deduction_245b_item(c: Corporation, y: TaxableYear, item: Integer, amount: Money) kind institutional {
+    label en official "the section 245(b) 100-percent deduction for dividends from a wholly owned foreign subsidiary, before the section 246(b) limitation";
+}
+@source(IRC_S245_B, quote = "there shall be allowed as a deduction (in lieu of the deduction provided by subsection (a)) an amount equal to 100 percent of such dividends")
+rule DividendsReceivedDeduction245b(c: Corporation, y: TaxableYear, item: Integer, amount: Money) strict {
+    label en official "100 percent of dividends paid out of earnings of a wholly owned foreign corporation whose gross income was all effectively connected, absent a section 1562 election (section 245(b))";
+    when dividend_amount_for_deduction(c, y, item, amount);
+    when owns_all_stock_of_foreign_corporation_for_year_of_dividend(c, y, item);
+    when dividend_out_of_year_of_full_ownership_and_all_income_effectively_connected(c, y, item);
+    when not_known(section_1562_election_effective_for_245b(c, y, item));
+    when not_known(dividends_received_deduction_disallowed_246(c, y, item));
+    when not_known(deduction_under_245a_or_245b_denied_for_fsc_earnings(c, y, item));
+    then dividends_received_deduction_245b_item(c, y, item, amount);
+}
+
+// --- §245A: foreign-source portion of dividends from specified 10-percent owned
+// foreign corporations (distributions after December 31, 2017) ------------------
+
+pub relation domestic_corporation_is_united_states_shareholder_of_payor(c: Corporation, y: TaxableYear, item: Integer) kind empirical {
+    label en official "the recipient is a domestic corporation that is a United States shareholder with respect to the foreign corporation paying the dividend (section 245A(a),(b)(1)); the status is defined in section 951(b) (EXTERNAL_DEPENDENCY on the international owner)";
+}
+pub relation payor_is_passive_foreign_investment_company_not_cfc(c: Corporation, y: TaxableYear, item: Integer) kind empirical {
+    label en official "the payor is a passive foreign investment company (section 1297) with respect to the shareholder and is not a controlled foreign corporation (section 245A(b)(2))";
+}
+pub relation undistributed_foreign_earnings_245a(c: Corporation, y: TaxableYear, item: Integer, amount: Money) kind institutional {
+    label en official "the portion of undistributed earnings attributable to neither effectively connected income nor dividends of section 245(a)(5)(B) (section 245A(c)(3))";
+}
+pub relation total_undistributed_earnings_245a(c: Corporation, y: TaxableYear, item: Integer, amount: Money) kind institutional {
+    label en official "the earnings and profits of the specified 10-percent owned foreign corporation (sections 964(a), 986) at the close of the year of distribution, without diminution by that year's dividends (section 245A(c)(2))";
+}
+pub relation hybrid_dividend_from_controlled_foreign_corporation(c: Corporation, y: TaxableYear, item: Integer) kind empirical {
+    label en official "the dividend is a hybrid dividend: an amount from a controlled foreign corporation for which the corporation received a deduction or other tax benefit for foreign income taxes (section 245A(e)(4))";
+}
+pub relation dividend_treated_as_purging_distribution_1291d2b(c: Corporation, y: TaxableYear, item: Integer) kind empirical {
+    label en official "the amount is treated as a dividend under section 1291(d)(2)(B) (purging distribution) and is not a dividend for section 245A (section 245A(f))";
+}
+pub relation dividends_received_deduction_245a_foreign_source_item(c: Corporation, y: TaxableYear, item: Integer, amount: Money) kind institutional {
+    label en official "the section 245A(a) deduction for the foreign-source portion of one dividend";
+}
+@source(IRC_S245A_A, quote = "there shall be allowed as a deduction an amount equal to the foreign-source portion of such dividend")
+rule DividendsReceivedDeduction245A(c: Corporation, y: TaxableYear, item: Integer, amount: Money, foreign: Money, total: Money) strict {
+    label en official "a domestic corporation that is a United States shareholder deducts the foreign-source portion of a dividend from a specified 10-percent owned foreign corporation: dividend times undistributed foreign earnings over total undistributed earnings, one rounding (section 245A(a),(c)(1))";
+    effective [@2018-01-01, infinity);
+    when dividend_amount_for_deduction(c, y, item, amount);
+    when domestic_corporation_is_united_states_shareholder_of_payor(c, y, item);
+    when undistributed_foreign_earnings_245a(c, y, item, foreign);
+    when total_undistributed_earnings_245a(c, y, item, total);
+    when total > 0.00 USD;
+    when not_known(payor_is_passive_foreign_investment_company_not_cfc(c, y, item));
+    when not_known(hybrid_dividend_from_controlled_foreign_corporation(c, y, item));
+    when not_known(dividend_treated_as_purging_distribution_1291d2b(c, y, item));
+    when not_known(dividends_received_deduction_disallowed_246(c, y, item));
+    then dividends_received_deduction_245a_foreign_source_item(c, y, item,
+        div_round(amount * (foreign / 1.00 USD), total / 1.00 USD, 2, "HALF_UP"));
+}
+pub relation foreign_tax_credit_disallowed_for_245a_dividend(c: Corporation, y: TaxableYear, item: Integer) kind institutional {
+    label en official "no credit under section 901 is allowed for taxes paid or accrued with respect to a dividend for which a deduction is allowed under section 245A, nor for a hybrid dividend (section 245A(d)(1),(e)(3))";
+}
+@source(IRC_S245A_D, quote = "No credit shall be allowed under section 901 for any taxes paid or accrued (or treated as paid or accrued) with respect to any dividend for which a deduction is allowed under this section.")
+rule ForeignTaxCreditDisallowed245A(c: Corporation, y: TaxableYear, item: Integer, deduction: Money) strict {
+    label en official "the foreign tax credit is denied for a dividend for which section 245A allows a deduction (section 245A(d)(1))";
+    effective [@2018-01-01, infinity);
+    when dividends_received_deduction_245a_foreign_source_item(c, y, item, deduction);
+    then foreign_tax_credit_disallowed_for_245a_dividend(c, y, item);
+}
+@source(IRC_S245A_E, quote = "The rules of subsection (d) shall apply to any hybrid dividend")
+rule ForeignTaxCreditDisallowedHybridDividend(c: Corporation, y: TaxableYear, item: Integer) strict {
+    label en official "subsection (d) also applies to a hybrid dividend for which section 245A(a) is switched off (section 245A(e)(3))";
+    effective [@2018-01-01, infinity);
+    when hybrid_dividend_from_controlled_foreign_corporation(c, y, item);
+    then foreign_tax_credit_disallowed_for_245a_dividend(c, y, item);
+}
+pub relation deduction_for_taxes_denied_245a(c: Corporation, y: TaxableYear, item: Integer) kind institutional {
+    label en official "no deduction under chapter 1 is allowed for a tax for which section 245A(d)(1) denies the credit (section 245A(d)(2))";
+}
+@source(IRC_S245A_D, quote = "No deduction shall be allowed under this chapter for any tax for which credit is not allowable under section 901 by reason of paragraph (1)")
+rule DeductionForTaxesDenied245A(c: Corporation, y: TaxableYear, item: Integer) strict {
+    label en official "the tax whose credit section 245A(d)(1) denies is not deductible either (section 245A(d)(2))";
+    effective [@2018-01-01, infinity);
+    when foreign_tax_credit_disallowed_for_245a_dividend(c, y, item);
+    then deduction_for_taxes_denied_245a(c, y, item);
+}
+
+// --- §247: Native Corporation contributions to Settlement Trusts ----------------
+
+pub relation contribution_by_native_corporation_to_settlement_trust(c: Corporation, y: TaxableYear, item: Integer, cash: Boolean, amount: Money) kind empirical {
+    label en official "a contribution by a Native Corporation to a Settlement Trust (section 646(h) definitions); `cash` is true for a cash contribution and `amount` is then its face amount, otherwise the amount is the fair market value of the property (section 247(a),(b))";
+}
+pub relation adjusted_basis_of_contributed_property_247(c: Corporation, y: TaxableYear, item: Integer, amount: Money) kind empirical {
+    label en official "the Native Corporation's adjusted basis in the property contributed (section 247(b)(2)(A))";
+}
+pub relation native_corporation_elects_section_247(c: Corporation, y: TaxableYear) kind empirical {
+    label en official "the Native Corporation makes the annual election on its return for the taxable year (section 247(e)(1))";
+}
+pub relation native_corporation_section_247_election_in_effect(c: Corporation, y: TaxableYear) kind institutional {
+    label en official "the section 247 election is in effect for the taxable year, effective solely for that year";
+}
+pub relation contribution_in_violation_of_alaska_native_claims_settlement_act_39(c: Corporation, y: TaxableYear, item: Integer) kind empirical {
+    label en official "the contribution is made in violation of section 39(a)(2) or (c)(2) of the Alaska Native Claims Settlement Act (section 247(f)(6))";
+}
+@source(IRC_S247_E, quote = "a Native Corporation may elect to have this section apply for such taxable year on the income tax return")
+rule NativeCorporationElectionPower(c: Corporation, y: TaxableYear) strict {
+    label en official "a Native Corporation has the power to elect, year by year, that section 247 applies, revocable by a timely amendment or supplement to the return (section 247(e))";
+    when native_corporation_elects_section_247(c, y);
+    then power NativeCorporationSection247Election {
+        holder c;
+        over y;
+        exercise native_corporation_elects_section_247(c, y);
+        valid_when native_corporation_elects_section_247(c, y);
+        effect create(native_corporation_section_247_election_in_effect(c, y));
+        window [@2017-12-22, infinity);
+    };
+}
+pub relation native_corporation_contribution_deduction_before_limit(c: Corporation, y: TaxableYear, item: Integer, amount: Money) kind institutional {
+    label en official "the section 247(b) amount of one contribution before the taxable income limitation of subsection (c)";
+}
+@source(IRC_S247_B, quote = "in the case of a cash contribution (regardless of the method of payment, including currency, coins, money order, or check), the amount of such contribution, or")
+rule NativeCorporationCashContributionAmount(c: Corporation, y: TaxableYear, item: Integer, amount: Money) defeasible {
+    label en official "a cash contribution is deductible at its amount (section 247(b)(1))";
+    when native_corporation_section_247_election_in_effect(c, y);
+    when not_known(native_corporation_section_247_election_revoked(c, y));
+    when contribution_by_native_corporation_to_settlement_trust(c, y, item, true, amount);
+    when not_known(contribution_in_violation_of_alaska_native_claims_settlement_act_39(c, y, item));
+    then native_corporation_contribution_deduction_before_limit(c, y, item, amount);
+}
+@source(IRC_S247_B, quote = "the lesser of—")
+rule NativeCorporationPropertyContributionAmount(c: Corporation, y: TaxableYear, item: Integer, fmv: Money, basis: Money) defeasible {
+    label en official "a non-cash contribution is deductible at the lesser of the corporation's adjusted basis and the fair market value (section 247(b)(2)); the fair market value is an asserted or adjudicated fact (DECISION-0194)";
+    when native_corporation_section_247_election_in_effect(c, y);
+    when not_known(native_corporation_section_247_election_revoked(c, y));
+    when contribution_by_native_corporation_to_settlement_trust(c, y, item, false, fmv);
+    when adjusted_basis_of_contributed_property_247(c, y, item, basis);
+    when not_known(contribution_in_violation_of_alaska_native_claims_settlement_act_39(c, y, item));
+    then native_corporation_contribution_deduction_before_limit(c, y, item, min(basis, fmv));
+}
+pub relation native_corporation_taxable_income_before_247_deduction(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the taxable income of the Native Corporation determined without regard to the section 247 deduction (section 247(c)(1))";
+}
+pub relation native_corporation_contributions_total_with_carryover(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the aggregate section 247(b) amounts of the year plus contributions carried over from the 15 preceding years (an asserted total; the multi-year carryover ledger is a self-recursive computation, TECH_GAPS G2702)";
+}
+pub relation native_corporation_contribution_deduction_allowed(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the section 247 deduction allowed for the taxable year after the taxable income limitation";
+}
+@source(IRC_S247_C, quote = "the deduction allowed under subsection (a) for any taxable year shall not exceed the taxable income (as determined without regard to such deduction) of the Native Corporation")
+rule NativeCorporationDeductionLimitedToTaxableIncome(c: Corporation, y: TaxableYear, total: Money, ti: Money) defeasible {
+    label en official "the section 247 deduction may not exceed taxable income determined without regard to it; the excess is carried over for 15 years (section 247(c))";
+    when native_corporation_section_247_election_in_effect(c, y);
+    when not_known(native_corporation_section_247_election_revoked(c, y));
+    when native_corporation_contributions_total_with_carryover(c, y, total);
+    when native_corporation_taxable_income_before_247_deduction(c, y, ti);
+    then native_corporation_contribution_deduction_allowed(c, y, min(total, max(0.00 USD, ti)));
+}
+
+// --- §248: organizational expenditures ----------------------------------------
+
+pub relation organizational_expenditures_aggregate(c: Corporation, amount: Money) kind institutional {
+    label en official "the organizational expenditures of the corporation: incident to creation, chargeable to capital account and of a character amortizable over a limited life (section 248(b))";
+}
+pub relation corporation_begins_business_in_year(c: Corporation, y: TaxableYear) kind empirical {
+    label en official "the taxable year in which the corporation begins business (section 248(a)(1))";
+}
+pub relation elects_to_deduct_organizational_expenditures(c: Corporation) kind empirical {
+    label en official "the corporation elects the application of section 248(a) not later than the due date, with extensions, of the return for the year (section 248(c))";
+}
+pub relation organizational_expenditure_election_in_effect(c: Corporation) kind institutional {
+    label en official "the section 248(a) election is in effect; the elected period is adhered to for the year and all subsequent years (section 248(c))";
+}
+pub relation organizational_amortization_months_in_taxable_year(c: Corporation, y: TaxableYear, months: Integer) kind empirical {
+    label en official "the months of the 180-month period beginning with the month the corporation begins business that fall within the taxable year (calendar arithmetic over the start month is a term gap, TECH_GAPS G2703)";
+}
+@source(IRC_S248_A, quote = "If a corporation elects the application of this subsection")
+rule OrganizationalExpenditureElectionPower(c: Corporation) strict {
+    label en official "a corporation has the power to elect to deduct organizational expenditures under section 248(a)";
+    when elects_to_deduct_organizational_expenditures(c);
+    then power OrganizationalExpenditureDeductionElection {
+        holder c;
+        over c;
+        exercise elects_to_deduct_organizational_expenditures(c);
+        valid_when elects_to_deduct_organizational_expenditures(c);
+        effect create(organizational_expenditure_election_in_effect(c));
+        window [@1976-01-01, infinity);
+    };
+}
+pub relation organizational_expenditure_first_year_deduction(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the section 248(a)(1) deduction for the year the corporation begins business: the lesser of the expenditures and $5,000 reduced (not below zero) by the excess of expenditures over $50,000";
+}
+@source(IRC_S248_A, quote = "$5,000, reduced (but not below zero) by the amount by which such organizational expenditures exceed $50,000")
+rule OrganizationalExpenditureFirstYearDeduction(c: Corporation, y: TaxableYear, total: Money) strict {
+    label en official "the first-year deduction is the lesser of the organizational expenditures and $5,000 phased out dollar for dollar above $50,000 (section 248(a)(1))";
+    when organizational_expenditure_election_in_effect(c);
+    when not_known(organizational_election_untimely(c, y));
+    when corporation_begins_business_in_year(c, y);
+    when organizational_expenditures_aggregate(c, total);
+    then organizational_expenditure_first_year_deduction(c, y, min(total, max(0.00 USD, 5000.00 USD - max(0.00 USD, total - 50000.00 USD))));
+}
+pub relation organizational_expenditure_amortization_deduction(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the section 248(a)(2) ratable deduction over the 180-month period for the taxable year";
+}
+@source(IRC_S248_A, quote = "the remainder of such organizational expenditures shall be allowed as a deduction ratably over the 180-month period beginning with the month in which the corporation begins business")
+rule OrganizationalExpenditureRatableAmortization(c: Corporation, y: TaxableYear, total: Money, months: Integer) strict {
+    label en official "the remainder after the first-year amount is deducted ratably: remainder times the months of the year over 180, one rounding (section 248(a)(2)); the first-year amount is the same statutory formula";
+    when organizational_expenditure_election_in_effect(c);
+    when not_known(organizational_election_untimely(c, y));
+    when organizational_expenditures_aggregate(c, total);
+    when organizational_amortization_months_in_taxable_year(c, y, months);
+    then organizational_expenditure_amortization_deduction(c, y,
+        div_round((total - min(total, max(0.00 USD, 5000.00 USD - max(0.00 USD, total - 50000.00 USD)))) * months, 180.0, 2, "HALF_UP"));
+}
+
+// --- §249: limit on deduction for repurchase premium on convertible debt ---------
+
+pub relation convertible_debt_repurchase_price(c: Corporation, y: TaxableYear, item: Integer, amount: Money) kind empirical {
+    label en official "the price paid to repurchase a bond, debenture, note or certificate convertible into stock of the issuer or a corporation in the same parent-subsidiary controlled group (section 249(a))";
+}
+pub relation adjusted_issue_price_249b(c: Corporation, y: TaxableYear, item: Integer, amount: Money) kind empirical {
+    label en official "the issue price (sections 1273(b), 1274) increased by discount deducted before repurchase or decreased by premium included in income before repurchase (section 249(b))";
+}
+pub relation normal_call_premium_on_nonconvertible_debt(c: Corporation, y: TaxableYear, item: Integer, amount: Money) kind empirical {
+    label en official "a normal call premium on bonds or other evidences of indebtedness that are not convertible (section 249(a)) — an evaluative amount taken as an asserted fact";
+}
+pub relation premium_on_convertible_repurchase_nondeductible(c: Corporation, y: TaxableYear, item: Integer, amount: Money) kind institutional {
+    label en official "the part of the repurchase premium for which no deduction is allowed: the repurchase price over the adjusted issue price plus a normal call premium (section 249(a))";
+}
+@source(IRC_S249_A, quote = "No deduction shall be allowed to the issuing corporation for any premium paid or incurred upon the repurchase of a bond, debenture, note, or certificate or other evidence of indebtedness which is convertible into the stock of the issuing corporation")
+rule ConvertibleRepurchasePremiumDenied(c: Corporation, y: TaxableYear, item: Integer, price: Money, aip: Money, call: Money) strict {
+    label en official "no deduction for the repurchase premium to the extent the repurchase price exceeds the adjusted issue price plus a normal call premium (section 249(a)); the second sentence's exception for amounts shown to be attributable to the cost of borrowing is not modelled (TECH_GAPS G2704)";
+    when convertible_debt_repurchase_price(c, y, item, price);
+    when adjusted_issue_price_249b(c, y, item, aip);
+    when normal_call_premium_on_nonconvertible_debt(c, y, item, call);
+    when price > aip + call;
+    then premium_on_convertible_repurchase_nondeductible(c, y, item, price - aip - call);
+}

@@ -1,0 +1,116 @@
+// Section 45B — Credit for portion of employer social security taxes paid with
+// respect to employee cash tips. Stage 2d (IRC-06, DECISION-0379).
+//
+// Scope / judgment calls:
+// * The credit is the "excess employer social security tax": the section 3111
+//   tax on tips deemed paid under section 3121(q), to the extent the tips
+//   exceed the amount by which the employee's non-tip wages for the month fall
+//   short of the federal minimum wage (rate as in effect on 1 January 2007).
+//   Modelled per employee-month. The month's FLSA minimum-wage amount and the
+//   applicable section 3111 rate (which depends on the OASDI wage base) are
+//   case-asserted inputs: the FLSA rate is an external act, section 3111 is
+//   owned by `us.irc.employment` and not read here (TECH-GAPS G1515).
+// * (b)(2): the asserted tip amount is read as already restricted to tips from
+//   customers for food or beverages where tipping is customary.
+// * (c): the deduction disallowance is exposed as an amount, not applied to a
+//   deduction computation (that lives in `us.irc.deductions`; TECH-GAPS G1516).
+// * (d): the election not to apply the section is a power.
+
+use self::{
+    IRC_S45B_A,
+    IRC_S45B_B,
+    IRC_S45B_C,
+    IRC_S45B_D,
+    Individual,
+    Person,
+    TaxableYear,
+};
+
+pub relation employer_of_tipped_employees_45b(employer: Person, y: TaxableYear) kind empirical {
+    label en official "the taxpayer is an employer that paid tax under section 3111 with respect to tips of employees for the taxable year — case-asserted";
+}
+pub relation tips_customary_food_beverage_month_45b(employer: Person, employee: Individual, y: TaxableYear, month: Date, amount: Money) kind empirical {
+    label en official "tips deemed paid by the employer under section 3121(q) for the month, from customers for food or beverage service where tipping is customary (section 45B(b)(2)) — case-asserted";
+}
+pub relation non_tip_wages_month_45b(employer: Person, employee: Individual, y: TaxableYear, month: Date, amount: Money) kind empirical {
+    label en official "wages (excluding tips) the employer paid the employee during the month (section 45B(b)(1)(B)) — case-asserted";
+}
+pub relation minimum_wage_payable_month_45b(employer: Person, employee: Individual, y: TaxableYear, month: Date, amount: Money) kind empirical {
+    label en official "the total amount payable for the month's employment at the section 6(a)(1) Fair Labor Standards Act minimum wage as in effect on 1 January 2007, without regard to section 3(m) of that Act (section 45B(b)(1)(B)) — case-asserted, external dependency";
+}
+pub relation employer_tax_rate_3111_month_45b(employer: Person, employee: Individual, y: TaxableYear, month: Date, rate: Decimal) kind empirical {
+    label en official "the effective rate of employer tax under section 3111 that applied to the tips for the month (reflecting the wage base) — case-asserted, external dependency on section 3111";
+}
+
+pub relation excess_tips_month_45b(employer: Person, employee: Individual, y: TaxableYear, month: Date, amount: Money) kind institutional {
+    label en official "section 45B(b)(1)(B): the tips for the month that exceed the shortfall of the employee's non-tip wages below the minimum-wage amount";
+}
+@source(IRC_S45B_B, quote = "exceed the amount by which the wages (excluding tips) paid by the employer to the employee during such month are less than the total amount which would be payable")
+rule ExcessTipsMonth45bRule(employer: Person, employee: Individual, y: TaxableYear, month: Date, tips: Money, wages: Money, minimum: Money) strict {
+    when tips_customary_food_beverage_month_45b(employer, employee, y, month, tips);
+    when non_tip_wages_month_45b(employer, employee, y, month, wages);
+    when minimum_wage_payable_month_45b(employer, employee, y, month, minimum);
+    then excess_tips_month_45b(employer, employee, y, month, max(0 USD, tips - max(0 USD, minimum - wages)));
+}
+
+pub relation excess_employer_social_security_tax_month_45b(employer: Person, employee: Individual, y: TaxableYear, month: Date, amount: Money) kind institutional {
+    label en official "section 45B(b)(1): the tax paid by the employer under section 3111 on the month's excess tips";
+}
+@source(IRC_S45B_B, quote = "any tax paid by an employer under section 3111 with respect to tips received by an employee during any month")
+rule ExcessEmployerSocialSecurityTaxMonth45bRule(employer: Person, employee: Individual, y: TaxableYear, month: Date, excess: Money, rate: Decimal) strict {
+    when excess_tips_month_45b(employer, employee, y, month, excess);
+    when employer_tax_rate_3111_month_45b(employer, employee, y, month, rate);
+    then excess_employer_social_security_tax_month_45b(employer, employee, y, month, round(rate * excess, 2, "HALF_UP"));
+}
+
+// --- (d): election not to have the section apply --------------------------------
+
+pub relation elects_out_of_section_45b(employer: Person, y: TaxableYear) kind empirical {
+    label en official "the taxpayer's exercise of the section 45B(d) election to have this section not apply for the taxable year";
+}
+pub relation section_45b_does_not_apply(employer: Person, y: TaxableYear) kind institutional {
+    label en official "section 45B(d): this section does not apply to the taxpayer for the taxable year (a valid election-out)";
+}
+@source(IRC_S45B_D, quote = "if such taxpayer elects to have this section not apply for such taxable year")
+rule ElectOutOf45bRule(employer: Person, y: TaxableYear) strict {
+    when employer_of_tipped_employees_45b(employer, y);
+    then power Section45bDElectOut {
+        holder employer;
+        over employer;
+        exercise elects_out_of_section_45b(employer, y);
+        valid_when employer_of_tipped_employees_45b(employer, y);
+        effect create(section_45b_does_not_apply(employer, y));
+        window [@1993-08-10, infinity);
+    };
+}
+
+// --- (a): the credit ------------------------------------------------------------
+
+pub relation employer_social_security_credit_before_election_45b(employer: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 45B(a): the sum of the excess employer social security tax for the taxable year, before the (d) election-out is considered";
+}
+rule EmployerSocialSecurityCreditBeforeElection45bRule(employer: Person, y: TaxableYear) strict {
+    when employer_of_tipped_employees_45b(employer, y);
+    then employer_social_security_credit_before_election_45b(employer, y,
+        sum(collect all a: Money, employee: Individual, month: Date where excess_employer_social_security_tax_month_45b(employer, employee, y, month, a), empty: 0 USD));
+}
+pub relation employer_social_security_credit(employer: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the section 45B employer social security credit for the taxable year (a section 38(b)(11) component)";
+}
+@source(IRC_S45B_A, quote = "the employer social security credit determined under this section for the taxable year is an amount equal to the excess employer social security tax paid or incurred by the taxpayer during the taxable year")
+rule EmployerSocialSecurityCredit45bRule(employer: Person, y: TaxableYear, amount: Money) defeasible {
+    when employer_social_security_credit_before_election_45b(employer, y, amount);
+    when not_known(section_45b_does_not_apply(employer, y));
+    then employer_social_security_credit(employer, y, amount);
+}
+
+// --- (c): no deduction for amounts taken into account ---------------------------
+
+pub relation deduction_disallowed_by_section_45b(employer: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 45B(c): the amount taken into account in determining the credit, for which no deduction is allowed under chapter 1";
+}
+@source(IRC_S45B_C, quote = "No deduction shall be allowed under this chapter for any amount taken into account in determining the credit under this section.")
+rule DeductionDisallowedBySection45bRule(employer: Person, y: TaxableYear, amount: Money) defeasible {
+    when employer_social_security_credit(employer, y, amount);
+    then deduction_disallowed_by_section_45b(employer, y, amount);
+}

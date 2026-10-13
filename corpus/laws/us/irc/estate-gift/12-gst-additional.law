@@ -1,0 +1,276 @@
+// 26 U.S.C. §§2621-2624 (GST taxable amount by transfer type and valuation),
+// §2652(a)(3) (reverse QTIP election), §2653 (taxation of multiple skips),
+// §2654 (special rules). Stage-2b module of `us.irc.estate_gift` (B01/
+// IRC-11). Fills in `gst_taxable_amount` (`pub relation`, DECLARED but never
+// produced in stage-1's 06-gst-tax.law — the coordinator's `pub gst_taxable_
+// amount` request is satisfied by adding its FIRST producing rules here).
+//
+// NOT MODELLED this pass (TECH_GAP/NON_NORMATIVE, TECH-GAPS.md G482):
+// §2621(b)'s recursive tax-inclusive grossup (paying the GST tax out of the
+// trust is itself a further taxable distribution, which would itself bear
+// tax, etc. — the same self-referential-ledger class as G330 in
+// `international`); §2624(b)-(c) (alternate/special-use valuation election
+// coordination with chapter 11); §2652(b)-(d) (trust/trustee/executor
+// definitions); §2653(b) (inclusion-ratio retention and the pour-over-trust
+// special rule); §2654(c) (cross-reference only).
+//
+// JUDGMENT CALLS:
+//  - §2624(a)'s "valued as of the time of the transfer" is the DEFAULT the
+//    case-asserted `gst_property_value_transferred` (06-gst-tax.law) already
+//    represents — no separate rule needed (NON_NORMATIVE by absorption).
+//  - §2653(a)'s generation reassignment reads "the highest generation of any
+//    person who has an interest in the trust" as a case-asserted integer
+//    (`highest_interest_holder_generation`), not derived from a full
+//    enumeration of every interest-holder's own `generation_assignment` —
+//    mirrors this package's established "candidates + no-earlier-candidate"
+//    convention (TECH-GAPS G136) without building the full enumeration.
+
+language "law.core" version "0.2";
+package us.irc.estate_gift version "0.1.1";
+namespace "urn:us:irc:estate_gift:clir";
+
+use self::{
+    Asset,
+    GstTransfer,
+    GstTransferKind,
+    IRC_S2621_A,
+    IRC_S2621_B,
+    IRC_S2622_A,
+    IRC_S2623,
+    IRC_S2624_D,
+    IRC_S2652_A,
+    IRC_S2653_A,
+    IRC_S2654_A,
+    IRC_S2654_B,
+    IRC_S2654_D,
+    Person,
+    Trust,
+    gst_property_value_transferred,
+    gst_tax,
+    gst_taxable_amount,
+    gst_transfer_kind,
+};
+
+// =====================================================================
+// §2624(d): reduction for consideration — applies across all three kinds
+// =====================================================================
+
+pub relation gst_transferee_consideration_provided(t: GstTransfer, amount: Money) kind empirical {
+    label en unofficial "consideration provided by the transferee with respect to the generation-skipping transfer (section 2624(d))";
+}
+relation has_gst_transferee_consideration(t: GstTransfer) kind institutional;
+rule HasGstTransfereeConsiderationRule(t: GstTransfer) defeasible {
+    when gst_transferee_consideration_provided(t, _);
+    then has_gst_transferee_consideration(t);
+}
+
+@source(IRC_S2624_D, relation = formalizes, coverage = exact, quote = "the value of the property transferred shall be reduced by the amount of any consideration provided by the transferee")
+pub relation gst_net_value_transferred(t: GstTransfer, amount: Money) kind institutional {
+    label en official "section 2624(d): the value of the property transferred, net of any consideration provided by the transferee";
+}
+rule GstNetValueTransferredWithConsiderationRule(t: GstTransfer, value: Money, consideration: Money) defeasible {
+    when gst_property_value_transferred(t, value);
+    when gst_transferee_consideration_provided(t, consideration);
+    then gst_net_value_transferred(t, max(0.00 USD, value - consideration));
+}
+rule GstNetValueTransferredNoConsiderationRule(t: GstTransfer, value: Money) defeasible {
+    when gst_property_value_transferred(t, value);
+    when not_known(has_gst_transferee_consideration(t));
+    then gst_net_value_transferred(t, value);
+}
+
+// =====================================================================
+// §2621: taxable amount, taxable distribution
+// =====================================================================
+
+pub relation gst_transferee_expense(t: GstTransfer, amount: Money) kind empirical {
+    label en unofficial "expense incurred by the transferee in connection with the determination, collection, or refund of the GST tax on this distribution (section 2621(a)(2))";
+}
+relation has_gst_transferee_expense(t: GstTransfer) kind institutional;
+rule HasGstTransfereeExpenseRule(t: GstTransfer) defeasible {
+    when gst_transferee_expense(t, _);
+    then has_gst_transferee_expense(t);
+}
+
+@source(IRC_S2621_A, relation = formalizes, coverage = exact, quote = "the taxable amount in the case of any taxable distribution shall be")
+rule GstTaxableAmountDistributionWithExpenseRule(t: GstTransfer, value: Money, exp: Money) defeasible {
+    label en official "section 2621(a): taxable amount = value received by the transferee, less the transferee's own expenses of determining/collecting/refunding the tax";
+    when gst_transfer_kind(t, TaxableDistribution);
+    when gst_net_value_transferred(t, value);
+    when gst_transferee_expense(t, exp);
+    then gst_taxable_amount(t, max(0.00 USD, value - exp));
+}
+rule GstTaxableAmountDistributionNoExpenseRule(t: GstTransfer, value: Money) defeasible {
+    when gst_transfer_kind(t, TaxableDistribution);
+    when gst_net_value_transferred(t, value);
+    when not_known(has_gst_transferee_expense(t));
+    then gst_taxable_amount(t, value);
+}
+
+pub relation gst_tax_paid_out_of_trust(t: GstTransfer, amount: Money) kind empirical {
+    label en unofficial "an amount of the section 2601 tax with respect to this taxable distribution was paid out of the trust (section 2621(b))";
+}
+@source(IRC_S2621_B, relation = formalizes, coverage = exact, quote = "an amount equal to the portion so paid shall be treated as a taxable distribution")
+pub relation gst_tax_paid_out_of_trust_treated_as_distribution_amount(t: GstTransfer, amount: Money) kind institutional {
+    label en official "section 2621(b): the amount of tax paid out of the trust is itself treated as a taxable distribution (the recursive tax-inclusive grossup this would in turn require is NOT computed — module header, TECH-GAPS.md G482)";
+}
+rule GstTaxPaidOutOfTrustTreatedAsDistributionRule(t: GstTransfer, amount: Money) defeasible {
+    when gst_tax_paid_out_of_trust(t, amount);
+    then gst_tax_paid_out_of_trust_treated_as_distribution_amount(t, amount);
+}
+
+// =====================================================================
+// §2622: taxable amount, taxable termination
+// =====================================================================
+
+pub relation gst_termination_expense_deduction(t: GstTransfer, amount: Money) kind empirical {
+    label en unofficial "a deduction similar to section 2053 for amounts attributable to the property with respect to which the taxable termination occurred (section 2622(b))";
+}
+relation has_gst_termination_expense_deduction(t: GstTransfer) kind institutional;
+rule HasGstTerminationExpenseDeductionRule(t: GstTransfer) defeasible {
+    when gst_termination_expense_deduction(t, _);
+    then has_gst_termination_expense_deduction(t);
+}
+
+@source(IRC_S2622_A, relation = formalizes, coverage = exact, quote = "the taxable amount in the case of a taxable termination shall be")
+rule GstTaxableAmountTerminationWithDeductionRule(t: GstTransfer, value: Money, ded: Money) defeasible {
+    label en official "section 2622(a): taxable amount = value of the property subject to the termination, less the (b) expense deduction";
+    when gst_transfer_kind(t, TaxableTermination);
+    when gst_net_value_transferred(t, value);
+    when gst_termination_expense_deduction(t, ded);
+    then gst_taxable_amount(t, max(0.00 USD, value - ded));
+}
+rule GstTaxableAmountTerminationNoDeductionRule(t: GstTransfer, value: Money) defeasible {
+    when gst_transfer_kind(t, TaxableTermination);
+    when gst_net_value_transferred(t, value);
+    when not_known(has_gst_termination_expense_deduction(t));
+    then gst_taxable_amount(t, value);
+}
+
+// =====================================================================
+// §2623: taxable amount, direct skip
+// =====================================================================
+
+@source(IRC_S2623, relation = formalizes, coverage = exact, quote = "the taxable amount in the case of a direct skip shall be the value of the property received by the transferee")
+rule GstTaxableAmountDirectSkipRule(t: GstTransfer, value: Money) defeasible {
+    label en official "section 2623: taxable amount = value of the property received by the transferee";
+    when gst_transfer_kind(t, DirectSkip);
+    when gst_net_value_transferred(t, value);
+    then gst_taxable_amount(t, value);
+}
+
+// =====================================================================
+// §2652(a)(3): reverse QTIP election
+// =====================================================================
+
+pub relation reverse_qtip_election_made(estate_or_donor: Person, item: Asset) kind empirical {
+    label en unofficial "the estate of the decedent or the donor spouse elected under section 2652(a)(3) to treat the QTIP trust property as if the QTIP election had not been made, for chapter 13 purposes";
+}
+pub relation qtip_trust_for_reverse_election(estate_or_donor: Person, item: Asset) kind empirical {
+    label en unofficial "item is a trust with respect to which a section 2056(b)(7) or 2523(f) QTIP deduction was allowed to estate_or_donor (section 2652(a)(3)(A)-(B))";
+}
+pub relation reverse_qtip_treated_as_transferor(estate_or_donor: Person, item: Asset) kind institutional {
+    label en unofficial "the section 2652(a)(3) reverse-QTIP effect: estate_or_donor (not the donee spouse) remains the chapter 13 transferor of item";
+}
+
+@source(IRC_S2652_A, relation = formalizes, coverage = exact, quote = "the estate of the decedent or the donor spouse, as the case may be, may elect to treat all of the property in such trust for purposes of this chapter as if the election to be treated as qualified terminable interest property had not been made")
+rule ReverseQtipElectionPower(estate_or_donor: Person, item: Asset) strict {
+    label en official "section 2652(a)(3): the reverse-QTIP election";
+    when reverse_qtip_election_made(estate_or_donor, item);
+    then power ReverseQtipElection {
+        holder estate_or_donor;
+        over item;
+        exercise reverse_qtip_election_made(estate_or_donor, item);
+        valid_when qtip_trust_for_reverse_election(estate_or_donor, item);
+        effect reverse_qtip_treated_as_transferor(estate_or_donor, item);
+        window [@0001-01-01, infinity);
+    };
+}
+
+// =====================================================================
+// §2653(a): taxation of multiple skips
+// =====================================================================
+
+pub relation gst_transfer_held_in_trust_after(t: GstTransfer, trust: Trust) kind empirical {
+    label en unofficial "immediately after the generation-skipping transfer t, the property is held in trust (section 2653(a)(2))";
+}
+pub relation highest_interest_holder_generation(trust: Trust, generation: Integer) kind empirical {
+    label en unofficial "the highest generation (furthest from the transferor) of any person who has an interest in the trust immediately after the transfer (section 2653(a)'s own reassignment base) — case-asserted, see module header";
+}
+
+@source(IRC_S2653_A, relation = formalizes, coverage = exact, quote = "the trust will be treated as if the transferor of such property were assigned to the first generation above the highest generation of any person who has an interest in such trust immediately after the transfer")
+pub relation multiple_skip_transferor_generation(t: GstTransfer, trust: Trust, generation: Integer) kind institutional {
+    label en official "section 2653(a): for subsequent transfers from the trust, the transferor is treated as assigned one generation above the highest generation of any current interest holder";
+}
+rule MultipleSkipTransferorGenerationRule(t: GstTransfer, trust: Trust, highest: Integer) defeasible {
+    when gst_transfer_held_in_trust_after(t, trust);
+    when highest_interest_holder_generation(trust, highest);
+    then multiple_skip_transferor_generation(t, trust, highest - 1);
+}
+// (a "generation above" a higher-numbered descendant generation is a LOWER
+// generation number in this package's `generation_assignment` convention,
+// section 2651's own generation 0 = transferor's generation; hence `- 1`.)
+
+// =====================================================================
+// §2654(a),(b),(d): special rules
+// =====================================================================
+
+pub relation gst_fair_market_value_at_transfer(t: GstTransfer, item: Asset, value: Money) kind empirical {
+    label en unofficial "the fair market value of item at the time of the generation-skipping transfer (section 2654(a)(1))";
+}
+pub relation gst_adjusted_basis_before_transfer(t: GstTransfer, item: Asset, basis: Money) kind empirical {
+    label en unofficial "the adjusted basis of item immediately before the transfer, after any section 1015 adjustment (section 2654(a)(1))";
+}
+
+@source(IRC_S2654_A, relation = formalizes, coverage = partial, quote = "the basis of such property shall be increased (but not above the fair market value of such property) by an amount equal to that portion of the tax imposed by section 2601 with respect to the transfer which is attributable to the excess of the fair market value of such property over its adjusted basis immediately before the transfer")
+pub relation gst_basis_after_transfer(t: GstTransfer, item: Asset, basis: Money) kind institutional {
+    label en official "section 2654(a)(1): the basis increase for the portion of the GST tax attributable to appreciation (the (a)(2) death-related-termination alternative under section 1014(a), inclusion-ratio-limited, is NOT modelled — module header)";
+}
+rule GstBasisAfterTransferRule(t: GstTransfer, item: Asset, fmv: Money, basis_before: Money, tax: Money, taxable_amount: Money) defeasible {
+    when gst_fair_market_value_at_transfer(t, item, fmv);
+    when gst_adjusted_basis_before_transfer(t, item, basis_before) and fmv > basis_before;
+    when gst_tax(t, tax);
+    when gst_taxable_amount(t, taxable_amount) and taxable_amount > 0.00 USD;
+    // One proportion, one rounding (TECH-GAPS G499, 26.09.2026).
+    then gst_basis_after_transfer(t, item, min(fmv, basis_before + div_round(tax * ((fmv - basis_before) / 1.00 USD), taxable_amount / 1.00 USD, 2, "HALF_UP")));
+}
+
+pub relation trust_portion_attributable_to_transferor(trust: Trust, transferor: Person, portion_id: Integer) kind empirical {
+    label en unofficial "portion_id is the portion of trust attributable to transfers from transferor (section 2654(b)(1))";
+}
+pub relation trust_separate_and_independent_share(trust: Trust, beneficiary: Person, share_id: Integer) kind empirical {
+    label en unofficial "share_id is a substantially separate and independent share of beneficiary in trust (section 2654(b)(2))";
+}
+@source(IRC_S2654_B, relation = formalizes, coverage = exact, quote = "the portions of a trust attributable to transfers from different transferors shall be treated as separate trusts")
+pub relation treated_as_separate_trust(trust: Trust, id: Integer) kind institutional {
+    label en official "section 2654(b): the portion/share is treated as its own separate trust for chapter 13 purposes";
+}
+rule TreatedAsSeparateTrustByTransferorRule(trust: Trust, transferor: Person, portion_id: Integer) defeasible {
+    when trust_portion_attributable_to_transferor(trust, transferor, portion_id);
+    then treated_as_separate_trust(trust, portion_id);
+}
+rule TreatedAsSeparateTrustByShareRule(trust: Trust, beneficiary: Person, share_id: Integer) defeasible {
+    when trust_separate_and_independent_share(trust, beneficiary, share_id);
+    then treated_as_separate_trust(trust, share_id);
+}
+
+pub relation trustee_knew_facts_requiring_gift_tax_return_or_erroneous_ratio(trustee: Person, trust: Trust) kind empirical {
+    label en unofficial "the trustee had knowledge of facts sufficient reasonably to conclude a gift tax return was required or the inclusion ratio was erroneous (section 2654(d), second sentence)";
+}
+pub relation trustee_gst_tax_increase_cause(trustee: Person, trust: Trust, cause: TrusteeLiabilityExcusedCause) kind empirical {
+    label en unofficial "the cause of the increase in GST tax with respect to the trust (section 2654(d)(1)-(2))";
+}
+pub enum TrusteeLiabilityExcusedCause {
+    Section2642cNontaxableGiftInapplicableNoReturnFiled; // (d)(1)
+    InclusionRatioGreaterThanComputedOnReturn;           // (d)(2)
+}
+
+@source(IRC_S2654_D, relation = formalizes, coverage = exact, quote = "A trustee shall not be personally liable for any increase in the tax imposed by section 2601 which is attributable to")
+pub relation trustee_immune_from_gst_tax_increase(trustee: Person, trust: Trust) kind institutional {
+    label en official "section 2654(d): the trustee is not personally liable for the described increase in GST tax, unless the trustee had the disqualifying knowledge";
+}
+rule TrusteeImmuneFromGstTaxIncreaseRule(trustee: Person, trust: Trust, cause: TrusteeLiabilityExcusedCause) defeasible {
+    when trustee_gst_tax_increase_cause(trustee, trust, cause);
+    when not_known(trustee_knew_facts_requiring_gift_tax_return_or_erroneous_ratio(trustee, trust));
+    then trustee_immune_from_gst_tax_increase(trustee, trust);
+}

@@ -1,0 +1,671 @@
+// Collection — stage 4 (26.09.2026, DECISION-0379, implemented_unverified): the rows
+// that stages 2-2c left as TECH_GAP or SOURCE_GAP and could be expressed.
+//
+// Covered here: §6334(g) and §6323(i)(4) (indexed amounts: the pinned Rev. Proc. figures as
+// A3 parameters, the statutory formula with a case-supplied cost-of-living factor),
+// §6324(a)(3), §6324A(b)(2) and (d)(5), §6337(b)(2), §6901(c)(2) and (d)(2), §7122(c)(2)(A),
+// §7122(d)(3)(B)(i) and (C), and §6306(j)(2).
+//
+// METHOD AND JUDGMENT CALLS.
+//  - Indexed amounts. The pinned Rev. Proc. values (2025: Rev. Proc. 2024-40; 2026: Rev. Proc.
+//    2025-32) are A3 parameters (`*.lawparam.json`, one per amount); the year is the year of
+//    the case's `legal_time`. The statutory formula (amount x cost-of-living adjustment, rounded
+//    to the nearest $10) is a calculation over a case-supplied factor: the section 1(f)(3) index
+//    with calendar year 1998 (or 1996) substituted for 2016 is `us.irc.income_individual`'s
+//    machinery and is not imported (EXTERNAL_DEPENDENCY on the factor, recorded in
+//    coverage/collection.deps.json). The unindexed statutory rules of modules 02 and 05 stay:
+//    an indexed limit is never below the base amount, so they remain sound lower bounds.
+//  - §6337(b)(2): the statute names no day count for "20 percent per annum"; interest is simple,
+//    actual days over 365, one rounding to cents (HALF_UP), and the result is a JUDGMENT CALL.
+//  - §6901(c)(2): the second tier reads the first tier's period (`transferee_assessment_period_ends`)
+//    and writes its own relation, so no predicate depends on itself; a third tier is read from
+//    a period the case asserts for the preceding transferee.
+//  - §6901(d)(2): "increased by the period from the date of expiration to the date of the
+//    agreement" is a variable number of days, so the look-back is compared by `days_between`
+//    against the plain 3-year (or 2-year) span plus that increase.
+
+language "law.core" version "0.2";
+package us.irc.collection version "0.1.1";
+namespace "urn:us:irc:collection:clir";
+
+use self::{
+    ClaimantCategory,
+    ExemptPropertyKind,
+    IRC_S6306_J,
+    IRC_S6323_I,
+    IRC_S6324A_B,
+    IRC_S6324A_D,
+    IRC_S6324_A,
+    IRC_S6334_G,
+    IRC_S6337_B,
+    IRC_S6901_C,
+    IRC_S6901_D,
+    IRC_S7122_C,
+    IRC_S7122_D,
+    Lien,
+    Person,
+    Secretary,
+    SuperpriorityCategory,
+    TaxableYear,
+    amount_paid_by_purchaser,
+    books_and_tools_of_trade_value,
+    contractor_fiscal_year_ended_on,
+    household_fuel_furniture_effects_value,
+    offer_relates_only_to_liability_issues,
+    property_exempt_from_levy,
+    redemption_attempted_on,
+    sale_conducted_on,
+    superpriority_protected,
+    transferee_assessment_period_ends,
+    transferor_assessment_period_ends,
+};
+
+// ============================================================================
+// §6334(g) — inflation adjustment of the levy exemptions of (a)(2) and (a)(3)
+// ============================================================================
+
+enum LevyExemptionAmountKind {
+    HouseholdEffects;   // §6334(a)(2)
+    BooksAndTools;      // §6334(a)(3)
+}
+relation levy_exemption_base_amount(kind: LevyExemptionAmountKind, base: Money) kind institutional {
+    label en official "the statutory dollar amount of section 6334(a)(2) or (a)(3) before the section 6334(g) increase";
+}
+rule S6334aBaseHouseholdEffects strict { then levy_exemption_base_amount(HouseholdEffects, 6250.00 USD); }
+rule S6334aBaseBooksAndTools strict { then levy_exemption_base_amount(BooksAndTools, 3125.00 USD); }
+relation levy_exemption_cola_factor(calendarYear: Integer, factor: Decimal) kind empirical {
+    label en official "the cost-of-living adjustment determined under section 1(f)(3) for the calendar year with calendar year 1998 substituted for calendar year 2016 (external: `us.irc.income_individual` machinery, not imported)";
+}
+relation levy_exemption_amount_requested(kind: LevyExemptionAmountKind, calendarYear: Integer) kind empirical {
+    label en unofficial "the indexed amount for the kind and calendar year is asked for";
+}
+pub relation indexed_levy_exemption_amount(kind: LevyExemptionAmountKind, calendarYear: Integer, amount: Money) kind institutional {
+    label en official "the dollar amount of section 6334(a)(2) or (a)(3) for a calendar year after 1999: the amount plus the amount times the cost-of-living adjustment, rounded to the nearest multiple of $10";
+}
+@source(IRC_S6334_G, relation = formalizes, coverage = exact, quote = "In the case of any calendar year beginning after 1999, each dollar amount referred to in paragraphs (2) and (3) of subsection (a) shall be increased by an amount equal to—")
+rule S6334g1IncreaseByCostOfLivingAdjustment strict {
+    label en official "each dollar amount of section 6334(a)(2) and (3) is increased by itself times the cost-of-living adjustment, and the result is rounded to the nearest multiple of $10";
+    for kind: LevyExemptionAmountKind;
+    for cy: Integer;
+    for base: Money;
+    for factor: Decimal;
+    when levy_exemption_amount_requested(kind, cy)
+        and cy > 1999
+        and levy_exemption_base_amount(kind, base)
+        and levy_exemption_cola_factor(cy, factor);
+    then indexed_levy_exemption_amount(kind, cy, div_round(base * (1.0 + factor), 10.0, 0, "HALF_UP") * 10);
+}
+pub relation levy_exemption_value_test(p: Person, kind: LevyExemptionAmountKind, value: Money) kind institutional {
+    label en unofficial "the value of the taxpayer's property of the kind is within the exemption limit pinned in the Revenue Procedure for the year of `legal_time`";
+}
+@source(IRC_S6334_G, relation = formalizes, coverage = exact, quote = "(B) the cost-of-living adjustment determined under section 1(f)(3) for such calendar year, by substituting \"calendar year 1998\" for \"calendar year 2016\" in subparagraph (A)(ii) thereof.")
+rule S6334a2HouseholdEffectsExemptIndexed strict {
+    label en official "household effects up to the indexed amount published for the year are exempt from levy";
+    for p: Person;
+    for value: Money;
+    when household_fuel_furniture_effects_value(p, value) and value <= HouseholdEffectsLevyExemptionLimit;
+    then property_exempt_from_levy(p, HouseholdFuelFurnitureAndEffects);
+}
+@source(IRC_S6334_G, relation = formalizes, coverage = exact, quote = "(A) such dollar amount, multiplied by")
+rule S6334a3BooksAndToolsExemptIndexed strict {
+    label en official "books and tools up to the indexed amount published for the year are exempt from levy";
+    for p: Person;
+    for value: Money;
+    when books_and_tools_of_trade_value(p, value) and value <= BooksAndToolsLevyExemptionLimit;
+    then property_exempt_from_levy(p, BooksAndToolsOfTrade);
+}
+@source(IRC_S6334_G, relation = formalizes, coverage = exact, quote = "If any dollar amount after being increased under paragraph (1) is not a multiple of $10, such dollar amount shall be rounded to the nearest multiple of $10.")
+rule S6334g2RoundingIsPartOfTheIndexedAmount strict {
+    label en official "the rounding to the nearest multiple of $10 is applied once, in the indexed amount";
+    for kind: LevyExemptionAmountKind;
+    for cy: Integer;
+    for amount: Money;
+    when indexed_levy_exemption_amount(kind, cy, amount);
+    then levy_exemption_value_test_amount(kind, cy, amount);
+}
+relation levy_exemption_value_test_amount(kind: LevyExemptionAmountKind, calendarYear: Integer, amount: Money) kind institutional {
+    label en unofficial "the rounded indexed amount that a value is tested against";
+}
+
+// ============================================================================
+// §6323(i)(4) — inflation adjustment of the (b)(4) and (b)(7) amounts
+// ============================================================================
+
+enum LienPriorityAmountKind {
+    CasualSalePurchaser;          // §6323(b)(4)
+    ResidentialMechanicsLien;     // §6323(b)(7)
+}
+relation lien_priority_base_amount(kind: LienPriorityAmountKind, base: Money) kind institutional {
+    label en official "the statutory dollar amount of section 6323(b)(4) or (b)(7) before the section 6323(i)(4) increase";
+}
+rule S6323b4BaseCasualSale strict { then lien_priority_base_amount(CasualSalePurchaser, 1000.00 USD); }
+rule S6323b7BaseMechanicsLien strict { then lien_priority_base_amount(ResidentialMechanicsLien, 5000.00 USD); }
+relation lien_priority_cola_factor(calendarYear: Integer, factor: Decimal) kind empirical {
+    label en official "the cost-of-living adjustment determined under section 1(f)(3) for the calendar year with calendar year 1996 substituted for calendar year 2016 (external: `us.irc.income_individual` machinery, not imported)";
+}
+relation lien_priority_amount_requested(kind: LienPriorityAmountKind, calendarYear: Integer) kind empirical {
+    label en unofficial "the indexed amount for the kind and calendar year of the lien notice filing is asked for";
+}
+pub relation indexed_lien_priority_amount(kind: LienPriorityAmountKind, calendarYear: Integer, amount: Money) kind institutional {
+    label en official "the dollar amount of section 6323(b)(4) or (b)(7) for notices of lien filed in a calendar year after 1998: the amount plus the amount times the cost-of-living adjustment, rounded to the nearest multiple of $10";
+}
+@source(IRC_S6323_I, relation = formalizes, coverage = exact, quote = "In the case of notices of liens imposed by section 6321 which are filed in any calendar year after 1998, each of the dollar amounts under paragraph (4) or (7) of subsection (b) shall be increased by an amount equal to—")
+rule S6323i4IncreaseByCostOfLivingAdjustment strict {
+    label en official "each dollar amount of section 6323(b)(4) and (7) is increased by itself times the cost-of-living adjustment, and the result is rounded to the nearest multiple of $10";
+    for kind: LienPriorityAmountKind;
+    for cy: Integer;
+    for base: Money;
+    for factor: Decimal;
+    when lien_priority_amount_requested(kind, cy)
+        and cy > 1998
+        and lien_priority_base_amount(kind, base)
+        and lien_priority_cola_factor(cy, factor);
+    then indexed_lien_priority_amount(kind, cy, div_round(base * (1.0 + factor), 10.0, 0, "HALF_UP") * 10);
+}
+relation casual_sale_price(claimant: Person, lien: Lien, price: Money) kind empirical {
+    label en official "the price at which the claimant purchased the personal property in a casual sale";
+}
+relation casual_sale_other_conditions_met(claimant: Person, lien: Lien) kind empirical {
+    label en official "the property is household goods, personal effects or other property described in section 6334(a) purchased not for resale, and the purchaser has no actual notice or knowledge of the lien or that the sale would be one of a series of casual sales";
+}
+@source(IRC_S6323_I, relation = formalizes, coverage = exact, quote = "(A) such dollar amount, multiplied by")
+rule S6323b4CasualSaleBelowIndexedLimit strict {
+    label en official "a casual sale purchaser is protected when the price is below the indexed amount published for the year";
+    for claimant: Person;
+    for lien: Lien;
+    for price: Money;
+    when casual_sale_other_conditions_met(claimant, lien)
+        and casual_sale_price(claimant, lien, price)
+        and price < CasualSalePurchaserPriceLimit;
+    then superpriority_protected(claimant, lien, CasualSalePurchaserUnder1000);
+}
+relation residential_repair_contract_price(claimant: Person, lien: Lien, price: Money) kind empirical {
+    label en official "the contract price on the contract with the owner for the repair or improvement";
+}
+relation residential_repair_other_conditions_met(claimant: Person, lien: Lien) kind empirical {
+    label en official "the claimant is a mechanic's lienor for the repair or improvement of a personal residence of not more than four dwelling units occupied by its owner";
+}
+@source(IRC_S6323_I, relation = formalizes, coverage = exact, quote = "(B) the cost-of-living adjustment determined under section 1(f)(3) for the calendar year, determined by substituting \"calendar year 1996\" for \"calendar year 2016\" in subparagraph (A)(ii) thereof.")
+rule S6323b7MechanicsLienWithinIndexedLimit strict {
+    label en official "a residential repair mechanic's lienor is protected when the contract price is not more than the indexed amount published for the year";
+    for claimant: Person;
+    for lien: Lien;
+    for price: Money;
+    when residential_repair_other_conditions_met(claimant, lien)
+        and residential_repair_contract_price(claimant, lien, price)
+        and price <= MechanicsLienContractPriceLimit;
+    then superpriority_protected(claimant, lien, ResidentialRepairMechanicsLienor);
+}
+@source(IRC_S6323_I, relation = formalizes, coverage = exact, quote = "If any amount as adjusted under the preceding sentence is not a multiple of $10, such amount shall be rounded to the nearest multiple of $10.")
+rule S6323i4RoundingIsPartOfTheIndexedAmount strict {
+    label en official "the rounding to the nearest multiple of $10 is applied once, in the indexed amount";
+    for kind: LienPriorityAmountKind;
+    for cy: Integer;
+    for amount: Money;
+    when indexed_lien_priority_amount(kind, cy, amount);
+    then lien_priority_amount_rounded(kind, cy, amount);
+}
+relation lien_priority_amount_rounded(kind: LienPriorityAmountKind, calendarYear: Integer, amount: Money) kind institutional {
+    label en unofficial "the rounded indexed amount that a price is tested against";
+}
+
+// ============================================================================
+// §6324(a)(3) — continuance of the estate lien after discharge of the fiduciary
+// ============================================================================
+
+relation fiduciary_discharged_under_2204(decedent: Person) kind empirical {
+    label en official "the fiduciary is discharged from personal liability under section 2204 (owned by `estate-gift`, not imported: the discharge is a case fact)";
+}
+relation estate_deficiency_determined_after_discharge(decedent: Person) kind empirical {
+    label en official "a deficiency of estate tax is thereafter determined to be due";
+}
+relation gross_estate_part(decedent: Person, part: us.irc.core::Asset) kind empirical {
+    label en official "the part of the gross estate (or an interest in it)";
+}
+relation part_transferred_to_purchaser_or_security_holder(part: us.irc.core::Asset) kind empirical {
+    label en official "the part of the gross estate (or an interest in it) has been transferred to a purchaser or a holder of a security interest";
+}
+relation consideration_received_from_purchaser(part: us.irc.core::Asset, recipient: Person, amount: Money) kind empirical {
+    label en official "the heirs, legatees, devisees or distributees receive the consideration from the purchaser or holder of a security interest";
+}
+pub relation estate_lien_continues_on_part_after_discharge(decedent: Person, part: us.irc.core::Asset) kind institutional {
+    label en official "the discharge under section 2204 does not release the part of the gross estate from the lien for a later-determined deficiency";
+}
+@source(IRC_S6324_A, relation = formalizes, coverage = exact, quote = "shall not operate as a release of any part of the gross estate from the lien for any deficiency that may thereafter be determined to be due")
+rule S6324a3LienContinuesAfterDischarge defeasible {
+    label en official "a section 2204 discharge does not release a part of the gross estate from the estate tax lien for a deficiency determined afterwards";
+    for decedent: Person;
+    for part: us.irc.core::Asset;
+    when fiduciary_discharged_under_2204(decedent)
+        and estate_deficiency_determined_after_discharge(decedent)
+        and gross_estate_part(decedent, part)
+        and not_known(part_transferred_to_purchaser_or_security_holder(part));
+    then estate_lien_continues_on_part_after_discharge(decedent, part);
+}
+pub relation transferred_part_not_subject_to_deficiency_lien(decedent: Person, part: us.irc.core::Asset) kind institutional {
+    label en official "a part (or interest) transferred to a purchaser or holder of a security interest is not subject to a lien or to any claim or demand for the deficiency";
+}
+@source(IRC_S6324_A, relation = formalizes, coverage = exact, quote = "in which case such part (or such interest) shall not be subject to a lien or to any claim or demand for any such deficiency")
+rule S6324a3TransferredPartFreeOfLien defeasible {
+    label en official "a part transferred to a purchaser or holder of a security interest is free of the deficiency lien and claim";
+    for decedent: Person;
+    for part: us.irc.core::Asset;
+    when fiduciary_discharged_under_2204(decedent)
+        and estate_deficiency_determined_after_discharge(decedent)
+        and gross_estate_part(decedent, part)
+        and part_transferred_to_purchaser_or_security_holder(part);
+    then transferred_part_not_subject_to_deficiency_lien(decedent, part);
+}
+pub relation estate_lien_attaches_to_consideration(decedent: Person, part: us.irc.core::Asset, recipient: Person, amount: Money) kind institutional {
+    label en official "the lien attaches to the consideration the heirs, legatees, devisees or distributees received from the purchaser or holder of a security interest";
+}
+@source(IRC_S6324_A, relation = formalizes, coverage = exact, quote = "but the lien shall attach to the consideration received from such purchaser or holder of a security interest, by the heirs, legatees, devisees, or distributees.")
+rule S6324a3LienAttachesToConsideration defeasible {
+    label en official "the estate lien attaches to the consideration received for a transferred part";
+    for decedent: Person;
+    for part: us.irc.core::Asset;
+    for recipient: Person;
+    for amount: Money;
+    when transferred_part_not_subject_to_deficiency_lien(decedent, part)
+        and consideration_received_from_purchaser(part, recipient, amount);
+    then estate_lien_attaches_to_consideration(decedent, part, recipient, amount);
+}
+
+// ============================================================================
+// §6324A(b)(2), (d)(5) — required lien property
+// ============================================================================
+
+relation section_6166_deferred_amount(decedent: Person, amount: Money) kind empirical {
+    label en official "the deferred amount under section 6166";
+}
+relation section_6166_required_interest_amount(decedent: Person, amount: Money) kind empirical {
+    label en official "the required interest amount";
+}
+pub relation section_6166_lien_property_maximum_value(decedent: Person, maximum: Money) kind institutional {
+    label en official "the maximum value of the property the Secretary may require as section 6166 lien property: the sum of the deferred amount and the required interest amount";
+}
+@source(IRC_S6324A_B, relation = formalizes, coverage = exact, quote = "The maximum value of the property which the Secretary may require as section 6166 lien property with respect to any estate shall be a value which is not greater than the sum of—")
+rule S6324Ab2MaximumValueOfRequiredProperty defeasible {
+    label en official "the required lien property may not exceed the deferred amount plus the required interest amount";
+    for decedent: Person;
+    for deferred: Money;
+    for interest: Money;
+    when section_6166_deferred_amount(decedent, deferred) and section_6166_required_interest_amount(decedent, interest);
+    then section_6166_lien_property_maximum_value(decedent, deferred + interest);
+}
+relation property_gross_value_on_6151a_date(decedent: Person, lienAsset: us.irc.core::Asset, gross: Money) kind empirical {
+    label en official "the value of the property determined as of the date prescribed by section 6151(a) for payment of the chapter 11 tax";
+}
+relation property_encumbrance_6324b_or_other(decedent: Person, lienAsset: us.irc.core::Asset, encumbrance: Money) kind empirical {
+    label en official "an encumbrance on the property such as a lien under section 6324B";
+}
+pub relation section_6166_lien_property_net_value(decedent: Person, lienAsset: us.irc.core::Asset, net: Money) kind institutional {
+    label en official "the value of the property for the maximum-value test: determined as of the section 6151(a) date and taking into account encumbrances";
+}
+@source(IRC_S6324A_B, relation = formalizes, coverage = exact, quote = "For purposes of the preceding sentence, the value of any property shall be determined as of the date prescribed by section 6151(a) for payment of the tax imposed by chapter 11 and shall be determined by taking into account any encumbrance such as a lien under section 6324B.")
+rule S6324Ab2NetValueOfProperty defeasible {
+    label en official "the value of the property is its 6151(a)-date value less encumbrances";
+    for decedent: Person;
+    for lienAsset: us.irc.core::Asset;
+    for gross: Money;
+    for encumbrance: Money;
+    when property_gross_value_on_6151a_date(decedent, lienAsset, gross)
+        and property_encumbrance_6324b_or_other(decedent, lienAsset, encumbrance);
+    then section_6166_lien_property_net_value(decedent, lienAsset, gross - encumbrance);
+}
+relation secretary_requires_lien_property_of_value(decedent: Person, value: Money) kind empirical {
+    label en official "the Secretary requires section 6166 lien property of this value";
+}
+@source(IRC_S6324A_B, relation = formalizes, coverage = exact, quote = "(A) the deferred amount, and")
+rule S6324Ab2SecretaryMayNotRequireMoreThanTheMaximum defeasible {
+    label en official "the Secretary may not require lien property worth more than the deferred amount plus the required interest amount";
+    for decedent: Person;
+    for maximum: Money;
+    for value: Money;
+    when section_6166_lien_property_maximum_value(decedent, maximum)
+        and secretary_requires_lien_property_of_value(decedent, value)
+        and value > maximum;
+    then prohibition S6324Ab2RequireMoreThanMaximumProhibition {
+        bearer Secretary;
+        action secretary_requires_lien_property_of_value(decedent, value);
+        window [-infinity, infinity];
+    };
+}
+relation covered_property_value(decedent: Person, value: Money) kind empirical {
+    label en official "the value of the property covered by the agreement";
+}
+relation unpaid_deferred_and_required_interest(decedent: Person, amount: Money) kind empirical {
+    label en official "the unpaid portion of the deferred amount and the required interest amount";
+}
+pub relation additional_lien_property_may_be_required(decedent: Person, shortfall: Money) kind institutional {
+    label en official "the value of the property covered by the agreement is less than the unpaid portion; the Secretary may require added property up to the unpaid portion (the shortfall)";
+}
+@source(IRC_S6324A_D, relation = formalizes, coverage = exact, quote = "If at any time the value of the property covered by the agreement is less than the unpaid portion of the deferred amount and the required interest amount, the Secretary may require the addition of property to the agreement (but he may not require under this paragraph that the value of the property covered by the agreement exceed such unpaid portion).")
+rule S6324Ad5ShortfallOfCoveredProperty defeasible {
+    label en official "the Secretary may require added property when the covered value is below the unpaid portion, but not beyond the unpaid portion";
+    for decedent: Person;
+    for covered: Money;
+    for unpaid: Money;
+    when covered_property_value(decedent, covered) and unpaid_deferred_and_required_interest(decedent, unpaid) and covered < unpaid;
+    then additional_lien_property_may_be_required(decedent, unpaid - covered);
+}
+relation additional_property_demanded_on(decedent: Person, demandedOn: Date) kind empirical {
+    label en official "notice and demand by the Secretary for the added property (or other security)";
+}
+relation additional_property_or_security_furnished_on(decedent: Person, furnishedOn: Date) kind empirical {
+    label en official "property having the required value is added to the property covered by the agreement, or other security equal to the required value is furnished";
+}
+relation additional_property_check_date(decedent: Person, asOf: Date) kind empirical {
+    label en unofficial "the date as of which compliance with the demand is tested (case-supplied: no current-date primitive)";
+}
+pub relation section_6166g_acceleration_by_failure_to_add_property(decedent: Person) kind institutional {
+    label en official "the failure to add property (or furnish security) within 90 days after notice and demand is treated as an act accelerating payment of the installments under section 6166(g)";
+}
+@source(IRC_S6324A_D, relation = formalizes, coverage = exact, quote = "the failure to comply with the preceding sentence shall be treated as an act accelerating payment of the installments under section 6166(g).")
+rule S6324Ad5FailureAcceleratesPayment defeasible {
+    label en official "no added property within 90 days of the demand accelerates the installments under section 6166(g)";
+    for decedent: Person;
+    for demandedOn: Date;
+    for asOf: Date;
+    for shortfall: Money;
+    when additional_lien_property_may_be_required(decedent, shortfall)
+        and additional_property_demanded_on(decedent, demandedOn)
+        and additional_property_check_date(decedent, asOf)
+        and asOf > add_calendar_period(demandedOn, 90 calendar_day)
+        and not_known(additional_property_furnished_in_time(decedent));
+    then section_6166g_acceleration_by_failure_to_add_property(decedent);
+}
+pub relation additional_property_furnished_in_time(decedent: Person) kind institutional {
+    label en unofficial "the property or security was furnished within 90 days after the demand";
+}
+rule S6324Ad5FurnishedInTime defeasible {
+    for decedent: Person;
+    for demandedOn: Date;
+    for furnishedOn: Date;
+    when additional_property_demanded_on(decedent, demandedOn)
+        and additional_property_or_security_furnished_on(decedent, furnishedOn)
+        and furnishedOn >= demandedOn
+        and furnishedOn <= add_calendar_period(demandedOn, 90 calendar_day);
+    then additional_property_furnished_in_time(decedent);
+}
+
+// ============================================================================
+// §6337(b)(2) — redemption price and payee
+// ============================================================================
+
+enum RedemptionPayee {
+    Purchaser;
+    SecretaryForThePurchaser;
+}
+relation purchaser_found_in_county(p: Person) kind empirical {
+    label en official "the purchaser can be found in the county in which the property to be redeemed is situated";
+}
+pub relation redemption_payee(p: Person, payee: RedemptionPayee) kind institutional {
+    label en official "the redemption price is paid to the purchaser or, when the purchaser cannot be found in the county, to the Secretary for the use of the purchaser, his heirs or assigns";
+}
+@source(IRC_S6337_B, relation = formalizes, coverage = exact, quote = "upon payment to the purchaser, or in case he cannot be found in the county in which the property to be redeemed is situated, then to the Secretary, for the use of the purchaser, his heirs, or assigns")
+rule S6337b2PayeeIsThePurchaser defeasible {
+    label en official "the redemption price is paid to the purchaser when he can be found in the county";
+    for p: Person;
+    when sale_conducted_on(p, _) and purchaser_found_in_county(p);
+    then redemption_payee(p, Purchaser);
+}
+@source(IRC_S6337_B, relation = formalizes, coverage = exact, quote = "or in case he cannot be found in the county in which the property to be redeemed is situated, then to the Secretary, for the use of the purchaser")
+rule S6337b2PayeeIsTheSecretaryWhenPurchaserNotFound defeasible {
+    label en official "the redemption price is paid to the Secretary when the purchaser cannot be found in the county";
+    for p: Person;
+    when sale_conducted_on(p, _) and not_known(purchaser_found_in_county(p));
+    then redemption_payee(p, SecretaryForThePurchaser);
+}
+pub relation redemption_price_due(p: Person, price: Money) kind institutional {
+    label en official "the amount paid by the purchaser plus interest at the rate of 20 percent per annum for the days from the sale to the redemption (simple interest, actual days over 365; a judgment call)";
+}
+@source(IRC_S6337_B, relation = formalizes, coverage = exact, quote = "the amount paid by such purchaser and interest thereon at the rate of 20 percent per annum.")
+rule S6337b2RedemptionPrice defeasible {
+    label en official "the redemption price is the amount the purchaser paid plus 20 percent per annum interest";
+    for p: Person;
+    for paid: Money;
+    for soldOn: Date;
+    for redeemedOn: Date;
+    when amount_paid_by_purchaser(p, paid)
+        and sale_conducted_on(p, soldOn)
+        and redemption_attempted_on(p, redeemedOn)
+        and redeemedOn >= soldOn;
+    then redemption_price_due(p, paid + div_round(paid * 0.20 * days_between(soldOn, redeemedOn), 365.0, 2, "HALF_UP"));
+}
+
+// ============================================================================
+// §6901(c)(2), (d)(2) — transferee of a transferee; refund period after a late agreement
+// ============================================================================
+
+relation is_transferee_of_transferee(p: Person, underlying_taxpayer: Person, preceding: Person) kind empirical {
+    label en official "the person is a transferee of a transferee: `preceding` is the preceding transferee";
+}
+relation proceeding_begun_against_before_expiry(preceding: Person, underlying_taxpayer: Person, begunOn: Date) kind empirical {
+    label en official "a court proceeding for the collection of the tax or liability is begun against the initial transferor or the last preceding transferee";
+}
+relation execution_returned_in_proceeding_on(preceding: Person, underlying_taxpayer: Person, returnedOn: Date) kind empirical {
+    label en official "the return of execution in the court proceeding";
+}
+pub relation transferee_of_transferee_period_ends(p: Person, underlying_taxpayer: Person, end: Date) kind institutional {
+    label en official "the last day for assessing the liability of a transferee of a transferee: one year after the expiration of the period against the preceding transferee, but not more than 3 years after the expiration of the period against the initial transferor; or one year after the return of execution when a court proceeding was begun before the expiration";
+}
+pub relation collection_proceeding_exception_applies(p: Person, underlying_taxpayer: Person) kind institutional {
+    label en unofficial "a court proceeding for the collection of the tax was begun against the initial transferor or the last preceding transferee before the transferee's period expired";
+}
+rule S6901c2CourtProceedingBeforeExpiry defeasible {
+    for p: Person;
+    for underlying_taxpayer: Person;
+    for preceding: Person;
+    for precedingEnd: Date;
+    for transferorEnd: Date;
+    for begunOn: Date;
+    when is_transferee_of_transferee(p, underlying_taxpayer, preceding)
+        and transferee_assessment_period_ends(preceding, underlying_taxpayer, precedingEnd)
+        and transferor_assessment_period_ends(underlying_taxpayer, transferorEnd)
+        and proceeding_begun_against_before_expiry(preceding, underlying_taxpayer, begunOn)
+        and begunOn <= min(add_calendar_period(precedingEnd, 1 calendar_year), add_calendar_period(transferorEnd, 3 calendar_year));
+    then collection_proceeding_exception_applies(p, underlying_taxpayer);
+}
+@source(IRC_S6901_C, relation = formalizes, coverage = exact, quote = "In the case of the liability of a transferee of a transferee, within 1 year after the expiration of the period of limitation for assessment against the preceding transferee, but not more than 3 years after the expiration of the period of limitation for assessment against the initial transferor;")
+rule S6901c2TransfereeOfTransfereePeriod defeasible {
+    label en official "the period against a transferee of a transferee: 1 year after the preceding transferee's period, capped at 3 years after the initial transferor's";
+    for p: Person;
+    for underlying_taxpayer: Person;
+    for preceding: Person;
+    for precedingEnd: Date;
+    for transferorEnd: Date;
+    when is_transferee_of_transferee(p, underlying_taxpayer, preceding)
+        and transferee_assessment_period_ends(preceding, underlying_taxpayer, precedingEnd)
+        and transferor_assessment_period_ends(underlying_taxpayer, transferorEnd)
+        and not_known(collection_proceeding_exception_applies(p, underlying_taxpayer));
+    then transferee_of_transferee_period_ends(p, underlying_taxpayer,
+        min(add_calendar_period(precedingEnd, 1 calendar_year), add_calendar_period(transferorEnd, 3 calendar_year)));
+}
+@source(IRC_S6901_C, relation = formalizes, coverage = exact, quote = "then the period of limitation for assessment of the liability of the transferee shall expire 1 year after the return of execution in the court proceeding.")
+rule S6901c2ExecutionReturnedPeriod defeasible {
+    label en official "after a collection proceeding begun in time, the period expires 1 year after the return of execution";
+    for p: Person;
+    for underlying_taxpayer: Person;
+    for preceding: Person;
+    for returnedOn: Date;
+    when is_transferee_of_transferee(p, underlying_taxpayer, preceding)
+        and collection_proceeding_exception_applies(p, underlying_taxpayer)
+        and execution_returned_in_proceeding_on(preceding, underlying_taxpayer, returnedOn);
+    then transferee_of_transferee_period_ends(p, underlying_taxpayer, add_calendar_period(returnedOn, 1 calendar_year));
+}
+relation transferee_agreement_executed_on(p: Person, underlying_taxpayer: Person, agreedOn: Date) kind empirical {
+    label en official "the section 6901(d)(1) agreement is executed on this date";
+}
+relation refund_taxpayer_for_transferee(p: Person, underlying_taxpayer: Person, y: TaxableYear, k: us.irc.core::TaxKind) kind empirical {
+    label en unofficial "the overpayment for the taxable year and tax kind whose credit or refund period is at issue";
+}
+pub relation transferee_agreement_after_transferor_expiry_days(p: Person, underlying_taxpayer: Person, days: Integer) kind institutional {
+    label en official "the period from the date of the expiration of the assessment period against the taxpayer to the date of the agreement";
+}
+@source(IRC_S6901_D, relation = formalizes, coverage = exact, quote = "the periods specified in section 6511(b)(2) shall be increased by the period from the date of such expiration to the date of the agreement.")
+rule S6901d2DaysFromExpirationToAgreement defeasible {
+    label en official "the increase is the number of days from the expiration of the taxpayer's assessment period to the agreement";
+    for p: Person;
+    for underlying_taxpayer: Person;
+    for expiry: Date;
+    for agreedOn: Date;
+    when transferee_agreement_executed_on(p, underlying_taxpayer, agreedOn)
+        and transferor_assessment_period_ends(underlying_taxpayer, expiry)
+        and agreedOn > expiry;
+    then transferee_agreement_after_transferor_expiry_days(p, underlying_taxpayer, days_between(expiry, agreedOn));
+}
+pub relation transferee_refund_limit_after_late_agreement(p: Person, underlying_taxpayer: Person, y: TaxableYear, k: us.irc.core::TaxKind, limit: Money) kind institutional {
+    label en official "section 6511(c) limit on the amount of the credit or refund with the section 6511(b)(2) look-back (3 years, or 2 years when the agreement date is after the 3-year period) increased by the days of section 6901(d)(2)";
+}
+@source(IRC_S6901_D, relation = formalizes, coverage = exact, quote = "then in applying the limitations under section 6511(c) on the amount of the credit or refund, the periods specified in section 6511(b)(2) shall be increased")
+rule S6901d2LookbackThreeYearsPlusDays defeasible {
+    label en official "the 3-year look-back before the agreement date is increased by the days between the expiration and the agreement";
+    for p: Person;
+    for underlying_taxpayer: Person;
+    for y: TaxableYear;
+    for k: us.irc.core::TaxKind;
+    for agreedOn: Date;
+    for days: Integer;
+    for threeYearEnd: Date;
+    for calendar_before_1: Date;
+    when refund_taxpayer_for_transferee(p, underlying_taxpayer, y, k)
+        and transferee_agreement_executed_on(p, underlying_taxpayer, agreedOn)
+        and transferee_agreement_after_transferor_expiry_days(p, underlying_taxpayer, days)
+        and us.irc.assessment::refund_claim_three_year_end(p, y, k, threeYearEnd)
+        and agreedOn <= threeYearEnd
+        and us.irc.core::civil_calendar_boundary_before(agreedOn, 3, us.irc.core::CalendarYear, calendar_before_1);
+    then transferee_refund_limit_after_late_agreement(p, underlying_taxpayer, y, k,
+        sum all amount: Money for paidOn: Date
+            where us.irc.assessment::amount_paid_as_tax(p, y, k, amount, paidOn)
+                and paidOn <= agreedOn
+                and days_between(paidOn, agreedOn) <= days_between(calendar_before_1, agreedOn) + days);
+}
+rule S6901d2LookbackTwoYearsPlusDays defeasible {
+    label en official "the 2-year look-back before the agreement date is increased by the days between the expiration and the agreement";
+    for p: Person;
+    for underlying_taxpayer: Person;
+    for y: TaxableYear;
+    for k: us.irc.core::TaxKind;
+    for agreedOn: Date;
+    for days: Integer;
+    for threeYearEnd: Date;
+    for calendar_before_1: Date;
+    when refund_taxpayer_for_transferee(p, underlying_taxpayer, y, k)
+        and transferee_agreement_executed_on(p, underlying_taxpayer, agreedOn)
+        and transferee_agreement_after_transferor_expiry_days(p, underlying_taxpayer, days)
+        and us.irc.assessment::refund_claim_three_year_end(p, y, k, threeYearEnd)
+        and agreedOn > threeYearEnd
+        and us.irc.core::civil_calendar_boundary_before(agreedOn, 2, us.irc.core::CalendarYear, calendar_before_1);
+    then transferee_refund_limit_after_late_agreement(p, underlying_taxpayer, y, k,
+        sum all amount: Money for paidOn: Date
+            where us.irc.assessment::amount_paid_as_tax(p, y, k, amount, paidOn)
+                and paidOn <= agreedOn
+                and days_between(paidOn, agreedOn) <= days_between(calendar_before_1, agreedOn) + days);
+}
+
+// ============================================================================
+// §7122(c)(2)(A), (d)(3)(B)(i), (d)(3)(C)
+// ============================================================================
+
+relation taxpayer_specifies_application_of_offer_payment(p: Person) kind empirical {
+    label en official "the taxpayer specifies the application of a payment made with an offer-in-compromise to the assessed tax or other amounts imposed with respect to it";
+}
+@source(IRC_S7122_C, relation = formalizes, coverage = exact, quote = "The application of any payment made under this subsection to the assessed tax or other amounts imposed under this title with respect to such tax may be specified by the taxpayer.")
+rule S7122c2ATaxpayerMaySpecifyApplicationOfPayment defeasible {
+    label en official "the taxpayer may specify the application of a payment made with an offer-in-compromise";
+    for p: Person;
+    when taxpayer_specifies_application_of_offer_payment(p);
+    then liberty S7122c2ASpecifyApplicationLiberty {
+        holder p;
+        against Secretary;
+        action taxpayer_specifies_application_of_offer_payment(p);
+        window [-infinity, infinity];
+    };
+}
+relation secretary_unable_to_locate_return_information(p: Person) kind empirical {
+    label en official "the Secretary is unable to locate the taxpayer's return or return information for verification of the liability";
+}
+relation offer_rejected_solely_because_return_not_located(p: Person) kind empirical {
+    label en official "the offer is rejected solely because the Secretary is unable to locate the taxpayer's return or return information";
+}
+@source(IRC_S7122_D, relation = formalizes, coverage = exact, quote = "(i) such offer shall not be rejected solely because the Secretary is unable to locate the taxpayer's return or return information for verification of such liability; and")
+rule S7122d3BiNoRejectionSolelyForMissingReturn defeasible {
+    label en official "a liability-only offer shall not be rejected solely because the return or return information cannot be located";
+    for p: Person;
+    when offer_relates_only_to_liability_issues(p)
+        and secretary_unable_to_locate_return_information(p)
+        and offer_rejected_solely_because_return_not_located(p);
+    then prohibition S7122d3BiNoRejectionForMissingReturnProhibition {
+        bearer Secretary;
+        action offer_rejected_solely_because_return_not_located(p);
+        window [-infinity, infinity];
+    };
+}
+relation offer_does_not_meet_payment_requirements_of_c1(p: Person) kind empirical {
+    label en official "the offer does not meet the requirements of subparagraph (A)(i) or (B)(i) of subsection (c)(1) (the partial payment with the submission)";
+}
+relation offer_returned_as_unprocessable(p: Person) kind empirical {
+    label en official "the offer is returned to the taxpayer as unprocessable";
+}
+@source(IRC_S7122_D, relation = formalizes, coverage = exact, quote = "may be returned to the taxpayer as unprocessable.")
+rule S7122d3CMayReturnOfferAsUnprocessable defeasible {
+    label en official "an offer that does not meet the (c)(1) payment requirements may be returned as unprocessable";
+    for p: Person;
+    when offer_does_not_meet_payment_requirements_of_c1(p);
+    then liberty S7122d3CReturnUnprocessableLiberty {
+        holder Secretary;
+        against p;
+        action offer_returned_as_unprocessable(p);
+        window [-infinity, infinity];
+    };
+}
+
+// ============================================================================
+// §6306(j)(2) — biannual report items
+// ============================================================================
+
+relation contractor_report_number(fyEnd: Date, n: Integer) kind empirical {
+    label en official "the ordinal of the report submitted under section 6306(j) (1 for the first report)";
+}
+pub relation contractor_report_biannual_items_due(fyEnd: Date) kind institutional {
+    label en official "the report is one of those in which the biannual items of paragraph (2) are due: every second report beginning with the second";
+}
+@source(IRC_S6306_J, relation = formalizes, coverage = exact, quote = "(2) biannually (beginning with the second report submitted under this subsection)—")
+rule S6306j2BiannualReportOrdinal defeasible {
+    label en official "the biannual items are due in the second report and in every second report after it";
+    for fyEnd: Date;
+    for n: Integer;
+    when contractor_report_number(fyEnd, n) and n >= 2 and n mod 2 == 0;
+    then contractor_report_biannual_items_due(fyEnd);
+}
+relation contractor_report_independent_evaluation(fyEnd: Date) kind empirical {
+    label en official "the report includes an independent evaluation of contractor performance";
+}
+relation contractor_report_measurement_plan(fyEnd: Date) kind empirical {
+    label en official "the report includes a measurement plan that compares the best practices of the private collectors to the collection techniques of the Internal Revenue Service and provides mechanisms to identify and capture information on successful techniques used by the contractors";
+}
+pub relation contractor_biannual_items_included(fyEnd: Date) kind institutional {
+    label en official "the report includes an independent evaluation of contractor performance and a measurement plan";
+}
+@source(IRC_S6306_J, relation = formalizes, coverage = exact, quote = "(A) an independent evaluation of contractor performance, and")
+rule S6306j2BiannualItemsIncluded defeasible {
+    label en official "the biannual items are an independent evaluation of contractor performance and a measurement plan";
+    for fyEnd: Date;
+    when contractor_report_independent_evaluation(fyEnd) and contractor_report_measurement_plan(fyEnd);
+    then contractor_biannual_items_included(fyEnd);
+}
+@source(IRC_S6306_J, relation = formalizes, coverage = exact, quote = "(B) a measurement plan that includes a comparison of the best practices used by the private collectors to the collection techniques used by the Internal Revenue Service and mechanisms to identify and capture information on successful collection techniques used by the contractors that could be adopted by the Internal Revenue Service.")
+rule S6306j2ReportMustIncludeBiannualItems defeasible {
+    label en official "in every second report the Secretary shall include the independent evaluation and the measurement plan";
+    for fyEnd: Date;
+    when contractor_report_biannual_items_due(fyEnd) and contractor_fiscal_year_ended_on(fyEnd);
+    then duty S6306j2BiannualItemsDuty {
+        bearer Secretary;
+        beneficiary us.irc.core::Congress;
+        goal achievement {
+            condition contractor_biannual_items_included(fyEnd);
+            window [fyEnd, add_calendar_period(fyEnd, 90 calendar_day)];
+        }
+    };
+}

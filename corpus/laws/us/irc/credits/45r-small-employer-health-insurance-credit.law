@@ -1,0 +1,194 @@
+// Section 45R — Employee health insurance expenses of small employers.
+// Stage 2c (IRC-06 stage 2c, DECISION-0379). Priority list item: §45R
+// (50%/35%, FTE <=25 and average wages <=$50,000 (indexed) phase-outs as
+// exact computations).
+//
+// Judgment calls / scope:
+// * The FTE COUNT itself ((d)(2): hours of service / 2,080, rounded down)
+//   and the average-annual-wages AMOUNT itself ((d)(3)(A): aggregate wages
+//   / FTE count, rounded down to the nearest $1,000) are modelled as
+//   case-asserted inputs (`full_time_equivalent_employees`,
+//   `average_annual_wages`) rather than derived from raw hours/aggregate-
+//   wages facts — the coordinator's own instruction names the (c)
+//   PHASE-OUT and the (d)(1)(A)/(B) ELIGIBILITY GATE as needing exact
+//   computation, not the (d)(2)/(3)(A) derivations themselves (both of
+//   which need a "round down to the next lower integer/nearest $1,000"
+//   primitive this module does not attempt — TECH-GAPS G391). Modelled as
+//   `Decimal` (FTE count) and `Money` (average wages) so the (c) phase-out
+//   fractions reuse this SAME package's own §21(a)(2) idiom exactly
+//   (Money/Money and Decimal/Decimal division under a declared rounding
+//   policy via `div_round`).
+// * The indexed dollar amount (section 45R(d)(3)(B)) is a NEW `.lawparam.json`
+//   (`45r-dollar-amount.lawparam.json`, parameter `Section45rDollarAmount`)
+//   anchored per the HANDOFF-documented convention: the statutory $25,000
+//   base for 2010-2013 (anchored to `IRC_S45R_D` itself), then ONLY the
+//   years whose Revenue Procedure is pinned in `us.irc.inflation_
+//   adjustments` (2025: Rev. Proc. 2024-40 section 2.10, $33,300; 2026:
+//   Rev. Proc. 2025-32 section 4.09, $34,100) — `us.irc.inflation_
+//   adjustments` added as a new dependency. Years 2014-2024 and 2027
+//   onward are gaps: evaluation returns MISSING_PARAMETER_VALUE, never a
+//   fabricated figure.
+// * (b)(2) (the Secretary-determined average-premium alternative) and (f)
+//   (tax-exempt employer's payroll-tax-credit substitute) both read deep
+//   external facts (HHS-determined average premiums; payroll tax amounts)
+//   as case-asserted inputs — EXTERNAL_DEPENDENCY, not derived.
+// * (e) (employee exclusions: section 401(c)(1) self-employed, 2-percent S
+//   corporation shareholders, 5-percent owners, family attribution under
+//   section 152(d)(2)) is NOT separately modelled — the case-asserted
+//   `qualified_health_plan_employer_contribution`/`full_time_equivalent_
+//   employees`/`average_annual_wages` inputs are read as ALREADY computed
+//   net of excluded employees (TECH_GAP, same "the case pre-computes the
+//   population" convention as several other credits in this package).
+// * (g) (2010-2013 transition rules), (h) (insurance-term cross-reference),
+//   (i) (anti-avoidance regulations) are NOT modelled — historical
+//   transition / cross-reference / regulatory-authority provisions outside
+//   this pass's scope.
+// * "credit period" (the taxable year must fall within the employer's
+//   2-consecutive-taxable-year credit period, section 45R(e)(2), not
+//   quoted at letter granularity in this package's own sources.law) is
+//   read as a case-asserted status (`within_credit_period_45r`) rather
+//   than derived from a first-Exchange-enrollment anchor year.
+
+use self::{
+    IRC_S45R_A,
+    IRC_S45R_B,
+    IRC_S45R_C,
+    IRC_S45R_D,
+    Person,
+    TaxableYear,
+};
+
+pub relation qualified_health_plan_employer_contribution(employer: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the aggregate nonelective contributions the employer made during the taxable year under the section 45R(d)(4) arrangement, for premiums for qualified health plans offered through an Exchange (section 45R(b)(1))";
+}
+pub relation qualified_health_plan_average_premium_amount(employer: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the aggregate nonelective contributions the employer would have made had every taken-into-account employee enrolled in a qualified health plan with the HHS-determined average premium for the small group market in the relevant rating area (section 45R(b)(2)) — EXTERNAL_DEPENDENCY, HHS-determined figure not pinned in this corpus";
+}
+pub relation tax_exempt_eligible_small_employer(employer: Person) kind empirical {
+    label en official "employer is a tax-exempt eligible small employer within the meaning of section 45R(f)(2) — case-asserted (the full section 501(c)-exemption/payroll-tax chain is not derived here)";
+}
+
+pub relation health_insurance_credit_before_phaseout(employer: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the section 45R(b) amount determined before the section 45R(c) phaseout: 50 percent (35 percent for a tax-exempt eligible small employer) of the lesser of the two section 45R(b)(1)/(2) contribution amounts";
+}
+@source(IRC_S45R_B, quote = "Subject to subsection (c), the amount determined under this subsection with respect to any eligible small employer is equal to 50 percent (35 percent in the case of a tax-exempt eligible small employer) of the lesser of")
+rule HealthInsuranceCreditBeforePhaseoutGeneralRule(employer: Person, y: TaxableYear, c1: Money, c2: Money) strict {
+    label en official "the general (non-tax-exempt) 50-percent rate";
+    when qualified_health_plan_employer_contribution(employer, y, c1);
+    when qualified_health_plan_average_premium_amount(employer, y, c2);
+    when not tax_exempt_eligible_small_employer(employer);
+    then health_insurance_credit_before_phaseout(employer, y, round(0.50 * min(c1, c2), 2, "HALF_UP"));
+}
+@source(IRC_S45R_B, quote = "35 percent in the case of a tax-exempt eligible small employer")
+rule HealthInsuranceCreditBeforePhaseoutTaxExemptRule(employer: Person, y: TaxableYear, c1: Money, c2: Money) strict {
+    label en official "the tax-exempt-employer 35-percent rate";
+    when qualified_health_plan_employer_contribution(employer, y, c1);
+    when qualified_health_plan_average_premium_amount(employer, y, c2);
+    when tax_exempt_eligible_small_employer(employer);
+    then health_insurance_credit_before_phaseout(employer, y, round(0.35 * min(c1, c2), 2, "HALF_UP"));
+}
+
+// --- §45R(c): phaseout by FTE count and average annual wages -----------------
+
+pub relation full_time_equivalent_employees(employer: Person, y: TaxableYear, count: Decimal) kind empirical {
+    label en official "the employer's total number of full-time equivalent employees for the taxable year, within the meaning of section 45R(d)(2) — case-asserted (the (d)(2)(A) hours/2,080 rounded-down derivation is not modelled here, TECH-GAPS G391)";
+}
+pub relation average_annual_wages(employer: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the employer's average annual wages for the taxable year, within the meaning of section 45R(d)(3)(A) — case-asserted (the aggregate-wages/FTE-count rounded-to-nearest-$1,000 derivation is not modelled here, TECH-GAPS G391)";
+}
+
+relation fte_excess_over_ten(employer: Person, y: TaxableYear) kind institutional;
+rule FteExcessOverTenRule(employer: Person, y: TaxableYear, count: Decimal) strict {
+    when full_time_equivalent_employees(employer, y, count);
+    when count > 10.0;
+    then fte_excess_over_ten(employer, y);
+}
+pub relation phaseout_reduction_fte(employer: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 45R(c)(1): the reduction for full-time equivalent employees in excess of 10, out of 15";
+}
+@source(IRC_S45R_C, quote = "Such amount multiplied by a fraction the numerator of which is the total number of full-time equivalent employees of the employer in excess of 10 and the denominator of which is 15.")
+rule PhaseoutReductionFteRule(employer: Person, y: TaxableYear, before: Money, count: Decimal) strict {
+    when health_insurance_credit_before_phaseout(employer, y, before);
+    when full_time_equivalent_employees(employer, y, count);
+    when fte_excess_over_ten(employer, y);
+    // One proportion, one rounding (TECH-GAPS G499, 26.09.2026).
+    then phaseout_reduction_fte(employer, y, div_round(before * (count - 10.0), 15.0, 2, "HALF_UP"));
+}
+pub relation phaseout_reduction_fte_or_zero(employer: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the section 45R(c)(1) reduction, or zero when the employer's FTE count does not exceed 10";
+}
+rule PhaseoutReductionFtePresentRule(employer: Person, y: TaxableYear, amount: Money) defeasible {
+    when phaseout_reduction_fte(employer, y, amount);
+    then phaseout_reduction_fte_or_zero(employer, y, amount);
+}
+rule PhaseoutReductionFteAbsentRule(employer: Person, y: TaxableYear) defeasible {
+    when health_insurance_credit_before_phaseout(employer, y, _);
+    when not_known(fte_excess_over_ten(employer, y));
+    then phaseout_reduction_fte_or_zero(employer, y, 0 USD);
+}
+
+relation average_wages_excess_over_dollar_amount(employer: Person, y: TaxableYear) kind institutional;
+rule AverageWagesExcessRule(employer: Person, y: TaxableYear, wages: Money) strict {
+    when average_annual_wages(employer, y, wages);
+    when wages > Section45rDollarAmount;
+    then average_wages_excess_over_dollar_amount(employer, y);
+}
+pub relation phaseout_reduction_wages(employer: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 45R(c)(2): the reduction for average annual wages in excess of the section 45R(d)(3)(B) dollar amount, out of that dollar amount";
+}
+@source(IRC_S45R_C, quote = "Such amount multiplied by a fraction the numerator of which is the average annual wages of the employer in excess of the dollar amount in effect under subsection (d)(3)(B) and the denominator of which is such dollar amount.")
+rule PhaseoutReductionWagesRule(employer: Person, y: TaxableYear, before: Money, wages: Money) strict {
+    when health_insurance_credit_before_phaseout(employer, y, before);
+    when average_annual_wages(employer, y, wages);
+    when average_wages_excess_over_dollar_amount(employer, y);
+    // One proportion, one rounding (TECH-GAPS G499, 26.09.2026).
+    then phaseout_reduction_wages(employer, y, div_round(before * ((wages - Section45rDollarAmount) / 1.00 USD), Section45rDollarAmount / 1.00 USD, 2, "HALF_UP"));
+}
+pub relation phaseout_reduction_wages_or_zero(employer: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the section 45R(c)(2) reduction, or zero when average annual wages do not exceed the section 45R(d)(3)(B) dollar amount";
+}
+rule PhaseoutReductionWagesPresentRule(employer: Person, y: TaxableYear, amount: Money) defeasible {
+    when phaseout_reduction_wages(employer, y, amount);
+    then phaseout_reduction_wages_or_zero(employer, y, amount);
+}
+rule PhaseoutReductionWagesAbsentRule(employer: Person, y: TaxableYear) defeasible {
+    when health_insurance_credit_before_phaseout(employer, y, _);
+    when not_known(average_wages_excess_over_dollar_amount(employer, y));
+    then phaseout_reduction_wages_or_zero(employer, y, 0 USD);
+}
+
+// --- §45R(d)(1): eligible small employer --------------------------------------
+
+pub relation section_45r_d4_arrangement_in_effect(employer: Person, y: TaxableYear) kind empirical {
+    label en official "the employer has in effect a section 45R(d)(4) arrangement (a uniform-percentage, not-less-than-50-percent nonelective contribution through an Exchange) — case-asserted";
+}
+pub relation eligible_small_employer_45r(employer: Person, y: TaxableYear) kind institutional {
+    label en official "employer is an 'eligible small employer' under section 45R(d)(1): no more than 25 FTE employees, average annual wages not exceeding twice the section 45R(d)(3)(B) dollar amount, and a section 45R(d)(4) arrangement in effect";
+}
+@source(IRC_S45R_D, quote = "The term \"eligible small employer\" means, with respect to any taxable year, an employer—\n(A) which has no more than 25 full-time equivalent employees for the taxable year,\n(B) the average annual wages of which do not exceed an amount equal to twice the dollar amount in effect under paragraph (3)(B) for the taxable year, and\n(C) which has in effect an arrangement described in paragraph (4).")
+rule EligibleSmallEmployerRule(employer: Person, y: TaxableYear, count: Decimal, wages: Money) strict {
+    when full_time_equivalent_employees(employer, y, count);
+    when count <= 25.0;
+    when average_annual_wages(employer, y, wages);
+    when wages <= 2.0 * Section45rDollarAmount;
+    when section_45r_d4_arrangement_in_effect(employer, y);
+    then eligible_small_employer_45r(employer, y);
+}
+
+// --- §45R(a): allowance of credit ----------------------------------------------
+
+pub relation within_credit_period_45r(employer: Person, y: TaxableYear) kind empirical {
+    label en official "the taxable year falls within the employer's section 45R(e)(2) 2-consecutive-taxable-year credit period — case-asserted (the anchor-year derivation is not modelled here)";
+}
+pub relation small_employer_health_insurance_credit(employer: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the section 45R small employer health insurance credit determined under section 38 for the taxable year: the section 45R(b) amount reduced by both section 45R(c) phaseouts, allowed only for an eligible small employer within its credit period";
+}
+@source(IRC_S45R_A, quote = "For purposes of section 38, in the case of an eligible small employer, the small employer health insurance credit determined under this section for any taxable year in the credit period is the amount determined under subsection (b).")
+rule SmallEmployerHealthInsuranceCreditRule(employer: Person, y: TaxableYear, before: Money, r1: Money, r2: Money) defeasible {
+    when eligible_small_employer_45r(employer, y);
+    when within_credit_period_45r(employer, y);
+    when health_insurance_credit_before_phaseout(employer, y, before);
+    when phaseout_reduction_fte_or_zero(employer, y, r1);
+    when phaseout_reduction_wages_or_zero(employer, y, r2);
+    then small_employer_health_insurance_credit(employer, y, max(0 USD, before - r1 - r2));
+}

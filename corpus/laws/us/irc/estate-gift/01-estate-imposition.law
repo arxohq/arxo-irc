@@ -1,0 +1,235 @@
+// 26 U.S.C. §§2001-2002 — imposition, rate and computation of the estate tax,
+// and the executor's duty to pay it. This module wires the top of the
+// computation chain (PLAN §5): gross estate -> deductions -> taxable estate
+// -> + adjusted taxable gifts -> tentative tax (section 2001(c) table) ->
+// - gift tax payable (section 2001(b)(2)) -> tax before credit.
+// §2010's unified credit is a SEPARATE deduction from THIS tax, modelled in
+// 02-unified-credit.law; `estate_tax` here is "the tax imposed by section
+// 2001" before the section 2010 credit is subtracted, matching the statute's
+// own layering (section 2010(a): "a credit ... shall be allowed ... against
+// the tax imposed by section 2001").
+//
+// COMPILER NOTE: a "when x == expr;" atom does not BIND a fresh variable
+// `x` for range-restriction purposes (§190) — only a positive established
+// atom binds a head variable. Every computed amount below is therefore
+// written directly inside the producing `then` head (matching
+// `corpus/laws/us/irc/credits/23-adoption-credit.law`'s
+// `then adoption_credit(..., max(0 USD, round(...)))` idiom), not through an
+// intermediate `when amount == ...;` step.
+//
+// JUDGMENT CALLS:
+//  - §2001(b)(2) ("aggregate amount of tax which would have been payable
+//    under chapter 12 ... if the rates ... in effect at the decedent's death
+//    ... had been applicable") is modelled by re-running the section 2001(c)
+//    table at the decedent's death over the SAME cumulative-gifts mechanism
+//    section 2502(a) already implements, rather than duplicating the rate
+//    schedule; see `gift_tax_payable_at_current_rates`.
+//  - §2001(f) (valuation of gifts finally determined) and §2001(g)
+//    (modifications for different exclusion amounts across periods) are NOT
+//    modelled in this stage: TECH_GAP (need the finality-of-valuation
+//    machinery of chapter 63's assessment-period rules, owned by
+//    `assessment`, not yet imported).
+//  - §2001(d)/(e) (gift-splitting coordination with sections 2513/2035) are
+//    NOT modelled: TECH_GAP, narrow cross-reference requiring the gift-
+//    splitting power's actual election records.
+
+language "law.core" version "0.2";
+package us.irc.estate_gift version "0.1.1";
+namespace "urn:us:irc:estate_gift:clir";
+
+use self::{
+    Estate,
+    IRC_S2001_A,
+    IRC_S2001_B,
+    IRC_S2001_C,
+    IRC_S2002,
+    IRC_S2031_A,
+    Person,
+    Secretary,
+    adjusted_taxable_gifts,
+    decedent_citizen_or_resident,
+    gift_tax_payable_at_current_rates,
+    gross_estate,
+    section_2201_reduced_schedule_applies,
+};
+
+relation bracket_2001c(base: Money, lower_bound: Money, base_tax: Money, rate: Decimal) kind institutional;
+
+// --- Deductions: shared enumeration and total ------------------------------
+
+pub enum EstateDeductionKind {
+    ExpensesIndebtednessAndTaxes;   // section 2053
+    Losses;                          // section 2054 (not modelled this stage)
+    CharitableDeduction;             // section 2055 (not modelled this stage)
+    MaritalDeduction;                // section 2056
+    StateDeathTaxDeduction;          // section 2058 (not modelled this stage)
+}
+
+pub relation estate_deduction_allowed(e: Estate, kind: EstateDeductionKind, amount: Money) kind institutional {
+    label en unofficial "an amount allowed as a deduction of the stated kind in determining the taxable estate";
+}
+
+pub relation total_estate_deductions(e: Estate, amount: Money) kind institutional {
+    label en unofficial "the sum of every allowed estate-tax deduction (section 2051's 'value of the taxable estate ... shall be determined by deducting from the value of the gross estate the deductions provided in this part')";
+}
+rule TotalEstateDeductionsRule(e: Estate) defeasible {
+    when estate_deduction_allowed(e, _, _);
+    then total_estate_deductions(e, sum all d: Money for kind: EstateDeductionKind where estate_deduction_allowed(e, kind, d));
+}
+
+// --- §2031 / Part III: gross estate. `gross_estate` is declared once, as
+// `pub relation`, in 03-gross-estate-inclusions.law (section 2031(a) is that
+// module's own imposition sentence); used here without redeclaration. -------
+
+// --- §2001(a): imposition ----------------------------------------------------
+
+@source(IRC_S2001_A, relation = formalizes, coverage = exact, quote = "A tax is hereby imposed on the transfer of the taxable estate of every decedent who is a citizen or resident of the United States.")
+pub relation estate_tax_imposed(e: Estate) kind institutional {
+    label en official "a tax is imposed on the transfer of the taxable estate of every decedent who is a citizen or resident of the United States (section 2001(a))";
+}
+rule EstateTaxImposedRule(e: Estate) defeasible {
+    label en official "a tax is hereby imposed on the transfer of the taxable estate of every decedent who is a citizen or resident of the United States";
+    when decedent_citizen_or_resident(e);
+    then estate_tax_imposed(e);
+}
+
+// --- §2001(b): taxable estate ------------------------------------------------
+
+@source(IRC_S2031_A, relation = formalizes, coverage = contextual, quote = "the value at the time of his death of all property")
+pub relation taxable_estate(e: Estate, amount: Money) kind institutional {
+    label en unofficial "the value of the gross estate less the deductions allowed by this part (section 2051)";
+}
+rule TaxableEstateRule(e: Estate, gross: Money, ded: Money) defeasible {
+    when gross_estate(e, gross);
+    when total_estate_deductions(e, ded);
+    then taxable_estate(e, max(0.00 USD, gross - ded));
+}
+// An estate with no deductions asserted still has a taxable estate equal to
+// its gross estate (section 2051's deductions are elective/conditional, not
+// a precondition of having a taxable estate at all).
+relation has_total_estate_deductions(e: Estate) kind institutional {
+    label en unofficial "a total-deductions amount has been computed for this estate (closed-world helper: not_known cannot take a wildcard argument, LDC-E0207)";
+}
+rule HasTotalEstateDeductionsRule(e: Estate) defeasible {
+    when total_estate_deductions(e, _);
+    then has_total_estate_deductions(e);
+}
+rule TaxableEstateNoDeductionsRule(e: Estate, gross: Money) defeasible {
+    when gross_estate(e, gross);
+    when not_known(has_total_estate_deductions(e));
+    then taxable_estate(e, gross);
+}
+
+// --- §2001(b)(1)(B): adjusted taxable gifts ---------------------------------
+// `adjusted_taxable_gifts` is declared once, as `pub relation`, in
+// 05-gift-tax.law (derived there from the decedent's own chapter 12
+// history); used here without redeclaration.
+
+// --- §2001(c): tentative tax on (taxable estate + adjusted taxable gifts) --
+
+@source(IRC_S2001_B, relation = formalizes, coverage = partial, quote = "a tentative tax computed under subsection (c) on the sum of")
+pub relation tentative_tax_base(e: Estate, amount: Money) kind institutional {
+    label en unofficial "the sum of the taxable estate and the adjusted taxable gifts (section 2001(b)(1))";
+}
+rule TentativeTaxBaseRule(e: Estate, taxable: Money, gifts: Money) defeasible {
+    when taxable_estate(e, taxable);
+    when adjusted_taxable_gifts(e, gifts);
+    then tentative_tax_base(e, taxable + gifts);
+}
+relation has_adjusted_taxable_gifts(e: Estate) kind institutional {
+    label en unofficial "an adjusted-taxable-gifts amount has been computed for this estate (closed-world helper, LDC-E0207)";
+}
+rule HasAdjustedTaxableGiftsRule(e: Estate) defeasible {
+    when adjusted_taxable_gifts(e, _);
+    then has_adjusted_taxable_gifts(e);
+}
+rule TentativeTaxBaseNoGiftsRule(e: Estate, taxable: Money) defeasible {
+    when taxable_estate(e, taxable);
+    when not_known(has_adjusted_taxable_gifts(e));
+    then tentative_tax_base(e, taxable);
+}
+
+@source(IRC_S2001_C, relation = formalizes, coverage = exact)
+pub relation tentative_tax(e: Estate, amount: Money) kind institutional {
+    label en official "a tentative tax computed under subsection (c) (section 2001(b)(1))";
+}
+rule TentativeTaxRule(e: Estate, base: Money, lower: Money, base_tax: Money, rate: Decimal) defeasible {
+    when tentative_tax_base(e, base);
+    when not_known(section_2201_reduced_schedule_applies(e));
+    when bracket_2001c(base, lower, base_tax, rate);
+    then tentative_tax(e, base_tax + rate * (base - lower));
+}
+
+// --- §2001(b)(2): gift tax payable on post-1976 gifts, at CURRENT rates ---
+// Interface: 05-gift-tax.law's section 2502(a) mechanism already computes,
+// for the decedent as donor, the tax that WOULD be payable using the rates
+// in effect at death (section 2001(g)(1) requires the CURRENT rate table,
+// which is the only table this package models — there is no separate
+// historical table to select between, so section 2001(g)(1)'s "modification"
+// is a no-op under this package's single-edition rate schedule and is not
+// separately derived).
+
+// `gift_tax_payable_at_current_rates` is declared once, as `pub relation`,
+// in 05-gift-tax.law.
+
+@source(IRC_S2001_B, relation = formalizes, coverage = partial, quote = "the aggregate amount of tax which would have been payable under chapter 12 with respect to gifts made by the decedent after December 31, 1976")
+pub relation estate_tax_before_credits(e: Estate, amount: Money) kind institutional {
+    label en unofficial "tentative tax minus the aggregate amount of tax which would have been payable under chapter 12 on post-1976 gifts, computed using the rates in effect at death (section 2001(b), before any section 2010 or other chapter-11 credit)";
+}
+rule EstateTaxBeforeCreditsRule(e: Estate, tentative: Money, gift_tax: Money) defeasible {
+    when tentative_tax(e, tentative);
+    when gift_tax_payable_at_current_rates(e, gift_tax);
+    then estate_tax_before_credits(e, max(0.00 USD, tentative - gift_tax));
+}
+relation has_gift_tax_payable_at_current_rates(e: Estate) kind institutional {
+    label en unofficial "a gift-tax-payable-at-current-rates amount has been computed for this estate (closed-world helper, LDC-E0207)";
+}
+rule HasGiftTaxPayableRule(e: Estate) defeasible {
+    when gift_tax_payable_at_current_rates(e, _);
+    then has_gift_tax_payable_at_current_rates(e);
+}
+rule EstateTaxBeforeCreditsNoGiftTaxRule(e: Estate, tentative: Money) defeasible {
+    when tentative_tax(e, tentative);
+    when not_known(has_gift_tax_payable_at_current_rates(e));
+    then estate_tax_before_credits(e, tentative);
+}
+
+// --- Interface: estate_tax = estate_tax_before_credits - applicable credit
+// amount (section 2010) - other chapter 11 credits (sections 2011-2016, not
+// modelled this stage beyond the interface). Declared here, computed in
+// 02-unified-credit.law once `applicable_credit_amount` exists.
+
+pub relation estate_tax(e: Estate, amount: Money) kind institutional {
+    label en unofficial "the net amount of tax due under chapter 11 after every allowable chapter-11 credit (PLAN §5 interface value)";
+}
+
+// --- §2002: liability for payment (a duty of the executor) -----------------
+
+// A generic `role`/`has_role` membership fails to type-check here: the
+// built-in `has_role(actor, role, context, window)` requires its `actor`/
+// `context` arguments to be the STD `Actor`/`LegalContext` types, and
+// `Person`/`Estate` here are types IMPORTED from `us.irc.core` ("Foreign"
+// types in the compiler's diagnostic, LDC-E2104: "no implicit
+// conversions") — unlike a package that declares its OWN local `Person`
+// entity. No other `us.irc.*` package uses `has_role` for this reason; each
+// models "who holds this role" as its own empirical relation instead. This
+// package follows that convention: `executor_of(e, x, w)`.
+pub relation executor_of(e: Estate, x: Person, w: Interval<Instant>) kind empirical {
+    label en unofficial "x is the executor (or administrator) of estate e during w";
+}
+
+@source(IRC_S2002, relation = formalizes, coverage = exact, quote = "The tax imposed by this chapter shall be paid by the executor.")
+rule ExecutorPaysEstateTax(e: Estate, x: Person, w: Interval<Instant>) defeasible {
+    label en official "the tax imposed by this chapter shall be paid by the executor (section 2002)";
+    when executor_of(e, x, w)
+        and estate_tax_imposed(e);
+    then duty ExecutorEstateTaxPaymentDuty {
+        bearer x;
+        beneficiary Secretary;
+        achieve estate_tax_paid(e) during w;
+    };
+}
+
+pub relation estate_tax_paid(e: Estate) kind empirical {
+    label en unofficial "the executor has paid the tax imposed by chapter 11 with respect to this estate";
+}

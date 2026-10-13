@@ -1,0 +1,113 @@
+// Section 39 — Carryback and carryforward of unused credits. Stage 2
+// (IRC-06 stage 2, DECISION-0379). Priority list item: §39 (carryback 1 /
+// carryforward 20 years — two-year scenarios, FIFO ordering (a)(2)).
+//
+// Judgment calls:
+// * §39(a)(1): the "unused credit year" excess (business credit
+//   carryforwards to the year plus current year business credit, over the
+//   section 38(c) limitation) becomes a 1-year carryback and a 20-year
+//   carryforward. This package models the CANDIDATE carryback/carryforward
+//   years as a `TaxableYear` case fact (`preceding_taxable_year_of`/
+//   `following_taxable_year_of`) rather than deriving successor/predecessor
+//   years by calendar arithmetic on `TaxableYear` — this corpus's
+//   `TaxableYear` entity does not expose an arithmetic successor function,
+//   and other packages (`corporations`' NOL carryover modules) use the same
+//   case-supplied-adjacency idiom for year-to-year attribute carryover.
+// * §39(a)(2) (which of the 21 candidate years absorbs the FULL unused
+//   credit first: "the earliest of the 21 taxable years") is modelled
+//   exactly via the `unless`-defeated "some earlier candidate year within
+//   the 21-year window would absorb it" idiom this package's own AGENT-
+//   BRIEF flags for earliest/latest-of-several-candidates (TECH-GAPS
+//   G136's own pattern) — a candidate year absorbs the FULL carryforward
+//   only if there is no OTHER candidate year, earlier in the 21-year
+//   window, that has residual limitation room. This pass models the
+//   TWO-YEAR scenario the priority list names (one carryback year plus one
+//   carryforward year) exactly; a full 21-year FIFO ledger across many
+//   simultaneous unused-credit years is TECH_GAP (self-recursive
+//   arithmetic across a chain of years — the same LDC-E4102 class HANDOFF
+//   already warns about for day-by-day ledgers).
+// * §39(a)(3) (5-year carryback for the marginal oil and gas well
+//   production credit), §39(a)(4) (net operating loss coordination for
+//   specified credits), (b) (transitional 3-year-carryback rule), (c)
+//   (empowerment zone/qualified railroad rules), (d) (business credit
+//   carryforward limited by the enactment date of the credit provision)
+//   are NOT modelled this pass — TECH_GAP, noted per subsection.
+
+use self::{
+    IRC_S39_A,
+    Person,
+    TaxableYear,
+    business_credit_carryforward_to_year_or_zero,
+    current_year_business_credit,
+    general_business_credit_limitation,
+};
+
+pub relation unused_credit_amount(taxpayer: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the section 39(a)(1) 'unused credit' for the taxable year (the unused credit year): the excess of (business credit carryforwards to the year plus current year business credit) over the section 38(c) limitation for the year, to the extent attributable to the current year business credit";
+}
+@source(IRC_S39_A, quote = "If the sum of the business credit carryforwards to the taxable year plus the amount of the current year business credit for the taxable year exceeds the amount of the limitation imposed by subsection (c) of section 38 for such taxable year (hereinafter in this section referred to as the \"unused credit year\"), such excess (to the extent attributable to the amount of the current year business credit) shall be—\n(A) a business credit carryback to the taxable year preceding the unused credit year, and\n(B) a business credit carryforward to each of the 20 taxable years following the unused credit year")
+rule UnusedCreditAmount defeasible {
+    for taxpayer: Person;
+    for y: TaxableYear;
+    for carryforward: Money;
+    for current: Money;
+    for limitation: Money;
+    when business_credit_carryforward_to_year_or_zero(taxpayer, y, carryforward);
+    when current_year_business_credit(taxpayer, y, current);
+    when general_business_credit_limitation(taxpayer, y, limitation);
+    when carryforward + current > limitation;
+    then unused_credit_amount(taxpayer, y, min(current, (carryforward + current) - limitation));
+}
+
+// --- §39(a)(1)(A): one-year carryback ----------------------------------------------
+
+pub relation preceding_taxable_year_of(y: TaxableYear, preceding: TaxableYear) kind empirical {
+    label en official "the taxable year immediately preceding the given taxable year (case-supplied adjacency, per this corpus's TaxableYear-successor idiom)";
+}
+pub relation following_taxable_year_of(y: TaxableYear, following: TaxableYear) kind empirical {
+    label en official "the taxable year immediately following the given taxable year (case-supplied adjacency)";
+}
+
+pub relation business_credit_carryback_before_39b_limit(taxpayer: Person, unused_credit_year: TaxableYear, carryback_year: TaxableYear, amount: Money) kind institutional {
+    label en official "the section 39(a)(1)(A) carryback before the section 39(b) limit (stage 3 split; the limit step is in s3-f-39-limits.law)";
+}
+pub relation business_credit_carryback_computed_to_year(taxpayer: Person, unused_credit_year: TaxableYear, carryback_year: TaxableYear, amount: Money) kind institutional {
+    label en official "section 39(a)(1)(A)'s computed carryback amount to the year preceding the unused credit year — exposed for scenarios to inspect directly; NOT auto-fed into 38-general-business-credit.law's own `business_credit_carryback_to_year` input (see that relation's own note on the cycle this would create)";
+}
+@source(IRC_S39_A, quote = "a business credit carryback to the taxable year preceding the unused credit year")
+rule BusinessCreditCarrybackToYear defeasible {
+    for taxpayer: Person;
+    for unused_credit_year: TaxableYear;
+    for carryback_year: TaxableYear;
+    for amount: Money;
+    when unused_credit_amount(taxpayer, unused_credit_year, amount);
+    when preceding_taxable_year_of(unused_credit_year, carryback_year);
+    then business_credit_carryback_before_39b_limit(taxpayer, unused_credit_year, carryback_year, amount);
+}
+
+// --- §39(a)(1)(B)/(a)(2): twenty-year carryforward, earliest-year-first -----------
+
+pub relation within_20_year_carryforward_window(taxpayer: Person, unused_credit_year: TaxableYear, candidate: TaxableYear) kind empirical {
+    label en official "the candidate taxable year is one of the 20 taxable years following the unused credit year (section 39(a)(1)(B)) — case-asserted window membership, avoiding a 20-step calendar-arithmetic chain";
+}
+relation earlier_candidate_with_room_exists(taxpayer: Person, unused_credit_year: TaxableYear, candidate: TaxableYear) kind empirical {
+    label en official "there exists another candidate carryforward year, earlier than this one within the 21-year window of section 39(a)(2), that has not yet fully absorbed the unused credit — case-asserted rather than derived from a full multi-year ledger (TECH_GAP on the general n-year FIFO chain; the two-year scenario this package's tests exercise supplies this fact directly)";
+}
+
+pub relation business_credit_carryforward_before_39c_limit(taxpayer: Person, unused_credit_year: TaxableYear, candidate: TaxableYear, amount: Money) kind institutional {
+    label en official "the section 39(a)(1)(B), (a)(2) carryforward to the candidate year before the section 39(c) limit (stage 3 split; the limit step is in s3-f-39-limits.law)";
+}
+pub relation business_credit_carryforward_computed_to_year(taxpayer: Person, unused_credit_year: TaxableYear, candidate: TaxableYear, amount: Money) kind institutional {
+    label en official "the portion of the section 39(a)(1) unused credit carried to this specific candidate year within the 20-year carryforward window — exposed for scenarios to inspect directly; NOT auto-fed into 38-general-business-credit.law's own `business_credit_carryforward_to_year` input (that relation's own note explains the unstratifiable cycle this would otherwise create, since the input to one year's unused-credit computation would depend, through this same predicate, on the unused-credit computation of another year)";
+}
+@source(IRC_S39_A, quote = "The entire amount of the unused credit for an unused credit year shall be carried to the earliest of the 21 taxable years to which (by reason of paragraph (1)) such credit may be carried.")
+rule BusinessCreditCarryforwardEarliestYear defeasible {
+    for taxpayer: Person;
+    for unused_credit_year: TaxableYear;
+    for candidate: TaxableYear;
+    for amount: Money;
+    when unused_credit_amount(taxpayer, unused_credit_year, amount);
+    when within_20_year_carryforward_window(taxpayer, unused_credit_year, candidate);
+    when not earlier_candidate_with_room_exists(taxpayer, unused_credit_year, candidate);
+    then business_credit_carryforward_before_39c_limit(taxpayer, unused_credit_year, candidate, amount);
+}

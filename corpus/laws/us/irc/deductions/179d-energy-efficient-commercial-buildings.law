@@ -1,0 +1,190 @@
+// Section 179D — energy efficient commercial buildings deduction. Stage 2.
+// Scope: (a) the deduction, (b)(1) the per-building limit (applicable dollar value
+// times square footage, less the deductions of the 3 preceding years), (b)(2)-(3)
+// the applicable dollar value with the increased amounts for property meeting the
+// prevailing wage and apprenticeship requirements, (g) the inflation adjustment
+// (A3 parameters anchored on Rev. Proc. 2024-40 section 2.26 and Rev. Proc.
+// 2025-32 section 4.25; taxable years 2023-2024 are pinned nowhere, so they
+// return MISSING_PARAMETER_VALUE), (e) basis reduction, (f) the alternative
+// deduction for retrofit property, and (i) the termination added by Pub. L. 119-21
+// section 70507 (property the construction of which begins after June 30, 2026).
+// The certification by qualified individuals, Reference Standard 90.1, the
+// modelling software and the methods of calculation are external
+// (Secretary/Department of Energy): the certified percentage and the status of
+// the property enter as asserted facts (EXTERNAL_DEPENDENCY).
+
+use self::{
+    DeductionKind,
+    IRC_S179D_A,
+    IRC_S179D_B,
+    IRC_S179D_E,
+    IRC_S179D_F,
+    Person,
+    TaxableYear,
+    deduction_allowed,
+};
+
+pub relation energy_efficient_commercial_building_property_cost(p: Person, y: TaxableYear, building: Integer, amount: Money) kind empirical {
+    label en official "the cost of energy efficient commercial building property placed in service during the taxable year: depreciable property installed on or in a building in the United States within the scope of Reference Standard 90.1, as part of interior lighting, HVAC and hot water systems or the envelope, and certified as part of a plan reducing total annual energy and power costs by 25 percent or more (section 179D(c)(1))";
+}
+pub relation building_square_footage(building: Integer, square_feet: Integer) kind empirical {
+    label en official "the square footage of the building (section 179D(b)(1)(A)(ii))";
+}
+pub relation certified_energy_cost_reduction_percentage(building: Integer, percentage: Decimal) kind empirical {
+    label en official "the percentage by which the total annual energy and power costs of the building are certified to be reduced in comparison to the reference building (section 179D(b)(2)); a certification made under section 179D(d)(5)";
+}
+pub relation prior_three_year_deductions_179d(p: Person, y: TaxableYear, building: Integer, amount: Money) kind empirical {
+    label en official "the aggregate of the deductions under subsections (a) and (f) with respect to the building for the 3 taxable years immediately preceding (for a deduction of another person, the 4-taxable-year period) (section 179D(b)(1)(B)); an asserted total, the look-back is a multi-year computation (TECH_GAPS G2714)";
+}
+pub relation prevailing_wage_and_apprenticeship_requirements_met(p: Person, y: TaxableYear, building: Integer) kind empirical {
+    label en official "the property meets section 179D(b)(3)(B): installation begins before the date 60 days after Secretary guidance, or satisfies the prevailing wage requirements of (b)(4)(A) and the apprenticeship requirements of (b)(5)";
+}
+pub relation construction_of_property_begins_on(building: Integer, on: Date) kind empirical {
+    label en official "the date the construction of the property begins (section 179D(i))";
+}
+pub relation section_179d_terminated_for_property(building: Integer) kind institutional {
+    label en official "section 179D does not apply to property the construction of which begins after June 30, 2026 (section 179D(i), added by Pub. L. 119-21 section 70507)";
+}
+@source(us.irc.temporal::PL119_21_S70507, relation = derives_from, quote = "This section shall not apply with respect to property the construction of which begins after June 30, 2026.")
+rule Section179dTerminationRule(building: Integer, begins: Date) strict {
+    label en official "property whose construction begins after June 30, 2026 is outside section 179D";
+    when construction_of_property_begins_on(building, begins);
+    when begins > @2026-06-30;
+    then section_179d_terminated_for_property(building);
+}
+
+pub relation applicable_dollar_value_179d(p: Person, y: TaxableYear, building: Integer, value: Money) kind institutional {
+    label en official "the applicable dollar value per square foot: $0.50 increased (not above $1.00) by $0.02 per percentage point of certified reduction above 25 percent, or the increased amounts ($2.50, $.10, $5.00) where the wage and apprenticeship requirements are met, all indexed (section 179D(b)(2),(3),(g))";
+}
+@source(IRC_S179D_B, quote = "the applicable dollar value shall be an amount equal to $0.50 increased (but not above $1.00) by $0.02 for each percentage point")
+rule ApplicableDollarValueStandard(p: Person, y: TaxableYear, building: Integer, pct: Decimal) strict {
+    label en official "the standard applicable dollar value is the base plus the step per whole percentage point above 25, not above the ceiling (section 179D(b)(2)); the parameters are the indexed amounts";
+    when energy_efficient_commercial_building_property_cost(p, y, building, _);
+    when certified_energy_cost_reduction_percentage(building, pct);
+    when pct >= 25.0;
+    when not_known(prevailing_wage_and_apprenticeship_requirements_met(p, y, building));
+    then applicable_dollar_value_179d(p, y, building,
+        min(Section179dCapValue, Section179dBaseValue + Section179dStepValue * round(pct - 25.0, 0, "FLOOR")));
+}
+@source(IRC_S179D_B, quote = "paragraph (2) shall be applied by substituting \"$2.50\" for \"$0.50\", \"$.10\" for \"$.02\", and \"$5.00\" for \"$1.00\".")
+rule ApplicableDollarValueIncreased(p: Person, y: TaxableYear, building: Integer, pct: Decimal) strict {
+    label en official "for property meeting the wage and apprenticeship requirements the increased amounts apply (section 179D(b)(3)(A))";
+    when energy_efficient_commercial_building_property_cost(p, y, building, _);
+    when certified_energy_cost_reduction_percentage(building, pct);
+    when pct >= 25.0;
+    when prevailing_wage_and_apprenticeship_requirements_met(p, y, building);
+    then applicable_dollar_value_179d(p, y, building,
+        min(Section179dIncreasedCapValue, Section179dIncreasedBaseValue + Section179dIncreasedStepValue * round(pct - 25.0, 0, "FLOOR")));
+}
+pub relation maximum_deduction_179d(p: Person, y: TaxableYear, building: Integer, amount: Money) kind institutional {
+    label en official "the maximum deduction for the building for the taxable year: the applicable dollar value times square footage less the deductions of the preceding 3 years, not below zero (section 179D(b)(1))";
+}
+@source(IRC_S179D_B, quote = "The deduction under subsection (a) with respect to any building for any taxable year shall not exceed the excess (if any) of—")
+rule MaximumDeduction179dRule(p: Person, y: TaxableYear, building: Integer, value: Money, sqft: Integer, prior: Money) strict {
+    label en official "the limit is the product of the applicable dollar value and the square footage, less the prior 3 years' deductions (section 179D(b)(1))";
+    when applicable_dollar_value_179d(p, y, building, value);
+    when building_square_footage(building, sqft);
+    when prior_three_year_deductions_179d(p, y, building, prior);
+    then maximum_deduction_179d(p, y, building, max(0.00 USD, value * sqft - prior));
+}
+pub relation deduction_179d(p: Person, y: TaxableYear, building: Integer, amount: Money) kind institutional {
+    label en official "the section 179D(a) deduction for the building: the cost of the property, up to the maximum";
+}
+@source(IRC_S179D_A, quote = "There shall be allowed as a deduction an amount equal to the cost of energy efficient commercial building property placed in service during the taxable year.")
+rule Section179dDeductionRule(p: Person, y: TaxableYear, building: Integer, cost: Money, maximum: Money) strict {
+    label en official "the deduction is the cost of the property, limited to the maximum for the building, unless section 179D has terminated for the property (section 179D(a),(b),(i))";
+    when energy_efficient_commercial_building_property_cost(p, y, building, cost);
+    when maximum_deduction_179d(p, y, building, maximum);
+    when not_known(section_179d_terminated_for_property(building));
+    then deduction_179d(p, y, building, min(cost, maximum));
+}
+@source(IRC_S179D_A, quote = "There shall be allowed as a deduction an amount equal to the cost of energy efficient commercial building property placed in service during the taxable year.")
+rule Section179dDeductionAllowed(p: Person, y: TaxableYear, building: Integer, amount: Money) strict {
+    label en official "the section 179D amount is an allowed deduction";
+    when deduction_179d(p, y, building, amount);
+    then deduction_allowed(p, y, Section179DEnergyEfficientBuildings, amount);
+}
+pub relation basis_reduction_179d(p: Person, y: TaxableYear, building: Integer, amount: Money) kind institutional {
+    label en official "the basis of the property is reduced by the deduction allowed (section 179D(e))";
+}
+@source(IRC_S179D_E, quote = "the basis of such property shall be reduced by the amount of the deduction so allowed")
+rule BasisReduction179dRule(p: Person, y: TaxableYear, building: Integer, amount: Money) strict {
+    label en official "the basis of the property is reduced by the section 179D deduction (section 179D(e))";
+    when deduction_179d(p, y, building, amount);
+    then basis_reduction_179d(p, y, building, amount);
+}
+
+// --- (f): the alternative deduction for energy efficient building retrofit property ----------
+
+pub relation elects_179d_retrofit_alternative(p: Person, building: Integer) kind empirical {
+    label en official "the taxpayer elects, at the time and in the manner the Secretary provides, the alternative deduction of section 179D(f) for a qualified building";
+}
+pub relation retrofit_election_in_effect_179d(p: Person, building: Integer) kind institutional {
+    label en official "the section 179D(f) election is in effect for the qualified building";
+}
+@source(IRC_S179D_F, quote = "In the case of a taxpayer which elects (at such time and in such manner as the Secretary may provide) the application of this subsection with respect to any qualified building")
+rule RetrofitElectionPowerRule(p: Person, building: Integer) strict {
+    label en official "a taxpayer has the power to elect the section 179D(f) alternative deduction for a qualified building";
+    when elects_179d_retrofit_alternative(p, building);
+    then power Section179dRetrofitElection {
+        holder p;
+        over building;
+        exercise elects_179d_retrofit_alternative(p, building);
+        valid_when elects_179d_retrofit_alternative(p, building);
+        effect create(retrofit_election_in_effect_179d(p, building));
+        window [@2022-08-17, infinity);
+    };
+}
+pub relation qualified_building_179df4(building: Integer) kind institutional {
+    label en official "the building is located in the United States and was originally placed in service not less than 5 years before the establishment of the qualified retrofit plan (section 179D(f)(4))";
+}
+pub relation baseline_energy_use_intensity(building: Integer, intensity: Decimal) kind institutional {
+    label en official "the energy use intensity certified as of a date within the 1-year period ending on placed-in-service, adjusted for weather, in British thermal units (section 179D(f)(6),(7)(A))";
+}
+pub relation final_certified_energy_use_intensity(building: Integer, intensity: Decimal) kind empirical {
+    label en official "the energy use intensity certified more than 1 year after the property is placed in service (section 179D(f)(2)(C))";
+}
+pub relation qualifying_final_certification_in_year(p: Person, y: TaxableYear, building: Integer) kind empirical {
+    label en official "the taxable year that includes the date of the qualifying final certification with respect to the qualified retrofit plan (section 179D(f)(1))";
+}
+pub relation retrofit_property_aggregate_adjusted_basis(p: Person, y: TaxableYear, building: Integer, amount: Money) kind empirical {
+    label en official "the aggregate adjusted basis, before the section 179D(e) reduction, of energy efficient building retrofit property placed in service under the qualified retrofit plan (section 179D(f)(1)(B))";
+}
+pub relation retrofit_energy_use_intensity_reduction_percentage(building: Integer, percentage: Decimal) kind empirical {
+    label en official "the percentage reduction of energy use intensity, which replaces the energy cost reduction in section 179D(b)(2) for the alternative deduction (section 179D(f)(1)(A))";
+}
+pub relation qualifying_final_certification_met(building: Integer) kind institutional {
+    label en official "the certified energy use intensity is not more than 75 percent of the baseline energy use intensity (section 179D(f)(5))";
+}
+@source(IRC_S179D_F, quote = "if the energy use intensity certified in such certification is not more than 75 percent of the baseline energy use intensity of the building")
+rule QualifyingFinalCertificationRule(building: Integer, baseline: Decimal, final: Decimal) strict {
+    label en official "the final certification qualifies where energy use intensity is at most 75 percent of the baseline (section 179D(f)(5))";
+    when baseline_energy_use_intensity(building, baseline);
+    when final_certified_energy_use_intensity(building, final);
+    when final * 4.0 <= baseline * 3.0;
+    then qualifying_final_certification_met(building);
+}
+pub relation retrofit_deduction_179d_f(p: Person, y: TaxableYear, building: Integer, amount: Money) kind institutional {
+    label en official "the section 179D(f) deduction: the lesser of the excess described in subsection (b) (with energy use intensity) and the aggregate adjusted basis of the retrofit property";
+}
+@source(IRC_S179D_F, quote = "there shall be allowed as a deduction for the taxable year which includes the date of the qualifying final certification with respect to the qualified retrofit plan of such building, an amount equal to the lesser of—")
+rule RetrofitDeductionRule(p: Person, y: TaxableYear, building: Integer, pct: Decimal, sqft: Integer, prior: Money, basis: Money) defeasible {
+    label en official "the alternative deduction is the lesser of the section 179D(b) excess computed on energy use intensity and the aggregate adjusted basis, in the year of the qualifying final certification (section 179D(f)(1)); it uses the standard applicable dollar value only; the increased amounts of (b)(3) for retrofit property are not applied (TECH_GAPS G2715)";
+    when retrofit_election_in_effect_179d(p, building);
+    when qualified_building_179df4(building);
+    when qualifying_final_certification_in_year(p, y, building);
+    when qualifying_final_certification_met(building);
+    when retrofit_energy_use_intensity_reduction_percentage(building, pct);
+    when building_square_footage(building, sqft);
+    when prior_three_year_deductions_179d(p, y, building, prior);
+    when retrofit_property_aggregate_adjusted_basis(p, y, building, basis);
+    when not_known(section_179d_terminated_for_property(building));
+    then retrofit_deduction_179d_f(p, y, building,
+        min(basis, max(0.00 USD, min(Section179dCapValue, Section179dBaseValue + Section179dStepValue * round(pct - 25.0, 0, "FLOOR")) * sqft - prior)));
+}
+@source(IRC_S179D_F, quote = "there shall be allowed as a deduction for the taxable year which includes the date of the qualifying final certification")
+rule RetrofitDeductionAllowed(p: Person, y: TaxableYear, building: Integer, amount: Money) defeasible {
+    label en official "the section 179D(f) amount is an allowed deduction";
+    when retrofit_deduction_179d_f(p, y, building, amount);
+    then deduction_allowed(p, y, Section179DEnergyEfficientBuildings, amount);
+}

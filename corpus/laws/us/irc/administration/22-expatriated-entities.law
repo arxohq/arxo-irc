@@ -1,0 +1,639 @@
+// 26 U.S.C. §7874 (rules relating to expatriated entities and their foreign
+// parents). STAGE 3.
+//
+// JUDGMENT CALLS
+//  - The entities are `Person`s. The acquisition is keyed by the pair
+//    (surrogate candidate e, domestic target d): `acquisition_completed_on`,
+//    `acquisition_first_property_date`, `acquisition_last_property_date`.
+//  - "Substantial business activities" (a)(2)(B)(iii) is an external judgment
+//    (DECISION-0194, authority TaxCourt); "a principal purpose ... to avoid the
+//    purposes of this section" (c)(4) likewise.
+//  - The ownership percentage (a)(2)(B)(ii) is a case-supplied number measured
+//    AFTER the (c)(2) exclusions (TECH-GAPS G3012); the exclusions are
+//    published per stock block (`block_counted_for_ownership`).
+//  - Inversion gain per taxable year is case-supplied (TECH-GAPS G3013); the
+//    itemization test of (d)(2) is executable per item.
+//  - Rates (the section 11(b) highest rate, the partner's highest rate) are
+//    case facts: no rate is pinned here.
+//  - (c)(3): the 4-year window "beginning 2 years before" is tested as
+//    acquisition date + 2 years >= ownership date and acquisition date <=
+//    ownership date + 2 years (calendar-year steps).
+//  - (e)(3) (rules similar to §860E(a)(3), (4)) is EXTERNAL_DEPENDENCY.
+
+language "law.core" version "0.2";
+package us.irc.administration version "0.1.1";
+namespace "urn:us:irc:administration:clir";
+
+use self::{
+    IRC_S7874_A,
+    IRC_S7874_B,
+    IRC_S7874_C,
+    IRC_S7874_D,
+    IRC_S7874_E,
+    IRC_S7874_F,
+    IRC_S7874_G,
+    Organ,
+    Person,
+    Secretary,
+    TaxableYear,
+    inversion_gain_of_year,
+};
+
+// --- vocabulary ---------------------------------------------------------------------------------------
+
+relation foreign_corporation(e: Person) kind empirical {
+    label en unofficial "the entity is a foreign corporation";
+}
+relation domestic_corporation_or_partnership(d: Person) kind empirical {
+    label en unofficial "the entity is a domestic corporation or a domestic partnership";
+}
+relation us_person(p: Person) kind empirical {
+    label en unofficial "the person is a United States person";
+}
+relation related_under_267b_or_707b1(p: Person, q: Person) kind empirical {
+    label en unofficial "the persons are related within the meaning of section 267(b) or 707(b)(1)";
+}
+relation acquisition_pursuant_to_plan(e: Person, d: Person) kind empirical {
+    label en unofficial "the acquisition is pursuant to a plan (or a series of related transactions)";
+}
+relation acquisition_completed_on(e: Person, d: Person, dt: Date) kind empirical {
+    label en unofficial "the entity completes, on this date, the direct or indirect acquisition of substantially all of the properties held by the domestic corporation, or constituting a trade or business of the domestic partnership";
+}
+relation acquisition_first_property_date(e: Person, d: Person, dt: Date) kind empirical {
+    label en unofficial "the first date properties are acquired as part of the acquisition";
+}
+relation acquisition_last_property_date(e: Person, d: Person, dt: Date) kind empirical {
+    label en unofficial "the last date properties are acquired as part of the acquisition";
+}
+relation majority_properties_acquired_on(e: Person, d: Person, dt: Date) kind empirical {
+    label en unofficial "the entity acquired, directly or indirectly, more than half of the properties held by the corporation (or constituting the partnership trade or business) on this date";
+}
+relation former_owner_percentage(e: Person, d: Person, pct: Decimal) kind institutional {
+    label en unofficial "the percentage of the stock (by vote or value) of the entity held after the acquisition by former shareholders or partners of the domestic entity by reason of their interest, measured after the subsection (c)(2) exclusions (TECH-GAPS G3012)";
+}
+relation ownership_requirement_met_on(e: Person, d: Person, dt: Date) kind empirical {
+    label en unofficial "the date on which the ownership requirements of subsection (a)(2)(B)(ii) are met";
+}
+external judgment relation eag_lacks_substantial_business_activities(e: Person) {
+    authority TaxCourt;
+    label en unofficial "after the acquisition the expanded affiliated group which includes the entity does not have substantial business activities in the foreign country of its organization, compared to the total business activities of the group (§7874(a)(2)(B)(iii))";
+}
+relation acquisition_condition_i(e: Person, d: Person) kind derived {
+    label en unofficial "clause (i): acquisition completed after March 4, 2003, pursuant to a plan, and not excepted by the flush language";
+}
+relation majority_acquired_by_cutoff(e: Person, d: Person) kind derived {
+    label en unofficial "the entity acquired more than half of the properties on or before March 4, 2003";
+}
+relation plan_deemed(e: Person, d: Person) kind derived {
+    label en unofficial "the acquisition is treated as pursuant to a plan by subsection (c)(3)";
+}
+relation meets_conditions_at_60(e: Person, d: Person) kind derived {
+    label en unofficial "the entity would be a surrogate foreign corporation under the 60 percent test";
+}
+relation meets_conditions_at_80(e: Person, d: Person) kind derived {
+    label en unofficial "the entity would be a surrogate foreign corporation if 80 percent were substituted for 60 percent";
+}
+pub relation treated_as_domestic_corporation(e: Person) kind institutional {
+    label en unofficial "the foreign corporation is treated for purposes of the Code as a domestic corporation (§7874(b))";
+}
+pub relation surrogate_foreign_corporation(e: Person, d: Person) kind institutional {
+    label en unofficial "the foreign corporation is a surrogate foreign corporation with respect to the domestic corporation or partnership (§7874(a)(2)(B), (a)(3))";
+}
+pub relation expatriation_link(x: Person, e: Person, d: Person) kind institutional {
+    label en unofficial "x is an expatriated entity by reason of the acquisition of d by the surrogate foreign corporation e";
+}
+pub relation expatriated_entity(x: Person) kind institutional {
+    label en unofficial "the person is an expatriated entity (§7874(a)(2)(A))";
+}
+pub relation applicable_period(x: Person, e: Person, d: Person, start: Date, finish: Date) kind institutional {
+    label en unofficial "the applicable period of the expatriated entity: from the first date properties are acquired to 10 years after the last such date (§7874(d)(1))";
+}
+
+// --- (a)(2)(B): surrogate foreign corporation ----------------------------------------------------------
+
+@source(IRC_S7874_A, relation = formalizes, coverage = exact, quote = "the entity completes after March 4, 2003, the direct or indirect acquisition of substantially all of the properties held directly or indirectly by a domestic corporation")
+rule S7874AcquisitionAfterMarch4 strict {
+    for e: Person;
+    for d: Person;
+    for dt: Date;
+    when foreign_corporation(e)
+        and domestic_corporation_or_partnership(d)
+        and acquisition_completed_on(e, d, dt)
+        and dt > @2003-03-04
+        and (acquisition_pursuant_to_plan(e, d) or plan_deemed(e, d))
+        and not_known(majority_acquired_by_cutoff(e, d));
+    then acquisition_condition_i(e, d);
+}
+@source(IRC_S7874_A, relation = formalizes, coverage = exact, quote = "such entity acquired directly or indirectly more than half of the properties held directly or indirectly by such corporation")
+rule S7874MajorityAcquiredByCutoff strict {
+    for e: Person;
+    for d: Person;
+    for dt: Date;
+    when majority_properties_acquired_on(e, d, dt)
+        and dt <= @2003-03-04;
+    then majority_acquired_by_cutoff(e, d);
+}
+@source(IRC_S7874_C, relation = formalizes, coverage = exact, quote = "such actions shall be treated as pursuant to a plan")
+rule S7874PlanDeemed strict {
+    for e: Person;
+    for d: Person;
+    for acq: Date;
+    for met: Date;
+    when acquisition_completed_on(e, d, acq)
+        and ownership_requirement_met_on(e, d, met)
+        and add_calendar_period(acq, 2 calendar_year) >= met
+        and acq <= add_calendar_period(met, 2 calendar_year);
+    then plan_deemed(e, d);
+}
+@source(IRC_S7874_A, relation = formalizes, coverage = exact, quote = "after the acquisition at least 60 percent of the stock (by vote or value) of the entity is held")
+rule S7874Conditions60 strict {
+    for e: Person;
+    for d: Person;
+    for pct: Decimal;
+    when acquisition_condition_i(e, d)
+        and former_owner_percentage(e, d, pct)
+        and pct >= 60.0
+        and eag_lacks_substantial_business_activities(e);
+    then meets_conditions_at_60(e, d);
+}
+@source(IRC_S7874_B, relation = formalizes, coverage = exact, quote = "if such corporation would be a surrogate foreign corporation if subsection (a)(2) were applied by substituting \"80 percent\" for \"60 percent\"")
+rule S7874Conditions80 strict {
+    for e: Person;
+    for d: Person;
+    for pct: Decimal;
+    when acquisition_condition_i(e, d)
+        and former_owner_percentage(e, d, pct)
+        and pct >= 80.0
+        and eag_lacks_substantial_business_activities(e);
+    then meets_conditions_at_80(e, d);
+}
+@source(IRC_S7874_B, relation = formalizes, coverage = exact, quote = "a foreign corporation shall be treated for purposes of this title as a domestic corporation")
+rule S7874TreatedAsDomestic strict {
+    for e: Person;
+    for d: Person;
+    when meets_conditions_at_80(e, d);
+    then treated_as_domestic_corporation(e);
+}
+@source(IRC_S7874_A, relation = formalizes, coverage = exact, quote = "shall not be treated as a surrogate foreign corporation for purposes of paragraph (2)(A)")
+rule S7874SurrogateForeignCorporation strict {
+    for e: Person;
+    for d: Person;
+    when meets_conditions_at_60(e, d)
+        and not_known(treated_as_domestic_corporation(e));
+    then surrogate_foreign_corporation(e, d);
+}
+
+// --- (a)(2)(A): expatriated entity -------------------------------------------------------------------
+
+@source(IRC_S7874_A, relation = formalizes, coverage = exact, quote = "the domestic corporation or partnership referred to in subparagraph (B)(i) with respect to which a foreign corporation is a surrogate foreign corporation")
+rule S7874ExpatriatedDomesticTarget strict {
+    for e: Person;
+    for d: Person;
+    when surrogate_foreign_corporation(e, d);
+    then expatriation_link(d, e, d);
+}
+@source(IRC_S7874_A, relation = formalizes, coverage = exact, quote = "any United States person who is related (within the meaning of section 267(b) or 707(b)(1)) to a domestic corporation or partnership described in clause (i)")
+rule S7874ExpatriatedRelatedUsPerson strict {
+    for x: Person;
+    for e: Person;
+    for d: Person;
+    when surrogate_foreign_corporation(e, d)
+        and us_person(x)
+        and related_under_267b_or_707b1(x, d);
+    then expatriation_link(x, e, d);
+}
+rule S7874ExpatriatedEntity strict {
+    for x: Person;
+    for e: Person;
+    for d: Person;
+    when expatriation_link(x, e, d);
+    then expatriated_entity(x);
+}
+@source(IRC_S7874_D, relation = formalizes, coverage = exact, quote = "beginning on the first date properties are acquired as part of the acquisition described in subsection (a)(2)(B)(i)")
+rule S7874ApplicablePeriod strict {
+    for x: Person;
+    for e: Person;
+    for d: Person;
+    for first: Date;
+    for last: Date;
+    when expatriation_link(x, e, d)
+        and acquisition_first_property_date(e, d, first)
+        and acquisition_last_property_date(e, d, last);
+    then applicable_period(x, e, d, first, add_calendar_period(last, 10 calendar_year));
+}
+
+// --- (c)(2): stock disregarded for ownership ----------------------------------------------------------
+
+entity StockBlock {
+    label en unofficial "a block of stock of the foreign corporation";
+}
+relation block_held_by_eag_member(b: StockBlock) kind empirical {
+    label en unofficial "the stock is held by members of the expanded affiliated group which includes the foreign corporation";
+}
+relation block_sold_in_related_public_offering(b: StockBlock) kind empirical {
+    label en unofficial "the stock is sold in a public offering related to the acquisition described in subsection (a)(2)(B)(i)";
+}
+relation block_of_foreign_corporation(b: StockBlock, e: Person) kind empirical {
+    label en unofficial "the block is stock of the foreign corporation";
+}
+pub relation block_counted_for_ownership(b: StockBlock) kind institutional {
+    label en unofficial "the block of stock is taken into account in determining ownership under subsection (a)(2)(B)(ii)";
+}
+@source(IRC_S7874_C, relation = formalizes, coverage = exact, quote = "There shall not be taken into account in determining ownership under subsection (a)(2)(B)(ii)")
+rule S7874BlockCounted strict {
+    for b: StockBlock;
+    for e: Person;
+    when block_of_foreign_corporation(b, e)
+        and not_known(block_held_by_eag_member(b))
+        and not_known(block_sold_in_related_public_offering(b));
+    then block_counted_for_ownership(b);
+}
+
+entity InversionItem {
+    label en unofficial "a transfer of stock or other properties, or a license of property, by an expatriated entity";
+}
+// --- (c)(4)-(5): disregarded transfers, related partnerships ------------------------------------------
+
+external judgment relation transfer_part_of_avoidance_plan(t: InversionItem) {
+    authority TaxCourt;
+    label en unofficial "the transfer is part of a plan a principal purpose of which is to avoid the purposes of section 7874 (§7874(c)(4))";
+}
+pub relation transfer_disregarded(t: InversionItem) kind institutional {
+    label en unofficial "the transfer is disregarded for purposes of section 7874";
+}
+@source(IRC_S7874_C, relation = formalizes, coverage = exact, quote = "The transfer of properties or liabilities (including by contribution or distribution) shall be disregarded")
+rule S7874TransferDisregarded strict {
+    for t: InversionItem;
+    when transfer_part_of_avoidance_plan(t);
+    then transfer_disregarded(t);
+}
+relation domestic_partnership(p: Person) kind empirical {
+    label en unofficial "the person is a domestic partnership";
+}
+relation partnerships_under_common_control_482(p: Person, q: Person) kind empirical {
+    label en unofficial "the partnerships are under common control within the meaning of section 482";
+}
+relation regulations_provide_otherwise_for_related_partnerships(p: Person, q: Person) kind empirical {
+    label en unofficial "regulations provide an exception to the one-partnership rule for these partnerships";
+}
+pub relation treated_as_one_partnership(p: Person, q: Person) kind institutional {
+    label en unofficial "the partnerships are treated as 1 partnership for applying subsection (a)(2)(B)(ii) to the acquisition of a partnership trade or business (§7874(c)(5))";
+}
+@source(IRC_S7874_C, relation = formalizes, coverage = exact, quote = "all partnerships which are under common control (within the meaning of section 482) shall be treated as 1 partnership")
+rule S7874RelatedPartnershipsOne defeasible {
+    for p: Person;
+    for q: Person;
+    when domestic_partnership(p)
+        and domestic_partnership(q)
+        and partnerships_under_common_control_482(p, q);
+    then treated_as_one_partnership(p, q);
+    unless regulations_provide_otherwise_for_related_partnerships(p, q) and domestic_partnership(p) and domestic_partnership(q);
+}
+
+// --- (c)(6), (g): regulations -------------------------------------------------------------------------
+
+relation secretary_prescribes_7874_surrogate_regulations(o: Organ) kind empirical {
+    label en unofficial "the Secretary prescribes regulations to determine whether a corporation is a surrogate foreign corporation, including regulations treating warrants, options, contracts, convertible debt and similar interests as stock and treating stock as not stock";
+}
+relation secretary_prescribes_7874_avoidance_regulations(o: Organ) kind empirical {
+    label en unofficial "the Secretary provides regulations necessary to carry out the section, including adjustments to prevent avoidance through related persons, pass-through entities or intermediaries, and through transactions designed to change membership of expanded affiliated groups or related persons";
+}
+@source(IRC_S7874_C, relation = formalizes, coverage = exact, quote = "The Secretary shall prescribe such regulations as may be appropriate to determine whether a corporation is a surrogate foreign corporation")
+rule S7874SurrogateRegulationsDuty strict {
+    when true;
+    then duty S7874PrescribeSurrogateRegulations {
+        bearer Secretary;
+        goal maintenance {
+            condition secretary_prescribes_7874_surrogate_regulations(Secretary);
+            window [-infinity, infinity];
+        }
+    };
+}
+@source(IRC_S7874_G, relation = formalizes, coverage = exact, quote = "The Secretary shall provide such regulations as are necessary to carry out this section")
+rule S7874AvoidanceRegulationsDuty strict {
+    when true;
+    then duty S7874PrescribeAvoidanceRegulations {
+        bearer Secretary;
+        goal maintenance {
+            condition secretary_prescribes_7874_avoidance_regulations(Secretary);
+            window [-infinity, infinity];
+        }
+    };
+}
+
+// --- (d)(2)-(3): inversion gain, foreign related person -----------------------------------------------
+
+relation foreign_person(p: Person) kind empirical {
+    label en unofficial "the person is a foreign person";
+}
+relation common_control_482(p: Person, q: Person) kind empirical {
+    label en unofficial "the persons are under the same common control within the meaning of section 482";
+}
+relation item_of_entity(t: InversionItem, x: Person) kind empirical {
+    label en unofficial "the item is a transfer or license by the expatriated entity";
+}
+relation item_date(t: InversionItem, dt: Date) kind empirical {
+    label en unofficial "the date of the transfer, or the date the license income is received or accrued";
+}
+relation item_part_of_acquisition(t: InversionItem) kind empirical {
+    label en unofficial "the transfer or license is part of the acquisition described in subsection (a)(2)(B)(i)";
+}
+relation item_counterparty(t: InversionItem, p: Person) kind empirical {
+    label en unofficial "the person to whom the stock or property is transferred or licensed";
+}
+relation item_property_is_inventory_1221a1(t: InversionItem) kind empirical {
+    label en unofficial "the property is described in section 1221(a)(1) in the hands of the expatriated entity";
+}
+pub relation foreign_related_person(p: Person, x: Person) kind institutional {
+    label en unofficial "the foreign person is a foreign related person with respect to the expatriated entity (§7874(d)(3))";
+}
+pub relation qualifying_inversion_item(t: InversionItem) kind institutional {
+    label en unofficial "the item's income or gain counts toward inversion gain (§7874(d)(2))";
+}
+@source(IRC_S7874_D, relation = formalizes, coverage = exact, quote = "is related (within the meaning of section 267(b) or 707(b)(1)) to such entity")
+rule S7874ForeignRelatedByRelation strict {
+    for p: Person;
+    for x: Person;
+    when foreign_person(p)
+        and related_under_267b_or_707b1(p, x);
+    then foreign_related_person(p, x);
+}
+@source(IRC_S7874_D, relation = formalizes, coverage = exact, quote = "is under the same common control (within the meaning of section 482) as such entity")
+rule S7874ForeignRelatedByCommonControl strict {
+    for p: Person;
+    for x: Person;
+    when foreign_person(p)
+        and common_control_482(p, x);
+    then foreign_related_person(p, x);
+}
+@source(IRC_S7874_D, relation = formalizes, coverage = exact, quote = "as part of the acquisition described in subsection (a)(2)(B)(i)")
+rule S7874ItemPartOfAcquisition strict {
+    for t: InversionItem;
+    for x: Person;
+    for e: Person;
+    for d: Person;
+    for s: Date;
+    for f: Date;
+    for dt: Date;
+    when item_of_entity(t, x)
+        and applicable_period(x, e, d, s, f)
+        and item_date(t, dt)
+        and dt >= s
+        and dt <= f
+        and item_part_of_acquisition(t)
+        and not_known(transfer_disregarded(t));
+    then qualifying_inversion_item(t);
+}
+@source(IRC_S7874_D, relation = formalizes, coverage = exact, quote = "after such acquisition if the transfer or license is to a foreign related person")
+rule S7874ItemToForeignRelatedPerson strict {
+    for t: InversionItem;
+    for x: Person;
+    for e: Person;
+    for d: Person;
+    for s: Date;
+    for f: Date;
+    for dt: Date;
+    for p: Person;
+    when item_of_entity(t, x)
+        and applicable_period(x, e, d, s, f)
+        and item_date(t, dt)
+        and dt >= s
+        and dt <= f
+        and item_counterparty(t, p)
+        and foreign_related_person(p, x)
+        and not_known(item_property_is_inventory_1221a1(t))
+        and not_known(transfer_disregarded(t));
+    then qualifying_inversion_item(t);
+}
+
+// --- (a)(1), (e)(1): the tax floor and the credit ceiling ---------------------------------------------
+
+relation taxable_income_before_floor(x: Person, y: TaxableYear, amt: Money) kind empirical {
+    label en unofficial "the taxable income of the expatriated entity for the year before applying subsection (a)(1)";
+}
+relation year_includes_applicable_period_portion(x: Person, y: TaxableYear) kind empirical {
+    label en unofficial "the taxable year includes any portion of the applicable period";
+}
+relation inversion_gain_for_year(x: Person, y: TaxableYear, amt: Money) kind empirical {
+    label en unofficial "the inversion gain of the entity for the taxable year: the sum of the income and gain of the qualifying items of the year (case-supplied, TECH-GAPS G3013)";
+}
+pub relation taxable_income_after_floor(x: Person, y: TaxableYear, amt: Money) kind institutional {
+    label en unofficial "the taxable income of the expatriated entity for the year, being no less than its inversion gain (§7874(a)(1))";
+}
+@source(IRC_S7874_A, relation = formalizes, coverage = exact, quote = "shall in no event be less than the inversion gain of the entity for the taxable year")
+rule S7874TaxableIncomeFloor strict {
+    for x: Person;
+    for y: TaxableYear;
+    for ti: Money;
+    for gain: Money;
+    when expatriated_entity(x)
+        and year_includes_applicable_period_portion(x, y)
+        and taxable_income_before_floor(x, y, ti)
+        and inversion_gain_of_year(x, y, gain);
+    then taxable_income_after_floor(x, y, max(ti, gain));
+}
+relation highest_section_11b_rate(y: TaxableYear, r: Decimal) kind empirical {
+    label en unofficial "the highest rate of tax specified in section 11(b) for the year (case fact; no rate is pinned here)";
+}
+relation tax_imposed_by_chapter_for_year(x: Person, y: TaxableYear, amt: Money) kind empirical {
+    label en unofficial "the tax imposed by chapter 1 on the expatriated entity for the year";
+}
+pub relation credit_ceiling_other_than_901(x: Person, y: TaxableYear, amt: Money) kind institutional {
+    label en unofficial "the amount of credits (other than the section 901 credit) allowed against the tax: the excess of the tax over the product of the inversion gain and the highest rate (§7874(e)(1))";
+}
+@source(IRC_S7874_E, relation = formalizes, coverage = exact, quote = "only to the extent such tax exceeds the product of")
+rule S7874CreditCeiling strict {
+    for x: Person;
+    for y: TaxableYear;
+    for tax: Money;
+    for gain: Money;
+    for r: Decimal;
+    when expatriated_entity(x)
+        and year_includes_applicable_period_portion(x, y)
+        and tax_imposed_by_chapter_for_year(x, y, tax)
+        and inversion_gain_of_year(x, y, gain)
+        and highest_section_11b_rate(y, r);
+    then credit_ceiling_other_than_901(x, y, max(0.00 USD, tax - round(gain * r, 2, "HALF_UP")));
+}
+pub relation inversion_gain_us_source(x: Person, y: TaxableYear) kind institutional {
+    label en unofficial "inversion gain is treated as from sources within the United States for purposes of the section 901 credit (§7874(e)(1))";
+}
+@source(IRC_S7874_E, relation = formalizes, coverage = exact, quote = "inversion gain shall be treated as from sources within the United States")
+rule S7874InversionGainUsSource strict {
+    for x: Person;
+    for y: TaxableYear;
+    for gain: Money;
+    when expatriated_entity(x)
+        and inversion_gain_of_year(x, y, gain);
+    then inversion_gain_us_source(x, y);
+}
+
+// --- (e)(2): partnerships -----------------------------------------------------------------------------
+
+relation expatriated_partnership(x: Person) kind empirical {
+    label en unofficial "the expatriated entity is a partnership";
+}
+relation partner_of(p: Person, x: Person) kind empirical {
+    label en unofficial "the person is a partner of the partnership";
+}
+relation partner_distributive_share_of_inversion_gain(p: Person, y: TaxableYear, amt: Money) kind empirical {
+    label en unofficial "the partner's distributive share of the inversion gain of the partnership for the year";
+}
+relation partner_gain_on_interest_transfer_to_surrogate(p: Person, y: TaxableYear, amt: Money) kind empirical {
+    label en unofficial "gain recognized for the year by the partner by reason of the transfer during the applicable period of any partnership interest to the surrogate foreign corporation";
+}
+relation partner_highest_rate(p: Person, y: TaxableYear, r: Decimal) kind empirical {
+    label en unofficial "the highest rate of tax specified in the rate schedule applicable to the partner under chapter 1 (case fact)";
+}
+relation partner_year_includes_applicable_period_portion(p: Person, y: TaxableYear) kind empirical {
+    label en unofficial "the taxable year includes any portion of the applicable period";
+}
+relation partner_taxable_income_before_floor(p: Person, y: TaxableYear, amt: Money) kind empirical {
+    label en unofficial "the partner's taxable income for the year before applying subsection (a)(1)";
+}
+relation partner_tax_imposed_for_year(p: Person, y: TaxableYear, amt: Money) kind empirical {
+    label en unofficial "the tax imposed by chapter 1 on the partner for the year";
+}
+pub relation partner_inversion_gain(p: Person, y: TaxableYear, amt: Money) kind institutional {
+    label en unofficial "the inversion gain of the partner for the year (§7874(e)(2)(B))";
+}
+pub relation partner_taxable_income_after_floor(p: Person, y: TaxableYear, amt: Money) kind institutional {
+    label en unofficial "the partner's taxable income, no less than the partner's inversion gain: subsection (a)(1) applies at the partner level (§7874(e)(2)(A))";
+}
+pub relation partner_credit_ceiling_other_than_901(p: Person, y: TaxableYear, amt: Money) kind institutional {
+    label en unofficial "the credit ceiling of the partner, using the partner's highest rate (§7874(e)(2)(C))";
+}
+@source(IRC_S7874_E, relation = formalizes, coverage = exact, quote = "the partner's distributive share of inversion gain of the partnership for such taxable year, plus")
+rule S7874PartnerInversionGain strict {
+    for p: Person;
+    for x: Person;
+    for y: TaxableYear;
+    for share: Money;
+    for xfer: Money;
+    when expatriated_partnership(x)
+        and expatriated_entity(x)
+        and partner_of(p, x)
+        and partner_distributive_share_of_inversion_gain(p, y, share)
+        and partner_gain_on_interest_transfer_to_surrogate(p, y, xfer);
+    then partner_inversion_gain(p, y, share + xfer);
+}
+@source(IRC_S7874_E, relation = formalizes, coverage = exact, quote = "subsection (a)(1) shall apply at the partner rather than the partnership level")
+rule S7874PartnerTaxableIncomeFloor strict {
+    for p: Person;
+    for y: TaxableYear;
+    for ti: Money;
+    for gain: Money;
+    when partner_year_includes_applicable_period_portion(p, y)
+        and partner_taxable_income_before_floor(p, y, ti)
+        and partner_inversion_gain(p, y, gain);
+    then partner_taxable_income_after_floor(p, y, max(ti, gain));
+}
+@source(IRC_S7874_E, relation = formalizes, coverage = exact, quote = "the highest rate of tax specified in the rate schedule applicable to the partner under this chapter shall be substituted for the rate of tax referred to in paragraph (1)")
+rule S7874PartnerCreditCeiling strict {
+    for p: Person;
+    for y: TaxableYear;
+    for tax: Money;
+    for gain: Money;
+    for r: Decimal;
+    when partner_year_includes_applicable_period_portion(p, y)
+        and partner_tax_imposed_for_year(p, y, tax)
+        and partner_inversion_gain(p, y, gain)
+        and partner_highest_rate(p, y, r);
+    then partner_credit_ceiling_other_than_901(p, y, max(0.00 USD, tax - round(gain * r, 2, "HALF_UP")));
+}
+
+// --- (e)(4): statute of limitations -------------------------------------------------------------------
+
+relation inv_year_begin(y: TaxableYear, d: Date) kind empirical {
+    label en unofficial "the first day of the taxable year";
+}
+relation inv_year_end(y: TaxableYear, d: Date) kind empirical {
+    label en unofficial "the last day of the taxable year";
+}
+relation acquisition_completion_year(e: Person, d: Person, y: TaxableYear) kind empirical {
+    label en unofficial "the taxable year in which the acquisition described in subsection (a)(2)(B)(i) is completed";
+}
+relation secretary_notified_of_acquisition_on(x: Person, dt: Date) kind empirical {
+    label en unofficial "the date the Secretary is notified by the taxpayer, in the prescribed manner, of the acquisition to which the gain relates";
+}
+relation inversion_deficiency_for_year(x: Person, y: TaxableYear) kind empirical {
+    label en unofficial "a deficiency of the taxpayer is attributable to the inversion gain for the year";
+}
+relation assessment_made_on(x: Person, y: TaxableYear, dt: Date) kind empirical {
+    label en unofficial "the Secretary assesses the deficiency on this date";
+}
+pub relation pre_inversion_year(x: Person, y: TaxableYear) kind institutional {
+    label en unofficial "the taxable year includes a portion of the applicable period and ends before the taxable year in which the acquisition is completed (§7874(e)(4)(B))";
+}
+pub relation assessment_period_not_before(x: Person, y: TaxableYear, dt: Date) kind institutional {
+    label en unofficial "the assessment period for a deficiency attributable to inversion gain of a pre-inversion year does not expire before this date: 3 years after the notice (§7874(e)(4)(A))";
+}
+relation inversion_deficiency_assessable(x: Person, y: TaxableYear) kind derived {
+    label en unofficial "a deficiency attributable to inversion gain of a pre-inversion year may be assessed within the extended period";
+}
+pub relation inversion_deficiency_assessed(x: Person, y: TaxableYear) kind institutional {
+    label en unofficial "the deficiency attributable to inversion gain was assessed within the extended period";
+}
+@source(IRC_S7874_E, relation = formalizes, coverage = exact, quote = "any portion of the applicable period is included in such taxable year")
+rule S7874PreInversionYear strict {
+    for x: Person;
+    for y: TaxableYear;
+    for e: Person;
+    for d: Person;
+    for cy: TaxableYear;
+    for yend: Date;
+    for cbegin: Date;
+    when expatriation_link(x, e, d)
+        and year_includes_applicable_period_portion(x, y)
+        and acquisition_completion_year(e, d, cy)
+        and inv_year_end(y, yend)
+        and inv_year_begin(cy, cbegin)
+        and yend < cbegin;
+    then pre_inversion_year(x, y);
+}
+@source(IRC_S7874_E, relation = formalizes, coverage = exact, quote = "shall not expire before the expiration of 3 years from the date the Secretary is notified by the taxpayer")
+rule S7874AssessmentPeriodFloor strict {
+    for x: Person;
+    for y: TaxableYear;
+    for n: Date;
+    when pre_inversion_year(x, y)
+        and inversion_deficiency_for_year(x, y)
+        and secretary_notified_of_acquisition_on(x, n);
+    then assessment_period_not_before(x, y, add_calendar_period(n, 3 calendar_year));
+}
+rule S7874DeficiencyAssessable strict {
+    for x: Person;
+    for y: TaxableYear;
+    for floor: Date;
+    for at: Date;
+    when assessment_period_not_before(x, y, floor)
+        and assessment_made_on(x, y, at)
+        and at < floor;
+    then inversion_deficiency_assessable(x, y);
+}
+@source(IRC_S7874_E, relation = formalizes, coverage = exact, quote = "such deficiency may be assessed before the expiration of such 3-year period notwithstanding the provisions of any other law or rule of law which would otherwise prevent such assessment")
+rule S7874AssessmentPower strict {
+    for x: Person;
+    for y: TaxableYear;
+    for at: Date;
+    when assessment_made_on(x, y, at);
+    then power S7874AssessInversionDeficiency {
+        holder Secretary;
+        over x;
+        exercise assessment_made_on(x, y, at);
+        valid_when inversion_deficiency_assessable(x, y);
+        effect create(inversion_deficiency_assessed(x, y));
+    };
+}
+
+// --- (f): treaties ------------------------------------------------------------------------------------
+
+pub relation treaty_exemption_unavailable(x: Person) kind institutional {
+    label en unofficial "no exemption from section 7874 arises by reason of any treaty obligation of the United States (§7874(f)): sections 894 and 7852(d) and other law do not permit it";
+}
+@source(IRC_S7874_F, relation = formalizes, coverage = exact, quote = "Nothing in section 894 or 7852(d) or in any other provision of law shall be construed as permitting an exemption")
+rule S7874TreatyNoExemption strict {
+    for x: Person;
+    when expatriated_entity(x);
+    then treaty_exemption_unavailable(x);
+}

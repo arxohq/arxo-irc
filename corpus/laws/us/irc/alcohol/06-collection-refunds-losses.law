@@ -1,0 +1,236 @@
+// Sections 5061 (method of collecting tax), 5062 (refund and drawback on
+// exportation), 5064 (losses from disaster, vandalism, or malicious
+// mischief).
+
+// --- Section 5061(a): return-based collection (duty, maintenance) ------------
+
+use self::{
+    DrawbackFilingFrequency,
+    IRC_S5061_A,
+    IRC_S5061_D,
+    IRC_S5061_E,
+    IRC_S5062_B,
+    IRC_S5064_A,
+    IRC_S5064_B,
+    Person,
+};
+
+pub relation is_alcohol_taxpayer(p: Person) kind empirical {
+    label en official "p is liable for tax on distilled spirits, wines, or beer under this chapter (section 5061(a))";
+}
+pub relation alcohol_tax_return_filed(p: Person, period: us.irc.core::Period) kind empirical {
+    label en official "the taxpayer files the section 5061(a) return for the period";
+}
+@source(IRC_S5061_A, coverage = exact, quote = "The taxes on distilled spirits, wines, and beer shall be collected on the basis of a return.")
+rule Section5061aReturnBasedCollectionDutyRule(p: Person) strict {
+    label en official "section 5061(a): the taxpayer's duty to file the return the Secretary's regulations prescribe (period, form, and payment timing left to those regulations — EXTERNAL_DEPENDENCY for their specific content, the duty itself is executable)";
+    when is_alcohol_taxpayer(p);
+    then duty Section5061aReturnDuty {
+        bearer p;
+        goal maintenance {
+            condition exists_timely_alcohol_tax_return(p);
+            window [-infinity, infinity];
+        }
+    };
+}
+pub relation exists_timely_alcohol_tax_return(p: Person) kind institutional {
+    label en unofficial "some section 5061(a) return exists for a period this taxpayer owed tax for, filed by its due date (positive existential over `alcohol_tax_return_filed` plus the section 5061(d) due-date rules below)";
+}
+
+// --- Section 5061(d): last day for payment (return-period thresholds) -------
+
+pub enum AlcoholReturnPeriod { Semimonthly; Quarterly; Annual; }
+pub relation expected_annual_alcohol_tax_liability(p: Person, year: Integer, amount: Money) kind empirical {
+    label en official "the amount of tax the taxpayer reasonably expects to be liable for, under subparts A, C, and D and section 7652, for the calendar year (section 5061(d)(4)(A))";
+}
+pub relation prior_year_alcohol_tax_liability(p: Person, year: Integer, amount: Money) kind empirical {
+    label en official "the amount of such tax the taxpayer was actually liable for in the PRECEDING calendar year (section 5061(d)(4)(A))";
+}
+pub relation alcohol_return_period(p: Person, year: Integer, period: AlcoholReturnPeriod) kind institutional {
+    label en official "the return/payment period applicable to this taxpayer for the calendar year (section 5061(d))";
+}
+@source(IRC_S5061_D, coverage = exact, quote = "In the case of any taxpayer who reasonably expects to be liable for not more than $1,000 in taxes imposed with respect to distilled spirits, wines, and beer under subparts A, C, and D and section 7652 for the calendar year and who was liable for not more than $1,000 in such taxes in the preceding calendar year, the last day for the payment of tax on withdrawals, removals, and entries (and articles brought into the United States from Puerto Rico) shall be the 14th day after the last day of the calendar year.")
+rule Section5061d4AnnualPeriodRule(p: Person, year: Integer, expected: Money, prior: Money) strict {
+    label en official "section 5061(d)(4)(A)(ii): annual payment when expected AND prior-year liability are each at most $1,000";
+    when expected_annual_alcohol_tax_liability(p, year, expected);
+    when prior_year_alcohol_tax_liability(p, year, prior);
+    when expected <= ReturnPeriodAnnualThreshold;
+    when prior <= ReturnPeriodAnnualThreshold;
+    then alcohol_return_period(p, year, Annual);
+}
+@source(IRC_S5061_D, coverage = exact, quote = "in the case of any taxpayer who reasonably expects to be liable for not more than $50,000 in taxes imposed with respect to distilled spirits, wines, and beer under subparts A, C, and D and section 7652 for the calendar year and who was liable for not more than $50,000 in such taxes in the preceding calendar year, the last day for the payment of tax on withdrawals, removals, and entries (and articles brought into the United States from Puerto Rico) shall be the 14th day after the last day of the calendar quarter")
+rule Section5061d4QuarterlyPeriodRule(p: Person, year: Integer, expected: Money, prior: Money) defeasible {
+    label en official "section 5061(d)(4)(A)(i): quarterly payment when expected AND prior-year liability are each at most $50,000, and the taxpayer does not already qualify for the stricter annual period";
+    when expected_annual_alcohol_tax_liability(p, year, expected);
+    when prior_year_alcohol_tax_liability(p, year, prior);
+    when expected <= ReturnPeriodQuarterlyThreshold;
+    when prior <= ReturnPeriodQuarterlyThreshold;
+    unless expected <= ReturnPeriodAnnualThreshold and prior <= ReturnPeriodAnnualThreshold and expected_annual_alcohol_tax_liability(p, year, expected) and prior_year_alcohol_tax_liability(p, year, prior);
+    then alcohol_return_period(p, year, Quarterly);
+}
+@source(IRC_S5061_D, coverage = exact, quote = "the last day for payment of such tax shall be the 14th day after the last day of the semimonthly period during which the withdrawal occurs")
+rule Section5061d1SemimonthlyDefaultPeriodRule(p: Person, year: Integer, expected: Money, prior: Money) defeasible {
+    label en official "section 5061(d)(1): semimonthly is the default period for a taxpayer that does not qualify for the quarterly or annual thresholds of (d)(4)";
+    when expected_annual_alcohol_tax_liability(p, year, expected);
+    when prior_year_alcohol_tax_liability(p, year, prior);
+    unless expected <= ReturnPeriodQuarterlyThreshold and prior <= ReturnPeriodQuarterlyThreshold and expected_annual_alcohol_tax_liability(p, year, expected) and prior_year_alcohol_tax_liability(p, year, prior);
+    then alcohol_return_period(p, year, Semimonthly);
+}
+// (d)(4)(B): mid-year loss of quarterly/annual eligibility once the running
+// aggregate tax due for the year exceeds the threshold — a self-accumulating
+// running total over the year's own removals, the SAME class of gap as the
+// section 5001(c)/5041(c)/5051(a) cumulative tiers (TECH_GAP, not modelled:
+// this rule only decides the period from the EXPECTED/PRIOR-YEAR facts, not
+// a mid-year switch). (d)(2)-(3) (import/Puerto Rico due dates), (d)(5)
+// (September accelerated payment), (d)(6) (section 7503 weekend/holiday
+// rollover, owned by `administration`): EXTERNAL_DEPENDENCY/TECH_GAP, not
+// modelled — see the package report.
+
+// --- Section 5061(e): electronic funds transfer duty --------------------------
+
+pub relation gross_12_month_alcohol_tax_liability(p: Person, ending_dec_31: Integer, amount: Money) kind empirical {
+    label en official "the taxpayer's gross amount of tax imposed on distilled spirits, wine, or beer under sections 5001, 5041, and 5051 (or 7652) for the 12-month period ending December 31 (section 5061(e)(1))";
+}
+pub relation must_pay_by_electronic_funds_transfer(p: Person, year: Integer) kind institutional {
+    label en official "the taxpayer must pay its distilled spirits/wine/beer taxes during this calendar year by electronic funds transfer to a Federal Reserve Bank (section 5061(e)(1))";
+}
+@source(IRC_S5061_E, coverage = exact, quote = "Any person who in any 12-month period ending December 31, was liable for a gross amount equal to or exceeding $5,000,000 in taxes imposed on distilled spirits, wines, or beer by sections 5001, 5041, and 5051 (or 7652), respectively, shall pay such taxes during the succeeding calendar year by electronic fund transfer to a Federal Reserve Bank.")
+rule Section5061eEftDutyRule(p: Person, prior_ending: Integer, amount: Money) strict {
+    label en official "section 5061(e)(1): a $5,000,000-or-more 12-month gross liability requires electronic-funds-transfer payment the succeeding calendar year";
+    when gross_12_month_alcohol_tax_liability(p, prior_ending, amount);
+    when amount >= ElectronicFundsTransferThreshold;
+    then must_pay_by_electronic_funds_transfer(p, prior_ending + 1);
+}
+// (e)(3): controlled-group-of-corporations single-taxpayer treatment for
+// the $5,000,000 threshold reuses `alcohol_controlled_group_member`
+// (module 01) in the SAME way section 5001(c)(2)/5051(a)(5) do — not
+// re-derived a third time; the aggregation of each member's own liability
+// into the group total is itself case-asserted, per the same judgment call.
+
+// --- Section 5062: refund and drawback on exportation (power) --------------
+
+pub entity ExportedSpiritsOrWine {
+    label en unofficial "distilled spirits or wine manufactured, produced, bottled, or packaged in the United States on which tax has been paid or determined, and which is exported (section 5062(b))";
+}
+pub relation drawback_claim_filed(e: ExportedSpiritsOrWine, p: Person) kind empirical {
+    label en official "the bottler or packager files a claim for drawback of the tax found to have been paid or determined on the exported spirits/wine (section 5062(b))";
+}
+pub relation spirits_marked_for_export(e: ExportedSpiritsOrWine) kind empirical {
+    label en official "the distilled spirits have been marked, especially for export, under Secretary regulations (section 5062(b), condition specific to distilled spirits)";
+}
+pub relation is_distilled_spirits_export(e: ExportedSpiritsOrWine) kind empirical {
+    label en unofficial "the exported article is distilled spirits (as opposed to wine), for the section 5062(b) marking condition that applies only to spirits";
+}
+pub relation is_wine_export(e: ExportedSpiritsOrWine) kind empirical {
+    label en unofficial "the exported article is wine (as opposed to distilled spirits) — no export-marking condition applies to it under section 5062(b)";
+}
+pub relation tax_paid_or_determined_amount(e: ExportedSpiritsOrWine, amount: Money) kind empirical {
+    label en official "the amount of internal revenue tax found to have been paid or determined on the exported distilled spirits or wine (section 5062(b))";
+}
+pub relation drawback_allowed(e: ExportedSpiritsOrWine, amount: Money) kind institutional {
+    label en official "the section 5062(b) drawback, equal in amount to the tax paid or determined, is allowed on exportation";
+}
+@source(IRC_S5062_B, coverage = exact, quote = "there shall be allowed, under regulations prescribed by the Secretary, a drawback equal in amount to the tax found to have been paid or determined on such distilled spirits or wines")
+rule Section5062bDrawbackPowerRule(e: ExportedSpiritsOrWine, p: Person, amount: Money) defeasible {
+    label en official "section 5062(b): the bottler/packager's drawback claim on export is valid unless the exported article is distilled spirits that were not marked for export as the statute requires";
+    when drawback_claim_filed(e, p);
+    when tax_paid_or_determined_amount(e, amount);
+    then power Section5062DrawbackClaim {
+        holder p;
+        over e;
+        exercise drawback_claim_filed(e, p);
+        valid_when drawback_claim_valid(e);
+        effect create(drawback_allowed(e, amount));
+        window [-infinity, infinity];
+    };
+}
+pub relation drawback_claim_valid(e: ExportedSpiritsOrWine) kind institutional {
+    label en official "the section 5062(b) marking condition (if the exported article is distilled spirits) is satisfied, or does not apply (the article is wine)";
+}
+@source(IRC_S5062_B, relation = formalizes, coverage = exact, quote = "In the case of distilled spirits, the preceding sentence shall not apply unless the claim for drawback is filed by the bottler or packager of the spirits and unless such spirits have been marked, especially for export, under regulations prescribed by the Secretary.")
+rule Section5062bSpiritsMarkingConditionRule(e: ExportedSpiritsOrWine) strict {
+    label en official "for an exported distilled-spirits article, the drawback condition requires the export marking";
+    when is_distilled_spirits_export(e);
+    when spirits_marked_for_export(e);
+    then drawback_claim_valid(e);
+}
+@source(IRC_S5062_B, relation = derives_from, coverage = contextual, quote = "there shall be allowed, under regulations prescribed by the Secretary, a drawback")
+rule Section5062bWineNoMarkingConditionRule(e: ExportedSpiritsOrWine) strict {
+    label en official "the export-marking condition of the second sentence applies only to distilled spirits: a wine export needs no marking to be valid";
+    when is_wine_export(e);
+    then drawback_claim_valid(e);
+}
+
+// --- Section 5064: losses from disaster, vandalism, or malicious mischief ---
+
+pub enum DamageCause { FireFloodCasualtyOrOtherDisaster; VandalismOrMaliciousMischief; }
+pub entity HeldForSaleAlcohol {
+    label en unofficial "distilled spirits, wine, or beer previously withdrawn and held and intended for sale at the time of a disaster or damage (section 5064(a))";
+}
+pub relation damaged_by(h: HeldForSaleAlcohol, cause: DamageCause, on: Date) kind empirical {
+    label en official "the article was lost, rendered unmarketable, or condemned by a duly authorized official by reason of this cause, on this date (section 5064(a))";
+}
+pub relation held_for_sale_at_time_of_damage(h: HeldForSaleAlcohol) kind empirical {
+    label en official "the article was held and intended for sale at the time of the disaster or other damage (section 5064(a))";
+}
+pub relation occurred_in_united_states(h: HeldForSaleAlcohol) kind empirical {
+    label en official "the disaster or damage occurred in the United States (section 5064(a))";
+}
+pub relation disaster_loss_claim_filed(h: HeldForSaleAlcohol, p: Person, filed_on: Date) kind empirical {
+    label en official "the person holding the article for sale at the time of the damage files a claim under section 5064(a)";
+}
+pub relation not_indemnified_by_insurance(h: HeldForSaleAlcohol) kind empirical {
+    label en official "the claimant was not indemnified by any valid claim of insurance or otherwise in respect of the tax (or tax and duty) on the article (section 5064(b)(1)(B)(i))";
+}
+pub relation claim_amount(h: HeldForSaleAlcohol, amount: Money) kind empirical {
+    label en official "the amount of internal revenue taxes paid or determined (and customs duties paid) on the damaged article (section 5064(a))";
+}
+pub relation major_disaster_extension_applies(h: HeldForSaleAlcohol) kind empirical {
+    label en unofficial "a Presidentially-declared major disaster under the Stafford Act applies to this loss (section 5064(b)(3)) — lifts the $250 minimum and extends the filing window; case-asserted, the Presidential-determination fact itself is EXTERNAL_DEPENDENCY";
+}
+pub relation disaster_loss_payment_allowed(h: HeldForSaleAlcohol, amount: Money) kind institutional {
+    label en official "the section 5064(a) payment (without interest) is allowed for this loss";
+}
+@source(IRC_S5064_A, coverage = partial, quote = "shall pay (without interest) an amount equal to the amount of the internal revenue taxes paid or determined and customs duties paid on distilled spirits, wines, and beer previously withdrawn, which were lost, rendered unmarketable, or condemned by a duly authorized official")
+rule Section5064DisasterLossClaimPowerRule(h: HeldForSaleAlcohol, p: Person, cause: DamageCause, filed_on: Date, damaged_on: Date, amount: Money) defeasible {
+    label en official "section 5064: the holder's claim for the disaster/vandalism loss payment is valid when held for sale in the US at the time of damage, not insurance-indemnified, filed within the timely window, and (absent a major-disaster extension) at least $250";
+    when disaster_loss_claim_filed(h, p, filed_on);
+    when damaged_by(h, cause, damaged_on);
+    when claim_amount(h, amount);
+    then power Section5064DisasterLossClaim {
+        holder p;
+        over h;
+        exercise disaster_loss_claim_filed(h, p, filed_on);
+        valid_when disaster_loss_claim_valid(h, filed_on, damaged_on);
+        effect create(disaster_loss_payment_allowed(h, amount));
+        window [-infinity, infinity];
+    };
+}
+pub relation disaster_loss_claim_valid(h: HeldForSaleAlcohol, filed_on: Date, damaged_on: Date) kind institutional {
+    label en official "the section 5064(b) validity conditions are met: US situs, held for sale, not indemnified, timely filing, and (absent a major-disaster extension) at least the $250 minimum";
+}
+@source(IRC_S5064_B, relation = formalizes, coverage = exact, quote = "filed within 6 months after the date on which such distilled spirits, wines, or beer were lost, rendered unmarketable, or condemned by a duly authorized official")
+rule Section5064bTimelyOrdinaryRule(h: HeldForSaleAlcohol, p: Person, filed_on: Date, damaged_on: Date, amount: Money, cause: DamageCause) defeasible {
+    label en official "the ordinary section 5064(b)(1)(A)/(b)(2) claim: US situs, held for sale, not indemnified, filed within 6 months, and at least $250";
+    when occurred_in_united_states(h);
+    when held_for_sale_at_time_of_damage(h);
+    when not_indemnified_by_insurance(h);
+    when claim_amount(h, amount);
+    when amount >= DisasterLossClaimMinimum;
+    when damaged_by(h, cause, damaged_on);
+    when disaster_loss_claim_filed(h, p, filed_on);
+    when filed_on <= add_calendar_period(damaged_on, 6 calendar_month);
+    unless major_disaster_extension_applies(h) and claim_amount(h, amount) and damaged_by(h, cause, damaged_on) and disaster_loss_claim_filed(h, p, filed_on);
+    then disaster_loss_claim_valid(h, filed_on, damaged_on);
+}
+@source(IRC_S5064_B, relation = formalizes, coverage = exact, quote = "the filing period set forth in paragraph (1)(A) shall not expire before the day which is 6 months after the date on which the President makes the determination that such major disaster has occurred")
+rule Section5064bMajorDisasterExtensionRule(h: HeldForSaleAlcohol, p: Person, filed_on: Date, damaged_on: Date, cause: DamageCause) strict {
+    label en official "under a Presidentially-declared major disaster, the $250 minimum does not apply and untimeliness under the ordinary 6-month window alone does not bar the claim (the extended deadline itself, keyed to the Presidential determination date, is case-asserted — EXTERNAL_DEPENDENCY for that date's own source)";
+    when occurred_in_united_states(h);
+    when held_for_sale_at_time_of_damage(h);
+    when not_indemnified_by_insurance(h);
+    when major_disaster_extension_applies(h);
+    when damaged_by(h, cause, damaged_on);
+    when disaster_loss_claim_filed(h, p, filed_on);
+    then disaster_loss_claim_valid(h, filed_on, damaged_on);
+}

@@ -1,0 +1,284 @@
+// Administration -- stage 4b (26.09.2026, DECISION-0379, implemented_unverified): rows of the capital construction fund
+// (section 7518), of the below-market loan present value (section 7872) that stages 3 and 4 left as TECH_GAP and that
+// can be stated over EMPIRICAL relations with bounded unrolling.
+//
+// METHOD AND JUDGMENT CALLS.
+//  - The ledger of the fund is a list of items ordered by an ordinal k (oldest deposit first) with the deposit year; the
+//    first-in-first-out and last-in-first-out consumption of a withdrawal is min(item, max(0, withdrawal - sum of the
+//    items ahead of it)), the sum being taken over the EMPIRICAL items (no aggregate over a derived predicate, section 111
+//    subset limit). Items are supplied by the case; the ordering by ordinal must agree with the deposit years.
+//  - Interest under (g)(3)(C)(ii) is recorded as a legal state (the running start date and the applicable rate); the
+//    accrual arithmetic (simple or compounded, day count) is delegated to joint regulations and is not computed.
+//  - Section 7872(b)(1)(B), (f)(1): the present value of each payment is discounted at the applicable Federal rate
+//    compounded semiannually over whole half-years h = 0..63 (binary powers of 1 + r/2 built by let-chain); the amount is
+//    rounded to cents HALF_UP per payment (corpus convention, no rounding named); day-count fractions of a half-year
+//    are outside the bound and belong to the regulations the text names.
+
+language "law.core" version "0.2";
+package us.irc.administration version "0.1.1";
+namespace "urn:us:irc:administration:clir";
+
+use self::{
+    BelowMarketLoan,
+    CapitalConstructionFund,
+    FundAccount,
+    FundWithdrawal,
+    IRC_S7518_D,
+    IRC_S7518_F,
+    IRC_S7518_G,
+    IRC_S7872_B,
+    IRC_S7872_F,
+    TaxableYear,
+    afr_at_loan_date,
+    amount_loaned,
+    basis_reduction_owed_on_debt_payment,
+    nonqualified_withdrawal,
+    term_loan,
+    withdrawal_from_account,
+    withdrawal_from_fund,
+};
+
+// ============================================================================
+// section 7518(d)(5): capital losses offset only the matching gains
+// ============================================================================
+
+pub enum HoldingTerm7518 {
+    MoreThan6Months;     // (d)(3): the capital gain account
+    SixMonthsOrLess;     // (d)(4)(B): the ordinary income account
+    label en unofficial "the holding period of the fund assets: more than 6 months (capital gain account) or 6 months or less (ordinary income account)";
+}
+pub relation account_component_gains_7518d5(f: CapitalConstructionFund, y: TaxableYear, term: HoldingTerm7518, amt: Money) kind empirical {
+    label en official "section 7518(d)(3)(A), (4)(B)(i): the gains of the year on fund assets of the holding period";
+}
+pub relation account_component_losses_7518d5(f: CapitalConstructionFund, y: TaxableYear, term: HoldingTerm7518, amt: Money) kind empirical {
+    label en official "section 7518(d)(3)(B), (4)(B)(ii): the capital losses of the year on fund assets of the holding period";
+}
+pub relation prior_gain_component_balance_7518d5(f: CapitalConstructionFund, term: HoldingTerm7518, amt: Money) kind empirical {
+    label en official "section 7518(d)(5): the gains of that kind already in the account before the year (case-supplied balance; the ledger across years is not iterated)";
+}
+pub relation fund_terminates_in_year_7518d5(f: CapitalConstructionFund, y: TaxableYear) kind empirical {
+    label en official "section 7518(d)(5): the capital construction fund is terminated in the year";
+}
+pub relation allowed_capital_loss_offset_7518d5(f: CapitalConstructionFund, y: TaxableYear, term: HoldingTerm7518, allowed: Money) kind institutional {
+    label en official "section 7518(d)(5): the capital losses allowed in the year as an offset to the gains of the matching kind: not more than the year's gains plus the prior balance of gains of that kind, and all of them on termination of the fund";
+}
+@source(IRC_S7518_D, quote = "Except on termination of a capital construction fund, capital losses referred to in paragraph (3)(B) or in paragraph (4)(B)(ii) shall be allowed only as an offset to gains referred to in paragraph (3)(A) or (4)(B)(i), respectively.")
+rule AllowedCapitalLossOffsetGoing(f: CapitalConstructionFund, y: TaxableYear, term: HoldingTerm7518, gains: Money, losses: Money, prior: Money) defeasible {
+    label en official "section 7518(d)(5), not a termination year: losses limited by the matching gains";
+    when account_component_gains_7518d5(f, y, term, gains);
+    when account_component_losses_7518d5(f, y, term, losses);
+    when prior_gain_component_balance_7518d5(f, term, prior);
+    unless fund_terminates_in_year_7518d5(f, y) and account_component_gains_7518d5(f, y, term, gains) and account_component_losses_7518d5(f, y, term, losses) and prior_gain_component_balance_7518d5(f, term, prior);
+    then allowed_capital_loss_offset_7518d5(f, y, term, min(losses, gains + prior));
+}
+@source(IRC_S7518_D, quote = "Except on termination of a capital construction fund, capital losses referred to in paragraph (3)(B) or in paragraph (4)(B)(ii) shall be allowed only as an offset to gains referred to in paragraph (3)(A) or (4)(B)(i), respectively.")
+rule AllowedCapitalLossOffsetOnTermination(f: CapitalConstructionFund, y: TaxableYear, term: HoldingTerm7518, losses: Money) defeasible {
+    label en official "section 7518(d)(5), on termination of the fund: all the losses are allowed";
+    when account_component_losses_7518d5(f, y, term, losses);
+    when fund_terminates_in_year_7518d5(f, y);
+    then allowed_capital_loss_offset_7518d5(f, y, term, losses);
+}
+pub relation net_gain_component_after_offset_7518d5(f: CapitalConstructionFund, y: TaxableYear, term: HoldingTerm7518, net: Money) kind institutional {
+    label en official "section 7518(d)(3), (4)(B): the net change of the account component in the year: the gains less the allowed losses (the accumulated gains of that kind never fall below zero unless the fund terminates)";
+}
+rule NetGainComponentAfterOffset(f: CapitalConstructionFund, y: TaxableYear, term: HoldingTerm7518, gains: Money, allowed: Money) defeasible {
+    label en official "section 7518(d)(3), (4)(B) with (5)";
+    when account_component_gains_7518d5(f, y, term, gains);
+    when allowed_capital_loss_offset_7518d5(f, y, term, allowed);
+    then net_gain_component_after_offset_7518d5(f, y, term, gains - allowed);
+}
+
+// ============================================================================
+// section 7518(f)(4): the reduction applied to the bases of vessels, barges and containers in the joint-regulation order
+// ============================================================================
+
+pub relation vessel_basis_in_regulation_order_7518f4(w: FundWithdrawal, o: Integer, basis: Money) kind empirical {
+    label en official "section 7518(f)(4): the basis of a vessel, barge or container owned by the person maintaining the fund, with its place o in the order provided in joint regulations (EXTERNAL_DEPENDENCY: the order is supplied by the case)";
+}
+pub relation debt_basis_reduction_applied_7518f4(w: FundWithdrawal, o: Integer, applied: Money) kind institutional {
+    label en official "section 7518(f)(4), first sentence: the part of the aggregate reduction applied to the asset in the order, not more than its basis. JUDGMENT CALL: a basis is not reduced below zero";
+}
+@source(IRC_S7518_F, quote = "then an amount equal to the aggregate reduction which would be required by paragraphs (2) and (3) if this were a qualified withdrawal for a purpose described in such paragraphs shall be applied, in the order provided in joint regulations, to reduce the basis of vessels, barges, and containers owned by the person maintaining the fund.")
+rule DebtBasisReductionApplied(w: FundWithdrawal, o: Integer, basis: Money, owed: Money) defeasible {
+    label en official "section 7518(f)(4): the reduction is used up asset by asset";
+    when basis_reduction_owed_on_debt_payment(w, owed);
+    when vessel_basis_in_regulation_order_7518f4(w, o, basis);
+    then debt_basis_reduction_applied_7518f4(w, o, min(basis, max(0.00 USD, owed - sum(collect all b: Money, j: Integer where vessel_basis_in_regulation_order_7518f4(w, j, b) and j < o, empty: 0.00 USD))));
+}
+pub relation debt_withdrawal_remainder_treated_nonqualified_7518f4(w: FundWithdrawal, amt: Money) kind institutional {
+    label en official "section 7518(f)(4), second sentence: any amount of the withdrawal remaining after the application of the reduction is treated as a nonqualified withdrawal";
+}
+@source(IRC_S7518_F, quote = "Any amount of a withdrawal remaining after the application of the preceding sentence shall be treated as a nonqualified withdrawal.")
+rule DebtWithdrawalRemainderNonqualified(w: FundWithdrawal, owed: Money, o: Integer, basis: Money) defeasible {
+    label en official "section 7518(f)(4), second sentence: the reduction owed exceeds the bases available";
+    when basis_reduction_owed_on_debt_payment(w, owed);
+    when vessel_basis_in_regulation_order_7518f4(w, o, basis);
+    when owed > sum(collect all b: Money, j: Integer where vessel_basis_in_regulation_order_7518f4(w, j, b), empty: 0.00 USD);
+    then debt_withdrawal_remainder_treated_nonqualified_7518f4(w, owed - sum(collect all b2: Money, j2: Integer where vessel_basis_in_regulation_order_7518f4(w, j2, b2), empty: 0.00 USD));
+}
+
+// ============================================================================
+// section 7518(g)(2): first-in-first-out and last-in-first-out consumption of the items of an account
+// ============================================================================
+
+pub relation fund_ledger_item_7518g2(f: CapitalConstructionFund, a: FundAccount, k: Integer, deposit_year: Integer, amt: Money) kind empirical {
+    label en official "section 7518(g)(2): an item of the account with its ordinal k (oldest first) and the deposit year";
+}
+pub relation withdrawal_for_ship_design_research_7518g2i(w: FundWithdrawal) kind empirical {
+    label en official "section 7518(g)(2)(i): the nonqualified withdrawal is for research, development, and design expenses incident to new and advanced ship design, machinery and equipment";
+}
+pub relation amount_treated_nonqualified_under_f4_second_sentence_7518g2ii(w: FundWithdrawal) kind empirical {
+    label en official "section 7518(g)(2)(ii): the amount is treated as a nonqualified withdrawal under the second sentence of subsection (f)(4)";
+}
+pub relation last_in_first_out_withdrawal_7518g2(w: FundWithdrawal) kind institutional {
+    label en official "section 7518(g)(2), last sentence: the withdrawal is treated as withdrawn on a last-in-first-out basis";
+}
+rule LastInFirstOutForShipDesignResearch(w: FundWithdrawal) defeasible {
+    label en official "section 7518(g)(2)(i)";
+    when withdrawal_for_ship_design_research_7518g2i(w);
+    then last_in_first_out_withdrawal_7518g2(w);
+}
+rule LastInFirstOutForF4Remainder(w: FundWithdrawal) defeasible {
+    label en official "section 7518(g)(2)(ii)";
+    when amount_treated_nonqualified_under_f4_second_sentence_7518g2ii(w);
+    then last_in_first_out_withdrawal_7518g2(w);
+}
+pub relation nonqualified_withdrawal_from_item_7518g2(w: FundWithdrawal, a: FundAccount, k: Integer, taken: Money) kind institutional {
+    label en official "section 7518(g)(2): the part of the nonqualified withdrawal out of the account that is taken from the item";
+}
+@source(IRC_S7518_G, quote = "For purposes of this section, items withdrawn from any account shall be treated as withdrawn on a first-in-first-out basis;")
+rule ItemWithdrawnFirstInFirstOut(w: FundWithdrawal, f: CapitalConstructionFund, a: FundAccount, k: Integer, dy: Integer, amt: Money, total: Money) defeasible {
+    label en official "section 7518(g)(2): the oldest items are consumed first";
+    when nonqualified_withdrawal(w);
+    when withdrawal_from_fund(w, f);
+    when withdrawal_from_account(w, a, total);
+    when fund_ledger_item_7518g2(f, a, k, dy, amt);
+    unless last_in_first_out_withdrawal_7518g2(w) and nonqualified_withdrawal(w) and withdrawal_from_fund(w, f) and withdrawal_from_account(w, a, total) and fund_ledger_item_7518g2(f, a, k, dy, amt);
+    then nonqualified_withdrawal_from_item_7518g2(w, a, k, min(amt, max(0.00 USD, total - sum(collect all b: Money, j: Integer, dj: Integer where fund_ledger_item_7518g2(f, a, j, dj, b) and j < k, empty: 0.00 USD))));
+}
+@source(IRC_S7518_G, quote = "except that (i) any nonqualified withdrawal for research, development, and design expenses incident to new and advanced ship design, machinery and equipment, and (ii) any amount treated as a nonqualified withdrawal under the second sentence of subsection (f)(4), shall be treated as withdrawn on a last-in-first-out basis.")
+rule ItemWithdrawnLastInFirstOut(w: FundWithdrawal, f: CapitalConstructionFund, a: FundAccount, k: Integer, dy: Integer, amt: Money, total: Money) defeasible {
+    label en official "section 7518(g)(2)(i)-(ii): the newest items are consumed first";
+    when nonqualified_withdrawal(w);
+    when withdrawal_from_fund(w, f);
+    when withdrawal_from_account(w, a, total);
+    when fund_ledger_item_7518g2(f, a, k, dy, amt);
+    when last_in_first_out_withdrawal_7518g2(w);
+    then nonqualified_withdrawal_from_item_7518g2(w, a, k, min(amt, max(0.00 USD, total - sum(collect all b: Money, j: Integer, dj: Integer where fund_ledger_item_7518g2(f, a, j, dj, b) and j > k, empty: 0.00 USD))));
+}
+
+// ============================================================================
+// section 7518(g)(3)(C)(ii)-(iii): interest on the additional tax from the deposit year
+// ============================================================================
+
+pub relation applicable_rate_of_interest_7518g4(w: FundWithdrawal, rate: Decimal) kind empirical {
+    label en official "section 7518(g)(4): the applicable rate determined and published jointly (EXTERNAL_DEPENDENCY: the joint regulations and the comparison with 8 percent are not computed; the rate is a case fact)";
+}
+pub relation deposit_year_last_payment_date_7518g3Cii(f: CapitalConstructionFund, dy: Integer, d: Date) kind empirical {
+    label en official "section 7518(g)(3)(C)(ii): the last date prescribed for payment of the tax for the taxable year for which the item was deposited";
+}
+pub relation withdrawal_arises_from_606_5_recapture_7518g3Ciii(w: FundWithdrawal) kind empirical {
+    label en official "section 7518(g)(3)(C)(iii): the nonqualified withdrawal arises from the application of the recapture provision of section 606(5) of the Merchant Marine Act, 1936, as in effect on December 31, 1969";
+}
+pub relation no_interest_on_withdrawal_7518g3Ciii(w: FundWithdrawal) kind institutional {
+    label en official "section 7518(g)(3)(C)(iii): no interest is payable on the amounts referred to in clauses (i) and (ii) of paragraph (2) or on a section 606(5) recapture withdrawal";
+}
+rule NoInterestOnLastInFirstOutAmounts(w: FundWithdrawal) defeasible {
+    label en official "section 7518(g)(3)(C)(iii): the amounts of paragraph (2)(i)-(ii)";
+    when last_in_first_out_withdrawal_7518g2(w);
+    then no_interest_on_withdrawal_7518g3Ciii(w);
+}
+rule NoInterestOnRecaptureWithdrawal(w: FundWithdrawal) defeasible {
+    label en official "section 7518(g)(3)(C)(iii): the section 606(5) recapture";
+    when withdrawal_arises_from_606_5_recapture_7518g3Ciii(w);
+    then no_interest_on_withdrawal_7518g3Ciii(w);
+}
+pub relation interest_runs_from_deposit_year_due_date_7518g3Cii(w: FundWithdrawal, a: FundAccount, k: Integer, from_day: Date, rate: Decimal) kind institutional {
+    label en official "section 7518(g)(3)(C)(ii): interest on the additional tax attributable to the item (ordinary income or capital gain account) is paid at the applicable rate from the last date prescribed for payment of the tax for the year of the item deposit. The accrual arithmetic is delegated to joint regulations and is not computed";
+}
+@source(IRC_S7518_G, quote = "(ii) interest on the amount of the additional tax attributable to any item referred to in subparagraph (A) or (B) shall be paid at the applicable rate (as defined in paragraph (4)) from the last date prescribed for payment of the tax for the taxable year for which such item was deposited in the fund, and")
+rule InterestRunsFromDepositYearDueDate(w: FundWithdrawal, f: CapitalConstructionFund, a: FundAccount, k: Integer, dy: Integer, amt: Money, taken: Money, from_day: Date, rate: Decimal) defeasible {
+    label en official "section 7518(g)(3)(C)(ii): a positive amount taken from an ordinary income or capital gain account item";
+    when nonqualified_withdrawal_from_item_7518g2(w, a, k, taken);
+    when taken > 0.00 USD;
+    when a != CapitalAccount;
+    when withdrawal_from_fund(w, f);
+    when fund_ledger_item_7518g2(f, a, k, dy, amt);
+    when deposit_year_last_payment_date_7518g3Cii(f, dy, from_day);
+    when applicable_rate_of_interest_7518g4(w, rate);
+    unless no_interest_on_withdrawal_7518g3Ciii(w) and nonqualified_withdrawal_from_item_7518g2(w, a, k, taken) and withdrawal_from_fund(w, f) and fund_ledger_item_7518g2(f, a, k, dy, amt) and deposit_year_last_payment_date_7518g3Cii(f, dy, from_day) and applicable_rate_of_interest_7518g4(w, rate);
+    then interest_runs_from_deposit_year_due_date_7518g3Cii(w, a, k, from_day, rate);
+}
+
+// ============================================================================
+// section 7518(g)(5)(B), (E): earnings and the balances of January 1, 1987 as deposits
+// ============================================================================
+
+pub relation fund_earnings_other_than_net_gains_7518g5B(f: CapitalConstructionFund, y: Integer, amt: Money) kind empirical {
+    label en official "section 7518(g)(5)(B): the earnings of the fund for the taxable year, other than net gains";
+}
+pub relation deemed_deposit_for_year_7518g5B(f: CapitalConstructionFund, y: Integer, amt: Money) kind institutional {
+    label en official "section 7518(g)(5)(B): the earnings are treated as an amount deposited for the taxable year (for the 25-year test of paragraph (5))";
+}
+@source(IRC_S7518_G, quote = "The earnings of any capital construction fund for any taxable year (other than net gains) shall be treated for purposes of this paragraph as an amount deposited for such taxable year.")
+rule EarningsTreatedAsDeposit7518g5B(f: CapitalConstructionFund, y: Integer, amt: Money) defeasible {
+    label en official "section 7518(g)(5)(B)";
+    when fund_earnings_other_than_net_gains_7518g5B(f, y, amt);
+    then deemed_deposit_for_year_7518g5B(f, y, amt);
+}
+pub relation amount_in_fund_on_1987_01_01_7518g5E(f: CapitalConstructionFund, amt: Money) kind empirical {
+    label en official "section 7518(g)(5)(E): the amounts in the fund on January 1, 1987";
+}
+pub relation deemed_deposit_on_date_7518g5E(f: CapitalConstructionFund, on: Date, amt: Money) kind institutional {
+    label en official "section 7518(g)(5)(E): all amounts in the fund on January 1, 1987 are treated as deposited in the fund on that date";
+}
+@source(IRC_S7518_G, quote = "For purposes of this paragraph, all amounts in a capital construction fund on January 1, 1987, shall be treated as deposited in such fund on such date.")
+rule AmountsOn1987TreatedAsDeposited7518g5E(f: CapitalConstructionFund, amt: Money) defeasible {
+    label en official "section 7518(g)(5)(E)";
+    when amount_in_fund_on_1987_01_01_7518g5E(f, amt);
+    then deemed_deposit_on_date_7518g5E(f, @1987-01-01, amt);
+}
+
+// ============================================================================
+// section 7872(b)(1)(B), (f)(1): present value of the payments of a term loan at the applicable Federal rate
+// ============================================================================
+
+pub relation loan_payment_due_7872(l: BelowMarketLoan, i: Integer, amt: Money, half_years: Integer) kind empirical {
+    label en official "section 7872(b)(1)(B): a payment required under the terms of the loan, with its number i and its time in whole half-years after the date of the loan";
+}
+pub relation computed_present_value_of_payments_7872(l: BelowMarketLoan, pv: Money) kind institutional {
+    label en official "section 7872(b)(1)(B), (f)(1): the present value, as of the date of the loan (A), of all payments required under the loan, by a discount rate equal to the applicable Federal rate (B), compounded semiannually";
+}
+@source(IRC_S7872_F, quote = "(A) as of the date of the loan, and")
+@source(IRC_S7872_F, quote = "(B) by using a discount rate equal to the applicable Federal rate.")
+rule PresentValueOfLoanPayments7872(l: BelowMarketLoan, r: Decimal, i0: Integer, a0: Money, h0: Integer) defeasible {
+    label en official "section 7872(f)(1): each payment divided by (1 + r/2) to the power of its half-years, rounded to cents HALF_UP, and summed (payments at 0..63 half-years)";
+    when term_loan(l);
+    when afr_at_loan_date(l, r);
+    when loan_payment_due_7872(l, i0, a0, h0);
+    then computed_present_value_of_payments_7872(l, sum(collect all x: Money, i: Integer, a: Money, h: Integer where loan_payment_due_7872(l, i, a, h) and h >= 0 and h <= 63 and x == div_round(a, (let f1: Decimal = 1.0 + r * 0.5 in let f2: Decimal = f1 * f1 in let f4: Decimal = f2 * f2 in let f8: Decimal = f4 * f4 in let f16: Decimal = f8 * f8 in let f32: Decimal = f16 * f16 in (if h mod 2 >= 1 then f1 else 1.0) * (if h mod 4 >= 2 then f2 else 1.0) * (if h mod 8 >= 4 then f4 else 1.0) * (if h mod 16 >= 8 then f8 else 1.0) * (if h mod 32 >= 16 then f16 else 1.0) * (if h mod 64 >= 32 then f32 else 1.0)), 2, "HALF_UP"), empty: 0.00 USD));
+}
+pub relation below_market_term_loan_by_computed_present_value_7872(l: BelowMarketLoan) kind institutional {
+    label en official "section 7872(e)(1)(B): a term loan whose amount loaned exceeds the computed present value of all payments due under the loan";
+}
+@source(IRC_S7872_B, quote = "(B) the present value of all payments which are required to be made under the terms of the loan.")
+rule BelowMarketTermLoanByComputedPresentValue(l: BelowMarketLoan, amt: Money, pv: Money) defeasible {
+    label en official "section 7872(b)(1): the excess of the amount loaned over the present value of all payments (bounded reading of the payments, above)";
+    when term_loan(l);
+    when amount_loaned(l, amt);
+    when computed_present_value_of_payments_7872(l, pv);
+    when amt > pv;
+    then below_market_term_loan_by_computed_present_value_7872(l);
+}
+pub relation excess_of_amount_loaned_over_present_value_7872b1(l: BelowMarketLoan, excess: Money) kind institutional {
+    label en official "section 7872(b)(1): the excess of the amount loaned over the present value of all payments (the amount treated as transferred by the lender to the borrower)";
+}
+@source(IRC_S7872_B, quote = "(B) the present value of all payments which are required to be made under the terms of the loan.")
+rule ExcessOfAmountLoanedOverPresentValue7872b1(l: BelowMarketLoan, amt: Money, pv: Money) defeasible {
+    label en official "section 7872(b)(1)";
+    when term_loan(l);
+    when amount_loaned(l, amt);
+    when computed_present_value_of_payments_7872(l, pv);
+    when amt > pv;
+    then excess_of_amount_loaned_over_present_value_7872b1(l, amt - pv);
+}
