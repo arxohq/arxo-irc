@@ -1,0 +1,983 @@
+// Stage 2c (IRC-07, A05). Section 1092: straddles — deferral of losses to the
+// extent of unrecognized gain in offsetting positions, the identified-straddle
+// regime, the qualified-covered-call exclusion, the (d) definitions, the
+// (f) covered-call holding-period rules and the (a)(3)(C) disclosure duty.
+//
+// Modelling notes.
+//  * The regulations §1092(a)(2)(D), (b), (c)(3)(A)(vi), (d)(3)(B) delegate
+//    to the Secretary are EXTERNAL_DEPENDENCY (no Treas. Reg. text is pinned).
+//    UPDATE 27.09.2026 (IRC-G/G4): 26 CFR 1.1092(b)-2T/-3T and 1.1017-1 are
+//    now pinned as phase-0 packages (us.cfr.t26_1_1092b_2t_3t,
+//    us.cfr.t26_1_1017_1) — addressable sources, still rule-less, not yet
+//    dependencies of this package (registry/lock gap, see cfr-wire STATUS).
+//    The reader rules below wire the delegation rows to case-selected
+//    regulation content; existing case-fact paths are untouched (parallel).
+//  * `substantial diminution of risk of loss` (c)(2)(A) is an evaluative
+//    element (DECISION-0194): an adjudicated fact, not an arithmetic guard.
+//  * Section 1092(a)(1)(B) carries a disallowed loss into the succeeding year
+//    where it is again subject to (a)(1)(A): the year-to-year chain is
+//    TECH-GAPS G2300 (cross-year recursion, LDC-E4102 class); this module
+//    derives ONE year's deferred amount and the case supplies the next year's
+//    loss including the carried amount.
+//  * Aggregates of unrecognized gain over a derived per-position relation are
+//    the §111 aggregate-over-derived limitation (G2301): the aggregate over
+//    the offsetting positions is a case-supplied total.
+
+use self::{
+    Asset,
+    IRC_S1092_A,
+    IRC_S1092_B,
+    IRC_S1092_C,
+    IRC_S1092_D,
+    IRC_S1092_E,
+    IRC_S1092_F,
+    Person,
+    TaxableYear,
+    Transaction,
+    covered_call_disqualification_derived_1092c4E,
+};
+
+pub entity StraddlePosition : Asset {
+    label en official "a position: an interest (including a futures or forward contract or option) in personal property (section 1092(d)(2))";
+}
+
+// =============================================================================
+// (d): definitions — personal property, position, related persons
+// =============================================================================
+
+pub relation position_held_by(p: Person, pos: StraddlePosition) kind empirical {
+    label en unofficial "the taxpayer holds the position (directly, or through the section 1092(d)(4) attribution)";
+}
+pub relation personal_property_of_actively_traded_type(pos: StraddlePosition) kind empirical {
+    label en official "section 1092(d)(1): the position relates to personal property of a type which is actively traded";
+}
+pub relation position_is_stock(pos: StraddlePosition) kind empirical {
+    label en unofficial "the position is in stock (section 1092(d)(3)(A))";
+}
+pub relation stock_of_type_actively_traded_with_offsetting_position_in_same_or_similar_property(pos: StraddlePosition) kind empirical {
+    label en official "section 1092(d)(3)(A)(i): the stock is of a type which is actively traded and at least 1 of the positions offsetting it is a position with respect to that stock or substantially similar or related property";
+}
+pub relation stock_of_corporation_formed_to_take_offsetting_positions(pos: StraddlePosition) kind empirical {
+    label en official "section 1092(d)(3)(A)(ii): the stock is of a corporation formed or availed of to take positions in personal property which offset positions taken by any shareholder";
+}
+pub relation position_in_personal_property_for_1092(pos: StraddlePosition) kind institutional {
+    label en official "section 1092(d)(1), (d)(3)(A): the position is a position with respect to personal property (stock only if (A)(i) or (A)(ii) holds)";
+}
+@source(IRC_S1092_D, relation = formalizes, coverage = partial, quote = "The term \"personal property\" means any personal property of a type which is actively traded.")
+rule NonStockPersonalPositionRule(pos: StraddlePosition) defeasible {
+    label en official "section 1092(d)(1): a non-stock position in actively traded personal property counts";
+    when personal_property_of_actively_traded_type(pos);
+    when not_known(position_is_stock(pos));
+    then position_in_personal_property_for_1092(pos);
+}
+@source(IRC_S1092_D, relation = formalizes, coverage = partial, quote = "such stock is of a type which is actively traded and at least 1 of the positions offsetting such stock is a position with respect to such stock or substantially similar or related property")
+rule StockPersonalPositionOffsetRule(pos: StraddlePosition) defeasible {
+    label en official "section 1092(d)(3)(A)(i): stock counts as personal property when actively traded and offset by the same or related property";
+    when position_is_stock(pos);
+    when personal_property_of_actively_traded_type(pos);
+    when stock_of_type_actively_traded_with_offsetting_position_in_same_or_similar_property(pos);
+    then position_in_personal_property_for_1092(pos);
+}
+@source(IRC_S1092_D, relation = formalizes, coverage = partial, quote = "such stock is of a corporation formed or availed of to take positions in personal property which offset positions taken by any shareholder")
+rule StockPersonalPositionCorporationRule(pos: StraddlePosition) defeasible {
+    label en official "section 1092(d)(3)(A)(ii): stock of a corporation formed to take positions offsetting a shareholder's positions counts as personal property";
+    when position_is_stock(pos);
+    when stock_of_corporation_formed_to_take_offsetting_positions(pos);
+    then position_in_personal_property_for_1092(pos);
+}
+pub relation related_person_of_taxpayer_1092(p: Person, other: Person) kind institutional {
+    label en official "section 1092(d)(4)(B): a person who is the spouse of the taxpayer, or files a consolidated return with the taxpayer for a year including part of the period the position is held";
+}
+pub relation spouse_of_1092(a: Person, b: Person) kind empirical {
+    label en unofficial "the two persons are spouses during the period the position is held";
+}
+pub relation files_consolidated_return_with(a: Person, b: Person) kind empirical {
+    label en unofficial "the person files a consolidated return (section 1501) with the taxpayer for a taxable year which includes a portion of the period";
+}
+@source(IRC_S1092_D, relation = formalizes, coverage = partial, quote = "is the spouse of the taxpayer, or")
+rule RelatedPersonSpouseRule(p: Person, other: Person) defeasible {
+    label en official "section 1092(d)(4)(B)(i): a spouse is a related person";
+    when spouse_of_1092(p, other);
+    then related_person_of_taxpayer_1092(p, other);
+}
+@source(IRC_S1092_D, relation = formalizes, coverage = partial, quote = "files a consolidated return (within the meaning of section 1501) with the taxpayer for any taxable year which includes a portion of such period.")
+rule RelatedPersonConsolidatedRule(p: Person, other: Person) defeasible {
+    label en official "section 1092(d)(4)(B)(ii): a consolidated-return filer is a related person";
+    when files_consolidated_return_with(other, p);
+    then related_person_of_taxpayer_1092(p, other);
+}
+pub relation position_treated_as_held_by_taxpayer(p: Person, pos: StraddlePosition) kind institutional {
+    label en official "section 1092(d)(4)(A): in determining whether positions are offsetting, the taxpayer is treated as holding any position held by a related person";
+}
+@source(IRC_S1092_D, relation = formalizes, coverage = partial, quote = "the taxpayer shall be treated as holding any position held by a related person.")
+rule TreatedAsHoldingRelatedPersonPositionRule(p: Person, other: Person, pos: StraddlePosition) defeasible {
+    label en official "section 1092(d)(4)(A): a related person's position is treated as the taxpayer's";
+    when related_person_of_taxpayer_1092(p, other);
+    when position_held_by(other, pos);
+    then position_treated_as_held_by_taxpayer(p, pos);
+}
+@source(IRC_S1092_D, relation = formalizes, coverage = partial, quote = "In determining whether 2 or more positions are offsetting")
+rule TreatedAsHoldingOwnPositionRule(p: Person, pos: StraddlePosition) defeasible {
+    label en unofficial "the taxpayer's own positions count as held by the taxpayer";
+    when position_held_by(p, pos);
+    then position_treated_as_held_by_taxpayer(p, pos);
+}
+pub relation position_held_by_entity_allocated_to_taxpayer(p: Person, pos: StraddlePosition) kind empirical {
+    label en official "section 1092(d)(4)(C): part or all of the gain or loss with respect to a position held by a partnership, trust or other entity would properly be taken into account by the taxpayer";
+}
+@source(IRC_S1092_D, relation = formalizes, coverage = partial, quote = "such position shall be treated as held by the taxpayer")
+rule EntityPositionTreatedAsHeldRule(p: Person, pos: StraddlePosition) defeasible {
+    label en official "section 1092(d)(4)(C): an entity's position whose gain or loss the taxpayer takes into account is held by the taxpayer (except as regulations provide)";
+    when position_held_by_entity_allocated_to_taxpayer(p, pos);
+    then position_treated_as_held_by_taxpayer(p, pos);
+}
+pub relation obligor_interest_in_nonfunctional_currency_debt(pos: StraddlePosition) kind empirical {
+    label en official "section 1092(d)(7)(A): an obligor's interest in a nonfunctional-currency-denominated debt obligation";
+}
+pub relation foreign_currency_with_active_interbank_market(pos: StraddlePosition) kind empirical {
+    label en official "section 1092(d)(7)(B): foreign currency for which there is an active interbank market";
+}
+pub relation position_in_nonfunctional_currency(pos: StraddlePosition) kind institutional {
+    label en official "section 1092(d)(7)(A): an obligor's interest in nonfunctional-currency debt is a position in the nonfunctional currency";
+}
+@source(IRC_S1092_D, relation = formalizes, coverage = partial, quote = "an obligor's interest in a nonfunctional currency denominated debt obligation is treated as a position in the nonfunctional currency.")
+rule ObligorNonfunctionalCurrencyPositionRule(pos: StraddlePosition) defeasible {
+    label en official "section 1092(d)(7)(A)";
+    when obligor_interest_in_nonfunctional_currency_debt(pos);
+    then position_in_nonfunctional_currency(pos);
+}
+@source(IRC_S1092_D, relation = formalizes, coverage = partial, quote = "foreign currency for which there is an active interbank market is presumed to be actively traded.")
+rule InterbankCurrencyPresumedActivelyTradedRule(pos: StraddlePosition) defeasible {
+    label en official "section 1092(d)(7)(B): a rebuttable presumption that foreign currency with an active interbank market is actively traded";
+    when foreign_currency_with_active_interbank_market(pos);
+    then personal_property_of_actively_traded_type(pos);
+}
+
+// =============================================================================
+// (c): straddle and offsetting positions
+// =============================================================================
+
+pub relation offsetting_by_substantial_diminution(p: Person, a: StraddlePosition, b: StraddlePosition) kind empirical {
+    label en official "section 1092(c)(2)(A): the taxpayer holds offsetting positions when there is a substantial diminution of the taxpayer's risk of loss from holding a position by reason of holding one or more other positions (an evaluative element, DECISION-0194: an adjudicated fact)";
+}
+pub relation same_personal_property_positions(a: StraddlePosition, b: StraddlePosition) kind empirical {
+    label en official "section 1092(c)(3)(A)(i): the positions are in the same personal property (established in it or a contract for it)";
+}
+pub relation same_property_in_substantially_altered_form(a: StraddlePosition, b: StraddlePosition) kind empirical {
+    label en official "section 1092(c)(3)(A)(ii): the positions are in the same personal property even though it may be in a substantially altered form";
+}
+pub relation debt_instruments_of_similar_maturity(a: StraddlePosition, b: StraddlePosition) kind empirical {
+    label en official "section 1092(c)(3)(A)(iii): the positions are in debt instruments of a similar maturity or other debt instruments described in regulations";
+}
+pub relation marketed_as_offsetting_positions(a: StraddlePosition, b: StraddlePosition) kind empirical {
+    label en official "section 1092(c)(3)(A)(iv): the positions are sold or marketed as offsetting positions (whether or not called a straddle, spread, butterfly, or any similar name)";
+}
+pub relation aggregate_margin_lower_than_separate_sum(a: StraddlePosition, b: StraddlePosition) kind empirical {
+    label en official "section 1092(c)(3)(A)(v): the aggregate margin requirement for the positions is lower than the sum of the margin requirements for each position held separately";
+}
+pub relation regulatory_indicator_of_offsetting(a: StraddlePosition, b: StraddlePosition) kind empirical {
+    label en official "section 1092(c)(3)(A)(vi): such other factors (or subjective or objective tests) as the Secretary prescribes by regulations indicate the positions are offsetting (EXTERNAL_DEPENDENCY: no regulation text is pinned)";
+}
+pub relation values_ordinarily_vary_inversely(a: StraddlePosition, b: StraddlePosition) kind empirical {
+    label en official "section 1092(c)(3)(A), last sentence: the value of one position ordinarily varies inversely with the value of the other";
+}
+pub relation offsetting_presumption_rebutted(p: Person, a: StraddlePosition, b: StraddlePosition) kind empirical {
+    label en official "section 1092(c)(3)(B): the presumption established under subparagraph (A) is rebutted";
+}
+pub relation presumed_offsetting(a: StraddlePosition, b: StraddlePosition) kind institutional {
+    label en official "section 1092(c)(3)(A): two or more positions are presumed to be offsetting";
+}
+@source(IRC_S1092_C, relation = formalizes, coverage = partial, quote = "the positions are in the same personal property (whether established in such property or a contract for such property)")
+rule PresumedOffsettingSamePropertyRule(a: StraddlePosition, b: StraddlePosition) defeasible {
+    label en official "section 1092(c)(3)(A)(i) with the last sentence: same-property positions are presumed offsetting only if their values ordinarily vary inversely";
+    when same_personal_property_positions(a, b);
+    when values_ordinarily_vary_inversely(a, b);
+    then presumed_offsetting(a, b);
+}
+@source(IRC_S1092_C, relation = formalizes, coverage = partial, quote = "the positions are in the same personal property, even though such property may be in a substantially altered form")
+rule PresumedOffsettingAlteredFormRule(a: StraddlePosition, b: StraddlePosition) defeasible {
+    label en official "section 1092(c)(3)(A)(ii) with the last sentence";
+    when same_property_in_substantially_altered_form(a, b);
+    when values_ordinarily_vary_inversely(a, b);
+    then presumed_offsetting(a, b);
+}
+@source(IRC_S1092_C, relation = formalizes, coverage = partial, quote = "the positions are in debt instruments of a similar maturity or other debt instruments described in regulations prescribed by the Secretary")
+rule PresumedOffsettingDebtRule(a: StraddlePosition, b: StraddlePosition) defeasible {
+    label en official "section 1092(c)(3)(A)(iii) with the last sentence";
+    when debt_instruments_of_similar_maturity(a, b);
+    when values_ordinarily_vary_inversely(a, b);
+    then presumed_offsetting(a, b);
+}
+@source(IRC_S1092_C, relation = formalizes, coverage = partial, quote = "there are such other factors (or satisfaction of subjective or objective tests) as the Secretary may by regulations prescribe as indicating that such positions are offsetting")
+rule PresumedOffsettingRegulatoryRule(a: StraddlePosition, b: StraddlePosition) defeasible {
+    label en official "section 1092(c)(3)(A)(vi) with the last sentence";
+    when regulatory_indicator_of_offsetting(a, b);
+    when values_ordinarily_vary_inversely(a, b);
+    then presumed_offsetting(a, b);
+}
+@source(IRC_S1092_C, relation = formalizes, coverage = partial, quote = "the positions are sold or marketed as offsetting positions (whether or not such positions are called a straddle, spread, butterfly, or any similar name)")
+rule PresumedOffsettingMarketedRule(a: StraddlePosition, b: StraddlePosition) defeasible {
+    label en official "section 1092(c)(3)(A)(iv): marketed as offsetting (no inverse-variation condition)";
+    when marketed_as_offsetting_positions(a, b);
+    then presumed_offsetting(a, b);
+}
+@source(IRC_S1092_C, relation = formalizes, coverage = partial, quote = "the aggregate margin requirement for such positions is lower than the sum of the margin requirements for each such position (if held separately)")
+rule PresumedOffsettingMarginRule(a: StraddlePosition, b: StraddlePosition) defeasible {
+    label en official "section 1092(c)(3)(A)(v): lower aggregate margin (no inverse-variation condition)";
+    when aggregate_margin_lower_than_separate_sum(a, b);
+    then presumed_offsetting(a, b);
+}
+pub relation part_of_identified_straddle(a: StraddlePosition) kind empirical {
+    label en official "section 1092(c)(2)(B): the position is part of an identified straddle (subsection (a)(2)(B))";
+}
+pub relation offsetting_positions_1092(p: Person, a: StraddlePosition, b: StraddlePosition) kind institutional {
+    label en official "section 1092(c)(2): the taxpayer holds offsetting positions with respect to personal property";
+}
+@source(IRC_S1092_C, relation = formalizes, coverage = partial, quote = "A taxpayer holds offsetting positions with respect to personal property if there is a substantial diminution of the taxpayer's risk of loss")
+rule OffsettingByDiminutionRule(p: Person, a: StraddlePosition, b: StraddlePosition) defeasible {
+    label en official "section 1092(c)(2)(A): substantial diminution of risk of loss makes positions offsetting, unless an identified-straddle position is paired with a non-identified one (c)(2)(B)";
+    when offsetting_by_substantial_diminution(p, a, b);
+    when position_treated_as_held_by_taxpayer(p, a);
+    when position_treated_as_held_by_taxpayer(p, b);
+    when not_known(identified_pairing_excluded(a, b));
+    then offsetting_positions_1092(p, a, b);
+}
+@source(IRC_S1092_C, relation = formalizes, coverage = partial, quote = "2 or more positions shall be presumed to be offsetting if—")
+rule OffsettingByPresumptionRule(p: Person, a: StraddlePosition, b: StraddlePosition) defeasible {
+    label en official "section 1092(c)(3)(A)-(B): presumed offsetting unless the presumption is rebutted";
+    when presumed_offsetting(a, b);
+    when position_treated_as_held_by_taxpayer(p, a);
+    when position_treated_as_held_by_taxpayer(p, b);
+    when not_known(identified_pairing_excluded(a, b));
+    unless offsetting_presumption_rebutted(p, a, b);
+    then offsetting_positions_1092(p, a, b);
+}
+pub relation identified_pairing_excluded(a: StraddlePosition, b: StraddlePosition) kind institutional {
+    label en official "section 1092(c)(2)(B): a position which is not part of an identified straddle is not offsetting with respect to a position which is part of one";
+}
+@source(IRC_S1092_C, relation = formalizes, coverage = partial, quote = "such position shall not be treated as offsetting with respect to any position which is part of an identified straddle.")
+rule NonIdentifiedNotOffsettingIdentifiedRule(a: StraddlePosition, b: StraddlePosition) defeasible {
+    label en official "section 1092(c)(2)(B): the exclusion, first order (a outside, b inside an identified straddle)";
+    when part_of_identified_straddle(b);
+    when position_ordered_pair_1092(a, b);
+    when not_known(part_of_identified_straddle(a));
+    then identified_pairing_excluded(a, b);
+}
+rule NonIdentifiedNotOffsettingIdentifiedReverseRule(a: StraddlePosition, b: StraddlePosition) defeasible {
+    label en official "section 1092(c)(2)(B): the exclusion, second order (b outside, a inside)";
+    when part_of_identified_straddle(a);
+    when position_ordered_pair_1092(a, b);
+    when not_known(part_of_identified_straddle(b));
+    then identified_pairing_excluded(a, b);
+}
+pub relation position_ordered_pair_1092(a: StraddlePosition, b: StraddlePosition) kind empirical {
+    label en unofficial "the two positions are the pair under test (binds both variables of the exclusion rules)";
+}
+pub relation straddle_1092(p: Person, a: StraddlePosition, b: StraddlePosition) kind institutional {
+    label en official "section 1092(c)(1): a straddle is offsetting positions with respect to personal property (both positions being positions in personal property, section 1092(d)(1)-(2))";
+}
+@source(IRC_S1092_C, relation = formalizes, coverage = partial, quote = "The term \"straddle\" means offsetting positions with respect to personal property.")
+rule StraddleDefinitionRule(p: Person, a: StraddlePosition, b: StraddlePosition) defeasible {
+    label en official "section 1092(c)(1)";
+    when offsetting_positions_1092(p, a, b);
+    when position_in_personal_property_for_1092(a);
+    when position_in_personal_property_for_1092(b);
+    then straddle_1092(p, a, b);
+}
+
+// (c)(4): qualified covered call options — excluded from the straddle regime
+pub entity CoveredCallOption : Asset {
+    label en official "an option granted by the taxpayer to purchase stock held by the taxpayer (section 1092(c)(4)(B))";
+}
+pub relation option_traded_on_qualifying_market(opt: CoveredCallOption) kind empirical {
+    label en official "section 1092(c)(4)(B)(i): traded on a national securities exchange registered with the SEC or another market the Secretary determines has adequate rules";
+}
+pub relation days_from_grant_to_expiry(opt: CoveredCallOption, days: Integer) kind empirical {
+    label en unofficial "the number of days from the day the option is granted to the day it expires";
+}
+pub relation option_granted_by_options_dealer_in_dealing(opt: CoveredCallOption) kind empirical {
+    label en official "section 1092(c)(4)(B)(iv): granted by an options dealer (section 1256(g)(8)) in connection with the activity of dealing in options";
+}
+pub relation option_gain_or_loss_is_ordinary(opt: CoveredCallOption) kind empirical {
+    label en official "section 1092(c)(4)(B)(v) (negated): gain or loss with respect to the option is ordinary income or loss";
+}
+pub relation strike_price(opt: CoveredCallOption, amount: Money) kind empirical {
+    label en official "section 1092(c)(4)(F): the price at which the option is exercisable";
+}
+pub relation applicable_stock_price_i(opt: CoveredCallOption, amount: Money) kind empirical {
+    label en official "section 1092(c)(4)(G)(i): the closing price of the stock on the most recent day it was traded before the option was granted";
+}
+pub relation opening_price_on_grant_day(opt: CoveredCallOption, amount: Money) kind empirical {
+    label en official "section 1092(c)(4)(G)(ii): the opening price of the stock on the day the option was granted";
+}
+pub relation applicable_stock_price(opt: CoveredCallOption, amount: Money) kind institutional {
+    label en official "section 1092(c)(4)(G): the closing price (i), or the opening price (ii) only if it is greater than 110 percent of the price under (i)";
+}
+@source(IRC_S1092_C, relation = formalizes, coverage = partial, quote = "the closing price of such stock on the most recent day on which such stock was traded before the date on which such option was granted, or")
+rule ApplicableStockPriceClosingRule(opt: CoveredCallOption, closing: Money, opening: Money) defeasible {
+    label en official "section 1092(c)(4)(G)(i): the closing price, unless the opening price exceeds 110 percent of it";
+    when applicable_stock_price_i(opt, closing);
+    when opening_price_on_grant_day(opt, opening);
+    when opening <= closing * 110 percent;
+    then applicable_stock_price(opt, closing);
+}
+@source(IRC_S1092_C, relation = formalizes, coverage = partial, quote = "the opening price of such stock on the day on which such option was granted, but only if such price is greater than 110 percent of the price determined under clause (i).")
+rule ApplicableStockPriceOpeningRule(opt: CoveredCallOption, closing: Money, opening: Money) defeasible {
+    label en official "section 1092(c)(4)(G)(ii): the opening price when it exceeds 110 percent of the closing price";
+    when applicable_stock_price_i(opt, closing);
+    when opening_price_on_grant_day(opt, opening);
+    when opening > closing * 110 percent;
+    then applicable_stock_price(opt, opening);
+}
+pub relation highest_available_strike_below_price(opt: CoveredCallOption, amount: Money) kind empirical {
+    label en official "section 1092(c)(4)(D)(i): the highest available strike price which is less than the applicable stock price";
+}
+pub relation second_highest_available_strike_below_price(opt: CoveredCallOption, amount: Money) kind empirical {
+    label en official "section 1092(c)(4)(D)(ii): the second highest available strike price which is less than the applicable stock price";
+}
+pub const CoveredCallLongGrantDays: Integer = 90 {
+    label en official "more than 90 days before the expiry (section 1092(c)(4)(D)(ii)(I))";
+};
+pub const CoveredCallHighStrikeFloor: Money = 50.00 USD {
+    label en official "a strike price of more than $50 (section 1092(c)(4)(D)(ii)(II))";
+};
+pub const CoveredCallLowPriceCeiling: Money = 25.00 USD {
+    label en official "an applicable stock price of $25 or less (section 1092(c)(4)(D)(iii)(I))";
+};
+pub const CoveredCallMidPriceCeiling: Money = 150.00 USD {
+    label en official "an applicable stock price of $150 or less (section 1092(c)(4)(D)(iv)(I))";
+};
+pub const CoveredCallTenDollarStep: Money = 10.00 USD {
+    label en official "reduced by $10 (section 1092(c)(4)(D)(iv)(II))";
+};
+pub relation bench_mark_after_clauses_i_ii(opt: CoveredCallOption, amount: Money) kind institutional {
+    label en unofficial "the lowest qualified bench mark after applying (D)(i) and (D)(ii); an intermediate value for the sequential (D)(iii)-(iv) floors";
+}
+@source(IRC_S1092_C, relation = formalizes, coverage = partial, quote = "means the highest available strike price which is less than the applicable stock price.")
+rule BenchMarkClauseIRule(opt: CoveredCallOption, hi: Money, days: Integer, strike: Money) defeasible {
+    label en official "section 1092(c)(4)(D)(i): the highest available strike below the applicable stock price, except where (D)(ii) applies (a granted-more-than-90-days option with a strike of $50 or less, or granted within 90 days)";
+    when highest_available_strike_below_price(opt, hi);
+    when days_from_grant_to_expiry(opt, days);
+    when strike_price(opt, strike);
+    when days <= CoveredCallLongGrantDays;
+    then bench_mark_after_clauses_i_ii(opt, hi);
+}
+@source(IRC_S1092_C, relation = formalizes, coverage = partial, quote = "the lowest qualified bench mark is the second highest available strike price which is less than the applicable stock price.")
+rule BenchMarkClauseIIRule(opt: CoveredCallOption, hi: Money, second: Money, days: Integer, strike: Money) defeasible {
+    label en official "section 1092(c)(4)(D)(ii): granted more than 90 days before expiry and strike more than $50 — the second highest available strike";
+    when second_highest_available_strike_below_price(opt, second);
+    when highest_available_strike_below_price(opt, hi);
+    when days_from_grant_to_expiry(opt, days);
+    when strike_price(opt, strike);
+    when days > CoveredCallLongGrantDays;
+    when strike > CoveredCallHighStrikeFloor;
+    then bench_mark_after_clauses_i_ii(opt, second);
+}
+@source(IRC_S1092_C, relation = formalizes, coverage = partial, quote = "granted more than 90 days before the date on which such option expires")
+rule BenchMarkLongGrantLowStrikeRule(opt: CoveredCallOption, hi: Money, days: Integer, strike: Money) defeasible {
+    label en official "section 1092(c)(4)(D)(i) for an option granted more than 90 days before expiry whose strike is $50 or less: (ii) does not apply, so the highest available strike governs";
+    when highest_available_strike_below_price(opt, hi);
+    when days_from_grant_to_expiry(opt, days);
+    when strike_price(opt, strike);
+    when days > CoveredCallLongGrantDays;
+    when strike <= CoveredCallHighStrikeFloor;
+    then bench_mark_after_clauses_i_ii(opt, hi);
+}
+pub relation bench_mark_after_clause_iii(opt: CoveredCallOption, amount: Money) kind institutional {
+    label en unofficial "the lowest qualified bench mark after the (D)(iii) 85-percent floor";
+}
+@source(IRC_S1092_C, relation = formalizes, coverage = partial, quote = "the lowest qualified bench mark shall be treated as equal to 85 percent of the applicable stock price.")
+rule BenchMarkClauseIIIFloorRule(opt: CoveredCallOption, b: Money, price: Money) defeasible {
+    label en official "section 1092(c)(4)(D)(iii): price of $25 or less and bench mark below 85 percent of the price — raised to 85 percent (cents, HALF_UP: JUDGMENT CALL, the statute names no rounding)";
+    when bench_mark_after_clauses_i_ii(opt, b);
+    when applicable_stock_price(opt, price);
+    when price <= CoveredCallLowPriceCeiling;
+    when b < round(price * 85 percent, 2, "HALF_UP");
+    then bench_mark_after_clause_iii(opt, round(price * 85 percent, 2, "HALF_UP"));
+}
+@source(IRC_S1092_C, relation = formalizes, coverage = partial, quote = "the applicable stock price is $25 or less")
+rule BenchMarkClauseIIIAtOrAboveRule(opt: CoveredCallOption, b: Money, price: Money) defeasible {
+    label en official "section 1092(c)(4)(D)(iii) does not lower or raise the bench mark when it is at least 85 percent of the price";
+    when bench_mark_after_clauses_i_ii(opt, b);
+    when applicable_stock_price(opt, price);
+    when price <= CoveredCallLowPriceCeiling;
+    when b >= round(price * 85 percent, 2, "HALF_UP");
+    then bench_mark_after_clause_iii(opt, b);
+}
+@source(IRC_S1092_C, relation = formalizes, coverage = partial, quote = "(I) the applicable stock price is $25 or less, and")
+rule BenchMarkClauseIIINotApplicableRule(opt: CoveredCallOption, b: Money, price: Money) defeasible {
+    label en official "section 1092(c)(4)(D)(iii) does not apply where the applicable stock price exceeds $25";
+    when bench_mark_after_clauses_i_ii(opt, b);
+    when applicable_stock_price(opt, price);
+    when price > CoveredCallLowPriceCeiling;
+    then bench_mark_after_clause_iii(opt, b);
+}
+pub relation lowest_qualified_bench_mark(opt: CoveredCallOption, amount: Money) kind institutional {
+    label en official "section 1092(c)(4)(D): the lowest qualified bench mark";
+}
+@source(IRC_S1092_C, relation = formalizes, coverage = partial, quote = "the applicable stock price is $150 or less, and")
+rule BenchMarkClauseIVFloorRule(opt: CoveredCallOption, b: Money, price: Money) defeasible {
+    label en official "section 1092(c)(4)(D)(iv): price of $150 or less and bench mark below the price less $10 — raised to the price less $10";
+    when bench_mark_after_clause_iii(opt, b);
+    when applicable_stock_price(opt, price);
+    when price <= CoveredCallMidPriceCeiling;
+    when b < price - CoveredCallTenDollarStep;
+    then lowest_qualified_bench_mark(opt, price - CoveredCallTenDollarStep);
+}
+@source(IRC_S1092_C, relation = formalizes, coverage = partial, quote = "the lowest qualified bench mark would be less than the applicable stock price reduced by $10")
+rule BenchMarkClauseIVNotBelowRule(opt: CoveredCallOption, b: Money, price: Money) defeasible {
+    label en official "section 1092(c)(4)(D)(iv) leaves the bench mark unchanged when it is not below the price less $10";
+    when bench_mark_after_clause_iii(opt, b);
+    when applicable_stock_price(opt, price);
+    when price <= CoveredCallMidPriceCeiling;
+    when b >= price - CoveredCallTenDollarStep;
+    then lowest_qualified_bench_mark(opt, b);
+}
+@source(IRC_S1092_C, relation = formalizes, coverage = partial, quote = "(I) the applicable stock price is $150 or less, and")
+rule BenchMarkClauseIVNotApplicableRule(opt: CoveredCallOption, b: Money, price: Money) defeasible {
+    label en official "section 1092(c)(4)(D)(iv) does not apply where the applicable stock price exceeds $150";
+    when bench_mark_after_clause_iii(opt, b);
+    when applicable_stock_price(opt, price);
+    when price > CoveredCallMidPriceCeiling;
+    then lowest_qualified_bench_mark(opt, b);
+}
+pub relation deep_in_the_money_option(opt: CoveredCallOption) kind institutional {
+    label en official "section 1092(c)(4)(C): a deep-in-the-money option has a strike price lower than the lowest qualified bench mark";
+}
+@source(IRC_S1092_C, relation = formalizes, coverage = partial, quote = "the term \"deep-in-the-money option\" means an option having a strike price lower than the lowest qualified bench mark.")
+rule DeepInTheMoneyRule(opt: CoveredCallOption, strike: Money, bench: Money) defeasible {
+    label en official "section 1092(c)(4)(C)";
+    when strike_price(opt, strike);
+    when lowest_qualified_bench_mark(opt, bench);
+    when strike < bench;
+    then deep_in_the_money_option(opt);
+}
+pub relation qualified_covered_call_option(opt: CoveredCallOption) kind institutional {
+    label en official "section 1092(c)(4)(B): a qualified covered call option (exchange-traded, granted more than 30 days before expiry, not deep-in-the-money, not granted by an options dealer in dealing, and not producing ordinary income or loss)";
+}
+pub const CoveredCallMinimumGrantDays: Integer = 30 {
+    label en official "granted more than 30 days before the day on which the option expires (section 1092(c)(4)(B)(ii))";
+};
+@source(IRC_S1092_C, relation = formalizes, coverage = partial, quote = "the term \"qualified covered call option\" means any option granted by the taxpayer to purchase stock held by the taxpayer (or stock acquired by the taxpayer in connection with the granting of the option) but only if—")
+rule QualifiedCoveredCallOptionRule(opt: CoveredCallOption, days: Integer) defeasible {
+    label en official "section 1092(c)(4)(B)(i)-(v)";
+    when option_traded_on_qualifying_market(opt);
+    when days_from_grant_to_expiry(opt, days);
+    when days > CoveredCallMinimumGrantDays;
+    when not_known(deep_in_the_money_option(opt));
+    when not_known(option_granted_by_options_dealer_in_dealing(opt));
+    when not_known(option_gain_or_loss_is_ordinary(opt));
+    then qualified_covered_call_option(opt);
+}
+pub relation straddle_in_taxable_year(p: Person, a: StraddlePosition, b: StraddlePosition, y: TaxableYear) kind empirical {
+    label en unofficial "the straddle is tested in the taxable year y (for the section 1092(c)(4)(E) disqualification)";
+}
+pub relation straddle_consists_only_of_covered_calls_and_stock(p: Person, a: StraddlePosition, b: StraddlePosition) kind empirical {
+    label en official "section 1092(c)(4)(A)(i)-(ii): all offsetting positions making up the straddle are qualified covered call options and the stock to be purchased under them, and the straddle is not part of a larger straddle";
+}
+pub relation covered_call_exclusion_disqualified_by_short_holding(p: Person, a: StraddlePosition, b: StraddlePosition, y: TaxableYear) kind empirical {
+    label en official "section 1092(c)(4)(E)(i)-(iii): options closed or stock disposed of at a loss during the year, gain includible in a later year, and the stock or option not held 30 days or more after the closing or disposition (holding period per section 246(c)(3)-(4))";
+}
+pub relation straddle_excluded_by_covered_call_rule(p: Person, a: StraddlePosition, b: StraddlePosition, y: TaxableYear) kind institutional {
+    label en official "section 1092(c)(4)(A): a straddle of qualified covered call options and their stock is not treated as a straddle for section 1092 and section 263(g), unless (E) applies";
+}
+@source(IRC_S1092_C, relation = formalizes, coverage = partial, quote = "such straddle shall not be treated as a straddle for purposes of this section and section 263(g).")
+rule CoveredCallStraddleExclusionRule(p: Person, a: StraddlePosition, b: StraddlePosition, y: TaxableYear) defeasible {
+    label en official "section 1092(c)(4)(A) with the (E) override for section 1092(a)";
+    when straddle_1092(p, a, b);
+    when straddle_consists_only_of_covered_calls_and_stock(p, a, b);
+    when straddle_in_taxable_year(p, a, b, y);
+    when not_known(covered_call_exclusion_disqualified_by_short_holding(p, a, b, y));
+    when not_known(covered_call_disqualification_derived_1092c4E(p, a, b, y));
+    then straddle_excluded_by_covered_call_rule(p, a, b, y);
+}
+
+// =============================================================================
+// (a)(3): unrecognized gain, and (a)(1): the loss deferral
+// =============================================================================
+
+pub relation fair_market_value_last_business_day(pos: StraddlePosition, y: TaxableYear, amount: Money) kind empirical {
+    label en official "section 1092(a)(3)(A)(i): the fair market value of a position held at the close of the year, as if sold on the last business day of the taxable year";
+}
+pub relation position_basis(pos: StraddlePosition, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the taxpayer's adjusted basis in the position at the close of the year";
+}
+pub relation realized_but_unrecognized_gain(pos: StraddlePosition, y: TaxableYear, amount: Money) kind empirical {
+    label en official "section 1092(a)(3)(A)(ii): gain realized but not recognized as of the close of the taxable year with respect to a position";
+}
+pub relation position_unrecognized_gain(pos: StraddlePosition, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 1092(a)(3)(A): the unrecognized gain with respect to a position";
+}
+@source(IRC_S1092_A, relation = formalizes, coverage = partial, quote = "the amount of gain which would be taken into account with respect to such position if such position were sold on the last business day of such taxable year at its fair market value")
+rule UnrecognizedGainHeldPositionRule(pos: StraddlePosition, y: TaxableYear, fmv: Money, basis: Money) defeasible {
+    label en official "section 1092(a)(3)(A)(i): the built-in gain of a position held at year end";
+    when fair_market_value_last_business_day(pos, y, fmv);
+    when position_basis(pos, y, basis);
+    when fmv > basis;
+    then position_unrecognized_gain(pos, y, fmv - basis);
+}
+@source(IRC_S1092_A, relation = formalizes, coverage = partial, quote = "the amount of gain so realized.")
+rule UnrecognizedGainRealizedRule(pos: StraddlePosition, y: TaxableYear, gain: Money) defeasible {
+    label en official "section 1092(a)(3)(A)(ii): gain realized but not recognized";
+    when realized_but_unrecognized_gain(pos, y, gain);
+    then position_unrecognized_gain(pos, y, gain);
+}
+pub relation straddle_losses_realized(p: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "section 1092(a)(1)(A): the loss with respect to one or more positions of straddles for the year (case-supplied total; G2301)";
+}
+pub relation unrecognized_gain_of_offsetting_positions(p: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "section 1092(a)(1)(A): the unrecognized gain with respect to one or more positions which were offsetting positions with respect to the loss positions (case-supplied total of section 1092(a)(3)(A) amounts; G2301)";
+}
+pub relation identified_straddle_for_loss(p: Person, y: TaxableYear) kind empirical {
+    label en official "section 1092(a)(2)(A)(i): the loss arises on positions comprising an identified straddle, to which (a)(1) does not apply";
+}
+pub relation succeeding_taxable_year(y: TaxableYear, next: TaxableYear) kind empirical {
+    label en unofficial "next is the taxable year succeeding y";
+}
+pub relation straddle_loss_taken_into_account(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 1092(a)(1)(A): the loss taken into account for the year, only to the extent it exceeds the unrecognized gain in offsetting positions";
+}
+pub relation straddle_loss_deferred(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 1092(a)(1)(B): the loss which may not be taken into account under subparagraph (A) for the year";
+}
+pub relation straddle_loss_treated_as_sustained(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 1092(a)(1)(B): the deferred loss is treated as sustained in the succeeding taxable year (again subject to (A); the chain is G2300)";
+}
+@source(IRC_S1092_A, relation = formalizes, coverage = partial, quote = "Any loss with respect to 1 or more positions shall be taken into account for any taxable year only to the extent that the amount of such loss exceeds the unrecognized gain")
+rule StraddleLossExcessTakenIntoAccountRule(p: Person, y: TaxableYear, loss: Money, gain: Money) defeasible {
+    label en official "section 1092(a)(1)(A): where the loss exceeds the unrecognized gain, the excess is taken into account (the unrecognized gain part is deferred)";
+    when straddle_losses_realized(p, y, loss);
+    when unrecognized_gain_of_offsetting_positions(p, y, gain);
+    when loss > gain;
+    when not_known(identified_straddle_for_loss(p, y));
+    then straddle_loss_taken_into_account(p, y, loss - gain);
+}
+@source(IRC_S1092_A, relation = formalizes, coverage = partial, quote = "Any loss with respect to 1 or more positions shall be taken into account for any taxable year only to the extent that the amount of such loss exceeds the unrecognized gain")
+rule StraddleLossWithinGainNothingTakenRule(p: Person, y: TaxableYear, loss: Money, gain: Money) defeasible {
+    label en official "section 1092(a)(1)(A): where the loss does not exceed the unrecognized gain, none is taken into account for the year";
+    when straddle_losses_realized(p, y, loss);
+    when unrecognized_gain_of_offsetting_positions(p, y, gain);
+    when loss <= gain;
+    when not_known(identified_straddle_for_loss(p, y));
+    then straddle_loss_taken_into_account(p, y, 0.00 USD);
+}
+@source(IRC_S1092_A, relation = formalizes, coverage = partial, quote = "Any loss which may not be taken into account under subparagraph (A) for any taxable year shall, subject to the limitations under subparagraph (A), be treated as sustained in the succeeding taxable year.")
+rule StraddleLossDeferredAmountRule(p: Person, y: TaxableYear, loss: Money, gain: Money) defeasible {
+    label en official "section 1092(a)(1)(B): the deferred loss is the lesser of the loss and the unrecognized gain";
+    when straddle_losses_realized(p, y, loss);
+    when unrecognized_gain_of_offsetting_positions(p, y, gain);
+    when not_known(identified_straddle_for_loss(p, y));
+    then straddle_loss_deferred(p, y, min(loss, gain));
+}
+@source(IRC_S1092_A, relation = formalizes, coverage = partial, quote = "shall, subject to the limitations under subparagraph (A), be treated as sustained in the succeeding taxable year.")
+rule StraddleLossSustainedNextYearRule(p: Person, y: TaxableYear, next: TaxableYear, deferred: Money) defeasible {
+    label en official "section 1092(a)(1)(B): the deferred amount is treated as sustained in the succeeding year";
+    when straddle_loss_deferred(p, y, deferred);
+    when succeeding_taxable_year(y, next);
+    then straddle_loss_treated_as_sustained(p, next, deferred);
+}
+
+// =============================================================================
+// (a)(2): identified straddles
+// =============================================================================
+
+pub relation identified_as_identified_straddle_in_records(p: Person, straddle_id: Integer) kind empirical {
+    label en official "section 1092(a)(2)(B)(i): the straddle is clearly identified on the taxpayer's records as an identified straddle";
+}
+pub relation identification_made_on(p: Person, straddle_id: Integer, on: Date) kind empirical {
+    label en unofficial "the date (end of day) on which the straddle was identified in the records";
+}
+pub relation straddle_acquired_on(p: Person, straddle_id: Integer, on: Date) kind empirical {
+    label en unofficial "the day on which the straddle is acquired";
+}
+pub relation identification_names_offsetting_positions(p: Person, straddle_id: Integer) kind empirical {
+    label en official "section 1092(a)(2)(B), flush: identification includes an identification of the positions in the straddle which are offsetting with respect to other positions in the straddle";
+}
+pub relation each_position_value_at_least_basis_at_creation(p: Person, straddle_id: Integer) kind empirical {
+    label en official "section 1092(a)(2)(B)(ii): to the extent provided by regulations, the value of each position immediately before creation of the straddle is not less than its basis at the time the straddle is created";
+}
+pub relation straddle_part_of_larger_straddle(p: Person, straddle_id: Integer) kind empirical {
+    label en official "section 1092(a)(2)(B)(iii) (negated): the straddle is part of a larger straddle";
+}
+pub relation identified_straddle(p: Person, straddle_id: Integer) kind institutional {
+    label en official "section 1092(a)(2)(B): an identified straddle";
+}
+@source(IRC_S1092_A, relation = formalizes, coverage = partial, quote = "The term \"identified straddle\" means any straddle—")
+rule IdentifiedStraddleRule(p: Person, straddle_id: Integer, identified: Date, acquired: Date) defeasible {
+    label en official "section 1092(a)(2)(B)(i)-(iii): identified by the close of the acquisition day (the earlier regulatory time is an EXTERNAL_DEPENDENCY), value not below basis, and not part of a larger straddle";
+    when identified_as_identified_straddle_in_records(p, straddle_id);
+    when identification_made_on(p, straddle_id, identified);
+    when straddle_acquired_on(p, straddle_id, acquired);
+    when identified <= acquired;
+    when identification_names_offsetting_positions(p, straddle_id);
+    when each_position_value_at_least_basis_at_creation(p, straddle_id);
+    when not_known(straddle_part_of_larger_straddle(p, straddle_id));
+    then identified_straddle(p, straddle_id);
+}
+pub relation identified_straddle_loss_on_position(p: Person, straddle_id: Integer, loss: Money) kind empirical {
+    label en official "section 1092(a)(2)(A)(ii): the loss with respect to a position of the identified straddle";
+}
+pub relation fmv_of_position_at_determination(p: Person, straddle_id: Integer, pos: StraddlePosition, amount: Money) kind empirical {
+    label en official "section 1092(a)(3)(B): the fair market value of the offsetting position at the time of the determination";
+}
+pub relation fmv_of_position_at_identification(p: Person, straddle_id: Integer, pos: StraddlePosition, amount: Money) kind empirical {
+    label en official "section 1092(a)(3)(B): the fair market value of the position at the time the taxpayer identified it as a position in the identified straddle";
+}
+pub relation offsetting_position_unrecognized_gain(p: Person, straddle_id: Integer, pos: StraddlePosition, gain: Money) kind institutional {
+    label en official "section 1092(a)(3)(B): for section 1092(a)(2)(A)(ii), the unrecognized gain of an offsetting position is the excess of its fair market value at the time of the determination over its value when identified";
+}
+@source(IRC_S1092_A, relation = formalizes, coverage = partial, quote = "the unrecognized gain with respect to any offsetting position shall be the excess of the fair market value of the position at the time of the determination over the fair market value of the position at the time the taxpayer identified the position")
+rule OffsettingPositionUnrecognizedGainRule(p: Person, straddle_id: Integer, pos: StraddlePosition, now: Money, then_value: Money) defeasible {
+    label en official "section 1092(a)(3)(B)";
+    when fmv_of_position_at_determination(p, straddle_id, pos, now);
+    when fmv_of_position_at_identification(p, straddle_id, pos, then_value);
+    when now > then_value;
+    then offsetting_position_unrecognized_gain(p, straddle_id, pos, now - then_value);
+}
+pub relation identified_straddle_total_offsetting_gain(p: Person, straddle_id: Integer, total: Money) kind empirical {
+    label en official "section 1092(a)(2)(A)(ii): the total unrecognized gain of the offsetting positions in the identified straddle (case-supplied; G2301)";
+}
+pub relation identified_straddle_basis_increase(p: Person, straddle_id: Integer, pos: StraddlePosition, amount: Money) kind institutional {
+    label en official "section 1092(a)(2)(A)(ii): the basis of each offsetting position increases by an amount bearing the same ratio to the loss as its unrecognized gain bears to the total unrecognized gain";
+}
+@source(IRC_S1092_A, relation = formalizes, coverage = partial, quote = "the basis of each of the offsetting positions in the identified straddle shall be increased by an amount which bears the same ratio to the loss")
+rule IdentifiedStraddleBasisIncreaseRule(p: Person, straddle_id: Integer, pos: StraddlePosition, loss: Money, gain: Money, total: Money) defeasible {
+    label en official "section 1092(a)(2)(A)(ii): the loss is spread over the offsetting positions pro rata to unrecognized gain (cents HALF_UP; JUDGMENT CALL, no rounding named)";
+    when identified_straddle(p, straddle_id);
+    when identified_straddle_loss_on_position(p, straddle_id, loss);
+    when offsetting_position_unrecognized_gain(p, straddle_id, pos, gain);
+    when identified_straddle_total_offsetting_gain(p, straddle_id, total);
+    when total > 0.00 USD;
+    then identified_straddle_basis_increase(p, straddle_id, pos, div_round(loss * (gain / 1.00 USD), total / 1.00 USD, 2, "HALF_UP"));
+}
+pub relation identified_straddle_loss_not_otherwise_taken_into_account(p: Person, straddle_id: Integer) kind institutional {
+    label en official "section 1092(a)(2)(A)(iv): the loss described in clause (ii) is not otherwise taken into account for purposes of this title";
+}
+@source(IRC_S1092_A, relation = formalizes, coverage = partial, quote = "any loss described in clause (ii) shall not otherwise be taken into account for purposes of this title.")
+rule IdentifiedStraddleLossNotOtherwiseTakenRule(p: Person, straddle_id: Integer, loss: Money) defeasible {
+    label en official "section 1092(a)(2)(A)(iv)";
+    when identified_straddle(p, straddle_id);
+    when identified_straddle_loss_on_position(p, straddle_id, loss);
+    then identified_straddle_loss_not_otherwise_taken_into_account(p, straddle_id);
+}
+pub relation identified_straddle_no_offsetting_gain(p: Person, straddle_id: Integer) kind empirical {
+    label en official "section 1092(a)(2)(A)(iii): the application of clause (ii) does not result in an increase in the basis of any offsetting position";
+}
+pub relation reasonable_consistent_allocation_of_basis_increase(p: Person, straddle_id: Integer) kind empirical {
+    label en official "section 1092(a)(2)(A)(iii)(I)-(II): a reasonable, purpose-consistent, consistently applied allocation whose aggregate increase equals the loss (an evaluative element, DECISION-0194)";
+}
+
+// =============================================================================
+// (d)(5), (d)(8), (e), (f)
+// =============================================================================
+
+pub relation straddle_has_some_but_not_all_section_1256_positions(p: Person, a: StraddlePosition, b: StraddlePosition) kind empirical {
+    label en official "section 1092(d)(5)(A): a straddle at least 1 (but not all) of the positions of which are section 1256 contracts";
+}
+pub relation section_1092_applies_to_1256_position_in_mixed_straddle(p: Person, pos: StraddlePosition) kind institutional {
+    label en official "section 1092(d)(5)(A): the section applies to any section 1256 contract and any other position making up the straddle";
+}
+@source(IRC_S1092_D, relation = formalizes, coverage = partial, quote = "the provisions of this section shall apply to any section 1256 contract and any other position making up such straddle.")
+rule MixedStraddleAppliesToAllPositionsRule(p: Person, a: StraddlePosition, b: StraddlePosition) defeasible {
+    label en official "section 1092(d)(5)(A)";
+    when straddle_has_some_but_not_all_section_1256_positions(p, a, b);
+    then section_1092_applies_to_1256_position_in_mixed_straddle(p, a);
+}
+pub relation position_settled_by_delivery_of_property(t: Transaction, p: Person, pos: StraddlePosition, delivered: Asset) kind empirical {
+    label en official "section 1092(d)(8): the taxpayer settles a position which is part of a straddle by delivering property to which the position relates (and the position, if terminated, would result in a realization of a loss)";
+}
+pub relation delivery_settlement_position_fmv(t: Transaction, amount: Money) kind empirical {
+    label en official "section 1092(d)(8)(A): the fair market value of the position immediately before the settlement";
+}
+pub relation delivery_settlement_property_fmv(t: Transaction, amount: Money) kind empirical {
+    label en official "section 1092(d)(8)(B): the fair market value of the property delivered";
+}
+pub relation deemed_terminated_position_proceeds(t: Transaction, amount: Money) kind institutional {
+    label en official "section 1092(d)(8)(A): the position is treated as terminated for its fair market value immediately before the settlement";
+}
+pub relation deemed_sold_delivered_property_proceeds(t: Transaction, amount: Money) kind institutional {
+    label en official "section 1092(d)(8)(B): the property delivered is treated as sold at its fair market value";
+}
+@source(IRC_S1092_D, relation = formalizes, coverage = partial, quote = "terminated the position for its fair market value immediately before the settlement, and")
+rule DeliverySettlementTerminationRule(t: Transaction, p: Person, pos: StraddlePosition, delivered: Asset, fmv: Money) defeasible {
+    label en official "section 1092(d)(8)(A)";
+    when position_settled_by_delivery_of_property(t, p, pos, delivered);
+    when delivery_settlement_position_fmv(t, fmv);
+    then deemed_terminated_position_proceeds(t, fmv);
+}
+@source(IRC_S1092_D, relation = formalizes, coverage = partial, quote = "sold the property so delivered by the taxpayer at its fair market value.")
+rule DeliverySettlementSaleRule(t: Transaction, p: Person, pos: StraddlePosition, delivered: Asset, fmv: Money) defeasible {
+    label en official "section 1092(d)(8)(B)";
+    when position_settled_by_delivery_of_property(t, p, pos, delivered);
+    when delivery_settlement_property_fmv(t, fmv);
+    then deemed_sold_delivered_property_proceeds(t, fmv);
+}
+pub relation hedging_transaction_1256e(t: Transaction) kind empirical {
+    label en official "section 1092(e): a hedging transaction as defined in section 1256(e)";
+}
+pub relation section_1092_does_not_apply_to_transaction(t: Transaction) kind institutional {
+    label en official "section 1092(e): the section shall not apply in the case of any hedging transaction";
+}
+@source(IRC_S1092_E, relation = formalizes, coverage = exact, quote = "This section shall not apply in the case of any hedging transaction (as defined in section 1256(e)).")
+rule HedgingTransactionExclusionRule(t: Transaction) strict {
+    label en official "section 1092(e)";
+    when hedging_transaction_1256e(t);
+    then section_1092_does_not_apply_to_transaction(t);
+}
+pub relation covered_call_granted_with_strike_below_applicable_price(p: Person, opt: CoveredCallOption) kind empirical {
+    label en official "section 1092(f): the taxpayer holds stock and grants a qualified covered call option to purchase it with a strike price less than the applicable stock price";
+}
+pub relation option_loss_realized(p: Person, opt: CoveredCallOption, loss: Money) kind empirical {
+    label en official "section 1092(f)(1): a loss with respect to the option, realized";
+}
+pub relation stock_gain_would_be_long_term_when_loss_realized(p: Person, opt: CoveredCallOption) kind empirical {
+    label en official "section 1092(f)(1): at the time the loss is realized, gain on the sale or exchange of the stock would be treated as long-term capital gain";
+}
+pub relation covered_call_option_loss_long_term(p: Person, opt: CoveredCallOption, loss: Money) kind institutional {
+    label en official "section 1092(f)(1): the loss on the option is treated as long-term capital loss";
+}
+@source(IRC_S1092_F, relation = formalizes, coverage = exact, quote = "Any loss with respect to such option shall be treated as long-term capital loss if, at the time such loss is realized, gain on the sale or exchange of such stock would be treated as long-term capital gain.")
+rule CoveredCallLossLongTermRule(p: Person, opt: CoveredCallOption, loss: Money) defeasible {
+    label en official "section 1092(f)(1)";
+    when covered_call_granted_with_strike_below_applicable_price(p, opt);
+    when qualified_covered_call_option(opt);
+    when option_loss_realized(p, opt, loss);
+    when stock_gain_would_be_long_term_when_loss_realized(p, opt);
+    then covered_call_option_loss_long_term(p, opt, loss);
+}
+pub relation stock_holding_period_excludes_grantor_period(p: Person, opt: CoveredCallOption) kind institutional {
+    label en official "section 1092(f)(2): the holding period of the stock does not include any period during which the taxpayer is the grantor of the option";
+}
+@source(IRC_S1092_F, relation = formalizes, coverage = exact, quote = "The holding period of such stock shall not include any period during which the taxpayer is the grantor of such option.")
+rule CoveredCallHoldingPeriodRule(p: Person, opt: CoveredCallOption) defeasible {
+    label en official "section 1092(f)(2)";
+    when covered_call_granted_with_strike_below_applicable_price(p, opt);
+    when qualified_covered_call_option(opt);
+    then stock_holding_period_excludes_grantor_period(p, opt);
+}
+
+// =============================================================================
+// (b)(2): ceilings on mixed straddle account character (the regulations
+// choose the accounting; the statute fixes the ceilings)
+// =============================================================================
+
+pub const MixedStraddleAccountLongTermGainCeiling: Decimal = 0.50 {
+    label en official "in no event more than 50 percent of the net gain from a mixed straddle account is long-term capital gain (section 1092(b)(2)(B)(i))";
+};
+pub const MixedStraddleAccountShortTermLossCeiling: Decimal = 0.40 {
+    label en official "in no event more than 40 percent of the net loss from a mixed straddle account is short-term capital loss (section 1092(b)(2)(B)(ii))";
+};
+pub relation mixed_straddle_account_net_gain(p: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "section 1092(b)(2)(B): the net gain from a mixed straddle account for the taxable year";
+}
+pub relation mixed_straddle_account_net_loss(p: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "section 1092(b)(2)(B): the net loss from a mixed straddle account for the taxable year";
+}
+pub relation mixed_straddle_account_long_term_gain_ceiling(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 1092(b)(2)(B)(i): the ceiling on the long-term capital gain part";
+}
+pub relation mixed_straddle_account_short_term_loss_ceiling(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 1092(b)(2)(B)(ii): the ceiling on the short-term capital loss part";
+}
+@source(IRC_S1092_B, relation = formalizes, coverage = partial, quote = "In no event shall more than 50 percent of the net gain from such account for any taxable year be treated as long-term capital gain.")
+rule MixedStraddleAccountGainCeilingRule(p: Person, y: TaxableYear, net: Money) defeasible {
+    label en official "section 1092(b)(2)(B)(i) (cents HALF_UP: JUDGMENT CALL)";
+    when mixed_straddle_account_net_gain(p, y, net);
+    then mixed_straddle_account_long_term_gain_ceiling(p, y, round(net * MixedStraddleAccountLongTermGainCeiling, 2, "HALF_UP"));
+}
+@source(IRC_S1092_B, relation = formalizes, coverage = partial, quote = "In no event shall more than 40 percent of the net loss from such account for any taxable year be treated as short-term capital loss.")
+rule MixedStraddleAccountLossCeilingRule(p: Person, y: TaxableYear, net: Money) defeasible {
+    label en official "section 1092(b)(2)(B)(ii) (cents HALF_UP: JUDGMENT CALL)";
+    when mixed_straddle_account_net_loss(p, y, net);
+    then mixed_straddle_account_short_term_loss_ceiling(p, y, round(net * MixedStraddleAccountShortTermLossCeiling, 2, "HALF_UP"));
+}
+
+// =============================================================================
+// (a)(3)(C): disclosure of unrecognized gain — a duty of the taxpayer
+// =============================================================================
+
+pub relation position_with_unrecognized_gain_at_year_end(p: Person, y: TaxableYear, pos: StraddlePosition) kind empirical {
+    label en official "section 1092(a)(3)(C)(i)(I): a position (whether or not part of a straddle) with respect to which, as of the close of the taxable year, there is unrecognized gain";
+}
+pub relation position_is_1221a1_or_a2_property(pos: StraddlePosition) kind empirical {
+    label en official "section 1092(a)(3)(C)(ii)(II): with respect to the taxpayer, property described in paragraph (1) or (2) of section 1221(a)";
+}
+pub relation position_part_of_hedging_transaction(pos: StraddlePosition) kind empirical {
+    label en official "section 1092(a)(3)(C)(ii)(II): the position is part of a hedging transaction (as defined in section 1256(e))";
+}
+pub relation no_position_loss_sustained_during_year(p: Person, y: TaxableYear) kind empirical {
+    label en official "section 1092(a)(3)(C)(ii)(III): no loss on a position (including a regulated futures contract) has been sustained during the taxable year, or the only loss sustained on the position is a loss described in subclause (II)";
+}
+pub relation position_exempt_from_disclosure(p: Person, y: TaxableYear, pos: StraddlePosition) kind institutional {
+    label en official "section 1092(a)(3)(C)(ii): clause (i) does not apply to the position";
+}
+@source(IRC_S1092_A, relation = formalizes, coverage = partial, quote = "to any position which is part of an identified straddle,")
+rule DisclosureExemptIdentifiedStraddleRule(p: Person, y: TaxableYear, pos: StraddlePosition) defeasible {
+    label en official "section 1092(a)(3)(C)(ii)(I)";
+    when position_with_unrecognized_gain_at_year_end(p, y, pos);
+    when part_of_identified_straddle(pos);
+    then position_exempt_from_disclosure(p, y, pos);
+}
+@source(IRC_S1092_A, relation = formalizes, coverage = partial, quote = "to any position which, with respect to the taxpayer, is property described in paragraph (1) or (2) of section 1221(a) or to any position which is part of a hedging transaction (as defined in section 1256(e)), or")
+rule DisclosureExemptOrdinaryOrHedgingRule(p: Person, y: TaxableYear, pos: StraddlePosition) defeasible {
+    label en official "section 1092(a)(3)(C)(ii)(II): section 1221(a)(1)/(2) property";
+    when position_with_unrecognized_gain_at_year_end(p, y, pos);
+    when position_is_1221a1_or_a2_property(pos);
+    then position_exempt_from_disclosure(p, y, pos);
+}
+rule DisclosureExemptHedgingPositionRule(p: Person, y: TaxableYear, pos: StraddlePosition) defeasible {
+    label en official "section 1092(a)(3)(C)(ii)(II): a position that is part of a hedging transaction";
+    when position_with_unrecognized_gain_at_year_end(p, y, pos);
+    when position_part_of_hedging_transaction(pos);
+    then position_exempt_from_disclosure(p, y, pos);
+}
+@source(IRC_S1092_A, relation = formalizes, coverage = partial, quote = "with respect to any taxable year if no loss on a position (including a regulated futures contract) has been sustained during such taxable year")
+rule DisclosureExemptNoLossRule(p: Person, y: TaxableYear, pos: StraddlePosition) defeasible {
+    label en official "section 1092(a)(3)(C)(ii)(III)";
+    when position_with_unrecognized_gain_at_year_end(p, y, pos);
+    when no_position_loss_sustained_during_year(p, y);
+    then position_exempt_from_disclosure(p, y, pos);
+}
+pub relation unrecognized_gain_disclosed_to_secretary(p: Person, y: TaxableYear, pos: StraddlePosition) kind empirical {
+    label en official "section 1092(a)(3)(C)(i)(I)-(II): the position and the amount of the unrecognized gain are disclosed at the time and in the manner and form the Secretary prescribes";
+}
+// =============================================================================
+// (b)(2) + (a)(2)(D): regulation readers (IRC-G/G4, CFR wiring 27.09.2026)
+// =============================================================================
+// The pattern follows the AFR wiring (administration/21-below-market-loans):
+// a case-selected relation names the regulation-prescribed content, policy is
+// carried by the method index (only the two statutory alternatives of
+// (b)(2)(A)(i) are representable), and one rule per coverage row derives the
+// statutory consequence. In .law only verbatim statutory keys appear (the two
+// (A)(i) methods); no rates, thresholds or regulation numbers are executed.
+// The from-regulation leg (reading us.cfr.t26_1_1092b_2t_3t pubs) is pending:
+// the CFR packages are phase-0 rule-less skeletons, absent from the registry,
+// and consumer lock --write is frozen — recorded as known unresolved in
+// docs/foundations/us-irc/scratchpad/cfr-wire/STATUS.md. Coverage rows stay
+// EXTERNAL_DEPENDENCY (flip only after execution, owner gate step 6).
+
+pub enum MixedStraddleOffsetMethod1092b2 {
+    StraddleByStraddle;
+    MixedStraddleAccount;
+    label en official "the two offsetting alternatives of section 1092(b)(2)(A)(i): (I) straddle-by-straddle identification, (II) a mixed straddle account — the policy index: no other method is representable";
+}
+relation mixed_straddle_offset_method_prescribed_1092b2(p: Person, straddle_id: Integer, m: MixedStraddleOffsetMethod1092b2) kind empirical {
+    label en official "the regulation-prescribed offsetting method applying to this mixed straddle (case-selected: the content of 26 CFR 1.1092(b)-3T enters as case facts)";
+}
+pub relation offsetting_provided_by_regulation_1092b2(p: Person, straddle_id: Integer) kind institutional {
+    label en official "section 1092(b)(2)(A) chapeau: the regulations provide offsetting for this mixed straddle";
+}
+@source(IRC_S1092_B, relation = formalizes, coverage = partial, quote = "The regulations prescribed under paragraph (1) shall provide that—")
+rule S1092B2ChapeauProvidesOffsetting strict {
+    label en official "section 1092(b)(2)(A): a prescribed offsetting method means the regulations provide offsetting for the straddle";
+    for p: Person;
+    for straddle_id: Integer;
+    for m: MixedStraddleOffsetMethod1092b2;
+    when mixed_straddle_offset_method_prescribed_1092b2(p, straddle_id, m);
+    then offsetting_provided_by_regulation_1092b2(p, straddle_id);
+}
+pub relation mixed_straddle_gains_losses_offset_1092b2a2(p: Person, straddle_id: Integer) kind institutional {
+    label en official "section 1092(b)(2)(A)(i): gains and losses from this mixed straddle's positions are offset under the prescribed method";
+}
+@source(IRC_S1092_B, relation = formalizes, coverage = partial, quote = "the taxpayer may offset gains and losses from positions which are part of mixed straddles—")
+rule S1092B2OffsetGainsAndLosses strict {
+    label en official "section 1092(b)(2)(A)(i): the taxpayer may offset gains and losses from the mixed straddle's positions";
+    for p: Person;
+    for straddle_id: Integer;
+    for m: MixedStraddleOffsetMethod1092b2;
+    when mixed_straddle_offset_method_prescribed_1092b2(p, straddle_id, m);
+    then mixed_straddle_gains_losses_offset_1092b2a2(p, straddle_id);
+}
+pub relation offset_by_straddle_identification_1092b2(p: Person, straddle_id: Integer) kind institutional {
+    label en official "section 1092(b)(2)(A)(i)(I): this mixed straddle is offset by straddle-by-straddle identification";
+}
+@source(IRC_S1092_B, relation = formalizes, coverage = partial, quote = "(I) by straddle-by-straddle identification, or")
+rule S1092B2StraddleByStraddleIdentification(p: Person, straddle_id: Integer) strict {
+    label en official "section 1092(b)(2)(A)(i)(I): the prescribed method is straddle-by-straddle identification";
+    when mixed_straddle_offset_method_prescribed_1092b2(p, straddle_id, StraddleByStraddle);
+    then offset_by_straddle_identification_1092b2(p, straddle_id);
+}
+pub relation offset_by_mixed_straddle_account_1092b2(p: Person, straddle_id: Integer) kind institutional {
+    label en official "section 1092(b)(2)(A)(i)(II): this mixed straddle is offset through a mixed straddle account";
+}
+@source(IRC_S1092_B, relation = formalizes, coverage = partial, quote = "(II) by the establishment (with respect to any class of activities) of a mixed straddle account for which gains and losses would be recognized (and offset) on a periodic basis,")
+rule S1092B2MixedStraddleAccount(p: Person, straddle_id: Integer) strict {
+    label en official "section 1092(b)(2)(A)(i)(II): the prescribed method is a mixed straddle account";
+    when mixed_straddle_offset_method_prescribed_1092b2(p, straddle_id, MixedStraddleAccount);
+    then offset_by_mixed_straddle_account_1092b2(p, straddle_id);
+}
+pub relation offsetting_before_section_1256_1092b2(p: Person, straddle_id: Integer) kind institutional {
+    label en official "section 1092(b)(2)(A)(ii): offsetting for this mixed straddle occurs before the application of section 1256";
+}
+@source(IRC_S1092_B, relation = formalizes, coverage = partial, quote = "such offsetting will occur before the application of section 1256, and section 1256(a)(3) will only apply to net gain or net loss attributable to section 1256 contracts, and")
+rule S1092B2OffsettingBefore1256 strict {
+    label en official "section 1092(b)(2)(A)(ii): the regulation-provided offsetting precedes section 1256";
+    for p: Person;
+    for straddle_id: Integer;
+    for m: MixedStraddleOffsetMethod1092b2;
+    when mixed_straddle_offset_method_prescribed_1092b2(p, straddle_id, m);
+    then offsetting_before_section_1256_1092b2(p, straddle_id);
+}
+pub relation section_1233d_inapplicable_to_regulation_straddle_1092b2(p: Person, straddle_id: Integer) kind institutional {
+    label en official "section 1092(b)(2)(A)(iii): the principles of section 1233(d) do not apply to this identified or account straddle";
+}
+@source(IRC_S1092_B, relation = formalizes, coverage = partial, quote = "the principles of section 1233(d) shall not apply with respect to any straddle identified under clause (i)(I) or part of an account established under clause (i)(II).")
+rule S1092B2Section1233dInapplicable strict {
+    label en official "section 1092(b)(2)(A)(iii): a straddle offset under either prescribed method is outside section 1233(d) principles";
+    for p: Person;
+    for straddle_id: Integer;
+    for m: MixedStraddleOffsetMethod1092b2;
+    when mixed_straddle_offset_method_prescribed_1092b2(p, straddle_id, m);
+    then section_1233d_inapplicable_to_regulation_straddle_1092b2(p, straddle_id);
+}
+relation regulation_extends_mixed_straddle_scope_1092b2c(p: Person, pos: StraddlePosition) kind empirical {
+    label en official "the regulation treats this position (not described in section 1256(d)(4)) as a mixed straddle position (case-selected: section 1092(b)(2)(C) content of 26 CFR 1.1092(b)-3T enters as case facts)";
+}
+pub relation position_treated_as_mixed_straddle_by_regulation_1092b2c(p: Person, pos: StraddlePosition) kind institutional {
+    label en official "section 1092(b)(2)(C): the position is treated as a mixed straddle by regulation";
+}
+@source(IRC_S1092_B, relation = formalizes, coverage = partial, quote = "The regulations prescribed under paragraph (1) may treat as a mixed straddle positions not described in section 1256(d)(4).")
+rule S1092B2ExtendedScopeByRegulation(p: Person, pos: StraddlePosition) strict {
+    label en official "section 1092(b)(2)(C): the regulation draws the position into mixed-straddle treatment";
+    when regulation_extends_mixed_straddle_scope_1092b2c(p, pos);
+    then position_treated_as_mixed_straddle_by_regulation_1092b2c(p, pos);
+}
+relation regulation_prescribes_timing_character_1092b2d(p: Person, straddle_id: Integer) kind empirical {
+    label en official "the regulation prescribes timing and character of gains and losses for this straddle with a non-section-1256 position (case-selected: section 1092(b)(2)(D) content enters as case facts)";
+}
+pub relation timing_character_governed_by_regulation_1092b2d(p: Person, straddle_id: Integer) kind institutional {
+    label en official "section 1092(b)(2)(D): timing and character of this straddle's gains and losses are governed by regulation";
+}
+@source(IRC_S1092_B, relation = formalizes, coverage = partial, quote = "The regulations prescribed under paragraph (1) shall include regulations relating to the timing and character of gains and losses in case of straddles")
+rule S1092B2TimingCharacterByRegulation(p: Person, straddle_id: Integer) strict {
+    label en official "section 1092(b)(2)(D): the regulation supplies timing and character";
+    when regulation_prescribes_timing_character_1092b2d(p, straddle_id);
+    then timing_character_governed_by_regulation_1092b2d(p, straddle_id);
+}
+relation secretary_guidance_on_identification_1092a2d(p: Person, straddle_id: Integer) kind empirical {
+    label en official "Secretary guidance under section 1092(a)(2)(D) governs identification of this straddle (case-selected: methods, failure rules, liability-position rules of 26 CFR 1.1092(b)-2T enter as case facts)";
+}
+pub relation identification_governed_by_secretary_guidance_1092a2d(p: Person, straddle_id: Integer) kind institutional {
+    label en official "section 1092(a)(2)(D): identification of this straddle is governed by the Secretary's regulations or other guidance";
+}
+@source(IRC_S1092_A, relation = formalizes, coverage = partial, quote = "The Secretary shall prescribe such regulations or other guidance as may be necessary or appropriate to carry out the purposes of this paragraph.")
+rule S1092A2DSecretaryGuidance(p: Person, straddle_id: Integer) strict {
+    label en official "section 1092(a)(2)(D): the Secretary's guidance carries the identification regime";
+    when secretary_guidance_on_identification_1092a2d(p, straddle_id);
+    then identification_governed_by_secretary_guidance_1092a2d(p, straddle_id);
+}
+
+@source(IRC_S1092_A, relation = formalizes, coverage = partial, quote = "Each taxpayer shall disclose to the Secretary, at such time and in such manner and form as the Secretary may prescribe by regulations")
+rule UnrecognizedGainDisclosureDuty(p: Person, y: TaxableYear, pos: StraddlePosition) defeasible {
+    label en official "section 1092(a)(3)(C)(i): the duty to disclose positions with unrecognized gain at year end, unless (ii) exempts; the time and manner are set by regulations (EXTERNAL_DEPENDENCY), so the window is unbounded";
+    when position_with_unrecognized_gain_at_year_end(p, y, pos);
+    unless position_exempt_from_disclosure(p, y, pos);
+    then duty UnrecognizedGainDisclosureDutyPosition {
+        bearer p;
+        beneficiary p;
+        goal achievement {
+            condition unrecognized_gain_disclosed_to_secretary(p, y, pos);
+            window [-infinity, infinity];
+        }
+    };
+}

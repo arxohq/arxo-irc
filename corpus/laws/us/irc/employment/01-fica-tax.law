@@ -1,0 +1,354 @@
+// Chapter 21 (FICA), sections 3101, 3102, 3111 — employee tax, employer's duty
+// to deduct and its liability, employer tax. Stage 1 (IRC-12), DECISION-0379.
+//
+// Method (task instruction): a `WagePayment` entity (payer, payee, amount,
+// date, taxable year) is the case-asserted empirical fact; the wage-base cap
+// (section 3121(a)(1), the "contribution and benefit base") is tracked
+// CUMULATIVELY per calendar year via a `sum all` aggregate over the
+// case-asserted payments strictly before the current one (the runtime-subset
+// aggregate-over-case-asserted-fact pattern of `us.irc.gross_income::
+// GrossIncomeAggregate`, not an aggregate over a DERIVED predicate, so §111's
+// limitation on the latter does not apply here). `wages_3121` itself (the
+// section 3121(a) exclusion classification) is declared in
+// `02-fica-definitions.law`; this module reads it.
+//
+// The section 3121(a)(1)/230 Social Security Act "contribution and benefit
+// base" is NOT pinned: the SSA publishes it annually and this package's task
+// forbids inventing a number absent from the pinned text. SOURCE_GAP: see
+// `additional-medicare-threshold-*` (pinned, statutory) versus the wage base
+// (not pinned) in `02-fica-definitions.law`'s `ContributionAndBenefitBase`
+// relation.
+
+use self::{
+    IRC_S3101_A,
+    IRC_S3101_B,
+    IRC_S3102_A,
+    IRC_S3102_B,
+    IRC_S3102_C,
+    IRC_S3102_F,
+    IRC_S3111_A,
+    IRC_S3111_B,
+    IRC_S3111_C,
+    IRC_S3121_A,
+    group_term_life_deduction_duty_displaced,
+    tip_payment,
+    wages_3121,
+};
+
+type Person = us.irc.core::Person;
+type Individual = us.irc.core::Individual;
+type TaxableYear = us.irc.core::TaxableYear;
+type Organ = us.irc.core::Organ;
+
+const Secretary: Organ = us.irc.core::Secretary;
+
+// --- Wage payment (shared case-fact shape for this package) -----------------
+
+pub entity WagePayment;
+
+pub relation wage_payment(pay: WagePayment, employer: Person, employee: Person, y: TaxableYear, amount: Money, on: Date) kind empirical {
+    label en unofficial "a payment of remuneration by an employer to an employee, asserted by the case with its amount and date";
+}
+
+pub relation wage_payment_period_kind(pay: WagePayment, k: us.irc.core::PeriodKind) kind empirical {
+    label en unofficial "the payroll period kind of this wage payment (section 3401(b))";
+}
+
+// Cumulative remuneration (before section 3121(a) exclusions) paid by this
+// employer to this employee earlier in the same taxable year — the input the
+// section 3121(a)(1) wage-base cap needs. `strict`, not `defeasible`: this is
+// a closed sum over asserted facts, not a defeasible legal conclusion.
+pub relation prior_remuneration_paid(pay: WagePayment, employer: Person, employee: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "aggregate remuneration this employer paid this employee earlier in the same taxable year (section 3121(a)(1) successor-employer aggregation is NOT modelled here: TECH_GAP, see coverage note on section 3121(a)(1))";
+}
+
+rule PriorRemunerationPaidAggregate(pay0: WagePayment, employer0: Person, employee0: Person, y0: TaxableYear, on0: Date) strict {
+    label en unofficial "sum of this employer's payments to this employee, in the same taxable year, dated strictly before this payment";
+    when wage_payment(pay0, employer0, employee0, y0, _, on0);
+    then prior_remuneration_paid(pay0, employer0, employee0, y0,
+        sum all amount: Money for pay: WagePayment, on: Date
+            where wage_payment(pay, employer0, employee0, y0, amount, on) and on < on0);
+}
+
+// --- Section 3101: employee tax ---------------------------------------------
+
+pub relation fica_employee_oasdi_tax(pay: WagePayment, amount: Money) kind institutional {
+    label en official "the tax imposed on the employee's wages by section 3101(a)";
+}
+
+pub relation fica_employee_hi_tax(pay: WagePayment, amount: Money) kind institutional {
+    label en official "the tax imposed on the employee's wages by section 3101(b)(1)";
+}
+
+pub relation fica_employee_additional_medicare_tax(pay: WagePayment, amount: Money) kind institutional {
+    label en official "the additional Medicare tax imposed on the employee's wages by section 3101(b)(2)";
+}
+
+pub relation fica_employee_tax(pay: WagePayment, amount: Money) kind institutional {
+    label en official "the total FICA tax imposed on the employee under section 3101 with respect to this wage payment";
+}
+
+// section 3121(a)(1) wage base: taxable wages for OASDI (3101(a)/3111(a)) are
+// capped at the contribution and benefit base per calendar year. Modelled via
+// the case-asserted `wages_3121` (section 3121(a) exclusions, see
+// `02-fica-definitions.law`) and `ContributionAndBenefitBase` (SOURCE_GAP
+// parameter, no invented value — see that file). Because the base's VALUE is
+// not pinned, the rule below states the CAP RULE only; it does not fire to a
+// bounded number without a case-asserted `ContributionAndBenefitBase` value
+// (TECH_GAP: no default value is supplied, matching the "never invent a
+// rate" instruction).
+pub relation oasdi_taxable_wages(pay: WagePayment, amount: Money) kind institutional {
+    label en official "wages subject to the OASDI tax after the section 3121(a)(1) contribution-and-benefit-base cap";
+}
+
+@source(IRC_S3121_A, relation = formalizes, coverage = partial, quote = "that part of the remuneration which, after remuneration (other than remuneration referred to in the succeeding paragraphs of this subsection) equal to the contribution and benefit base")
+rule OasdiTaxableWagesBelowBase(pay: WagePayment, employer: Person, employee: Person, y: TaxableYear, amount: Money, on: Date, prior: Money, base: Money) strict {
+    label en official "remuneration is fully OASDI-taxable while cumulative prior remuneration plus this payment does not exceed the contribution and benefit base";
+    when wages_3121(pay, amount)
+        and wage_payment(pay, employer, employee, y, amount, on)
+        and prior_remuneration_paid(pay, employer, employee, y, prior)
+        and contribution_and_benefit_base(y, base)
+        and prior + amount <= base;
+    then oasdi_taxable_wages(pay, amount);
+}
+
+@source(IRC_S3121_A, relation = formalizes, coverage = partial, quote = "that part of the remuneration which, after remuneration (other than remuneration referred to in the succeeding paragraphs of this subsection) equal to the contribution and benefit base")
+rule OasdiTaxableWagesCrossingBase(pay: WagePayment, employer: Person, employee: Person, y: TaxableYear, amount: Money, on: Date, prior: Money, base: Money) strict {
+    label en official "only the portion of remuneration up to the contribution and benefit base is OASDI-taxable; the excess is excluded by section 3121(a)(1)";
+    when wages_3121(pay, amount)
+        and wage_payment(pay, employer, employee, y, amount, on)
+        and prior_remuneration_paid(pay, employer, employee, y, prior)
+        and contribution_and_benefit_base(y, base)
+        and prior < base and prior + amount > base;
+    then oasdi_taxable_wages(pay, base - prior);
+}
+
+// SOURCE_GAP: the "contribution and benefit base" is published annually by
+// the Commissioner of Social Security under section 230 of the Social
+// Security Act; the IRC text of section 3121(a)(1) only cross-references
+// that section, and no dollar figure is stated anywhere in the pinned Title
+// 26 text this package owns. Per the task instruction ("do not invent the
+// base"), this package declares the relation as a CASE FACT the scenario
+// must assert (or a future `us.irc.definitions`/administrative package can
+// supply from a pinned SSA publication) rather than defaulting to any
+// number.
+pub relation contribution_and_benefit_base(y: TaxableYear, base: Money) kind empirical {
+    label en unofficial "the section 230 Social Security Act contribution and benefit base for this calendar year (SOURCE_GAP: not published in the pinned Title 26 text; the case must assert it from the SSA's own annual determination)";
+}
+// prior >= base: zero OASDI-taxable wages remain; no rule fires (absence is
+// the correct NEITHER/zero reading — the case can assert
+// `oasdi_taxable_wages(pay, 0.00 USD)` directly if that fact must be visible).
+
+@source(IRC_S3101_A, relation = formalizes, coverage = exact, quote = "there is hereby imposed on the income of every individual a tax equal to 6.2 percent of the wages")
+rule Section3101EmployeeOasdiTax(pay: WagePayment, amount: Money) strict {
+    when oasdi_taxable_wages(pay, amount);
+    then fica_employee_oasdi_tax(pay, round(amount * OasdiEmployeeRate, 2, "HALF_UP"));
+}
+
+@source(IRC_S3101_B, relation = formalizes, coverage = partial, quote = "there is hereby imposed on the income of every individual a tax equal to 1.45 percent of the wages")
+rule Section3101EmployeeHiTax(pay: WagePayment, amount: Money) strict {
+    when wages_3121(pay, amount);
+    then fica_employee_hi_tax(pay, round(amount * HiEmployeeRate, 2, "HALF_UP"));
+}
+
+// section 3101(b)(2) additional Medicare tax: 0.9% of wages in excess of the
+// filing-status threshold. `us.irc.income_individual::filing_status` gives
+// the status; a filing status of `MarriedSeparate` maps to the ½ threshold.
+// The cumulative-wages-in-the-year test (the threshold applies per employee
+// per year across ALL employers under section 3102(f), not per payment) is a
+// TECH_GAP noted on section 3101(b)(2)/3102(f): this rule tests the single
+// payment's employer-cumulative wages (`prior_remuneration_paid` + amount),
+// which is the correct base for the EMPLOYER's withholding duty (section
+// 3102(f)(1), 200,000 threshold applied by each employer without regard to
+// the employee's other employment) but understates the additional tax
+// actually OWED when the employee has more than one employer in the year —
+// section 3101(b)(2)'s own liability is computed on the RETURN, aggregating
+// all employment; that aggregate computation belongs to `gross-income`/
+// `income-individual` (chapter 1 reconciliation, section 3101(b)(2) read with
+// section 6654), not to this package's per-payment duty. Recorded as a
+// TECH_GAP/cross-package dependency in coverage, not silently narrowed.
+pub relation additional_medicare_wage_threshold(p: Person, y: TaxableYear, threshold: Money) kind institutional {
+    label en official "the section 3101(b)(2) threshold applicable to this taxpayer's filing status";
+}
+
+@source(IRC_S3101_B, relation = formalizes, coverage = partial, quote = "in the case of a joint return, $250,000")
+rule AdditionalMedicareThresholdJointRule(p: Individual, y: TaxableYear) strict {
+    when us.irc.income_individual::filing_status(p, y, us.irc.income_individual::Joint);
+    then additional_medicare_wage_threshold(p, y, AdditionalMedicareThresholdJoint);
+}
+
+@source(IRC_S3101_B, relation = formalizes, coverage = partial, quote = "in the case of a married taxpayer (as defined in section 7703) filing a separate return, ½ of the dollar amount determined under subparagraph (A)")
+rule AdditionalMedicareThresholdMarriedSeparateRule(p: Individual, y: TaxableYear) strict {
+    when us.irc.income_individual::filing_status(p, y, us.irc.income_individual::MarriedSeparate);
+    then additional_medicare_wage_threshold(p, y, AdditionalMedicareThresholdMarriedSeparate);
+}
+
+@source(IRC_S3101_B, relation = formalizes, coverage = partial, quote = "in any other case, $200,000")
+rule AdditionalMedicareThresholdOtherRule(p: Individual, y: TaxableYear, s: us.irc.income_individual::FilingStatus) strict {
+    when us.irc.income_individual::filing_status(p, y, s)
+        and s != us.irc.income_individual::Joint
+        and s != us.irc.income_individual::MarriedSeparate;
+    then additional_medicare_wage_threshold(p, y, AdditionalMedicareThresholdOther);
+}
+
+@source(IRC_S3101_B, relation = formalizes, coverage = partial, quote = "a tax equal to 0.9 percent of wages which are received with respect to employment")
+rule Section3101AdditionalMedicareTax(pay: WagePayment, employee: Person, y: TaxableYear, amount: Money, prior: Money, threshold: Money) strict {
+    when wages_3121(pay, amount)
+        and wage_payment(pay, _, employee, y, amount, _)
+        and prior_remuneration_paid(pay, _, employee, y, prior)
+        and additional_medicare_wage_threshold(employee, y, threshold)
+        and prior + amount > threshold;
+    then fica_employee_additional_medicare_tax(pay,
+        round((prior + amount - threshold) * AdditionalMedicareEmployeeRate, 2, "HALF_UP"));
+}
+@source(IRC_S3101_B, relation = formalizes, coverage = partial, quote = "a tax equal to 0.9 percent of wages which are received with respect to employment")
+rule Section3101AdditionalMedicareTaxZero(pay: WagePayment, employee: Person, y: TaxableYear, amount: Money, prior: Money, threshold: Money) strict {
+    label en unofficial "cumulative wages at or below the threshold: the additional Medicare tax on this payment is zero (stated explicitly, rather than left as an absent fact, so `FicaEmployeeTaxTotal` below can always require the relation instead of negating it — LDC-E4113)";
+    when wages_3121(pay, amount)
+        and wage_payment(pay, _, employee, y, amount, _)
+        and prior_remuneration_paid(pay, _, employee, y, prior)
+        and additional_medicare_wage_threshold(employee, y, threshold)
+        and prior + amount <= threshold;
+    then fica_employee_additional_medicare_tax(pay, 0.00 USD);
+}
+
+rule FicaEmployeeTaxTotal(pay: WagePayment, oasdi: Money, hi: Money, addl: Money) strict {
+    label en unofficial "total FICA employee tax is the sum of the three section 3101 components";
+    when fica_employee_oasdi_tax(pay, oasdi) and fica_employee_hi_tax(pay, hi) and fica_employee_additional_medicare_tax(pay, addl);
+    then fica_employee_tax(pay, oasdi + hi + addl);
+}
+
+// --- Section 3102: collection of employee tax by deduction from wages ------
+
+// (a) duty to deduct: an achievement goal per payment, performed by
+// deducting the tax at the time of payment (the statute gives no separate
+// filing deadline distinct from the payment date itself).
+pub relation employee_tax_deducted(pay: WagePayment, amount: Money) kind empirical {
+    label en unofficial "the employer in fact deducted this amount from this wage payment (section 3102(a) performance fact)";
+}
+
+@source(IRC_S3102_A, relation = formalizes, coverage = partial, quote = "The tax imposed by section 3101 shall be collected by the employer of the taxpayer, by deducting the amount of the tax from the wages as and when paid.")
+rule Section3102DutyToDeduct(pay: WagePayment, employer: Person, employee: Person, on: Date, tax: Money) defeasible {
+    when wage_payment(pay, employer, employee, _, _, on) and fica_employee_tax(pay, tax);
+    then duty Section3102DeductDuty {
+        bearer employer;
+        beneficiary Secretary;
+        goal achievement {
+            condition employee_tax_deducted(pay, tax);
+            window [on, on];
+        }
+    };
+    // stage 3: section 3102(d)(1)(A) (group-term life insurance after employment ends) and
+    // section 3102(c)(1) (tips: only to the extent collectible, own duty in 13-fica-rrta-special-rules.law)
+    unless group_term_life_deduction_duty_displaced(pay) and wage_payment(pay, employer, employee, _, _, on) and fica_employee_tax(pay, tax);
+    unless tip_payment(pay) and wage_payment(pay, employer, employee, _, _, on) and fica_employee_tax(pay, tax);
+}
+
+// (b) indemnification: the employer who deducted is indemnified against the
+// employee's claim for the amount deducted — an immunity of the employer
+// against the employee's claim to the withheld amount.
+@source(IRC_S3102_B, relation = formalizes, coverage = exact, quote = "Every employer required so to deduct the tax shall be liable for the payment of such tax, and shall be indemnified against the claims and demands of any person for the amount of any such payment made by such employer.")
+rule Section3102IndemnificationImmunity(pay: WagePayment, employer: Person, employee: Person, on: Date, tax: Money) strict {
+    when wage_payment(pay, employer, employee, _, _, on) and employee_tax_deducted(pay, tax);
+    then immunity Section3102EmployerIndemnifiedImmunity {
+        holder employer;
+        protected_effect owes_employee_deducted_amount(employer, employee, pay);
+        window [on, infinity);
+    };
+}
+relation owes_employee_deducted_amount(employer: Person, employee: Person, pay: WagePayment) kind institutional {
+    label en unofficial "would-be claim of the employee against the employer for the amount lawfully deducted under section 3102(a) — the immunity's protected effect, never itself asserted true by a rule in this package";
+}
+
+// (f) special rules for additional Medicare tax: the employer's section
+// 3102(a) duty on the additional Medicare tax component is computed WITHOUT
+// regard to the employee's filing status or other wages (a flat $200,000
+// per-employer threshold), and the employer has no duty to collect any
+// UNDERWITHHOLDING that results from that simplification.
+pub relation additional_medicare_employer_duty_threshold(y: TaxableYear, threshold: Money) kind institutional {
+    label en official "the flat threshold each employer applies under section 3102(f)(1), regardless of the employee's actual filing status";
+}
+@source(IRC_S3102_F, relation = formalizes, coverage = partial, quote = "subsection (a) shall only apply to the extent to which the taxpayer receives wages from the employer in excess of $200,000")
+rule Section3102FFlatThreshold(pay: WagePayment, y: TaxableYear) strict {
+    when wage_payment(pay, _, _, y, _, _);
+    then additional_medicare_employer_duty_threshold(y, AdditionalMedicareThresholdOther);
+}
+// TECH_GAP: `when true` (an unconditioned fact for every taxable year) is a
+// simplification standing in for "for purposes of the employer's collection
+// duty only" — the rule intentionally ignores marital status because section
+// 3102(f)(1) itself does. The employer's ACTUAL withholding duty
+// (`Section3102DeductDuty` above) uses `fica_employee_tax`, which already
+// applies the flat $200,000 threshold via a separate per-employer
+// computation in a full model; this package does not yet fork the employer's
+// withholding computation from the employee's own liability computation
+// (they can differ when the employee has multiple employers) — see the
+// TECH_GAP note on `Section3101AdditionalMedicareTax` above.
+
+@source(IRC_S3102_C, relation = formalizes, coverage = contextual, quote = "collection can be made by the employer")
+relation constructive_payment_of_wages(employer: Person, employee: Person, amount: Money, on: Date) kind institutional {
+    label en unofficial "section 3102(c): cash tips reported under section 6053(a) are constructively paid to the employee for section 3102(a) deduction purposes even though no cash payment under the employer's control exists; classification only — the deduction-from-available-funds mechanics of 3102(c) are a TECH_GAP (self-referential ledger over a running fund balance, comparable to the day-by-day ledger LDC-E4102 trap)";
+}
+
+// (d) special rule for tips: no duty to deduct beyond what section 3102(c)
+// makes available; (e) special rule for religious exemption cross-references
+// section 3127 (already formalized in `03-fica-administrative.law`).
+// NON_NORMATIVE for THIS module: (d) and (e) restate mechanics owned by (c)
+// and by section 3127, respectively — see coverage notes.
+
+// --- Section 3111: employer tax ---------------------------------------------
+
+pub relation fica_employer_oasdi_tax(pay: WagePayment, amount: Money) kind institutional {
+    label en official "the excise tax imposed on the employer by section 3111(a)";
+}
+pub relation fica_employer_hi_tax(pay: WagePayment, amount: Money) kind institutional {
+    label en official "the excise tax imposed on the employer by section 3111(b)";
+}
+pub relation fica_employer_tax(pay: WagePayment, amount: Money) kind institutional {
+    label en official "the total FICA tax imposed on the employer under section 3111 with respect to this wage payment";
+}
+
+@source(IRC_S3111_A, relation = formalizes, coverage = exact, quote = "there is hereby imposed on every employer an excise tax, with respect to having individuals in his employ, equal to 6.2 percent of the wages")
+rule Section3111EmployerOasdiTax(pay: WagePayment, amount: Money) strict {
+    when oasdi_taxable_wages(pay, amount);
+    then fica_employer_oasdi_tax(pay, round(amount * OasdiEmployerRate, 2, "HALF_UP"));
+}
+
+@source(IRC_S3111_B, relation = formalizes, coverage = exact, quote = "there is hereby imposed on every employer an excise tax, with respect to having individuals in his employ, equal to 1.45 percent of the wages")
+rule Section3111EmployerHiTax(pay: WagePayment, amount: Money) strict {
+    when wages_3121(pay, amount);
+    then fica_employer_hi_tax(pay, round(amount * HiEmployerRate, 2, "HALF_UP"));
+}
+
+rule FicaEmployerTaxTotal(pay: WagePayment, oasdi: Money, hi: Money) strict {
+    when fica_employer_oasdi_tax(pay, oasdi) and fica_employer_hi_tax(pay, hi);
+    then fica_employer_tax(pay, oasdi + hi);
+}
+
+// (c) international-agreement relief (totalization agreements): EXTERNAL_DEPENDENCY
+// — which countries have a section 233 Social Security Act agreement in
+// force, and its terms, are facts outside this title; modelled as a
+// case-asserted immunity condition.
+relation totalization_agreement_covers(employee: Person, on: Date) kind empirical {
+    label en unofficial "a section 233 Social Security Act agreement exclusively covers this employee's wages on this date (EXTERNAL_DEPENDENCY: which agreements exist and their scope is a State Department/SSA fact, not IRC text)";
+}
+@source(IRC_S3111_C, relation = formalizes, coverage = exact, quote = "wages received by or paid to an individual shall be exempt from the taxes imposed by this section to the extent that such wages are subject under such agreement exclusively to the laws applicable to the social security system of such foreign country")
+rule Section3111TotalizationImmunityRule(pay: WagePayment, employer: Person, employee: Person, on: Date) strict {
+    when wage_payment(pay, employer, employee, _, _, on) and totalization_agreement_covers(employee, on);
+    then immunity Section3111TotalizationImmunity {
+        holder employer;
+        protected_effect fica_employer_tax_owed(employer, pay);
+        window [on, on];
+    };
+}
+relation fica_employer_tax_owed(employer: Person, pay: WagePayment) kind institutional {
+    label en unofficial "the protected effect of the totalization immunity: liability for the section 3111 tax on this payment";
+}
+
+// (e)/(f) credits against the employer tax (qualified veterans; qualified
+// small business research credit payroll offset): TECH_GAP/EXTERNAL_DEPENDENCY.
+// Both credits cross-reference computations owned by other packages (section
+// 51 work opportunity credit modifications; section 41(h) research credit
+// election) that are not yet available to this package, and (e)'s "applicable
+// period" test and (f)'s carryover-to-succeeding-quarter mechanics are
+// themselves non-trivial temporal aggregates. Recorded as EXTERNAL_DEPENDENCY
+// (owner: `credits`, not yet consumable) rather than approximated.

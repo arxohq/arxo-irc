@@ -1,0 +1,309 @@
+// Chapter 2A, section 1411 — net investment income tax (NIIT). Stage IRC-10
+// (A14), DECISION-0379.
+
+
+
+
+
+// --- section 1411(b): threshold amount --------------------------------------
+
+use self::{
+    IRC_S1411_A,
+    IRC_S1411_B,
+    IRC_S1411_C,
+    IRC_S1411_D,
+    Individual,
+    Person,
+    TaxableYear,
+    Trust,
+    disposition_of_partnership_or_s_corporation_interest,
+    ordinary_course_of_active_business_after_working_capital,
+    property_held_in_active_business_after_working_capital,
+    self_employment_income,
+};
+
+pub relation niit_threshold_amount(p: Individual, y: TaxableYear, threshold: Money) kind institutional {
+    label en official "the section 1411(b) \"threshold amount\" applicable to this individual's filing status";
+}
+
+@source(IRC_S1411_B, relation = formalizes, coverage = partial, quote = "in the case of a taxpayer making a joint return under section 6013 or a surviving spouse (as defined in section 2(a)), $250,000")
+rule NiitThresholdJointRule(p: Individual, y: TaxableYear) strict {
+    when us.irc.income_individual::filing_status(p, y, us.irc.income_individual::Joint);
+    then niit_threshold_amount(p, y, NiitThresholdJoint);
+}
+@source(IRC_S1411_B, relation = formalizes, coverage = partial, quote = "in the case of a married taxpayer (as defined in section 7703) filing a separate return, ½ of the dollar amount determined under paragraph (1)")
+rule NiitThresholdMarriedSeparateRule(p: Individual, y: TaxableYear) strict {
+    when us.irc.income_individual::filing_status(p, y, us.irc.income_individual::MarriedSeparate);
+    then niit_threshold_amount(p, y, NiitThresholdMarriedSeparate);
+}
+@source(IRC_S1411_B, relation = formalizes, coverage = partial, quote = "in any other case, $200,000")
+rule NiitThresholdOtherRule(p: Individual, y: TaxableYear, s: us.irc.income_individual::FilingStatus) strict {
+    when us.irc.income_individual::filing_status(p, y, s)
+        and s != us.irc.income_individual::Joint
+        and s != us.irc.income_individual::MarriedSeparate;
+    then niit_threshold_amount(p, y, NiitThresholdOther);
+}
+
+// --- section 1411(c): net investment income ---------------------------------
+
+pub entity NetInvestmentIncomeItem;
+
+pub enum NiiItemKind {
+    InterestDividendAnnuityRoyaltyRent;   // (c)(1)(A)(i)
+    TradeOrBusinessGrossIncome;           // (c)(1)(A)(ii) — passive activity or trading business
+    NetGainOnDisposition;                 // (c)(1)(A)(iii)
+}
+
+pub relation nii_item(item: NetInvestmentIncomeItem, p: Person, y: TaxableYear, kind: NiiItemKind, amount: Money) kind empirical {
+    label en unofficial "an item of gross income or net gain the case attributes to this person and taxable year, classified for section 1411(c)(1)(A)";
+}
+
+pub relation is_passive_activity_469(p: Person, y: TaxableYear, activity: Person) kind empirical {
+    label en unofficial "the trade or business is a passive activity within the meaning of section 469 with respect to the taxpayer — section 1411(c)(2)(A); contract to `us.irc.accounting` (§469), EXTERNAL_DEPENDENCY per docs/foundations/us-irc/coverage/other-income-taxes.deps.json until that package exposes a `pub` classification relation";
+}
+pub relation is_trading_business_475e2(p: Person, y: TaxableYear, activity: Person) kind empirical {
+    label en unofficial "the trade or business is one of trading in financial instruments or commodities as defined in section 475(e)(2) — section 1411(c)(2)(B)";
+}
+pub relation is_trade_or_business_described_1411c2(p: Person, y: TaxableYear, activity: Person) kind institutional {
+    label en official "section 1411(c)(2): the trade or business is a passive activity (§469) or a trading business (§475(e)(2)) — the (c)(1)(A)(i) exception and the (c)(1)(A)(ii) inclusion both key off this classification";
+}
+rule TradeOrBusinessDescribed1411C2Passive(p: Person, y: TaxableYear, activity: Person) strict {
+    when is_passive_activity_469(p, y, activity);
+    then is_trade_or_business_described_1411c2(p, y, activity);
+}
+rule TradeOrBusinessDescribed1411C2Trading(p: Person, y: TaxableYear, activity: Person) strict {
+    when is_trading_business_475e2(p, y, activity);
+    then is_trade_or_business_described_1411c2(p, y, activity);
+}
+// section 1411(c)(3): "a rule similar to the rule of section 469(e)(1)(B)
+// shall apply": income from the investment of working capital is treated as not
+// derived in the ordinary course of a trade or business (stage 3, module 06:
+// `attributable_to_investment_of_working_capital` defeats the (c)(1)(A)(i) and (iii)
+// carve-outs through the `..._after_working_capital` relations read below).
+
+pub relation nii_allocable_deductions(p: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the deductions allowed by subtitle A properly allocable to the gross income/net gain described in section 1411(c)(1)(A) — section 1411(c)(1)(B); case-asserted because the allocability test itself is not this package's own norm";
+}
+
+pub relation net_investment_income(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "net investment income, section 1411(c)(1): the (A) items less the (B) allocable deductions, but never below the statute's own floor of zero when the (A) sum itself is negative is NOT stated by the text — this module does not impose a zero floor beyond what \"excess (if any)\" implies at the (A)-minus-(B) level";
+}
+
+@source(IRC_S1411_C, relation = formalizes, coverage = partial, quote = "gross income from interest, dividends, annuities, royalties, and rents, other than such income which is derived in the ordinary course of a trade or business not described in paragraph (2)")
+rule NiiInterestDividendItemIncludedOrdinaryBusinessNotDescribed(item: NetInvestmentIncomeItem, p: Person, y: TaxableYear, amount: Money) defeasible {
+    label en official "interest/dividend/annuity/royalty/rent income IS a NII item UNLESS it is derived in the ordinary course of a trade or business that is NOT a section 1411(c)(2) passive/trading business (i.e. an ordinary active trade or business) — in which case it is excluded from this category entirely (it may still be a chapter 2 self-employment item, excluded again by (c)(6))";
+    when nii_item(item, p, y, InterestDividendAnnuityRoyaltyRent, amount);
+    then nii_item_included(item, p, y, amount);
+    unless ordinary_course_of_active_business_after_working_capital(item, p, y) and nii_item(item, p, y, InterestDividendAnnuityRoyaltyRent, amount);
+}
+pub relation derived_in_ordinary_course_of_active_trade_or_business(item: NetInvestmentIncomeItem, p: Person, y: TaxableYear) kind empirical {
+    label en unofficial "the interest/dividend/annuity/royalty/rent item is derived in the ordinary course of an ACTIVE trade or business (one NOT described in section 1411(c)(2)) — the (c)(1)(A)(i) carve-out";
+}
+
+@source(IRC_S1411_C, relation = formalizes, coverage = partial, quote = "other gross income derived from a trade or business described in paragraph (2)")
+rule NiiTradeOrBusinessItemIncluded(item: NetInvestmentIncomeItem, p: Person, y: TaxableYear, amount: Money, activity: Person) strict {
+    when nii_item(item, p, y, TradeOrBusinessGrossIncome, amount)
+        and is_trade_or_business_described_1411c2(p, y, activity);
+    then nii_item_included(item, p, y, amount);
+}
+
+@source(IRC_S1411_C, relation = formalizes, coverage = partial, quote = "net gain (to the extent taken into account in computing taxable income) attributable to the disposition of property other than property held in a trade or business not described in paragraph (2)")
+rule NiiNetGainItemIncluded(item: NetInvestmentIncomeItem, p: Person, y: TaxableYear, amount: Money) defeasible {
+    when nii_item(item, p, y, NetGainOnDisposition, amount);
+    then nii_item_included(item, p, y, amount);
+    unless property_held_in_active_business_after_working_capital(item, p, y) and nii_item(item, p, y, NetGainOnDisposition, amount);
+    unless disposition_of_partnership_or_s_corporation_interest(item) and nii_item(item, p, y, NetGainOnDisposition, amount);
+}
+pub relation property_held_in_active_trade_or_business(item: NetInvestmentIncomeItem, p: Person, y: TaxableYear) kind empirical {
+    label en unofficial "the disposed property was held in an active trade or business NOT described in section 1411(c)(2) — the (c)(1)(A)(iii) carve-out";
+}
+
+pub relation nii_item_included(item: NetInvestmentIncomeItem, p: Person, y: TaxableYear, amount: Money) kind institutional;
+
+// (c)(4): partnership/S-corp interest disposition — gain/loss taken into
+// account only to the extent of the net gain/loss a hypothetical sale of all
+// partnership/S-corp property at fair market value would produce. Stage 3
+// (module 06): the per-property shares of the hypothetical sale are recorded
+// facts; `limited_interest_disposition_amount` feeds `nii_item_included`, and
+// the general net-gain rule above is defeated for such items.
+
+@source(IRC_S1411_C, relation = formalizes, coverage = exact, quote = "The term \"net investment income\" shall not include any distribution from a plan or arrangement described in section 401(a), 403(a), 403(b), 408, 408A, or 457(b).")
+rule NiiExcludesRetirementPlanDistribution(item: NetInvestmentIncomeItem, p: Person, y: TaxableYear) strict {
+    when is_retirement_plan_distribution(item, p, y);
+    then nii_item_excluded_retirement_plan(item);
+}
+pub relation is_retirement_plan_distribution(item: NetInvestmentIncomeItem, p: Person, y: TaxableYear) kind empirical {
+    label en unofficial "the item is a distribution from a plan or arrangement described in section 401(a), 403(a), 403(b), 408, 408A, or 457(b) — section 1411(c)(5)";
+}
+pub relation nii_item_excluded_retirement_plan(item: NetInvestmentIncomeItem) kind institutional;
+
+@source(IRC_S1411_C, relation = formalizes, coverage = exact, quote = "Net investment income shall not include any item taken into account in determining self-employment income for such taxable year on which a tax is imposed by section 1401(b).")
+rule NiiExcludesSelfEmploymentTaxedItem(item: NetInvestmentIncomeItem, p: Individual, y: TaxableYear, se: Money) defeasible {
+    when self_employment_income(p, y, se)
+        and se > 0.00 USD
+        and item_counted_in_self_employment_income(item, p, y);
+    then nii_item_excluded_self_employment(item);
+}
+pub relation item_counted_in_self_employment_income(item: NetInvestmentIncomeItem, p: Person, y: TaxableYear) kind empirical {
+    label en unofficial "this NII item corresponds to (is the same economic item as) an item already taken into account in computing this person's net earnings from self-employment for this year — section 1411(c)(6); asserted by the case linking the two item universes rather than re-deriving item identity";
+}
+pub relation nii_item_excluded_self_employment(item: NetInvestmentIncomeItem) kind institutional;
+
+pub relation net_investment_income_gross(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the sum of section 1411(c)(1)(A) included items, before the (c)(1)(B) allocable-deductions reduction";
+}
+rule NetInvestmentIncomeGrossAggregate(p0: Person, y0: TaxableYear, item0: NetInvestmentIncomeItem) defeasible {
+    when nii_item_included(item0, p0, y0, _);
+    then net_investment_income_gross(p0, y0,
+        sum all amount: Money for item: NetInvestmentIncomeItem
+            where nii_item_included(item, p0, y0, amount)
+                and not nii_item_excluded_retirement_plan(item)
+                and not nii_item_excluded_self_employment(item));
+}
+
+@source(IRC_S1411_C, relation = formalizes, coverage = partial, quote = "the deductions allowed by this subtitle which are properly allocable to such gross income or net gain")
+rule NetInvestmentIncome(p: Person, y: TaxableYear, gross: Money, deductions: Money) defeasible {
+    when net_investment_income_gross(p, y, gross)
+        and nii_allocable_deductions(p, y, deductions);
+    then net_investment_income(p, y, gross - deductions);
+}
+// NOTE: the case must assert `nii_allocable_deductions` for every person/year
+// with NII items, even 0.00 USD when there are no allocable deductions — a
+// "not asserted" fallback rule is not written here (LDC-E0207: `_` is not a
+// legal argument under `not`), matching the §111 monotone-supported(P)
+// restriction on status-sensitive negation over an empirical relation.
+
+// --- section 1411(d): modified adjusted gross income ------------------------
+
+pub relation section_911_exclusion_amount(p: Individual, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the amount excluded from gross income under section 911(a)(1) for this individual and year — EXTERNAL_DEPENDENCY: `us.irc.international` (mid-write, contract only per AGENT-BRIEF) is the eventual owner of a `pub` relation for this; asserted as a case fact until that contract lands";
+}
+pub relation section_911d6_disallowed_amount(p: Individual, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "deductions/exclusions disallowed under section 911(d)(6) with respect to the section 911(a)(1) excluded amount — section 1411(d)(2); EXTERNAL_DEPENDENCY, same owner as above";
+}
+
+pub relation modified_adjusted_gross_income(p: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 1411(d): adjusted gross income increased by the excess of the section 911(a)(1) exclusion over the section 911(d)(6) disallowed amount";
+}
+@source(IRC_S1411_D, relation = formalizes, coverage = exact, quote = "the term \"modified adjusted gross income\" means adjusted gross income increased by the excess of")
+rule ModifiedAdjustedGrossIncomeWithAddback(p: Individual, y: TaxableYear, agi: Money, excl: Money, disallowed: Money) strict {
+    when us.irc.gross_income::adjusted_gross_income(p, y, agi)
+        and section_911_exclusion_amount(p, y, excl)
+        and section_911d6_disallowed_amount(p, y, disallowed)
+        and excl > disallowed;
+    then modified_adjusted_gross_income(p, y, agi + (excl - disallowed));
+}
+rule ModifiedAdjustedGrossIncomeNoExcess(p: Individual, y: TaxableYear, agi: Money, excl: Money, disallowed: Money) strict {
+    when us.irc.gross_income::adjusted_gross_income(p, y, agi)
+        and section_911_exclusion_amount(p, y, excl)
+        and section_911d6_disallowed_amount(p, y, disallowed)
+        and excl <= disallowed;
+    then modified_adjusted_gross_income(p, y, agi);
+}
+// NOTE: the case must assert `section_911_exclusion_amount` and
+// `section_911d6_disallowed_amount` (even 0.00 USD) for every
+// individual/year this rule reads — LDC-E0207 forbids a "not asserted"
+// fallback rule using `_` under `not`.
+
+// --- section 1411(a)(1)/(e): the individual's tax, with the (e) exclusions --
+
+pub relation is_niit_exempt_nonresident_alien(p: Individual, y: TaxableYear) kind institutional {
+    label en official "section 1411(e)(1): a nonresident alien is not subject to this section";
+}
+rule NiitExemptNonresidentAlien(p: Individual, y: TaxableYear, n: Integer) strict {
+    when us.irc.core::calendar_year_of(y, n)
+        and us.irc.definitions::nonresident_alien_for_year(p, n);
+    then is_niit_exempt_nonresident_alien(p, y);
+}
+
+pub relation is_niit_exempt_charitable_trust(t: Trust, y: TaxableYear) kind empirical {
+    label en unofficial "section 1411(e)(2): a trust all of the unexpired interests in which are devoted to one or more section 170(c)(2)(B) purposes";
+}
+
+@source(IRC_S1411_A, relation = formalizes, coverage = partial, quote = "In the case of an individual, there is hereby imposed (in addition to any other tax imposed by this subtitle) for each taxable year a tax equal to 3.8 percent of the lesser of")
+rule Section1411A1TaxNiiLesser(p: Individual, y: TaxableYear, nii: Money, magi: Money, threshold: Money) defeasible {
+    when net_investment_income(p, y, nii)
+        and modified_adjusted_gross_income(p, y, magi)
+        and niit_threshold_amount(p, y, threshold)
+        and magi > threshold
+        and nii <= (magi - threshold)
+        and not_known(is_niit_exempt_nonresident_alien(p, y));
+    then net_investment_income_tax(p, y, round(nii * NiitRate, 2, "HALF_UP"));
+}
+rule Section1411A1TaxExcessLesser(p: Individual, y: TaxableYear, nii: Money, magi: Money, threshold: Money) defeasible {
+    when net_investment_income(p, y, nii)
+        and modified_adjusted_gross_income(p, y, magi)
+        and niit_threshold_amount(p, y, threshold)
+        and magi > threshold
+        and nii > (magi - threshold)
+        and not_known(is_niit_exempt_nonresident_alien(p, y));
+    then net_investment_income_tax(p, y, round((magi - threshold) * NiitRate, 2, "HALF_UP"));
+}
+rule Section1411A1TaxMagiAtOrBelowThreshold(p: Individual, y: TaxableYear, magi: Money, threshold: Money) defeasible {
+    when modified_adjusted_gross_income(p, y, magi)
+        and niit_threshold_amount(p, y, threshold)
+        and magi <= threshold
+        and not_known(is_niit_exempt_nonresident_alien(p, y));
+    then net_investment_income_tax(p, y, 0.00 USD);
+}
+
+pub relation net_investment_income_tax(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the tax imposed by section 1411 (individual under (a)(1), or estate/trust under (a)(2))";
+}
+
+rule NiitLiability(p: Person, y: TaxableYear, amount: Money) defeasible {
+    when net_investment_income_tax(p, y, amount);
+    then us.irc.core::liability(p, y, us.irc.core::NiitCh2A, amount);
+}
+
+// --- section 1411(a)(2): estates and trusts ---------------------------------
+//
+// "the lesser of (A) the undistributed net investment income for such
+// taxable year, or (B) the excess (if any) of (i) the adjusted gross income
+// (as defined in section 67(e)) for such taxable year, over (ii) the dollar
+// amount at which the highest tax bracket in section 1(e) begins for such
+// taxable year." Both `undistributed_net_investment_income` (an
+// estates/trusts-package computation over distributable net income) and the
+// section 1(e) top-bracket dollar amount are EXTERNAL_DEPENDENCY: the
+// `trusts-estates` package (pending per AGENT-BRIEF) is the intended owner.
+// This package declares the CONTRACT shape it will consume, not an invented
+// number, and does not compute (a)(2) tax without those case-asserted values.
+
+pub relation undistributed_net_investment_income(t: Trust, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "EXTERNAL_DEPENDENCY (owner: `trusts-estates`, pending): the trust's or estate's undistributed net investment income for the taxable year, computed under principles this package does not implement";
+}
+pub relation section_1e_top_bracket_threshold(y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "EXTERNAL_DEPENDENCY (owner: the section-1-rates package, pending): the dollar amount at which the highest section 1(e) estate/trust tax bracket begins for this year";
+}
+pub relation trust_adjusted_gross_income_67e(t: Trust, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the section 67(e) adjusted gross income of the estate or trust for this taxable year — EXTERNAL_DEPENDENCY, same owner";
+}
+
+@source(IRC_S1411_A, relation = formalizes, coverage = partial, quote = "In the case of an estate or trust, there is hereby imposed (in addition to any other tax imposed by this subtitle) for each taxable year a tax of 3.8 percent of the lesser of")
+rule Section1411A2TaxUndistributedNiiLesser(t: Trust, y: TaxableYear, unii: Money, agi: Money, bracket: Money) strict {
+    when undistributed_net_investment_income(t, y, unii)
+        and trust_adjusted_gross_income_67e(t, y, agi)
+        and section_1e_top_bracket_threshold(y, bracket)
+        and agi > bracket
+        and unii <= (agi - bracket)
+        and not is_niit_exempt_charitable_trust(t, y);
+    then net_investment_income_tax(t, y, round(unii * NiitRate, 2, "HALF_UP"));
+}
+rule Section1411A2TaxExcessLesser(t: Trust, y: TaxableYear, unii: Money, agi: Money, bracket: Money) strict {
+    when undistributed_net_investment_income(t, y, unii)
+        and trust_adjusted_gross_income_67e(t, y, agi)
+        and section_1e_top_bracket_threshold(y, bracket)
+        and agi > bracket
+        and unii > (agi - bracket)
+        and not is_niit_exempt_charitable_trust(t, y);
+    then net_investment_income_tax(t, y, round((agi - bracket) * NiitRate, 2, "HALF_UP"));
+}
+rule Section1411A2TaxAgiAtOrBelowBracket(t: Trust, y: TaxableYear, agi: Money, bracket: Money) strict {
+    when trust_adjusted_gross_income_67e(t, y, agi)
+        and section_1e_top_bracket_threshold(y, bracket)
+        and agi <= bracket
+        and not is_niit_exempt_charitable_trust(t, y);
+    then net_investment_income_tax(t, y, 0.00 USD);
+}
+
+const NiitRate: Decimal = 0.038;

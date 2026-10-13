@@ -1,0 +1,388 @@
+// 26 U.S.C. §6654 — Failure by individual to pay estimated income tax.
+// SCOPE (per assignment): (d)(1) required annual payment thresholds
+// (90%/100%/110%), (c) the 4 installments and their due dates (calendar-year
+// taxpayer only), (e)(1)/(2)/(3) exceptions (the $1,000 floor, no prior-year
+// liability, and the Secretary's casualty/disaster/retirement/disability
+// waiver power), (h) the return-filed-by-January-31 special rule. Exempt
+// from §6751(b) (§6751(b)(2)(A) names section 6654 outright).
+//
+// JUDGMENT CALLS AND GAPS (see report):
+//  - (d)(2) (the annualized income installment, lower-of test) is NOT
+//    modelled — every required installment here is the flat 25 percent of
+//    the required annual payment under (d)(1)(A); a taxpayer who would
+//    qualify for a lower annualized installment gets an OVERSTATED
+//    underpayment under this rule set. TECH_GAP, substantial (this is a
+//    materially used real-world method).
+//  - (f) ("tax" defined net of credits other than §31 withholding), (g)
+//    (withholding as deemed-paid estimated tax), (i) (farmers/fishermen),
+//    (j) (nonresident aliens), (k)/(l)/(m)/(n) (fiscal/short years, estates
+//    and trusts, Medicare tax, regulations) are OUT OF STAGE-1 SCOPE per the
+//    assignment and left `unreviewed` ("stage 2"): `required_annual_payment`
+//    below reads `us.irc.core::liability` directly, which is NOT (f)'s
+//    credit-adjusted "tax" — a further TECH_GAP layered on the same
+//    simplification (c)/(d) already carry.
+//  - Due dates in (c)(2) are for a CALENDAR-YEAR individual only (the table's
+//    April 15/June 15/September 15/January 15 row); a fiscal-year taxpayer's
+//    (k)(1) month-substitution is not modelled.
+//  - The addition amount itself is a SIMPLE (non-compounding) rate × amount ×
+//    time computation, not the daily-compounding §6621/6622 computation the
+//    real underpayment-rate interest mechanism uses (that mechanism is
+//    `payment-refunds-interest`'s, F03, still pending) — `underpayment_rate_
+//    under_6621` (01-shared.law) is read as an ANNUAL rate and pro-rated by
+//    the fraction of a 365-day year the underpayment period covers.
+//  - (e)(3) waiver's casualty/disaster/retirement/disability grounds are
+//    modelled as ordinary empirical predicates (the statute conditions the
+//    waiver on the Secretary's own DETERMINATION, "the Secretary determines
+//    that ..." — an institutional finding, not an open-textured DECISION-0194
+//    evaluative element the way "reasonable cause" is elsewhere).
+
+language "law.core" version "0.2";
+package us.irc.penalties version "0.1.1";
+namespace "urn:us:irc:penalties:clir";
+
+use self::{
+    CorporateEstimatedInstallment,
+    IRC_S6654_A,
+    IRC_S6654_B,
+    IRC_S6654_D,
+    IRC_S6654_E,
+    IRC_S6654_G,
+    IRC_S6654_H,
+    Person,
+    Secretary,
+    TaxKind,
+    TaxableYear,
+    deemed_withholding_payment_total_6654g,
+    estimated_tax_inapplicable_to_estate_or_trust_6654l,
+    farmer_or_fisherman,
+    no_payment_addition_under_6658,
+    nonresident_alien_described_in_6072c,
+    required_installment_applicable,
+    tax_for_6654,
+    underpayment_rate_under_6621,
+    withholding_deemed_paid_present_6654g,
+};
+
+pub enum EstimatedTaxInstallment {
+    First;
+    Second;
+    Third;
+    Fourth;
+    label en unofficial "one of the four section 6654(c)(1) required installments for a calendar-year individual";
+}
+
+relation preceding_year_was_12_months(p: Person, y: TaxableYear) kind empirical {
+    label en official "the preceding taxable year was not a taxable year of 12 months (negated below)";
+}
+relation preceding_year_return_filed(p: Person, y: TaxableYear) kind empirical {
+    label en unofficial "the individual filed a return for the preceding taxable year";
+}
+relation preceding_year_tax_shown(p: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the tax shown on the individual's return for the preceding taxable year";
+}
+relation current_year_tax(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "the tax for the current taxable year (section 6654(d)(1)(B)(i)) — the section 6654(f) tax (`tax_for_6654`, module 31)";
+}
+rule CurrentYearTax strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for tax: Money;
+    for tax_f: Money;
+    when us.irc.core::liability(p, y, kind, tax) and kind == us.irc.core::IncomeCh1 and tax_for_6654(p, y, tax_f);
+    then current_year_tax(p, y, tax_f);
+}
+
+relation preceding_year_agi_exceeds_150000(p: Person, y: TaxableYear) kind institutional {
+    label en official "the adjusted gross income shown on the return of the individual for the preceding taxable year beginning in any calendar year exceeds $150,000";
+}
+relation files_separately(p: Person, y: TaxableYear) kind empirical {
+    label en official "a married individual (within the meaning of section 7703) who files a separate return for the taxable year";
+}
+pub relation preceding_year_percentage(p: Person, y: TaxableYear, rate: Decimal) kind institutional {
+    label en unofficial "the section 6654(d)(1)(B)(ii)/(C) percentage of the preceding year's tax used in the required-annual-payment lesser-of test";
+}
+@source(IRC_S6654_D, relation = formalizes, coverage = exact, quote = "100 percent of the tax shown on the return of the individual for the preceding taxable year")
+rule PrecedingYearPercentageStandard strict {
+    for p: Person;
+    for y: TaxableYear;
+    for preceding: Money;
+    when preceding_year_tax_shown(p, y, preceding) and not_known(preceding_year_agi_exceeds_150000(p, y));
+    then preceding_year_percentage(p, y, PrecedingYearStandardPercent);
+}
+@source(IRC_S6654_D, relation = formalizes, coverage = exact, quote = "clause (ii) of subparagraph (B) shall be applied by substituting \"110 percent\" for \"100 percent\"")
+rule PrecedingYearPercentageHighIncome strict {
+    for p: Person;
+    for y: TaxableYear;
+    for preceding: Money;
+    when preceding_year_tax_shown(p, y, preceding) and preceding_year_agi_exceeds_150000(p, y);
+    then preceding_year_percentage(p, y, PrecedingYearHighIncomePercent);
+}
+
+pub relation required_annual_payment(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the term \"required annual payment\" means the lesser of (i) 90 percent of the tax shown on the return for the taxable year ... or (ii) 100 percent of the tax shown on the return of the individual for the preceding taxable year";
+}
+@source(IRC_S6654_D, relation = formalizes, coverage = partial, quote = "the term \"required annual payment\" means the lesser of")
+rule RequiredAnnualPaymentWithPriorYear strict {
+    for p: Person;
+    for y: TaxableYear;
+    for current: Money;
+    for preceding: Money;
+    for pct: Decimal;
+    when current_year_tax(p, y, current)
+        and preceding_year_return_filed(p, y)
+        and not preceding_year_was_12_months(p, y)
+        and preceding_year_tax_shown(p, y, preceding)
+        and preceding_year_percentage(p, y, pct);
+    then required_annual_payment(p, y, min(round(current * RequiredAnnualPaymentCurrentYearPercent, 2, "HALF_UP"), round(preceding * pct, 2, "HALF_UP")));
+}
+@source(IRC_S6654_D, relation = formalizes, coverage = partial, quote = "Clause (ii) shall not apply if the preceding taxable year was not a taxable year of 12 months or if the individual did not file a return for such preceding taxable year")
+rule RequiredAnnualPaymentNoPriorYear strict {
+    for p: Person;
+    for y: TaxableYear;
+    for current: Money;
+    when current_year_tax(p, y, current)
+        and (preceding_year_was_12_months(p, y));
+    then required_annual_payment(p, y, round(current * RequiredAnnualPaymentCurrentYearPercent, 2, "HALF_UP"));
+}
+rule RequiredAnnualPaymentNoPriorYearReturn strict {
+    for p: Person;
+    for y: TaxableYear;
+    for current: Money;
+    when current_year_tax(p, y, current)
+        and not preceding_year_return_filed(p, y)
+        and not preceding_year_was_12_months(p, y);
+    then required_annual_payment(p, y, round(current * RequiredAnnualPaymentCurrentYearPercent, 2, "HALF_UP"));
+}
+
+// --- (c): four installments, calendar-year due dates ------------------------
+
+pub relation required_installment_due_date(y: TaxableYear, installment: EstimatedTaxInstallment, d: Date) kind institutional {
+    label en unofficial "PENDING (owner: returns) — the calendar-year due date of the named installment for the taxable year (April 15 / June 15 / September 15 / January 15 of the following year)";
+}
+pub relation required_installment_amount(p: Person, y: TaxableYear, installment: EstimatedTaxInstallment, amount: Money) kind institutional {
+    label en official "the amount of any required installment shall be 25 percent of the required annual payment";
+}
+@source(IRC_S6654_D, relation = formalizes, coverage = partial, quote = "the amount of any required installment shall be 25 percent of the required annual payment")
+rule RequiredInstallmentAmount strict {
+    for p: Person;
+    for y: TaxableYear;
+    for installment: EstimatedTaxInstallment;
+    for annual: Money;
+    for due: Date;
+    when required_annual_payment(p, y, annual) and required_installment_due_date(y, installment, due)
+        and not_known(farmer_or_fisherman(p, y)) and not_known(nonresident_alien_described_in_6072c(p, y));
+    then required_installment_amount(p, y, installment, round(annual * RequiredInstallmentPercent, 2, "HALF_UP"));
+}
+
+// --- (b): underpayment and period ------------------------------------------
+
+relation installment_paid_amount(p: Person, y: TaxableYear, installment: EstimatedTaxInstallment, amount: Money) kind institutional {
+    label en unofficial "the amount (if any) of the installment paid on or before the due date for the installment";
+}
+pub relation estimated_tax_underpayment(p: Person, y: TaxableYear, installment: EstimatedTaxInstallment, amount: Money) kind institutional {
+    label en official "the amount of the underpayment shall be the excess of the required installment, over the amount (if any) of the installment paid on or before the due date for the installment";
+}
+@source(IRC_S6654_B, relation = formalizes, coverage = exact, quote = "The amount of the underpayment shall be the excess of")
+rule Section6654bUnderpayment strict {
+    for p: Person;
+    for y: TaxableYear;
+    for installment: EstimatedTaxInstallment;
+    for required: Money;
+    for paid: Money;
+    when required_installment_applicable(p, y, installment, required)
+        and installment_paid_amount(p, y, installment, paid)
+        and not_known(withholding_deemed_paid_present_6654g(p, y, installment));
+    then estimated_tax_underpayment(p, y, installment, max(0.00 USD, required - paid));
+}
+@source(IRC_S6654_G, relation = formalizes, coverage = exact, quote = "the amount of the credit allowed under section 31 for the taxable year shall be deemed a payment of estimated tax")
+rule Section6654bUnderpaymentWithDeemedWithholding strict {
+    for p: Person;
+    for y: TaxableYear;
+    for installment: EstimatedTaxInstallment;
+    for required: Money;
+    for paid: Money;
+    for deemed: Money;
+    when required_installment_applicable(p, y, installment, required)
+        and installment_paid_amount(p, y, installment, paid)
+        and deemed_withholding_payment_total_6654g(p, y, installment, deemed);
+    then estimated_tax_underpayment(p, y, installment, max(0.00 USD, required - paid - deemed));
+}
+
+relation underpayment_cured_on(p: Person, y: TaxableYear, installment: EstimatedTaxInstallment, d: Date) kind institutional {
+    label en unofficial "the date the underpayment (or the relevant portion) was paid, or the 15th day of the 4th month following the close of the taxable year if earlier and still unpaid (section 6654(b)(2))";
+}
+
+relation estimated_tax_underpayment_addition_before_exceptions(p: Person, y: TaxableYear, installment: EstimatedTaxInstallment, amount: Money) kind institutional {
+    label en unofficial "the section 6654(a) addition before the (e)/(h) exceptions and the (e)(3) waiver — see header note on the simplified (non-compounding) rate-times-time formula";
+}
+@source(IRC_S6654_A, relation = formalizes, coverage = partial, quote = "there shall be added to the tax under chapter 1")
+rule Section6654aAdditionBeforeExceptions defeasible {
+    for p: Person;
+    for y: TaxableYear;
+    for installment: EstimatedTaxInstallment;
+    for underpayment: Money;
+    for due: Date;
+    for cured: Date;
+    for rate: Decimal;
+    when estimated_tax_underpayment(p, y, installment, underpayment)
+        and required_installment_due_date(y, installment, due)
+        and underpayment_cured_on(p, y, installment, cured)
+        and underpayment_rate_under_6621(due, rate);
+    then estimated_tax_underpayment_addition_before_exceptions(p, y, installment,
+        div_round(underpayment * rate * days_between(due, cured), 365.0, 2, "HALF_UP"));
+    unless no_payment_addition_under_6658(p, y)
+        and estimated_tax_underpayment(p, y, installment, underpayment)
+        and required_installment_due_date(y, installment, due)
+        and underpayment_cured_on(p, y, installment, cured)
+        and underpayment_rate_under_6621(due, rate);    unless estimated_tax_inapplicable_to_estate_or_trust_6654l(p, y)
+        and estimated_tax_underpayment(p, y, installment, underpayment)
+        and required_installment_due_date(y, installment, due)
+        and underpayment_cured_on(p, y, installment, cured)
+        and underpayment_rate_under_6621(due, rate);
+}
+
+pub relation estimated_tax_underpayment_addition(p: Person, y: TaxableYear, installment: EstimatedTaxInstallment, amount: Money) kind institutional {
+    label en unofficial "the section 6654(a) addition to tax for this installment's underpayment, after the (e)/(h) exceptions and the (e)(3) waiver";
+}
+@source(IRC_S6654_E, relation = formalizes, coverage = contextual, quote = "No addition to tax shall be imposed under subsection (a)")
+rule Section6654AdditionAfterExceptions defeasible {
+    for p: Person;
+    for y: TaxableYear;
+    for installment: EstimatedTaxInstallment;
+    for before: Money;
+    when estimated_tax_underpayment_addition_before_exceptions(p, y, installment, before);
+    then estimated_tax_underpayment_addition(p, y, installment,
+        if established(estimated_tax_small_amount_exception(p, y)) then 0.00 USD
+        else if established(estimated_tax_no_preceding_year_liability_exception(p, y)) then 0.00 USD
+        else if established(fourth_installment_january31_exception_applies(p, y, installment)) then 0.00 USD
+        else before);
+    // NOTE: the section 6654(e)(3) waiver's own effect
+    // (`estimated_tax_addition_waived`) is NOT composed into this
+    // conditional term: a power's effect materializes after all strata
+    // (§280.3) and cannot be read by a status-sensitive conditional in the
+    // SAME strict rule (LDC-E4103, reproduced while drafting this module).
+    // A case needing the waived result reads `estimated_tax_addition_waived`
+    // directly alongside this relation, rather than a single combined
+    // "final" amount — documented simplification, see header.
+}
+relation fourth_installment_january31_exception_applies(p: Person, y: TaxableYear, installment: EstimatedTaxInstallment) kind institutional {
+    label en unofficial "helper: the (h) January-31 exception applies to THIS installment (only the 4th)";
+}
+rule FourthInstallmentJanuary31ExceptionApplies strict {
+    for p: Person;
+    for y: TaxableYear;
+    when estimated_tax_january31_exception(p, y);
+    then fourth_installment_january31_exception_applies(p, y, Fourth);
+}
+
+// --- (e): exceptions ---------------------------------------------------------
+
+pub relation estimated_tax_small_amount_exception(p: Person, y: TaxableYear) kind institutional {
+    label en official "No addition to tax shall be imposed under subsection (a) for any taxable year if the tax shown on the return for such taxable year ... reduced by the credit allowable under section 31, is less than $1,000";
+}
+@source(IRC_S6654_E, relation = formalizes, coverage = partial, quote = "is less than $1,000")
+rule Section6654e1SmallAmount strict {
+    for p: Person;
+    for y: TaxableYear;
+    for tax: Money;
+    for withholding: Money;
+    when current_year_tax(p, y, tax)
+        and section31_withholding_credit(p, y, withholding)
+        and (tax - withholding) < round(EstimatedTaxSmallAmountThreshold, 2, "HALF_UP");
+    then estimated_tax_small_amount_exception(p, y);
+}
+relation section31_withholding_credit(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "the credit allowable under section 31 (tax withheld on wages); derived from `us.irc.credits::wage_withholding_credit` in 99-wire9-owner-contracts.law (WIRE-9), a case may still assert it directly";
+}
+
+pub relation estimated_tax_no_preceding_year_liability_exception(p: Person, y: TaxableYear) kind institutional {
+    label en official "No addition to tax shall be imposed under subsection (a) for any taxable year if the preceding taxable year was a taxable year of 12 months, the individual did not have any liability for tax for the preceding taxable year, and the individual was a citizen or resident of the United States throughout the preceding taxable year";
+}
+relation preceding_year_no_tax_liability(p: Person, y: TaxableYear) kind empirical {
+    label en official "the individual did not have any liability for tax for the preceding taxable year";
+}
+relation citizen_or_resident_throughout_preceding_year(p: Person, y: TaxableYear) kind empirical {
+    label en official "the individual was a citizen or resident of the United States throughout the preceding taxable year";
+}
+@source(IRC_S6654_E, relation = formalizes, coverage = exact, quote = "No addition to tax shall be imposed under subsection (a) for any taxable year if")
+rule Section6654e2NoPrecedingYearLiability strict {
+    for p: Person;
+    for y: TaxableYear;
+    when not preceding_year_was_12_months(p, y)
+        and preceding_year_no_tax_liability(p, y)
+        and citizen_or_resident_throughout_preceding_year(p, y);
+    then estimated_tax_no_preceding_year_liability_exception(p, y);
+}
+
+// (e)(3): the Secretary's discretionary waiver.
+relation casualty_disaster_or_unusual_circumstance(p: Person, y: TaxableYear) kind empirical {
+    label en official "by reason of casualty, disaster, or other unusual circumstances the imposition of such addition to tax would be against equity and good conscience";
+}
+relation retired_after_62_or_disabled(p: Person, y: TaxableYear) kind empirical {
+    label en official "the taxpayer retired after having attained age 62, or became disabled, in the taxable year for which estimated payments were required to be made or in the taxable year preceding such taxable year";
+}
+relation underpayment_due_to_reasonable_cause_not_willful_neglect(p: Person, y: TaxableYear, installment: EstimatedTaxInstallment) kind empirical {
+    label en unofficial "such underpayment was due to reasonable cause and not to willful neglect (section 6654(e)(3)(B)(ii))";
+}
+pub relation estimated_tax_waiver_condition_met(p: Person, y: TaxableYear, installment: EstimatedTaxInstallment) kind institutional {
+    label en unofficial "the section 6654(e)(3) waiver conditions are met (single atom for valid_when)";
+}
+@source(IRC_S6654_E, relation = formalizes, coverage = partial, quote = "No addition to tax shall be imposed under subsection (a) with respect to any underpayment to the extent the Secretary determines that by reason of casualty, disaster, or other unusual circumstances the imposition of such addition to tax would be against equity and good conscience")
+rule Section6654e3AWaiverConditionMet strict {
+    for p: Person;
+    for y: TaxableYear;
+    for installment: EstimatedTaxInstallment;
+    for due: Date;
+    when casualty_disaster_or_unusual_circumstance(p, y) and required_installment_due_date(y, installment, due);
+    then estimated_tax_waiver_condition_met(p, y, installment);
+}
+@source(IRC_S6654_E, relation = formalizes, coverage = partial, quote = "such underpayment was due to reasonable cause and not to willful neglect")
+rule Section6654e3BWaiverConditionMet strict {
+    for p: Person;
+    for y: TaxableYear;
+    for installment: EstimatedTaxInstallment;
+    when retired_after_62_or_disabled(p, y)
+        and underpayment_due_to_reasonable_cause_not_willful_neglect(p, y, installment);
+    then estimated_tax_waiver_condition_met(p, y, installment);
+}
+relation secretary_moves_to_waive_estimated_tax_addition(p: Person, y: TaxableYear, installment: EstimatedTaxInstallment) kind empirical {
+    label en unofficial "the exercise fact of the section 6654(e)(3) waiver power";
+}
+@source(IRC_S6654_E, relation = formalizes, coverage = partial, quote = "No addition to tax shall be imposed under subsection (a)")
+rule Section6654e3WaiverPower strict {
+    for p: Person;
+    for y: TaxableYear;
+    for installment: EstimatedTaxInstallment;
+    when secretary_moves_to_waive_estimated_tax_addition(p, y, installment);
+    then power WaiveEstimatedTaxAddition {
+        holder Secretary;
+        over installment;
+        exercise secretary_moves_to_waive_estimated_tax_addition(p, y, installment);
+        valid_when estimated_tax_waiver_condition_met(p, y, installment);
+        effect create(estimated_tax_addition_waived(p, y, installment));
+        window [@1984-07-18, infinity);
+    };
+}
+pub relation estimated_tax_addition_waived(p: Person, y: TaxableYear, installment: EstimatedTaxInstallment) kind institutional {
+    label en unofficial "the section 6654 addition for this installment is waived under section 6654(e)(3)";
+}
+
+// --- (h): return filed and paid by January 31 -------------------------------
+
+relation return_filed_by_january_31_following(p: Person, y: TaxableYear) kind empirical {
+    label en official "on or before January 31 of the following taxable year, the taxpayer files a return for the taxable year";
+}
+relation full_amount_paid_with_january_31_return(p: Person, y: TaxableYear) kind empirical {
+    label en official "pays in full the amount computed on the return as payable";
+}
+pub relation estimated_tax_january31_exception(p: Person, y: TaxableYear) kind institutional {
+    label en official "If, on or before January 31 of the following taxable year, the taxpayer files a return for the taxable year and pays in full the amount computed on the return as payable, then no addition to tax shall be imposed under subsection (a) with respect to any underpayment of the 4th required installment";
+}
+@source(IRC_S6654_H, relation = formalizes, coverage = exact, quote = "If, on or before January 31 of the following taxable year, the taxpayer files a return for the taxable year and pays in full the amount computed on the return as payable, then no addition to tax shall be imposed under subsection (a)")
+rule Section6654hJanuary31Exception strict {
+    for p: Person;
+    for y: TaxableYear;
+    when return_filed_by_january_31_following(p, y) and full_amount_paid_with_january_31_return(p, y);
+    then estimated_tax_january31_exception(p, y);
+}

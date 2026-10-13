@@ -1,0 +1,124 @@
+// Section 1091: wash sales of stock or securities.
+// Lower window bounds use positive calendar shifts: the deadline primitive
+// rejects negative counts; acquired + 30 >= sold is the same inclusive bound.
+//
+// SIMPLIFICATION: (b)/(c) (allocating disallowance across MULTIPLE lots
+// when the amount acquired differs from the amount sold, "under
+// regulations prescribed by the Secretary") is EXTERNAL_DEPENDENCY on
+// Treasury regulations — this module handles the equal-quantity case
+// directly and flags the proration case. (e) (short sales) and (f) (cash-
+// settled options do not escape the section) are modelled as classification
+// extensions of the same core disallowance rule.
+
+
+
+use self::{
+    Asset,
+    IRC_S1091_A,
+    IRC_S1091_D,
+    IRC_S1091_E,
+    Person,
+    Transaction,
+    loss_recognized,
+    nonrecognition_exception_applies,
+    substituted_basis_from,
+};
+
+pub relation loss_claimed_on_sale_of_stock_or_securities(t: Transaction, p: Person, a: Asset, sold_on: Date, loss: Money) kind empirical {
+    label en official "a loss claimed to have been sustained from a sale or other disposition of shares of stock or securities (section 1091(a))";
+}
+pub relation acquired_substantially_identical_stock_or_securities(p: Person, a: Asset, replacement: Asset, acquired_on: Date) kind empirical {
+    label en official "the taxpayer acquired (by purchase or by a fully-recognized exchange), or entered into a contract or option to acquire, substantially identical stock or securities (section 1091(a))";
+}
+pub relation entered_contract_or_option_to_acquire_substantially_identical(p: Person, a: Asset, entered_on: Date) kind empirical {
+    label en official "the taxpayer entered into a contract or option to acquire substantially identical stock or securities (section 1091(a))";
+}
+pub relation quantity_acquired_not_less_than_quantity_sold(p: Person, a: Asset) kind empirical {
+    label en unofficial "the amount of stock or securities acquired (or covered by the contract or option) is not less than the amount sold or disposed of (section 1091(c)) — the disallowance covers the entire loss (equal-or-greater-quantity case modelled directly here); the LESSER-quantity proration of section 1091(b) is EXTERNAL_DEPENDENCY on Treasury regulations, not modelled";
+}
+
+@source(IRC_S1091_A, quote = "In the case of any loss claimed to have been sustained from any sale or other disposition of shares of stock or securities where it appears that, within a period beginning 30 days before the date of such sale or disposition and ending 30 days after such date, the taxpayer has acquired (by purchase or by an exchange on which the entire amount of gain or loss was recognized by law), or has entered into a contract or option so to acquire, substantially identical stock or securities, then no deduction shall be allowed under section 165")
+rule WashSaleLossDisallowedOnPurchaseWithinWindowRule(p: Person, t: Transaction, a: Asset, sold_on: Date, loss: Money, replacement: Asset, acquired_on: Date) defeasible {
+    label en official "section 1091(a): a loss on stock/securities is disallowed if, within the 61-day window (30 days before through 30 days after the sale), the taxpayer acquired substantially identical stock or securities and the quantity acquired is not less than the quantity sold";
+    when loss_claimed_on_sale_of_stock_or_securities(t, p, a, sold_on, loss);
+    when acquired_substantially_identical_stock_or_securities(p, a, replacement, acquired_on);
+    when add_calendar_period(acquired_on, 30 calendar_day) >= sold_on;
+    when acquired_on <= add_calendar_period(sold_on, 30 calendar_day);
+    when quantity_acquired_not_less_than_quantity_sold(p, a);
+    then wash_sale_loss_disallowed(p, t, loss);
+    then nonrecognition_exception_applies(p, t);
+    then loss_recognized(p, t, 0.00 USD);
+}
+rule WashSaleLossDisallowedOnOptionWithinWindowRule(p: Person, t: Transaction, a: Asset, sold_on: Date, loss: Money, entered_on: Date) defeasible {
+    label en official "section 1091(a): a loss is likewise disallowed if the taxpayer entered a contract or option to acquire substantially identical stock or securities within the window";
+    when loss_claimed_on_sale_of_stock_or_securities(t, p, a, sold_on, loss);
+    when entered_contract_or_option_to_acquire_substantially_identical(p, a, entered_on);
+    when add_calendar_period(entered_on, 30 calendar_day) >= sold_on;
+    when entered_on <= add_calendar_period(sold_on, 30 calendar_day);
+    when quantity_acquired_not_less_than_quantity_sold(p, a);
+    then wash_sale_loss_disallowed(p, t, loss);
+    then nonrecognition_exception_applies(p, t);
+    then loss_recognized(p, t, 0.00 USD);
+}
+pub relation wash_sale_loss_disallowed(p: Person, t: Transaction, amount: Money) kind institutional {
+    label en official "the amount of loss disallowed under section 1091(a) as a wash sale";
+}
+
+// Keep the result distinct from the opening ledger consumed by section 1001.
+pub relation wash_sale_replacement_basis(p: Person, t: Transaction, replacement: Asset, on: Date, amount: Money) kind institutional {
+    label en unofficial "section 1091(d): transaction-scoped replacement basis result, not the opening basis of a subsequent sale";
+}
+
+pub relation stock_disposition_price_1091(t: Transaction, amount: Money) kind empirical {
+    label en unofficial "section 1091(d): disposition price of the matched quantity of stock or securities";
+}
+pub relation replacement_acquisition_price_1091(t: Transaction, replacement: Asset, on: Date, amount: Money) kind empirical {
+    label en unofficial "section 1091(d): acquisition price of the replacement quantity matched to the disposition; partial-lot allocation must already be established";
+}
+
+// (d): basis of the replacement stock/securities is increased by the
+// disallowed loss (preserving the loss, deferred, in the replacement lot's
+// basis — the economic-continuity mechanism of the wash-sale rule).
+@source(IRC_S1091_D, quote = "then the basis shall be the basis of the stock or securities so sold or disposed of, increased or decreased, as the case may be, by the difference, if any, between the price at which the property was acquired and the price at which such substantially identical stock or securities were sold or otherwise disposed of")
+rule WashSaleReplacementBasisRule(p: Person, t: Transaction, a: Asset, replacement: Asset, sold_on: Date, acquired_on: Date, loss_amt: Money, old_basis: Money, disallowed: Money, sold_price: Money, acquired_price: Money) defeasible {
+    label en official "section 1091(d): basis of the replacement stock or securities is the basis of the stock sold, adjusted by the difference between the acquisition price and the disposition price (equivalently, replacement acquisition cost plus the disallowed loss for the matched quantity)";
+    when loss_claimed_on_sale_of_stock_or_securities(t, p, a, sold_on, loss_amt);
+    when acquired_substantially_identical_stock_or_securities(p, a, replacement, acquired_on);
+    when us.irc.core::adjusted_basis(p, a, sold_on, old_basis);
+    when wash_sale_loss_disallowed(p, t, disallowed);
+    when stock_disposition_price_1091(t, sold_price);
+    when replacement_acquisition_price_1091(t, replacement, acquired_on, acquired_price);
+    then substituted_basis_from(p, replacement, p);
+    then wash_sale_replacement_basis(p, t, replacement, acquired_on, old_basis + acquired_price - sold_price);
+}
+
+// (e): short sales — rules similar to (a) apply to a loss on closing a
+// short sale (or a securities futures contract to sell) if, within the
+// same 61-day window, substantially identical stock/securities were sold,
+// or another short sale/futures contract to sell was entered into.
+pub relation short_sale_closed(t: Transaction, p: Person, a: Asset, closed_on: Date, loss: Money) kind empirical {
+    label en official "a loss realized on the closing of a short sale (or the sale, exchange, or termination of a securities futures contract to sell) of stock or securities (section 1091(e))";
+}
+pub relation sold_substantially_identical_within_window(p: Person, a: Asset, sold_on: Date) kind empirical {
+    label en official "substantially identical stock or securities were sold within the section 1091(e) window";
+}
+pub relation entered_another_short_sale_within_window(p: Person, a: Asset, entered_on: Date) kind empirical {
+    label en official "another short sale of (or securities futures contract to sell) substantially identical stock or securities was entered into within the section 1091(e) window";
+}
+@source(IRC_S1091_E, quote = "Rules similar to the rules of subsection (a) shall apply to any loss realized on the closing of a short sale of (or the sale, exchange, or termination of a securities futures contract to sell) stock or securities if, within a period beginning 30 days before the date of such closing and ending 30 days after such date—")
+rule ShortSaleWashLossDisallowedRule(p: Person, t: Transaction, a: Asset, closed_on: Date, loss: Money, sold_on: Date) defeasible {
+    label en official "section 1091(e): a short-sale-closing loss is disallowed under rules similar to (a) if substantially identical stock/securities were sold within the window";
+    when short_sale_closed(t, p, a, closed_on, loss);
+    when sold_substantially_identical_within_window(p, a, sold_on);
+    when add_calendar_period(sold_on, 30 calendar_day) >= closed_on;
+    when sold_on <= add_calendar_period(closed_on, 30 calendar_day);
+    then wash_sale_loss_disallowed(p, t, loss);
+    then nonrecognition_exception_applies(p, t);
+    then loss_recognized(p, t, 0.00 USD);
+}
+
+// (f): cash settlement does not exempt a contract or option from section
+// 1091 — modelled as an explicit non-exception (documentation rule: the
+// contract/option relations above make no distinction on settlement form,
+// so this paragraph adds no separate guard; recorded as NON_NORMATIVE for
+// this package's executable surface, see coverage notes).

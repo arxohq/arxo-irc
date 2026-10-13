@@ -1,0 +1,342 @@
+// 26 U.S.C. §707(a)-(b), §709 — stage 2b: transactions between a partner and
+// a partnership other than in the partner's capacity as a partner
+// (including disguised payments for services and disguised sales),
+// related-party loss disallowance and ordinary-income recharacterization,
+// and the organizational-expenses deduction/amortization election.
+//
+// JUDGMENT CALLS AND GAPS (see report):
+//  - §707(a)(1) is a plain classification, EXECUTABLE.
+//  - §707(a)(2)(A)-(B) (disguised payments for services, disguised sales):
+//    the "properly characterized as" test is EVALUATIVE under DECISION-0194
+//    (an `external judgment` channel, not an arithmetic guard — Treas. Reg.
+//    1.707-3 through -9 supply a nine-factor multi-part test this package
+//    does not reproduce). The regulatory REBUTTABLE PRESUMPTION that a
+//    transfer within 2 years is a disguised sale (Treas. Reg. 1.707-3(d)) is
+//    modeled as its own EXTERNAL_DEPENDENCY input a case can assert (a
+//    2-year date-window computation feeding a presumption FLAG, not a
+//    self-executing characterization this package invents).
+//  - §707(b)(1)-(2): the >50% capital-or-profits-interest ownership test
+//    reuses `us.irc.deductions::family_member_of` (an already-implemented,
+//    entity-agnostic section 267(c)(4) relation) for the FAMILY-attribution
+//    leg of the section 267(c) constructive-ownership rules that section
+//    707(b)(3) borrows. The remaining section 267(c) attribution paragraphs
+//    ((c)(1) partnership members, (c)(2) estate/trust beneficiaries, (c)(5)
+//    re-attribution) are not separately implemented anywhere in `us.irc.*`
+//    for a PARTNERSHIP interest (as opposed to corporate stock, which
+//    `us.irc.corporations::constructive_ownership` covers under section 318
+//    — a DIFFERENT attribution section, and typed to `Corporation`, not
+//    `Partnership`, so it cannot be imported here without a type error) —
+//    modeled as a local, one-hop, non-self-recursive
+//    `partnership_interest_constructive_ownership` relation over DIRECT
+//    `partnership_interest_share` plus the imported family leg, following
+//    the exact convention `us.irc.corporations`'s section 318 module uses
+//    (bounded to one hop; a chain of two attributions of the SAME kind is
+//    out of scope by the same construction). Actual ownership plus one
+//    family-attribution hop is covered; entity/re-attribution hops are
+//    TECH_GAP (TECH-GAPS.md G363).
+//  - §707(b)(1)'s final sentence (section 267(d) basis relief on a
+//    transferee's SUBSEQUENT resale) is modeled as a fact SHAPED to feed
+//    `us.irc.deductions::prior_loss_disallowed_under_267a1` (same field
+//    types) rather than a literal cross-package write (imports are
+//    consume-only in this compiler; a case that wants the section 267(d)
+//    relief asserts this package's `section_707b1_treated_as_267a1_loss`
+//    fact into that relation itself) — EXECUTABLE as to the classification,
+//    with the cross-package wiring left to the case per the compiler's
+//    one-directional import model.
+//  - §709(b)(2) (liquidation before the amortization period ends —
+//    "deducted to the extent allowable under section 165") is modeled only
+//    as far as identifying the unamortized remainder; the section 165
+//    allowability test itself is EXTERNAL_DEPENDENCY/out of package (this
+//    stage does not import a section 165 module).
+//  - §709(b)(1)(B)'s 180-month ratable amortization reuses the SAME
+//    month-fraction-supplied-by-the-case convention as
+//    `us.irc.deductions`'s section 195(b) start-up-expenditure amortization
+//    (Money/Integer division is outside the divisible-types table,
+//    LDC-E2108/errata E-0020 — the case supplies the fraction directly, not
+//    a derived month count).
+
+language "law.core" version "0.2";
+package us.irc.partnerships version "0.1.1";
+namespace "urn:us:irc:partnerships:clir";
+
+use self::{
+    IRC_S707_A,
+    IRC_S707_B,
+    IRC_S709_A,
+    IRC_S709_B,
+    Partnership,
+    Person,
+    TaxableYear,
+    Transaction,
+    partnership_interest_share,
+};
+
+// ============================================================================
+// §707(a): partner not acting in capacity as partner
+// ============================================================================
+
+pub relation partner_transacts_other_than_as_member(t: Transaction, partner: Person, pship: Partnership) kind empirical {
+    label en unofficial "the partner engaged in the transaction other than in his capacity as a member of the partnership (section 707(a)(1) chapeau input fact)";
+}
+@source(IRC_S707_A, relation = formalizes, coverage = exact, quote = "If a partner engages in a transaction with a partnership other than in his capacity as a member of such partnership, the transaction shall, except as otherwise provided in this section, be considered as occurring between the partnership and one who is not a partner.")
+pub relation transaction_treated_as_with_nonpartner(t: Transaction, partner: Person, pship: Partnership) kind institutional {
+    label en official "a transaction between a partner and the partnership, entered into other than in the partner's capacity as a member, is considered as occurring between the partnership and a person who is not a partner (section 707(a)(1))";
+}
+rule S707aTransactionAsNonpartner(t: Transaction, partner: Person, pship: Partnership) defeasible {
+    label en official "a partner's transaction with the partnership, other than in his capacity as a member, is treated as a transaction with a nonpartner (section 707(a)(1))";
+    when partner_transacts_other_than_as_member(t, partner, pship);
+    unless section_707a2_recharacterized_as_partner_distribution(t, partner, pship) and partner_transacts_other_than_as_member(t, partner, pship);
+    then transaction_treated_as_with_nonpartner(t, partner, pship);
+}
+relation section_707a2_recharacterized_as_partner_distribution(t: Transaction, partner: Person, pship: Partnership) kind institutional {
+    label en unofficial "the transaction is instead recharacterized under section 707(a)(2) as a disguised payment/sale within the partnership relationship, defeating the general section 707(a)(1) nonpartner treatment (the 'except as otherwise provided in this section' clause)";
+}
+rule S707a2FeedsRecharacterization(t: Transaction, partner: Person, pship: Partnership) strict {
+    when section_707a2a_disguised_payment_for_services(t, partner, pship, _);
+    then section_707a2_recharacterized_as_partner_distribution(t, partner, pship);
+}
+
+// --- §707(a)(2)(A): disguised payments for services -------------------------
+
+pub relation partner_performs_services_or_transfers_property(t: Transaction, partner: Person, pship: Partnership) kind empirical {
+    label en unofficial "the partner performed services for, or transferred property to, the partnership (section 707(a)(2)(A)(i))";
+}
+pub relation related_allocation_and_distribution_to_partner(t: Transaction, partner: Person, pship: Partnership, amount: Money) kind empirical {
+    label en unofficial "there is a related, direct or indirect, allocation and distribution to the partner (section 707(a)(2)(A)(ii))";
+}
+pub relation properly_characterized_as_nonpartner_capacity_transaction(t: Transaction, partner: Person, pship: Partnership) kind empirical {
+    label en unofficial "EVALUATIVE (DECISION-0194, external judgment channel): viewed together, the services/transfer and the allocation/distribution are properly characterized as a transaction between the partnership and a partner acting other than in his capacity as a member (section 707(a)(2)(A)(iii)) — Treas. Reg. 1.707-3's multi-factor test is not reproduced; a case asserts the ultimate characterization directly";
+}
+
+pub relation section_707a2a_disguised_payment_for_services(t: Transaction, partner: Person, pship: Partnership, amount: Money) kind institutional {
+    label en official "the allocation and distribution related to the partner's services or property transfer is treated as a section 707(a)(1) transaction (a disguised payment for services or property, not a distributive share) (section 707(a)(2)(A))";
+}
+@source(IRC_S707_A, relation = formalizes, coverage = exact, quote = "such allocation and distribution shall be treated as a transaction described in paragraph (1)")
+rule S707a2aDisguisedPaymentForServices(t: Transaction, partner: Person, pship: Partnership, amount: Money) strict {
+    label en official "if a partner's services/property transfer and a related allocation and distribution are properly characterized as a nonpartner-capacity transaction, the allocation and distribution are treated as a section 707(a)(1) transaction (section 707(a)(2)(A))";
+    when partner_performs_services_or_transfers_property(t, partner, pship);
+    when related_allocation_and_distribution_to_partner(t, partner, pship, amount);
+    when properly_characterized_as_nonpartner_capacity_transaction(t, partner, pship);
+    then section_707a2a_disguised_payment_for_services(t, partner, pship, amount);
+}
+
+// --- §707(a)(2)(B): disguised sales ------------------------------------------
+
+pub relation partner_transfers_to_partnership(t: Transaction, partner: Person, pship: Partnership, amount: Money, on: Date) kind empirical {
+    label en unofficial "a direct or indirect transfer of money or other property by a partner to the partnership (section 707(a)(2)(B)(i))";
+}
+pub relation partnership_transfers_to_partner(t: Transaction, pship: Partnership, recipient: Person, amount: Money, on: Date) kind empirical {
+    label en unofficial "a related, direct or indirect transfer of money or other property by the partnership to the partner (or another partner) (section 707(a)(2)(B)(ii))";
+}
+pub relation properly_characterized_as_sale_or_exchange(t: Transaction, partner: Person, pship: Partnership) kind empirical {
+    label en unofficial "EVALUATIVE (DECISION-0194, external judgment channel): viewed together, the transfers are properly characterized as a sale or exchange of property (section 707(a)(2)(B)(iii)) — case-asserted ultimate characterization, not an arithmetic guard";
+}
+pub relation transfer_within_2_year_presumption_window(t: Transaction, transfer_date: Date, related_transfer_date: Date) kind institutional {
+    label en unofficial "EXTERNAL_DEPENDENCY (Treas. Reg. 1.707-3(d)): the two transfers occurred within 2 years of each other, triggering the regulatory REBUTTABLE presumption that they are a disguised sale — the date-window computation is EXECUTABLE, but the presumption's rebuttal standard is not reproduced by this package (a case supplies the ultimate `properly_characterized_as_sale_or_exchange` fact directly)";
+}
+@source(IRC_S707_A, relation = formalizes, coverage = contextual, quote = "the transfers described in clauses (i) and (ii), when viewed together, are properly characterized as a sale or exchange of property")
+rule S707aDisguisedSale2YearWindow(t: Transaction, partner: Person, pship: Partnership, recipient: Person, transfer_amount: Money, related_amount: Money, transfer_date: Date, related_transfer_date: Date) strict {
+    label en unofficial "the 2-year window test feeding the Treas. Reg. 1.707-3(d) disguised-sale presumption (EXTERNAL_DEPENDENCY as to the presumption's legal effect, EXECUTABLE as to the date arithmetic)";
+    when partner_transfers_to_partnership(t, partner, pship, transfer_amount, transfer_date);
+    when partnership_transfers_to_partner(t, pship, recipient, related_amount, related_transfer_date);
+    when transfer_date <= related_transfer_date;
+    when related_transfer_date <= add_calendar_period(transfer_date, 2 calendar_year);
+    then transfer_within_2_year_presumption_window(t, transfer_date, related_transfer_date);
+}
+
+pub relation section_707a2b_disguised_sale(t: Transaction, partner: Person, pship: Partnership, amount: Money) kind institutional {
+    label en official "transfers between a partner and the partnership properly characterized, viewed together, as a sale or exchange are treated as a section 707(a)(1) transaction (or as a transaction between two or more partners acting other than as members) (section 707(a)(2)(B))";
+}
+@source(IRC_S707_A, relation = formalizes, coverage = exact, quote = "such transfers shall be treated either as a transaction described in paragraph (1) or as a transaction between 2 or more partners acting other than in their capacity as members of the partnership.")
+rule S707a2bDisguisedSale(t: Transaction, partner: Person, pship: Partnership, amount: Money, on: Date) strict {
+    label en official "transfers to and from the partnership, properly characterized together as a sale or exchange, are treated as a section 707(a)(1) transaction (section 707(a)(2)(B))";
+    when partner_transfers_to_partnership(t, partner, pship, amount, on);
+    when properly_characterized_as_sale_or_exchange(t, partner, pship);
+    then section_707a2b_disguised_sale(t, partner, pship, amount);
+}
+
+// ============================================================================
+// §707(b)(1)-(3): related-party loss disallowance and ordinary income
+// ============================================================================
+
+pub relation partnership_interest_constructive_ownership(person: Person, pship: Partnership, share: Decimal) kind institutional {
+    label en official "the direct interest, plus one hop of section 267(c)(4) family attribution, in the capital or profits of the partnership (section 707(b)(3), borrowing section 267(c) other than paragraph (3) — one-hop, non-self-recursive, following the convention of us.irc.corporations's section 318 module; see header note on scope)";
+}
+rule S707b3DirectOwnership(person: Person, pship: Partnership, share: Decimal) strict {
+    when partnership_interest_share(person, pship, share);
+    then partnership_interest_constructive_ownership(person, pship, share);
+}
+rule S707b3FamilyAttribution(person: Person, family_member: Person, pship: Partnership, share: Decimal) strict {
+    label en official "a person is considered as owning the interest in the partnership owned, directly, by a member of the person's family within section 267(c)(4) (section 707(b)(3) borrowing section 267(c)(2)/(4), one hop)";
+    when us.irc.deductions::family_member_of(person, family_member);
+    when partnership_interest_share(family_member, pship, share);
+    then partnership_interest_constructive_ownership(person, pship, share);
+}
+
+pub relation two_partnerships_common_ownership(pship1: Partnership, pship2: Partnership, common_share: Decimal) kind empirical {
+    label en unofficial "the aggregate interest that the same persons own, directly or indirectly, in the capital or profits of BOTH pship1 and pship2 (section 707(b)(1)(B)/(2)(B) input — a finite-roster aggregate fact per the module 03/07 convention, since deriving a common-ownership aggregate from two separate constructive-ownership sets is a further aggregation this package does not build generically)";
+}
+
+pub relation sale_or_exchange_of_property_with_controlled_partnership(t: Transaction, seller: Person, pship: Partnership, property_is_partnership_interest: Boolean) kind empirical {
+    label en unofficial "a sale or exchange of property (section 707(b)(1) input fact — property_is_partnership_interest excludes an interest in the partnership itself, which section 707(b)(1) does not reach)";
+}
+pub relation loss_recognized_on_sale_with_controlled_partnership(t: Transaction, seller: Person, pship: Partnership, amount: Money) kind empirical {
+    label en unofficial "the amount of loss that would otherwise be recognized on the sale or exchange with the controlled partnership (section 707(b)(1) input)";
+}
+
+pub relation section_707b1_loss_disallowed(t: Transaction, seller: Person, pship: Partnership, amount: Money) kind institutional {
+    label en official "no deduction is allowed for a loss from a sale or exchange of property (other than a partnership interest), directly or indirectly, between a partnership and a person owning more than 50 percent of its capital or profits interest, or between two partnerships more than 50-percent commonly owned (section 707(b)(1))";
+}
+@source(IRC_S707_B, relation = formalizes, coverage = exact, quote = "No deduction shall be allowed in respect of losses from sales or exchanges of property (other than an interest in the partnership), directly or indirectly, between—")
+rule S707b1LossDisallowedOwnerAndPartnership(t: Transaction, seller: Person, pship: Partnership, amount: Money, share: Decimal) strict {
+    label en official "a loss from a sale or exchange between a partnership and a person owning more than 50 percent of its capital or profits interest is disallowed (section 707(b)(1)(A))";
+    when sale_or_exchange_of_property_with_controlled_partnership(t, seller, pship, false);
+    when loss_recognized_on_sale_with_controlled_partnership(t, seller, pship, amount);
+    when partnership_interest_constructive_ownership(seller, pship, share);
+    when share > 0.50;
+    then section_707b1_loss_disallowed(t, seller, pship, amount);
+}
+rule S707b1LossDisallowedTwoPartnerships(t: Transaction, seller: Person, pship: Partnership, other_pship: Partnership, amount: Money, common_share: Decimal) strict {
+    label en official "a loss from a sale or exchange between two partnerships in which the same persons own more than 50 percent of the capital or profits interests is disallowed (section 707(b)(1)(B))";
+    when sale_or_exchange_of_property_with_controlled_partnership(t, seller, pship, false);
+    when loss_recognized_on_sale_with_controlled_partnership(t, seller, pship, amount);
+    when two_partnerships_common_ownership(pship, other_pship, common_share);
+    when common_share > 0.50;
+    then section_707b1_loss_disallowed(t, seller, pship, amount);
+}
+
+pub relation section_707b1_treated_as_267a1_loss(seller: Person, buyer: Person, pship: Partnership, amount: Money) kind institutional {
+    label en official "for purposes of a subsequent sale or exchange by the transferee, the section 707(b)(1) disallowed loss is treated as if disallowed under section 267(a)(1) (section 267(d) relief on resale applies) — shaped so a case can re-assert it, with a year and item key, into us.irc.deductions::prior_loss_disallowed_under_267a1, since this compiler's imports are consume-only (see header note)";
+}
+@source(IRC_S707_B, relation = formalizes, coverage = exact, quote = "In the case of a subsequent sale or exchange by a transferee described in this paragraph, section 267(d) shall be applicable as if the loss were disallowed under section 267(a)(1).")
+rule S707b1TreatedAs267a1(t: Transaction, seller: Person, buyer: Person, pship: Partnership, amount: Money) strict {
+    when section_707b1_loss_disallowed(t, seller, pship, amount);
+    when us.irc.core::ownership_interest(_, buyer, pship, _);
+    then section_707b1_treated_as_267a1_loss(seller, buyer, pship, amount);
+}
+
+pub relation gain_on_sale_with_controlled_partnership(t: Transaction, seller: Person, pship: Partnership, amount: Money) kind empirical {
+    label en unofficial "the amount of gain recognized on a sale or exchange of property with the controlled partnership (section 707(b)(2) input)";
+}
+pub relation property_not_capital_asset_to_transferee(t: Transaction) kind empirical {
+    label en unofficial "the property is, in the hands of the transferee, property other than a capital asset as defined in section 1221 (section 707(b)(2) chapeau input) — reads on us.irc.property_transactions::capital_asset for the transferee where a case wants to derive rather than assert this directly";
+}
+
+pub relation section_707b2_gain_is_ordinary_income(t: Transaction, seller: Person, pship: Partnership, amount: Money) kind institutional {
+    label en official "gain recognized on a sale or exchange, of property that is not a capital asset in the transferee's hands, between a partnership and a more-than-50-percent owner (or between two more-than-50-percent commonly owned partnerships), is treated as ordinary income (section 707(b)(2))";
+}
+@source(IRC_S707_B, relation = formalizes, coverage = exact, quote = "any gain recognized shall be considered as ordinary income")
+rule S707b2GainOrdinaryOwnerAndPartnership(t: Transaction, seller: Person, pship: Partnership, amount: Money, share: Decimal) strict {
+    label en official "gain on a sale of non-capital-asset property between a partnership and a more-than-50-percent owner is ordinary income (section 707(b)(2)(A))";
+    when property_not_capital_asset_to_transferee(t);
+    when gain_on_sale_with_controlled_partnership(t, seller, pship, amount);
+    when partnership_interest_constructive_ownership(seller, pship, share);
+    when share > 0.50;
+    then section_707b2_gain_is_ordinary_income(t, seller, pship, amount);
+}
+rule S707b2GainOrdinaryTwoPartnerships(t: Transaction, seller: Person, pship: Partnership, other_pship: Partnership, amount: Money, common_share: Decimal) strict {
+    label en official "gain on a sale of non-capital-asset property between two more-than-50-percent commonly owned partnerships is ordinary income (section 707(b)(2)(B))";
+    when property_not_capital_asset_to_transferee(t);
+    when gain_on_sale_with_controlled_partnership(t, seller, pship, amount);
+    when two_partnerships_common_ownership(pship, other_pship, common_share);
+    when common_share > 0.50;
+    then section_707b2_gain_is_ordinary_income(t, seller, pship, amount);
+}
+
+// ============================================================================
+// §709: organizational expenses
+// ============================================================================
+
+pub relation amount_paid_or_incurred_to_organize_or_promote(pship: Partnership, y: TaxableYear, item: Integer, amount: Money) kind empirical {
+    label en unofficial "an amount paid or incurred to organize the partnership, or to promote the sale of (or to sell) an interest in the partnership (section 709(a) input fact)";
+}
+pub relation organizational_expense(pship: Partnership, item: Integer) kind empirical {
+    label en unofficial "the expenditure is (A) incident to the creation of the partnership, (B) chargeable to capital account, and (C) of a character that would be amortized over an ascertainable life if the partnership had one (section 709(b)(3) 'organizational expenses' definition, folded into one case-asserted classification since all three conjuncts are yes/no facts about the same expenditure)";
+}
+pub relation elects_to_deduct_organizational_expenses(pship: Partnership) kind empirical {
+    label en unofficial "the partnership elects the application of section 709(b) with respect to its organizational expenses (in accordance with regulations prescribed by the Secretary — the manner-of-election regulatory conditions are EXTERNAL_DEPENDENCY, same convention as this package's existing section 754 election)";
+}
+pub relation section_709b_election_in_effect(pship: Partnership) kind institutional {
+    label en official "the section 709(b) election to deduct organizational expenses is in effect for the partnership";
+}
+
+@source(IRC_S709_A, relation = formalizes, coverage = exact, quote = "Except as provided in subsection (b), no deduction shall be allowed under this chapter to the partnership or to any partner for any amounts paid or incurred to organize a partnership or to promote the sale of (or to sell) an interest in such partnership.")
+pub relation section_709a_deduction_disallowed(pship: Partnership, y: TaxableYear, item: Integer, amount: Money) kind institutional {
+    label en official "no deduction is allowed for amounts paid or incurred to organize a partnership or to promote/sell an interest in it, except as section 709(b) provides (section 709(a))";
+}
+rule S709aDeductionDisallowed(pship: Partnership, y: TaxableYear, item: Integer, amount: Money) defeasible {
+    when amount_paid_or_incurred_to_organize_or_promote(pship, y, item, amount);
+    unless organizational_expense(pship, item) and amount_paid_or_incurred_to_organize_or_promote(pship, y, item, amount) and section_709b_election_in_effect(pship);
+    then section_709a_deduction_disallowed(pship, y, item, amount);
+}
+
+pub relation organizational_expenses_aggregate(pship: Partnership, amount: Money) kind institutional {
+    label en official "the aggregate organizational expenses with respect to the partnership (section 709(b)(1) input value)";
+}
+rule S709OrganizationalExpensesAggregate(pship: Partnership, y: TaxableYear, item: Integer, amount: Money) strict {
+    when organizational_expense(pship, item);
+    when amount_paid_or_incurred_to_organize_or_promote(pship, y, item, amount);
+    then organizational_expenses_aggregate(pship, amount);
+}
+
+@source(IRC_S709_B, relation = formalizes, coverage = exact, quote = "If a partnership elects the application of this subsection (in accordance with regulations prescribed by the Secretary) with respect to any organizational expenses")
+rule S709bElectionPowerRule(pship: Partnership) strict {
+    label en official "a partnership may elect the application of section 709(b) with respect to its organizational expenses (section 709(b)(1))";
+    when elects_to_deduct_organizational_expenses(pship);
+    then power S709bOrganizationalExpenseElection {
+        holder pship;
+        over pship;
+        exercise elects_to_deduct_organizational_expenses(pship);
+        valid_when elects_to_deduct_organizational_expenses(pship);
+        effect create(section_709b_election_in_effect(pship));
+        subject Partnership;
+        window [-infinity, infinity);
+    };
+}
+
+pub relation partnership_begins_business_in_year(pship: Partnership, y: TaxableYear) kind empirical {
+    label en unofficial "the taxable year in which the partnership begins business (section 709(b)(1)(A)/(B) anchor)";
+}
+
+pub relation section_709b1A_deduction(pship: Partnership, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the section 709(b)(1)(A) year-one deduction: the lesser of aggregate organizational expenses, or $5,000 reduced (not below zero) by the excess of such expenses over $50,000";
+}
+@source(IRC_S709_B, relation = formalizes, coverage = exact, quote = "$5,000, reduced (but not below zero) by the amount by which such organizational expenses exceed $50,000, and")
+rule S709b1ADeduction(pship: Partnership, y: TaxableYear, aggregate: Money) defeasible {
+    label en official "the year-one organizational-expense deduction is the lesser of the aggregate expenses or $5,000 reduced (not below zero) by the excess over $50,000 (section 709(b)(1)(A))";
+    when section_709b_election_in_effect(pship);
+    when partnership_begins_business_in_year(pship, y);
+    when organizational_expenses_aggregate(pship, aggregate);
+    then section_709b1A_deduction(pship, y, min(aggregate, max(0.00 USD, 5000.00 USD - max(0.00 USD, aggregate - 50000.00 USD))));
+}
+
+pub relation section_709b1B_amortization_month_fraction_for_year(pship: Partnership, y: TaxableYear, fraction: Decimal) kind institutional {
+    label en official "the fraction of the 180-month amortization period (months falling in this taxable year, divided by 180) — a case supplies this fraction directly (see header note on Money/Integer division, LDC-E2108/errata E-0020, matching us.irc.deductions's section 195(b) convention)";
+}
+pub relation section_709b1B_deduction(pship: Partnership, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the section 709(b)(1)(B) ratable amortization deduction for the taxable year: the remainder of organizational expenses (after the year-one deduction), times the year's fraction of the 180-month period";
+}
+@source(IRC_S709_B, relation = formalizes, coverage = exact, quote = "the remainder of such organizational expenses shall be allowed as a deduction ratably over the 180-month period beginning with the month in which the partnership begins business")
+rule S709b1BAmortizationDeduction(pship: Partnership, y: TaxableYear, aggregate: Money, year_one: Money, fraction: Decimal) defeasible {
+    label en official "the remainder of organizational expenses is amortized ratably over the 180-month period beginning with the month the partnership begins business (section 709(b)(1)(B))";
+    when organizational_expenses_aggregate(pship, aggregate);
+    when section_709b1A_deduction(pship, _, year_one);
+    when section_709b1B_amortization_month_fraction_for_year(pship, y, fraction);
+    then section_709b1B_deduction(pship, y, round((aggregate - year_one) * fraction, 2, "HALF_UP"));
+}
+
+pub relation partnership_liquidated_before_amortization_ends(pship: Partnership, y: TaxableYear) kind empirical {
+    label en unofficial "the partnership is liquidated before the end of the section 709(b)(1)(B) amortization period (section 709(b)(2) input fact)";
+}
+pub relation section_709b1B_remaining_unamortized_expenses(pship: Partnership, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the amount of deferred organizational expenses attributable to the partnership not yet allowed as a deduction under section 709(b)(1)(B) at the time of liquidation (a case-computed running total — no self-recursive per-year ledger, per this package's existing convention)";
+}
+pub relation section_709b2_deductible_on_liquidation(pship: Partnership, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "the unamortized organizational-expense remainder MAY be deducted on liquidation, to the extent allowable under section 165 (section 709(b)(2)) — the section 165 allowability test itself is EXTERNAL_DEPENDENCY/out of package scope this stage";
+}
+@source(IRC_S709_B, relation = formalizes, coverage = partial, quote = "any deferred expenses attributable to the partnership which were not allowed as a deduction by reason of this section may be deducted to the extent allowable under section 165")
+rule S709b2DeductibleOnLiquidation(pship: Partnership, y: TaxableYear, amount: Money) strict {
+    when partnership_liquidated_before_amortization_ends(pship, y);
+    when section_709b1B_remaining_unamortized_expenses(pship, y, amount);
+    then section_709b2_deductible_on_liquidation(pship, y, amount);
+}

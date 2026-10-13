@@ -1,0 +1,130 @@
+// 26 U.S.C. §2801 — tax on gifts and bequests from covered expatriates.
+// Stage-2b module of `us.irc.estate_gift` (B01/IRC-11). Publishes `pub
+// covered_gift_tax_2801`.
+//
+// JUDGMENT CALL: "covered expatriate" (section 2801(f)) has the meaning
+// given by section 877A(g)(1) — NOT modelled by any `us.irc.*` package as of
+// this pass (grepped `international` for a `covered_expatriate`/`877a`
+// relation: none exists yet). Read as a dependency-contract empirical
+// relation per the task's own framing; a pending row is recorded in
+// estate-gift.deps.json naming `us.irc.international` as the eventual owner.
+//
+// NOT MODELLED this pass (TECH_GAP, TECH-GAPS.md G484): §2801(e)(4) (the
+// domestic/foreign trust special rules and the foreign-trust election);
+// §2801(d)'s foreign-tax-credit-style reduction is modelled per-item but the
+// "highest rate ... as in effect on the date of receipt" (a) is read from a
+// package CONSTANT mirroring the current top section 2001(c) bracket rather
+// than re-deriving it from `rate-schedule-2001c.lawtable.json`'s own top
+// row (a documented shortcut, not a separate historical schedule).
+
+language "law.core" version "0.2";
+package us.irc.estate_gift version "0.1.1";
+namespace "urn:us:irc:estate_gift:clir";
+
+use self::{
+    Asset,
+    IRC_S2801_A,
+    IRC_S2801_B,
+    IRC_S2801_C,
+    Individual,
+    Person,
+    Secretary,
+};
+
+pub relation covered_expatriate(individual: Individual) kind institutional {
+    label en unofficial "individual is a covered expatriate within the meaning of section 877A(g)(1) (section 2801(f)) — read from the owner `us.irc.international` (WIRE-7); the section 877A(g)(1) test is the owner's";
+}
+
+pub relation covered_gift_or_bequest(recipient: Person, source_individual: Individual, item: Asset, y: Integer, value: Money) kind empirical {
+    label en unofficial "recipient acquired item by gift from, or by reason of the death of, source_individual, a covered expatriate at the relevant time, during calendar year y (section 2801(e)(1))";
+}
+pub relation covered_transfer_shown_on_timely_chapter_11_or_12_return(item: Asset) kind empirical {
+    label en unofficial "the property is shown on a timely filed chapter 11 or chapter 12 return of the covered expatriate (section 2801(e)(2))";
+}
+pub relation covered_transfer_marital_or_charitable_deduction_would_apply(item: Asset) kind empirical {
+    label en unofficial "a section 2055/2056/2522/2523 deduction would be allowed if the covered expatriate were a United States person (section 2801(e)(3))";
+}
+relation covered_gift_or_bequest_excepted(item: Asset) kind institutional;
+rule CoveredGiftExceptedByReturnRule(item: Asset) defeasible {
+    when covered_transfer_shown_on_timely_chapter_11_or_12_return(item);
+    then covered_gift_or_bequest_excepted(item);
+}
+rule CoveredGiftExceptedByDeductionRule(item: Asset) defeasible {
+    when covered_transfer_marital_or_charitable_deduction_would_apply(item);
+    then covered_gift_or_bequest_excepted(item);
+}
+
+pub relation taxable_covered_gift_item(recipient: Person, source_individual: Individual, item: Asset, y: Integer, value: Money) kind institutional {
+    label en unofficial "the item is a covered gift or bequest not excepted under section 2801(e)(2)-(3)";
+}
+rule TaxableCoveredGiftItemRule(recipient: Person, source_individual: Individual, item: Asset, y: Integer, value: Money) defeasible {
+    when covered_gift_or_bequest(recipient, source_individual, item, y, value);
+    when covered_expatriate(source_individual);
+    when not_known(covered_gift_or_bequest_excepted(item));
+    then taxable_covered_gift_item(recipient, source_individual, item, y, value);
+}
+
+pub relation total_covered_gifts_received(recipient: Person, y: Integer, amount: Money) kind institutional {
+    label en official "the total value of covered gifts and bequests received by recipient during calendar year y (section 2801(c)'s own aggregate)";
+}
+rule TotalCoveredGiftsReceivedRule(recipient: Person, y: Integer) defeasible {
+    when taxable_covered_gift_item(recipient, _, _, y, _);
+    then total_covered_gifts_received(recipient, y, sum all v: Money for src: Individual, item: Asset where taxable_covered_gift_item(recipient, src, item, y, v));
+}
+
+@source(IRC_S2801_C, relation = formalizes, coverage = exact, quote = "Subsection (a) shall apply only to the extent that the value of covered gifts and bequests received by any person during the calendar year exceeds the dollar amount in effect under section 2503(b) for such calendar year")
+pub relation covered_gifts_excess_over_annual_exclusion(recipient: Person, y: Integer, amount: Money) kind institutional {
+    label en official "section 2801(c): the excess of total covered gifts/bequests over the section 2503(b) annual exclusion amount for the year";
+}
+rule CoveredGiftsExcessOverAnnualExclusionRule(recipient: Person, y: Integer, total: Money) defeasible {
+    when total_covered_gifts_received(recipient, y, total);
+    then covered_gifts_excess_over_annual_exclusion(recipient, y, max(0.00 USD, total - (AnnualExclusionAmount + 0.00 USD)));
+}
+
+const HighestSection2001cRate: Decimal = 0.40;
+// Mirrors the top bracket of `rate-schedule-2001c.lawtable.json` (module
+// header): "the highest rate of tax specified in the table contained in
+// section 2001(c) as in effect on the date of such receipt" (section
+// 2801(a)(1)) is not re-derived from that table's own top row this pass.
+
+pub relation foreign_gift_or_estate_tax_paid_2801(recipient: Person, y: Integer, amount: Money) kind empirical {
+    label en unofficial "gift or estate tax paid to a foreign country with respect to the covered gift(s) or bequest(s) (section 2801(d))";
+}
+relation has_foreign_gift_or_estate_tax_paid_2801(recipient: Person, y: Integer) kind institutional;
+rule HasForeignGiftOrEstateTaxPaid2801Rule(recipient: Person, y: Integer) defeasible {
+    when foreign_gift_or_estate_tax_paid_2801(recipient, y, _);
+    then has_foreign_gift_or_estate_tax_paid_2801(recipient, y);
+}
+
+@source(IRC_S2801_A, relation = formalizes, coverage = exact, quote = "there is hereby imposed a tax equal to the product of")
+pub relation covered_gift_tax_2801(recipient: Person, y: Integer, amount: Money) kind institutional {
+    label en official "section 2801(a): the tax on covered gifts/bequests received during the year, reduced by any foreign gift/estate tax paid (section 2801(d))";
+}
+rule CoveredGiftTax2801WithForeignTaxRule(recipient: Person, y: Integer, excess: Money, foreign_tax: Money) defeasible {
+    when covered_gifts_excess_over_annual_exclusion(recipient, y, excess);
+    when foreign_gift_or_estate_tax_paid_2801(recipient, y, foreign_tax);
+    then covered_gift_tax_2801(recipient, y, max(0.00 USD, round(excess * HighestSection2001cRate, 2, "HALF_UP") - foreign_tax));
+}
+rule CoveredGiftTax2801NoForeignTaxRule(recipient: Person, y: Integer, excess: Money) defeasible {
+    when covered_gifts_excess_over_annual_exclusion(recipient, y, excess);
+    when not_known(has_foreign_gift_or_estate_tax_paid_2801(recipient, y));
+    then covered_gift_tax_2801(recipient, y, round(excess * HighestSection2001cRate, 2, "HALF_UP"));
+}
+
+@source(IRC_S2801_B, relation = formalizes, coverage = exact, quote = "The tax imposed by subsection (a) on any covered gift or bequest shall be paid by the person receiving such gift or bequest")
+rule RecipientCoveredGiftTaxPaymentDuty(recipient: Person, y: Integer, amount: Money, w: Interval<Instant>) defeasible {
+    label en official "the tax imposed by section 2801(a) shall be paid by the recipient (section 2801(b))";
+    when covered_gift_tax_2801(recipient, y, amount) and amount > 0.00 USD
+        and covered_gift_tax_2801_due_window(y, w);
+    then duty RecipientCoveredGiftTaxDuty {
+        bearer recipient;
+        beneficiary Secretary;
+        achieve covered_gift_tax_2801_paid(recipient, y) during w;
+    };
+}
+pub relation covered_gift_tax_2801_due_window(y: Integer, w: Interval<Instant>) kind empirical {
+    label en unofficial "the window for paying the section 2801(a) tax for calendar year y (no independent statutory due-date rule modelled here; read as a case-asserted window mirroring the individual income tax filing season)";
+}
+pub relation covered_gift_tax_2801_paid(recipient: Person, y: Integer) kind empirical {
+    label en unofficial "the recipient paid the section 2801(a) tax for calendar year y";
+}

@@ -1,0 +1,422 @@
+// Sections 55(b)(2), 56A(d) and 59(k)-(l): the corporate alternative minimum
+// tax on adjusted financial statement income (stage 2). Enacted by Pub. L.
+// 117-169 section 10101, applicable "to taxable years beginning after Dec.
+// 31, 2022" (the statutory note to section 55; see the coverage row of
+// 26/55/note/8/1): every rule below is therefore bounded `effective
+// [2023-01-01, infinity)`.
+//
+// MODELLED: (1) section 59(k)(1)-(2), the "applicable corporation" test — the
+// three-year average annual adjusted financial statement income (AFSI) over
+// $1,000,000,000 (or, for a member of a foreign-parented multinational group,
+// group AFSI over $1,000,000,000 and own AFSI of $100,000,000 or more), tested
+// for "one or more taxable years which are prior to such taxable year and end
+// after December 31, 2021", less the excluded corporation types (S
+// corporation, regulated investment company, real estate investment trust) and
+// the Secretary's section 59(k)(1)(C) determination as a `power`; (2) section
+// 59(k)(1)(E)(i)-(ii), a corporation in existence for fewer than three
+// taxable years and the annualization of a short year; (3) section 56A(d), the
+// financial statement net operating loss deduction (lesser of the carryovers
+// or 80 percent of AFSI); (4) section 55(b)(2), the tentative minimum tax of a
+// corporation (15 percent of AFSI less the CAMT foreign tax credit; zero if
+// the corporation is not an applicable corporation); (5) section 59(l), the
+// CAMT foreign tax credit and the corporation's election to have the benefits
+// of subpart A of part III of subchapter N, as a `power`.
+//
+// NOT MODELLED (coverage rows, not silent): section 56A(a)-(c) — what the
+// "net income or loss set forth on the applicable financial statement" is and
+// the fifteen adjustments of subsection (c) (consolidated groups, partnerships,
+// CFCs, mortgage servicing, depreciation, etc.) turn on accounting-standard
+// facts and cross-owner amounts; AFSI enters here as a typed dependency
+// contract (`afsi_before_nol_deduction`). The group-aggregation rules of
+// section 59(k)(1)(D) and (2)(A) and the predecessor rule (1)(E)(iii) are
+// inputs to the AFSI window facts, not computations here.
+
+use self::{
+    IRC_S55_B,
+    IRC_S56A_D,
+    IRC_S59_K,
+    IRC_S59_L,
+    Person,
+    TaxableYear,
+    has_camt_ftc_chain_year_59l2,
+    has_fsnol_chain_year_56Ad,
+    tentative_minimum_tax,
+};
+
+type Corporation = us.irc.core::Corporation;
+
+// --- Inputs (facts about the corporation) -----------------------------------
+
+pub relation s_corporation(c: Corporation, y: TaxableYear) kind empirical {
+    label en official "an S corporation";
+}
+pub relation regulated_investment_company(c: Corporation, y: TaxableYear) kind empirical {
+    label en official "a regulated investment company";
+}
+pub relation real_estate_investment_trust(c: Corporation, y: TaxableYear) kind empirical {
+    label en official "a real estate investment trust";
+}
+pub relation foreign_parented_multinational_member(c: Corporation, y: TaxableYear) kind institutional {
+    label en official "the corporation is a member of a foreign-parented multinational group for the taxable year (section 59(k)(2)(B))";
+}
+
+// AFSI of each taxable year of the test period, determined without regard to
+// section 56A(d) (and with the section 59(k)(1)(D) single-employer aggregation
+// already applied by the case). One relation per period length: a corporation
+// in existence for fewer than 3 taxable years is tested over the period it
+// existed ((1)(E)(i)).
+pub relation afsi_window_three_years(c: Corporation, y: TaxableYear, first: Money, second: Money, third: Money) kind empirical {
+    label en official "adjusted financial statement income of each of the 3 taxable years of the period ending with the taxable year";
+}
+pub relation afsi_window_two_years(c: Corporation, y: TaxableYear, first: Money, second: Money) kind empirical {
+    label en official "adjusted financial statement income of each of the 2 taxable years for which a corporation in existence for less than 3 taxable years has existed";
+}
+pub relation afsi_window_one_year(c: Corporation, y: TaxableYear, first: Money) kind empirical {
+    label en official "adjusted financial statement income of the single taxable year for which a corporation in existence for one taxable year has existed";
+}
+pub relation group_average_afsi(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the average annual adjusted financial statement income of all members of the foreign-parented multinational group for the 3-taxable-year period ending with the taxable year (section 59(k)(2)(A))";
+}
+
+// --- Section 59(k)(1)(E)(ii): short taxable years ----------------------------
+
+pub relation short_year_afsi(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the adjusted financial statement income for a taxable year of less than 12 months";
+}
+pub relation months_in_short_year(y: TaxableYear, months: Decimal) kind empirical {
+    label en official "the number of months in the short period";
+}
+pub relation annualized_afsi(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "adjusted financial statement income annualized by multiplying by 12 and dividing by the number of months in the short period";
+}
+
+@source(IRC_S59_K, relation = formalizes, coverage = exact, quote = "Adjusted financial statement income for any taxable year of less than 12 months shall be annualized by multiplying the adjusted financial statement income for the short period by 12 and dividing the result by the number of months in the short period.")
+rule ShortYearAfsiAnnualized(c: Corporation, y: TaxableYear, afsi: Money, months: Decimal) strict {
+    label en official "section 59(k)(1)(E)(ii): annualized AFSI = AFSI for the short period x 12 / months in the short period";
+    effective [@2023-01-01, infinity);
+    when short_year_afsi(c, y, afsi);
+    when months_in_short_year(y, months);
+    then annualized_afsi(c, y, div_round(afsi * 12, months, 10, "HALF_UP"));
+}
+
+// --- Section 59(k)(1)(B): the average annual AFSI test -----------------------
+
+pub relation average_annual_afsi(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the average annual adjusted financial statement income (determined without regard to section 56A(d)) for the 3-taxable-year period ending with the taxable year (for a corporation in existence for less time, the period during which it was in existence)";
+}
+
+@source(IRC_S59_K, relation = formalizes, coverage = exact, quote = "the average annual adjusted financial statement income of such corporation (determined without regard to section 56A(d)) for the 3-taxable-year period ending with such taxable year exceeds $1,000,000,000")
+rule AverageAfsiThreeYears(c: Corporation, y: TaxableYear, a: Money, b: Money, d: Money) strict {
+    label en official "average annual AFSI over the 3-taxable-year period";
+    effective [@2023-01-01, infinity);
+    when afsi_window_three_years(c, y, a, b, d);
+    then average_annual_afsi(c, y, div_round(a + b + d, 3.0, 10, "HALF_UP"));
+}
+
+@source(IRC_S59_K, relation = formalizes, coverage = exact, quote = "If the corporation was in existence for less than 3-taxable years, subparagraph (B) shall be applied on the basis of the period during which such corporation was in existence.")
+rule AverageAfsiTwoYears(c: Corporation, y: TaxableYear, a: Money, b: Money) strict {
+    label en official "section 59(k)(1)(E)(i): a corporation in existence for two taxable years is tested on that period";
+    effective [@2023-01-01, infinity);
+    when afsi_window_two_years(c, y, a, b);
+    then average_annual_afsi(c, y, div_round(a + b, 2.0, 10, "HALF_UP"));
+}
+
+@source(IRC_S59_K, relation = formalizes, coverage = exact, quote = "If the corporation was in existence for less than 3-taxable years, subparagraph (B) shall be applied on the basis of the period during which such corporation was in existence.")
+rule AverageAfsiOneYear(c: Corporation, y: TaxableYear, a: Money) strict {
+    label en official "section 59(k)(1)(E)(i): a corporation in existence for one taxable year is tested on that year";
+    effective [@2023-01-01, infinity);
+    when afsi_window_one_year(c, y, a);
+    then average_annual_afsi(c, y, a);
+}
+
+pub relation meets_afsi_test_for_year(c: Corporation, y: TaxableYear) kind institutional {
+    label en official "a corporation meets the average annual adjusted financial statement income test for a taxable year";
+}
+
+@source(IRC_S59_K, relation = formalizes, coverage = exact, quote = "(i) a corporation meets the average annual adjusted financial statement income test for a taxable year if the average annual adjusted financial statement income of such corporation (determined without regard to section 56A(d)) for the 3-taxable-year period ending with such taxable year exceeds $1,000,000,000, and")
+rule MeetsAfsiTestGeneral(c: Corporation, y: TaxableYear, avg: Money) strict {
+    label en official "section 59(k)(1)(B)(i): average annual AFSI exceeds $1,000,000,000 (a corporation that is not a foreign-parented multinational group member)";
+    effective [@2023-01-01, infinity);
+    when average_annual_afsi(c, y, avg);
+    when avg > 1000000000 USD;
+    when not_known(foreign_parented_multinational_member(c, y));
+    then meets_afsi_test_for_year(c, y);
+}
+
+@source(IRC_S59_K, relation = formalizes, coverage = exact, quote = "the average annual adjusted financial statement income of such corporation (determined without regard to the application of paragraph (2) and without regard to section 56A(d)) for the 3-taxable-year-period ending with such taxable year is $100,000,000 or more.")
+rule MeetsAfsiTestForeignParented(c: Corporation, y: TaxableYear, own: Money, group: Money) strict {
+    label en official "section 59(k)(1)(B)(ii): a foreign-parented multinational group member meets the test if the group average exceeds $1,000,000,000 (with the group's AFSI included, (2)(A)) and its own average is $100,000,000 or more";
+    effective [@2023-01-01, infinity);
+    when foreign_parented_multinational_member(c, y);
+    when group_average_afsi(c, y, group);
+    when group > 1000000000 USD;
+    when average_annual_afsi(c, y, own);
+    when own >= 100000000 USD;
+    then meets_afsi_test_for_year(c, y);
+}
+
+// --- Section 59(k)(1)(A): applicable corporation ------------------------------
+
+pub relation applicable_corporation_before_exceptions(c: Corporation, y: TaxableYear) kind institutional {
+    label en unofficial "a corporation (other than an S corporation, regulated investment company or real estate investment trust) that meets the AFSI test for one or more earlier taxable years ending after December 31, 2021";
+}
+
+@source(IRC_S59_K, relation = formalizes, coverage = exact, quote = "which meets the average annual adjusted financial statement income test of subparagraph (B) for one or more taxable years which—")
+rule ApplicableCorporationByEarlierYear(c: Corporation, y: TaxableYear, earlier: TaxableYear, earlier_end: Date, this_start: Date) strict {
+    label en official "section 59(k)(1)(A): the test is met for a taxable year prior to this one that ends after December 31, 2021";
+    effective [@2023-01-01, infinity);
+    when meets_afsi_test_for_year(c, earlier);
+    when us.irc.core::ends(earlier, earlier_end);
+    when us.irc.core::begins(y, this_start);
+    when earlier_end > @2021-12-31;
+    when earlier_end < this_start;
+    then applicable_corporation_before_exceptions(c, y);
+}
+
+pub relation excluded_corporation_type(c: Corporation, y: TaxableYear) kind institutional {
+    label en official "an S corporation, a regulated investment company, or a real estate investment trust";
+}
+
+@source(IRC_S59_K, relation = formalizes, coverage = exact, quote = "any corporation (other than an S corporation, a regulated investment company, or a real estate investment trust)")
+rule ExcludedTypeSCorporation(c: Corporation, y: TaxableYear) strict {
+    when s_corporation(c, y);
+    then excluded_corporation_type(c, y);
+}
+@source(IRC_S59_K, relation = formalizes, coverage = exact, quote = "any corporation (other than an S corporation, a regulated investment company, or a real estate investment trust)")
+rule ExcludedTypeRegulatedInvestmentCompany(c: Corporation, y: TaxableYear) strict {
+    when regulated_investment_company(c, y);
+    then excluded_corporation_type(c, y);
+}
+@source(IRC_S59_K, relation = formalizes, coverage = exact, quote = "any corporation (other than an S corporation, a regulated investment company, or a real estate investment trust)")
+rule ExcludedTypeRealEstateInvestmentTrust(c: Corporation, y: TaxableYear) strict {
+    when real_estate_investment_trust(c, y);
+    then excluded_corporation_type(c, y);
+}
+
+// --- Section 59(k)(1)(C): the Secretary's exception, a power ------------------
+
+pub relation change_in_ownership(c: Corporation) kind empirical {
+    label en official "the corporation has a change in ownership";
+}
+pub relation consecutive_years_below_test_reached(c: Corporation) kind empirical {
+    label en official "the corporation has the number of consecutive taxable years (specified by the Secretary), including the most recent, in which it does not meet the AFSI test";
+}
+pub relation secretary_finds_continued_treatment_inappropriate(c: Corporation) kind empirical {
+    label en official "the Secretary determines that it would not be appropriate to continue to treat such corporation as an applicable corporation (the exercise)";
+}
+pub relation exception_precondition_met(c: Corporation) kind institutional {
+    label en official "the corporation has a change in ownership, or has the specified number of consecutive taxable years in which it does not meet the test";
+}
+
+@source(IRC_S59_K, relation = formalizes, coverage = exact, quote = "(I) has a change in ownership, or")
+rule ExceptionPreconditionChangeInOwnership(c: Corporation) strict {
+    when change_in_ownership(c);
+    then exception_precondition_met(c);
+}
+@source(IRC_S59_K, relation = formalizes, coverage = exact, quote = "(II) has a specified number (to be determined by the Secretary and which shall, as appropriate, take into account the facts and circumstances of the taxpayer) of consecutive taxable years, including the most recent taxable year, in which the corporation does not meet the average annual adjusted financial statement income test of subparagraph (B), and")
+rule ExceptionPreconditionConsecutiveYears(c: Corporation) strict {
+    when consecutive_years_below_test_reached(c);
+    then exception_precondition_met(c);
+}
+
+pub relation secretary_exclusion_determination(c: Corporation) kind institutional {
+    label en official "the Secretary's section 59(k)(1)(C) determination excluding the corporation from applicable-corporation status";
+}
+pub relation secretary_exclusion_first_year(c: Corporation, y0: TaxableYear) kind empirical {
+    label en official "the first taxable year for which the determination applies";
+}
+
+@source(IRC_S59_K, relation = formalizes, coverage = exact, quote = "the Secretary determines that it would not be appropriate to continue to treat such corporation as an applicable corporation.")
+rule SecretaryMayExcludeCorporation defeasible {
+    label en official "section 59(k)(1)(C): a corporation with a change in ownership, or with the specified number of consecutive non-qualifying years, is not an applicable corporation if the Secretary determines it would not be appropriate to continue to treat it as one";
+    for c: Corporation;
+    when applicable_corporation_before_exceptions(c, _);
+    then power SecretaryExcludesCorporationFromApplicableStatus {
+        holder us.irc.core::Secretary; over c;
+        exercise secretary_finds_continued_treatment_inappropriate(c);
+        valid_when exception_precondition_met(c);
+        effect create(secretary_exclusion_determination(c));
+        window [@2023-01-01, infinity);
+    };
+}
+
+pub relation reentered_after_determination(c: Corporation) kind institutional {
+    label en official "after the Secretary makes the determination the corporation meets the AFSI test for a taxable year beginning after the first taxable year for which the determination applies";
+}
+
+@source(IRC_S59_K, relation = formalizes, coverage = exact, quote = "The preceding sentence shall not apply to any corporation if, after the Secretary makes the determination described in clause (ii), such corporation meets the average annual adjusted financial statement income test of subparagraph (B) for any taxable year beginning after the first taxable year for which such determination applies.")
+rule ReenteredAfterDetermination(c: Corporation, y0: TaxableYear, y3: TaxableYear, s0: Date, s3: Date) strict {
+    label en official "section 59(k)(1)(C), last sentence: a later year that meets the test ends the exception";
+    effective [@2023-01-01, infinity);
+    when secretary_exclusion_first_year(c, y0);
+    when meets_afsi_test_for_year(c, y3);
+    when us.irc.core::begins(y0, s0);
+    when us.irc.core::begins(y3, s3);
+    when s3 > s0;
+    then reentered_after_determination(c);
+}
+
+pub relation excluded_by_secretary_determination(c: Corporation, y: TaxableYear) kind institutional {
+    label en official "the corporation is excluded from applicable-corporation status by the Secretary's determination";
+}
+
+// The exclusion is derived from the SAME premises the power's `valid_when` reads
+// (the exercise fact and the precondition helper), not from the power's own
+// effect relation: a power's effect materializes after every stratum (§280.3,
+// E-0134) and a reader of "not excluded" could not see it. The power above
+// remains the position that answers "was the exercise valid / invalid"; this
+// rule is the computational twin of its effect.
+@source(IRC_S59_K, relation = formalizes, coverage = exact, quote = "Notwithstanding subparagraph (A), the term \"applicable corporation\" shall not include any corporation which otherwise meets the requirements of subparagraph (A) if—")
+rule ExcludedBySecretaryDetermination(c: Corporation, y: TaxableYear, y0: TaxableYear, s0: Date, s: Date) strict {
+    label en official "the determination applies from its first taxable year on, unless the corporation later meets the test again";
+    effective [@2023-01-01, infinity);
+    when secretary_finds_continued_treatment_inappropriate(c);
+    when exception_precondition_met(c);
+    when secretary_exclusion_first_year(c, y0);
+    when us.irc.core::begins(y0, s0);
+    when us.irc.core::begins(y, s);
+    when s >= s0;
+    when not_known(reentered_after_determination(c));
+    then excluded_by_secretary_determination(c, y);
+}
+
+pub relation applicable_corporation(p: Person, y: TaxableYear) kind institutional {
+    label en official "the term \"applicable corporation\"";
+}
+
+@source(IRC_S59_K, relation = formalizes, coverage = exact, quote = "The term \"applicable corporation\" means, with respect to any taxable year, any corporation")
+rule ApplicableCorporationRule(c: Corporation, y: TaxableYear) strict {
+    label en official "section 59(k)(1): a corporation that meets the test for an earlier qualifying year, is not of an excluded type, and is not excluded by the Secretary's determination";
+    effective [@2023-01-01, infinity);
+    when applicable_corporation_before_exceptions(c, y);
+    when not_known(excluded_corporation_type(c, y));
+    when not_known(excluded_by_secretary_determination(c, y));
+    then applicable_corporation(c, y);
+}
+
+// --- Section 56A(d): the financial statement net operating loss deduction ----
+
+pub relation afsi_before_nol_deduction(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "adjusted financial statement income determined after application of section 56A(c) and without regard to section 56A(d) (dependency contract: the accounting-standard facts and the subsection (c) adjustments are not computed here)";
+}
+pub relation financial_statement_nol_carryovers(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the aggregate amount of financial statement net operating loss carryovers to the taxable year";
+}
+relation has_fs_nol_carryovers(c: Corporation, y: TaxableYear) kind institutional {
+    label en unofficial "a financial statement net operating loss carryover amount is asserted for the year";
+}
+rule HasFsNolCarryovers(c: Corporation, y: TaxableYear) strict {
+    when financial_statement_nol_carryovers(c, y, _);
+    then has_fs_nol_carryovers(c, y);
+}
+pub relation adjusted_financial_statement_income(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "adjusted financial statement income after the section 56A(d) deduction";
+}
+
+@source(IRC_S56A_D, relation = formalizes, coverage = exact, quote = "Adjusted financial statement income (determined after application of subsection (c) and without regard to this subsection) shall be reduced by an amount equal to the lesser of—")
+rule AfsiAfterNolDeduction(c: Corporation, y: TaxableYear, before: Money, carryovers: Money) strict {
+    label en official "section 56A(d)(1): AFSI reduced by the lesser of the carryovers or 80 percent of AFSI computed without regard to the deduction (read as never negative)";
+    effective [@2023-01-01, infinity);
+    when afsi_before_nol_deduction(c, y, before);
+    when not_known(has_fsnol_chain_year_56Ad(c, y));
+    when financial_statement_nol_carryovers(c, y, carryovers);
+    then adjusted_financial_statement_income(c, y, before - min(carryovers, max(0.00 USD, before * 0.8)));
+}
+
+@source(IRC_S56A_D, relation = formalizes, coverage = partial, quote = "Adjusted financial statement income (determined after application of subsection (c) and without regard to this subsection) shall be reduced by an amount equal to the lesser of—")
+rule AfsiWithoutCarryovers(c: Corporation, y: TaxableYear, before: Money) strict {
+    label en official "no financial statement net operating loss carryover is asserted: no reduction";
+    effective [@2023-01-01, infinity);
+    when afsi_before_nol_deduction(c, y, before);
+    when not_known(has_fsnol_chain_year_56Ad(c, y));
+    when not_known(has_fs_nol_carryovers(c, y));
+    then adjusted_financial_statement_income(c, y, before);
+}
+
+// --- Section 59(l): the corporate AMT foreign tax credit ----------------------
+
+pub relation camt_foreign_tax_credit_election(c: Corporation, y: TaxableYear) kind institutional {
+    label en official "the applicable corporation has chosen to have the benefits of subpart A of part III of subchapter N for the taxable year";
+}
+pub relation corporation_chooses_foreign_tax_credit_benefits(c: Corporation, y: TaxableYear) kind empirical {
+    label en official "the applicable corporation chooses to have the benefits of subpart A of part III of subchapter N (the exercise)";
+}
+
+@source(IRC_S59_L, relation = formalizes, coverage = partial, quote = "For purposes of this part, if an applicable corporation chooses to have the benefits of subpart A of part III of subchapter N for any taxable year")
+rule ApplicableCorporationMayChooseForeignTaxCreditBenefits defeasible {
+    label en official "section 59(l)(1): an applicable corporation may choose the benefits of subpart A of part III of subchapter N for a taxable year";
+    for c: Corporation;
+    for y: TaxableYear;
+    when applicable_corporation(c, y);
+    then power ChooseCamtForeignTaxCreditBenefits {
+        holder c; over c;
+        exercise corporation_chooses_foreign_tax_credit_benefits(c, y);
+        valid_when applicable_corporation(c, y);
+        effect create(camt_foreign_tax_credit_election(c, y));
+        window [@2023-01-01, infinity);
+    };
+}
+
+pub relation cfc_foreign_taxes_pro_rata_share(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the aggregate of the corporation's pro rata share of the income, war profits and excess profits taxes taken into account on the applicable financial statement of each controlled foreign corporation and paid or accrued by it";
+}
+pub relation section_56a_c3_adjustment(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the amount of the adjustment under section 56A(c)(3)";
+}
+pub relation own_foreign_taxes_on_financial_statement(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "for a domestic corporation, the income, war profits and excess profits taxes taken into account on its applicable financial statement and paid or accrued for Federal income tax purposes";
+}
+pub relation corporate_amt_foreign_tax_credit(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the corporate AMT foreign tax credit for the taxable year";
+}
+relation has_corporate_amt_foreign_tax_credit(c: Corporation, y: TaxableYear) kind institutional {
+    label en unofficial "a corporate AMT foreign tax credit is derived for the year";
+}
+rule HasCorporateAmtForeignTaxCredit(c: Corporation, y: TaxableYear) strict {
+    when corporate_amt_foreign_tax_credit(c, y, _);
+    then has_corporate_amt_foreign_tax_credit(c, y);
+}
+
+@source(IRC_S59_L, relation = formalizes, coverage = partial, quote = "(ii) the product of the amount of the adjustment under section 56A(c)(3) and the percentage specified in section 55(b)(2)(A)(i), and")
+rule CorporateAmtForeignTaxCreditRule(c: Corporation, y: TaxableYear, cfc: Money, adjustment: Money, own: Money) strict {
+    label en official "section 59(l)(1): (A) the lesser of the CFC taxes or 15 percent of the section 56A(c)(3) adjustment, plus (B) the domestic corporation's own foreign taxes on its financial statement";
+    effective [@2023-01-01, infinity);
+    when corporation_chooses_foreign_tax_credit_benefits(c, y);
+    when not_known(has_camt_ftc_chain_year_59l2(c, y));
+    when applicable_corporation(c, y);
+    when cfc_foreign_taxes_pro_rata_share(c, y, cfc);
+    when section_56a_c3_adjustment(c, y, adjustment);
+    when own_foreign_taxes_on_financial_statement(c, y, own);
+    then corporate_amt_foreign_tax_credit(c, y, min(cfc, adjustment * 0.15) + own);
+}
+
+// --- Section 55(b)(2): the tentative minimum tax of a corporation -------------
+
+@source(IRC_S55_B, relation = formalizes, coverage = exact, quote = "the tentative minimum tax for the taxable year shall be the excess of—")
+rule TentativeMinimumTaxApplicableCorporation(c: Corporation, y: TaxableYear, afsi: Money, credit: Money) strict {
+    label en official "section 55(b)(2)(A): 15 percent of adjusted financial statement income over the corporate AMT foreign tax credit (an excess, read as never below zero)";
+    effective [@2023-01-01, infinity);
+    when applicable_corporation(c, y);
+    when adjusted_financial_statement_income(c, y, afsi);
+    when corporate_amt_foreign_tax_credit(c, y, credit);
+    then tentative_minimum_tax(c, y, max(0.00 USD, (afsi * 0.15) - credit));
+}
+
+@source(IRC_S55_B, relation = formalizes, coverage = exact, quote = "the tentative minimum tax for the taxable year shall be the excess of—")
+rule TentativeMinimumTaxApplicableCorporationNoCredit(c: Corporation, y: TaxableYear, afsi: Money) strict {
+    label en official "section 55(b)(2)(A) with no corporate AMT foreign tax credit: 15 percent of adjusted financial statement income";
+    effective [@2023-01-01, infinity);
+    when applicable_corporation(c, y);
+    when adjusted_financial_statement_income(c, y, afsi);
+    when not_known(has_corporate_amt_foreign_tax_credit(c, y));
+    then tentative_minimum_tax(c, y, max(0.00 USD, afsi * 0.15));
+}
+
+@source(IRC_S55_B, relation = formalizes, coverage = exact, quote = "In the case of any corporation which is not an applicable corporation, the tentative minimum tax for the taxable year shall be zero.")
+rule TentativeMinimumTaxOtherCorporationZero(c: Corporation, y: TaxableYear) strict {
+    label en official "section 55(b)(2)(B): a corporation that is not an applicable corporation has a zero tentative minimum tax";
+    effective [@2023-01-01, infinity);
+    when us.irc.core::year_of(c, y);
+    when not_known(applicable_corporation(c, y));
+    then tentative_minimum_tax(c, y, 0 USD);
+}

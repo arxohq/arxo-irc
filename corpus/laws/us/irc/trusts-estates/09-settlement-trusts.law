@@ -1,0 +1,622 @@
+// 26 U.S.C. §646 — tax treatment of electing Alaska Native Settlement Trusts
+// (stage 3 "добор": the 41 rows of §646 that stage 1 left `unreviewed`).
+//
+// JUDGMENT CALLS AND GAPS (see coverage/trusts-estates.json, TECH-GAPS.md G42xx):
+//  - The trust's election is a POWER held by the trustee (§646(c)(2): "made by
+//    the trustee"); validity = timely (due date of the return for the first
+//    taxable year ending after the enactment date, including extensions) AND
+//    the statement attached to the return AND not made after the moment a
+//    beneficial interest became disposable in a manner not permitted by
+//    ANCSA §7(h) (§646(f)(1)(A)). The same last condition is a PROHIBITION on
+//    the trustee (E-0179: VIOLATED on itself when an election is made then).
+//  - "May not be revoked once it is made" (§646(c)(3)(B)) is an IMMUNITY of the
+//    trust's election (protected effect: the election stays in effect); no
+//    revocation power exists in the section, so none is modelled.
+//  - The ANCSA definitions (§646(h)(2)-(4): Native Corporation, Settlement
+//    Common Stock, Settlement Trust) are EXTERNAL_DEPENDENCY: 43 U.S.C. 1602 is
+//    not in the corpus; the classifications are case-asserted relations.
+//  - §646(b)(1) reads "the lowest rate specified in section 1(c)"; the
+//    `us.irc.income_individual` package does not export that rate as a constant
+//    (same class as G44 for §641(c)(2)(A)), so it is a case-asserted relation
+//    `lowest_section_1c_rate`. §646(b)(2) needs a COUNTERFACTUAL §1(h) rate
+//    (the gain taxed as if the other taxable income were taxed only at the
+//    lowest bracket) — that rerun is TECH_GAP; the multiplication is modelled
+//    over an asserted rate `settlement_trust_capital_gain_rate`.
+//  - Money form: cents HALF_UP where the statute names no rounding
+//    (JUDGMENT CALL); §6102 whole-dollar rounding is a separate norm.
+//  - §646(e)(2) reaches back over ALL earlier electing years ("not previously
+//    taken into account under paragraph (1)"): a period-to-period carry
+//    relation (`settlement_trust_paragraph2_carry_in`, re-asserted by the case
+//    from last year's `settlement_trust_paragraph2_carry_out`) instead of a
+//    self-recursive ledger (LDC-E4102 avoided). The fourth tier is the
+//    residual: the statute characterizes what remains as "in excess of the
+//    distributable net income" without a separate limit (JUDGMENT CALL).
+//  - §646(i): the per-share adjustment aggregates over an EMPIRICAL relation
+//    of per-share contributions (eligibility "on or after the first day the
+//    trust is treated as electing" is asserted with the fact, not derived:
+//    aggregates over derived predicates are a runtime subset limitation §111).
+
+language "law.core" version "0.2";
+package us.irc.trusts_estates version "0.1.1";
+namespace "urn:us:irc:trusts_estates:clir";
+
+use self::{
+    Asset,
+    DniAdjustmentKind,
+    Election,
+    IRC_S646_A,
+    IRC_S646_B,
+    IRC_S646_C,
+    IRC_S646_D,
+    IRC_S646_E,
+    IRC_S646_F,
+    IRC_S646_G,
+    IRC_S646_H,
+    IRC_S646_I,
+    Person,
+    TaxableYear,
+    Trust,
+    dni_addition,
+    lowest_section_1c_rate_from_table,
+    section_642b_deduction,
+    section_646b2_tax_computed,
+    taxable_income_before_distribution_and_exemption,
+};
+
+// ============================================================================
+// §646(h): definitions
+// ============================================================================
+
+@source(IRC_S646_H, relation = formalizes, coverage = partial, quote = "The term \"Settlement Trust\" means a trust that constitutes a settlement trust under section 3(t) of the Alaska Native Claims Settlement Act")
+pub relation settlement_trust(t: Trust) kind empirical {
+    label en official "a trust that constitutes a settlement trust under section 3(t) of the Alaska Native Claims Settlement Act (43 U.S.C. 1602(t)) — EXTERNAL_DEPENDENCY, case-asserted (section 646(h)(4))";
+}
+@source(IRC_S646_H, relation = formalizes, coverage = partial, quote = "The term \"Native Corporation\" has the meaning given such term by section 3(m) of the Alaska Native Claims Settlement Act")
+pub relation native_corporation(c: us.irc.core::Corporation) kind empirical {
+    label en official "a Native Corporation within the meaning of section 3(m) of the Alaska Native Claims Settlement Act (43 U.S.C. 1602(m)) — EXTERNAL_DEPENDENCY, case-asserted (section 646(h)(2))";
+}
+@source(IRC_S646_H, relation = formalizes, coverage = partial, quote = "The term \"Settlement Common Stock\" has the meaning given such term by section 3(p) of the Alaska Native Claims Settlement Act")
+pub relation settlement_common_stock(stock: Asset) kind empirical {
+    label en official "Settlement Common Stock within the meaning of section 3(p) of the Alaska Native Claims Settlement Act (43 U.S.C. 1602(p)) — EXTERNAL_DEPENDENCY, case-asserted (section 646(h)(3))";
+}
+pub relation corporation_transfers_assets_to_settlement_trust(c: us.irc.core::Corporation, t: Trust) kind empirical {
+    label en unofficial "the Native Corporation transfers assets to the Settlement Trust (case-asserted; section 646(h)(5))";
+}
+pub relation settlement_trust_election_effective(t: Trust, e: Election) kind institutional {
+    label en unofficial "a section 646(c) election of the Settlement Trust has been validly made and is in effect (the effect of the trustee's election power)";
+}
+
+@source(IRC_S646_H, relation = formalizes, coverage = exact, quote = "The term \"sponsoring Native Corporation\" means the Native Corporation which transfers assets to an electing Settlement Trust.")
+pub relation sponsoring_native_corporation(c: us.irc.core::Corporation, t: Trust) kind institutional {
+    label en official "the sponsoring Native Corporation: the Native Corporation which transfers assets to an electing Settlement Trust (section 646(h)(5))";
+}
+rule S646h5SponsoringNativeCorporation(c: us.irc.core::Corporation, t: Trust, e: Election) defeasible {
+    when native_corporation(c);
+    when corporation_transfers_assets_to_settlement_trust(c, t);
+    when settlement_trust_election_effective(t, e);
+    then sponsoring_native_corporation(c, t);
+}
+
+// ============================================================================
+// §646(c): one-time election (power of the trustee), (f)(1)(A) bar
+// ============================================================================
+
+pub relation settlement_trust_election_made(t: Trust, e: Election) kind empirical {
+    label en unofficial "the trustee of the Settlement Trust made the section 646(c)(1) election (case-asserted; the election's date is core's made_on)";
+}
+pub relation election_statement_attached_to_return(t: Trust, e: Election) kind empirical {
+    label en unofficial "the election was made by attaching to the trust's return a statement specifically providing for the election (case-asserted; section 646(c)(2)(B))";
+}
+pub relation first_taxable_year_ending_after_enactment(t: Trust, y: TaxableYear) kind empirical {
+    label en unofficial "y is the first taxable year of the trust ending after the date of enactment of section 646 (June 7, 2001; Pub. L. 107-16 section 671(d)) — case-asserted year fact (section 646(c)(2)(A))";
+}
+
+pub relation settlement_trust_election_timely(t: Trust, e: Election) kind institutional {
+    label en unofficial "the election was made on or before the due date (including extensions) for filing the trust's return for the first taxable year ending after enactment (section 646(c)(2)(A))";
+}
+@source(IRC_S646_C, relation = formalizes, coverage = exact, quote = "on or before the due date (including extensions) for filing the Settlement Trust's return of tax for the first taxable year of such trust ending after the date of the enactment of this section")
+rule S646c2ATimelyByDueDate(t: Trust, e: Election, y: TaxableYear, r: us.irc.core::Return, due: Date, m: Date) defeasible {
+    label en official "election made on or before the return's due date for the first taxable year ending after enactment (section 646(c)(2)(A))";
+    when first_taxable_year_ending_after_enactment(t, y);
+    when us.irc.core::return_of(r, t, y, _);
+    when us.irc.core::due_date(r, due);
+    when us.irc.core::made_on(e, m);
+    when m <= due;
+    then settlement_trust_election_timely(t, e);
+}
+@source(IRC_S646_C, relation = formalizes, coverage = exact, quote = "on or before the due date (including extensions) for filing the Settlement Trust's return of tax for the first taxable year of such trust ending after the date of the enactment of this section")
+rule S646c2ATimelyByExtendedDate(t: Trust, e: Election, y: TaxableYear, r: us.irc.core::Return, until: Date, m: Date) defeasible {
+    label en official "election made on or before the extended due date of the return (including extensions, section 646(c)(2)(A))";
+    when first_taxable_year_ending_after_enactment(t, y);
+    when us.irc.core::return_of(r, t, y, _);
+    when us.irc.core::extension_granted(r, until);
+    when us.irc.core::made_on(e, m);
+    when m <= until;
+    then settlement_trust_election_timely(t, e);
+}
+
+// --- when a beneficial interest becomes disposable (section 646(f)) --------
+
+pub relation interest_disposable_not_permitted_by_7h_on(t: Trust, d: Date) kind empirical {
+    label en unofficial "on date d a beneficial interest in the Settlement Trust may be disposed of to a person in a manner not permitted by ANCSA section 7(h) if the interest were Settlement Common Stock (case-asserted; section 646(f)(1))";
+}
+pub relation interest_surrender_for_redemption_or_liquidation_on(t: Trust, d: Date) kind empirical {
+    label en unofficial "the disposition on date d is the surrender of an interest in the Native Corporation or the trust to accomplish a whole or partial redemption or liquidation (case-asserted; section 646(f)(3))";
+}
+pub relation native_corp_stock_disposable_not_permitted_by_7h_on(c: us.irc.core::Corporation, d: Date) kind empirical {
+    label en unofficial "on date d stock in the sponsoring Native Corporation may be disposed of in a manner not permitted by ANCSA section 7(h) if it were Settlement Common Stock (case-asserted; section 646(f)(2)(A))";
+}
+pub relation native_corp_stock_surrender_for_redemption_or_liquidation_on(c: us.irc.core::Corporation, d: Date) kind empirical {
+    label en unofficial "the stock disposition on date d is the surrender of an interest to accomplish a whole or partial redemption or liquidation of the shareholder's interest or of the corporation (case-asserted; section 646(f)(3))";
+}
+pub relation corporation_transfers_assets_to_settlement_trust_on(c: us.irc.core::Corporation, t: Trust, d: Date) kind empirical {
+    label en unofficial "the Native Corporation transfers assets to the Settlement Trust on date d (case-asserted; section 646(f)(2)(B))";
+}
+
+pub relation settlement_trust_disposition_candidate_date(t: Trust, d: Date) kind institutional {
+    label en unofficial "a date on which paragraph (1) of section 646(f) applies to the trust: a non-7(h) disposability of the beneficial interest that is not a section 646(f)(3) surrender, or (f)(2) a transfer of assets after stock became so disposable";
+}
+@source(IRC_S646_F, relation = formalizes, coverage = exact, quote = "If, at any time, a beneficial interest in an electing Settlement Trust may be disposed of to a person in a manner which would not be permitted by section 7(h) of the Alaska Native Claims Settlement Act")
+rule S646f1DispositionCandidate(t: Trust, d: Date) defeasible {
+    label en official "a beneficial interest in the trust may be disposed of in a manner not permitted by ANCSA section 7(h) (section 646(f)(1)), except a redemption or liquidation surrender deemed permitted by section 646(f)(3)";
+    when interest_disposable_not_permitted_by_7h_on(t, d);
+    unless interest_surrender_for_redemption_or_liquidation_on(t, d);
+    then settlement_trust_disposition_candidate_date(t, d);
+}
+relation stock_disposability_counts_under_646f2(c: us.irc.core::Corporation, d: Date) kind institutional {
+    label en unofficial "helper: stock of the Native Corporation is disposable on date d in a manner not permitted by section 7(h), and the disposition is not a section 646(f)(3) redemption or liquidation surrender";
+}
+rule S646f2StockDisposabilityCounts(c: us.irc.core::Corporation, d: Date) defeasible {
+    when native_corp_stock_disposable_not_permitted_by_7h_on(c, d);
+    unless native_corp_stock_surrender_for_redemption_or_liquidation_on(c, d);
+    then stock_disposability_counts_under_646f2(c, d);
+}
+@source(IRC_S646_F, relation = formalizes, coverage = exact, quote = "paragraph (1)(B) shall be applied to such trust on and after the date of the transfer in the same manner as if the trust permitted dispositions of beneficial interests in the trust in a manner not permitted by such section 7(h)")
+rule S646f2StockThenTransfer(c: us.irc.core::Corporation, t: Trust, d1: Date, d2: Date) defeasible {
+    label en official "if stock in the sponsoring Native Corporation may be disposed of in a manner not permitted by section 7(h) and afterwards the corporation transfers assets to a Settlement Trust, paragraph (1)(B) applies to that trust on and after the date of the transfer (section 646(f)(2))";
+    when stock_disposability_counts_under_646f2(c, d1);
+    when corporation_transfers_assets_to_settlement_trust_on(c, t, d2);
+    when d2 >= d1;
+    then settlement_trust_disposition_candidate_date(t, d2);
+}
+relation earlier_disposition_candidate_exists(t: Trust, d: Date) kind institutional {
+    label en unofficial "helper (TECH-GAPS G136 idiom): a strictly earlier candidate date exists for the trust";
+}
+rule S646fEarlierCandidateExists(t: Trust, d: Date, d2: Date) defeasible {
+    when settlement_trust_disposition_candidate_date(t, d);
+    when settlement_trust_disposition_candidate_date(t, d2);
+    when d2 < d;
+    then earlier_disposition_candidate_exists(t, d);
+}
+pub relation settlement_trust_disposition_first_permitted_on(t: Trust, d: Date) kind institutional {
+    label en unofficial "the first date on which a beneficial interest in the trust may be disposed of in a manner not permitted by ANCSA section 7(h) (section 646(f)(1)-(2))";
+}
+rule S646fFirstPermittedDate(t: Trust, d: Date) defeasible {
+    when settlement_trust_disposition_candidate_date(t, d);
+    unless earlier_disposition_candidate_exists(t, d);
+    then settlement_trust_disposition_first_permitted_on(t, d);
+}
+
+pub relation election_made_when_disposition_permitted(t: Trust, e: Election) kind institutional {
+    label en official "the election was made on or after the first date a beneficial interest became disposable in a manner not permitted by ANCSA section 7(h) (section 646(f)(1)(A))";
+}
+@source(IRC_S646_F, relation = formalizes, coverage = exact, quote = "no election may be made under subsection (c) with respect to such trust")
+rule S646f1ANoElectionAfterDisposability(t: Trust, e: Election, d: Date, m: Date) defeasible {
+    label en official "no election may be made under subsection (c) with respect to a trust once a beneficial interest in it is disposable in a manner not permitted by section 7(h) (section 646(f)(1)(A))";
+    when settlement_trust_election_made(t, e);
+    when settlement_trust_disposition_first_permitted_on(t, d);
+    when us.irc.core::made_on(e, m);
+    when m >= d;
+    then election_made_when_disposition_permitted(t, e);
+}
+
+pub relation settlement_trust_election_properly_made(t: Trust, e: Election) kind institutional {
+    label en unofficial "the section 646(c) election is timely, carries the statement required by (c)(2)(B), and is not barred by (f)(1)(A) — folded into one atom for valid_when";
+}
+@source(IRC_S646_C, relation = formalizes, coverage = exact, quote = "by attaching to such return of tax a statement specifically providing for such election")
+rule S646cElectionProperlyMade(t: Trust, e: Election) defeasible {
+    label en official "the election is properly made when timely under (c)(2)(A), accompanied by the statement of (c)(2)(B), and not barred by (f)(1)(A)";
+    when settlement_trust(t);
+    when settlement_trust_election_made(t, e);
+    when settlement_trust_election_timely(t, e);
+    when election_statement_attached_to_return(t, e);
+    unless election_made_when_disposition_permitted(t, e);
+    then settlement_trust_election_properly_made(t, e);
+}
+
+@source(IRC_S646_C, relation = formalizes, coverage = exact, quote = "A Settlement Trust may elect to have the provisions of this section apply to the trust and its beneficiaries.")
+rule S646cElectionPowerRule(trustee: Person, t: Trust, e: Election) defeasible {
+    label en official "a Settlement Trust may elect (by its trustee) to have section 646 apply to the trust and its beneficiaries; the election is made on or before the due date of the return for the first taxable year ending after enactment, by attaching a statement (section 646(c)(1)-(2))";
+    when settlement_trust(t);
+    when us.irc.core::fiduciary_for(trustee, t);
+    when us.irc.core::election_by(e, trustee);
+    when settlement_trust_election_made(t, e);
+    then power S646cSettlementTrustElection {
+        holder trustee;
+        over e;
+        exercise settlement_trust_election_made(t, e);
+        valid_when settlement_trust_election_properly_made(t, e);
+        effect create(settlement_trust_election_effective(t, e));
+        subject Election;
+        window [-infinity, infinity);
+    };
+}
+
+@source(IRC_S646_F, relation = formalizes, coverage = exact, quote = "no election may be made under subsection (c) with respect to such trust")
+rule S646f1ANoElectionProhibition(trustee: Person, t: Trust, e: Election) defeasible {
+    label en official "the trustee must not make the section 646(c) election for a trust in which a beneficial interest is disposable in a manner not permitted by section 7(h); making it is a breach of the prohibition (section 646(f)(1)(A))";
+    when settlement_trust(t);
+    when us.irc.core::fiduciary_for(trustee, t);
+    when us.irc.core::election_by(e, trustee);
+    when settlement_trust_disposition_first_permitted_on(t, _);
+    then prohibition S646f1ANoElectionWhenTransferRestrictionModified {
+        bearer trustee;
+        action election_made_when_disposition_permitted(t, e);
+        window [-infinity, infinity];
+    };
+}
+
+@source(IRC_S646_C, relation = formalizes, coverage = exact, quote = "may not be revoked once it is made")
+rule S646c3BElectionIrrevocableImmunity(t: Trust, e: Election) defeasible {
+    label en official "once made, the election may not be revoked: the election in effect is protected from removal (section 646(c)(3)(B)); the exception is the (f) cessation, modelled as a separate consequence";
+    when settlement_trust_election_effective(t, e);
+    then immunity Section646c3BElectionIrrevocable {
+        holder t;
+        protected_effect settlement_trust_election_effective(t, e);
+        window [-infinity, infinity];
+    };
+}
+
+// --- period the election is in effect: (c)(3)(A), (f)(1)(B)(i)-(ii) --------
+
+pub relation settlement_trust_election_first_year(t: Trust, y: TaxableYear) kind institutional {
+    label en unofficial "the first taxable year to which the election applies (the first taxable year ending after enactment; section 646(c)(3)(A))";
+}
+rule S646c3AFirstYear(t: Trust, e: Election, y: TaxableYear) defeasible {
+    when settlement_trust_election_effective(t, e);
+    when first_taxable_year_ending_after_enactment(t, y);
+    then settlement_trust_election_first_year(t, y);
+}
+pub relation settlement_trust_election_applies_to_year(t: Trust, y: TaxableYear) kind institutional {
+    label en official "the election applies to the first taxable year and all subsequent taxable years (section 646(c)(3)(A)), before the section 646(f)(1)(B) cessation";
+}
+@source(IRC_S646_C, relation = formalizes, coverage = exact, quote = "shall apply to the first taxable year described in paragraph (2)(A) and all subsequent taxable years")
+rule S646c3AAppliesFromFirstYear(t: Trust, first: TaxableYear, y: TaxableYear, s0: Date, s: Date) defeasible {
+    label en official "an effective election applies to the first taxable year described in paragraph (2)(A) and all subsequent taxable years (section 646(c)(3)(A))";
+    when settlement_trust_election_first_year(t, first);
+    when us.irc.core::begins(first, s0);
+    when us.irc.core::year_of(t, y);
+    when us.irc.core::begins(y, s);
+    when s >= s0;
+    then settlement_trust_election_applies_to_year(t, y);
+}
+
+pub relation settlement_trust_first_permitted_year(t: Trust, y0: TaxableYear) kind institutional {
+    label en unofficial "the taxable year of the trust in which a beneficial interest is first disposable in a manner not permitted by ANCSA section 7(h)";
+}
+rule S646fFirstPermittedYear(t: Trust, d0: Date, y0: TaxableYear, s: Date, en: Date) defeasible {
+    when settlement_trust_disposition_first_permitted_on(t, d0);
+    when us.irc.core::year_of(t, y0);
+    when us.irc.core::begins(y0, s);
+    when us.irc.core::ends(y0, en);
+    when s <= d0;
+    when d0 <= en;
+    then settlement_trust_first_permitted_year(t, y0);
+}
+pub relation section_646_ceases_for_year(t: Trust, y: TaxableYear) kind institutional {
+    label en official "the election ceases to apply as of the first day of the taxable year in which disposition is first permitted, and section 646 does not apply to the trust for that year and all taxable years thereafter (section 646(f)(1)(B)(i)-(ii))";
+}
+@source(IRC_S646_F, relation = formalizes, coverage = exact, quote = "the provisions of this section shall not apply to such trust for such taxable year and all taxable years thereafter")
+rule S646f1BCessation(t: Trust, y0: TaxableYear, y: TaxableYear, s0: Date, s: Date) defeasible {
+    label en official "if an election is in effect when disposition is first permitted, it ceases and section 646 no longer applies to the trust from the first day of that taxable year (section 646(f)(1)(B)(i)-(ii))";
+    when settlement_trust_first_permitted_year(t, y0);
+    when settlement_trust_election_applies_to_year(t, y0);
+    when us.irc.core::begins(y0, s0);
+    when us.irc.core::year_of(t, y);
+    when us.irc.core::begins(y, s);
+    when s >= s0;
+    then section_646_ceases_for_year(t, y);
+}
+
+@source(IRC_S646_H, relation = formalizes, coverage = exact, quote = "The term \"electing Settlement Trust\" means a Settlement Trust which has made the election, effective for a taxable year, described in subsection (c).")
+pub relation electing_settlement_trust(t: Trust, y: TaxableYear) kind institutional {
+    label en official "an electing Settlement Trust: a Settlement Trust which has made the election, effective for the taxable year, described in subsection (c) (section 646(h)(1)), and for which the (f)(1)(B) cessation has not occurred";
+}
+rule S646h1ElectingSettlementTrust(t: Trust, y: TaxableYear) defeasible {
+    when settlement_trust_election_applies_to_year(t, y);
+    unless section_646_ceases_for_year(t, y);
+    then electing_settlement_trust(t, y);
+}
+
+@source(IRC_S646_A, relation = formalizes, coverage = exact, quote = "If an election under this section is in effect with respect to any Settlement Trust, the provisions of this section shall apply in determining the income tax treatment of the Settlement Trust and its beneficiaries with respect to the Settlement Trust.")
+pub relation section_646_applies(t: Trust, y: TaxableYear) kind institutional {
+    label en official "if an election under section 646 is in effect for the Settlement Trust, the section governs the income tax treatment of the trust and its beneficiaries with respect to the trust (section 646(a))";
+}
+rule S646aSectionApplies(t: Trust, y: TaxableYear) defeasible {
+    when electing_settlement_trust(t, y);
+    then section_646_applies(t, y);
+}
+
+// ============================================================================
+// §646(g), (b): taxable income and the tax on an electing Settlement Trust
+// ============================================================================
+
+pub relation settlement_trust_taxable_income(t: Trust, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the taxable income of an electing Settlement Trust, determined under section 641(b) without regard to any deduction under section 651 or 661 (section 646(g))";
+}
+@source(IRC_S646_G, relation = formalizes, coverage = exact, quote = "the taxable income of an electing Settlement Trust shall be determined under section 641(b) without regard to any deduction under section 651 or 661")
+rule S646gTaxableIncome(t: Trust, y: TaxableYear, pretax: Money, exemption: Money) defeasible {
+    label en official "taxable income under section 641(b) (the pre-distribution figure less the section 642(b) exemption) with no section 651/661 distribution deduction (section 646(g))";
+    when electing_settlement_trust(t, y);
+    when taxable_income_before_distribution_and_exemption(t, y, pretax);
+    when section_642b_deduction(t, y, exemption);
+    then settlement_trust_taxable_income(t, y, pretax - exemption);
+}
+
+pub relation lowest_section_1c_rate(y: TaxableYear, rate: Decimal) kind empirical {
+    label en unofficial "the lowest rate specified in section 1(c) for the taxable year, as a decimal (case-asserted: us.irc.income_individual does not export it as a constant; same class as TECH-GAPS G44)";
+}
+pub relation settlement_trust_capital_gain_rate(t: Trust, y: TaxableYear, rate: Decimal) kind empirical {
+    label en unofficial "the rate that would apply to the trust's net capital gain if the trust were subject to tax on its other taxable income at only the lowest rate specified in section 1(c) (case-asserted: the counterfactual section 1(h) rerun is a TECH_GAP; section 646(b)(2))";
+}
+
+pub relation section_646b1_tax(t: Trust, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the tax on the taxable income of an electing Settlement Trust, other than its net capital gain, at the lowest rate specified in section 1(c) (section 646(b)(1))";
+}
+@source(IRC_S646_B, relation = formalizes, coverage = exact, quote = "There is hereby imposed on the taxable income of an electing Settlement Trust, other than its net capital gain, a tax at the lowest rate specified in section 1(c).")
+rule S646b1TaxAtLowestRate(t: Trust, y: TaxableYear, ti: Money, ncg: Money, rate: Decimal) defeasible {
+    label en official "tax at the lowest section 1(c) rate on taxable income other than net capital gain (section 646(b)(1)); cents HALF_UP is a JUDGMENT CALL";
+    when electing_settlement_trust(t, y);
+    when settlement_trust_taxable_income(t, y, ti);
+    when us.irc.income_individual::net_capital_gain(t, y, ncg);
+    when lowest_section_1c_rate(y, rate);
+    unless lowest_section_1c_rate_from_table(y, _) and electing_settlement_trust(t, y) and settlement_trust_taxable_income(t, y, ti) and us.irc.income_individual::net_capital_gain(t, y, ncg) and lowest_section_1c_rate(y, rate); // stage 4: the rate read from the table of section 1(c) (module 13) takes precedence over the asserted one
+    then section_646b1_tax(t, y, round(max(0 USD, ti - ncg) * rate, 2, "HALF_UP"));
+}
+@source(IRC_S646_B, relation = formalizes, coverage = exact, quote = "There is hereby imposed on the taxable income of an electing Settlement Trust, other than its net capital gain, a tax at the lowest rate specified in section 1(c).")
+rule S646b1TaxAtLowestRateFromTable(t: Trust, y: TaxableYear, ti: Money, ncg: Money, rate: Decimal) defeasible {
+    label en official "stage 4: tax at the lowest section 1(c) rate read from the rate table of the year on taxable income other than net capital gain (section 646(b)(1)); cents HALF_UP is a JUDGMENT CALL";
+    when electing_settlement_trust(t, y);
+    when settlement_trust_taxable_income(t, y, ti);
+    when us.irc.income_individual::net_capital_gain(t, y, ncg);
+    when lowest_section_1c_rate_from_table(y, rate);
+    then section_646b1_tax(t, y, round(max(0 USD, ti - ncg) * rate, 2, "HALF_UP"));
+}
+pub relation section_646b2_tax(t: Trust, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the tax on the electing Settlement Trust's net capital gain at the rate that would apply if its other taxable income were taxed at only the lowest section 1(c) rate (section 646(b)(2))";
+}
+@source(IRC_S646_B, relation = formalizes, coverage = partial, quote = "In the case of an electing Settlement Trust with a net capital gain for the taxable year, a tax is hereby imposed on such gain at the rate of tax which would apply to such gain")
+rule S646b2TaxOnNetCapitalGain(t: Trust, y: TaxableYear, ncg: Money, rate: Decimal) defeasible {
+    label en official "tax on the net capital gain at the asserted counterfactual rate (section 646(b)(2)); deriving the rate is TECH_GAP";
+    when electing_settlement_trust(t, y);
+    when us.irc.income_individual::net_capital_gain(t, y, ncg);
+    when ncg > 0 USD;
+    when settlement_trust_capital_gain_rate(t, y, rate);
+    unless section_646b2_tax_computed(t, y, _) and electing_settlement_trust(t, y) and us.irc.income_individual::net_capital_gain(t, y, ncg) and settlement_trust_capital_gain_rate(t, y, rate); // stage 4: the tax computed over the layers of section 1(h) (module 13) takes precedence over the asserted rate
+    then section_646b2_tax(t, y, round(ncg * rate, 2, "HALF_UP"));
+}
+@source(IRC_S646_B, relation = formalizes, coverage = exact, quote = "In the case of an electing Settlement Trust with a net capital gain for the taxable year, a tax is hereby imposed on such gain at the rate of tax which would apply to such gain")
+rule S646b2TaxFromLayers(t: Trust, y: TaxableYear, tax: Money) defeasible {
+    label en official "stage 4 (module 13): the tax on the net capital gain computed over the layers of section 1(h) (section 646(b)(2))";
+    when section_646b2_tax_computed(t, y, tax);
+    then section_646b2_tax(t, y, tax);
+}
+pub relation section_646b_total_tax(t: Trust, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "the total section 646(b) tax: the (b)(1) tax plus the (b)(2) tax";
+}
+rule S646bTotalTax(t: Trust, y: TaxableYear, ordinary_tax: Money, gain_tax: Money) defeasible {
+    when section_646b1_tax(t, y, ordinary_tax);
+    when section_646b2_tax(t, y, gain_tax);
+    then section_646b_total_tax(t, y, ordinary_tax + gain_tax);
+}
+rule S646bTotalTaxNoGain(t: Trust, y: TaxableYear, ordinary_tax: Money) defeasible {
+    label en unofficial "the total when the trust has no net capital gain: the (b)(1) tax alone";
+    when section_646b1_tax(t, y, ordinary_tax);
+    unless section_646b2_tax(t, y, _) and section_646b1_tax(t, y, ordinary_tax);
+    then section_646b_total_tax(t, y, ordinary_tax);
+}
+
+pub relation section_646b_tax_in_lieu_of_chapter_1_tax(t: Trust, y: TaxableYear) kind institutional {
+    label en official "any section 646(b) tax is in lieu of the income tax otherwise imposed by chapter 1 on the income or gain (section 646(b), last sentence): the section 1(e) tax of section 641(a) does not apply";
+}
+@source(IRC_S646_B, relation = formalizes, coverage = exact, quote = "Any such tax shall be in lieu of the income tax otherwise imposed by this chapter on such income or gain.")
+rule S646bInLieuOfChapter1Tax(t: Trust, y: TaxableYear) defeasible {
+    when electing_settlement_trust(t, y);
+    then section_646b_tax_in_lieu_of_chapter_1_tax(t, y);
+}
+
+// ============================================================================
+// §646(d): contributions
+// ============================================================================
+
+pub relation contribution_to_electing_settlement_trust(b: Person, t: Trust, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "a contribution is made to the Settlement Trust in the taxable year, in respect of the beneficiary b (case-asserted; section 646(d)(1))";
+}
+pub relation contribution_not_includible_in_beneficiary_gross_income(b: Person, t: Trust, y: TaxableYear) kind institutional {
+    label en official "in the case of an electing Settlement Trust, no amount is includible in the gross income of a beneficiary by reason of a contribution to the trust (section 646(d)(1))";
+}
+@source(IRC_S646_D, relation = formalizes, coverage = exact, quote = "no amount shall be includible in the gross income of a beneficiary of such trust by reason of a contribution to such trust")
+rule S646d1ContributionNotIncludible(b: Person, t: Trust, y: TaxableYear, amount: Money) defeasible {
+    when electing_settlement_trust(t, y);
+    when contribution_to_electing_settlement_trust(b, t, y, amount);
+    then contribution_not_includible_in_beneficiary_gross_income(b, t, y);
+}
+pub relation sponsor_earnings_and_profits_not_reduced_by_contribution(c: us.irc.core::Corporation, t: Trust, y: TaxableYear) kind institutional {
+    label en official "the earnings and profits of the sponsoring Native Corporation are not reduced on account of any contribution to the Settlement Trust (section 646(d)(2))";
+}
+@source(IRC_S646_D, relation = formalizes, coverage = exact, quote = "The earnings and profits of the sponsoring Native Corporation shall not be reduced on account of any contribution to such Settlement Trust.")
+rule S646d2EarningsAndProfitsNotReduced(c: us.irc.core::Corporation, t: Trust, y: TaxableYear, b: Person, amount: Money) defeasible {
+    when sponsoring_native_corporation(c, t);
+    when electing_settlement_trust(t, y);
+    when contribution_to_electing_settlement_trust(b, t, y, amount);
+    then sponsor_earnings_and_profits_not_reduced_by_contribution(c, t, y);
+}
+
+// ============================================================================
+// §646(e): characteristics of distributions to beneficiaries (four tiers)
+// ============================================================================
+
+pub relation settlement_trust_distributions_during_year(t: Trust, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "amounts distributed by the electing Settlement Trust during the taxable year (case-asserted; section 646(e))";
+}
+pub relation settlement_trust_income_tax_paid(t: Trust, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "income tax paid by the trust with respect to its income for the year (case-asserted; section 646(e)(1))";
+}
+pub relation settlement_trust_section_103_excluded_income(t: Trust, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the amount excluded from the trust's gross income under section 103 for the year (case-asserted; section 646(e)(1))";
+}
+pub relation settlement_trust_paragraph2_carry_in(t: Trust, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the paragraph (1) amounts of all earlier electing taxable years not previously taken into account under paragraph (1) (a period-to-period carry, re-asserted by the case from the prior year's settlement_trust_paragraph2_carry_out; section 646(e)(2))";
+}
+pub relation sponsor_adjusted_earnings_and_profits(c: us.irc.core::Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the current or accumulated earnings and profits of the sponsoring Native Corporation as of the close of the taxable year, after proper adjustment for all its distributions during the year (case-asserted; section 646(e)(3), (f)(1)(B)(iii))";
+}
+
+pub relation settlement_trust_paragraph1_capacity(t: Trust, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the paragraph (1) amount: the taxable income of the trust (decreased by income tax paid) plus any amount excluded under section 103 (section 646(e)(1))";
+}
+rule S646e1Capacity(t: Trust, y: TaxableYear, ti: Money, paid: Money, excl: Money) defeasible {
+    when electing_settlement_trust(t, y);
+    when settlement_trust_taxable_income(t, y, ti);
+    when settlement_trust_income_tax_paid(t, y, paid);
+    when settlement_trust_section_103_excluded_income(t, y, excl);
+    then settlement_trust_paragraph1_capacity(t, y, max(0 USD, ti - paid + excl));
+}
+
+pub relation settlement_distribution_tier1_excludable(t: Trust, y: TaxableYear, amount: Money) kind institutional {
+    label en official "first, distributed amounts excludable from gross income to the extent of the paragraph (1) amount for the year (section 646(e)(1))";
+}
+@source(IRC_S646_E, relation = formalizes, coverage = exact, quote = "First, as amounts excludable from gross income for the taxable year to the extent of the taxable income of such trust for such taxable year")
+rule S646e1Tier1(t: Trust, y: TaxableYear, d: Money, cap: Money) defeasible {
+    when electing_settlement_trust(t, y);
+    when settlement_trust_distributions_during_year(t, y, d);
+    when settlement_trust_paragraph1_capacity(t, y, cap);
+    then settlement_distribution_tier1_excludable(t, y, min(d, cap));
+}
+pub relation settlement_distribution_tier2_excludable(t: Trust, y: TaxableYear, amount: Money) kind institutional {
+    label en official "second, distributed amounts excludable to the extent of the paragraph (1) amounts of all electing years not previously taken into account (section 646(e)(2))";
+}
+@source(IRC_S646_E, relation = formalizes, coverage = exact, quote = "Second, as amounts excludable from gross income to the extent of the amount described in paragraph (1) for all taxable years for which an election is in effect")
+rule S646e2Tier2(t: Trust, y: TaxableYear, d: Money, t1: Money, carry: Money) defeasible {
+    when settlement_distribution_tier1_excludable(t, y, t1);
+    when settlement_trust_distributions_during_year(t, y, d);
+    when settlement_trust_paragraph2_carry_in(t, y, carry);
+    then settlement_distribution_tier2_excludable(t, y, min(d - t1, carry));
+}
+pub relation settlement_trust_paragraph2_carry_out(t: Trust, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "paragraph (1) amounts not yet taken into account after this year's distributions: to be re-asserted as next year's carry-in (period-to-period relation)";
+}
+rule S646e2CarryOut(t: Trust, y: TaxableYear, cap: Money, t1: Money, t2: Money, carry: Money) defeasible {
+    when settlement_trust_paragraph1_capacity(t, y, cap);
+    when settlement_distribution_tier1_excludable(t, y, t1);
+    when settlement_distribution_tier2_excludable(t, y, t2);
+    when settlement_trust_paragraph2_carry_in(t, y, carry);
+    then settlement_trust_paragraph2_carry_out(t, y, carry + cap - t1 - t2);
+}
+pub relation settlement_distribution_tier3_native_corporation_distribution(t: Trust, y: TaxableYear, amount: Money) kind institutional {
+    label en official "third, distributed amounts treated as distributed by the sponsoring Native Corporation with respect to its stock, taxable as section 301(c)(1) amounts to the extent of its adjusted earnings and profits (section 646(e)(3))";
+}
+@source(IRC_S646_E, relation = formalizes, coverage = exact, quote = "Third, as amounts distributed by the sponsoring Native Corporation with respect to its stock")
+rule S646e3Tier3(t: Trust, y: TaxableYear, c: us.irc.core::Corporation, d: Money, t1: Money, t2: Money, ep: Money) defeasible {
+    when sponsoring_native_corporation(c, t);
+    when settlement_trust_distributions_during_year(t, y, d);
+    when settlement_distribution_tier1_excludable(t, y, t1);
+    when settlement_distribution_tier2_excludable(t, y, t2);
+    when sponsor_adjusted_earnings_and_profits(c, y, ep);
+    then settlement_distribution_tier3_native_corporation_distribution(t, y, min(d - t1 - t2, max(0 USD, ep)));
+}
+pub relation settlement_distribution_tier4_in_excess_of_dni(t: Trust, y: TaxableYear, amount: Money) kind institutional {
+    label en official "fourth, amounts distributed by the trust in excess of its distributable net income for the year (section 646(e)(4)); read as the residual after the first three tiers (JUDGMENT CALL)";
+}
+@source(IRC_S646_E, relation = formalizes, coverage = exact, quote = "Fourth, as amounts distributed by the trust in excess of the distributable net income of such trust for such taxable year.")
+rule S646e4Tier4(t: Trust, y: TaxableYear, d: Money, t1: Money, t2: Money, t3: Money) defeasible {
+    when settlement_trust_distributions_during_year(t, y, d);
+    when settlement_distribution_tier1_excludable(t, y, t1);
+    when settlement_distribution_tier2_excludable(t, y, t2);
+    when settlement_distribution_tier3_native_corporation_distribution(t, y, t3);
+    then settlement_distribution_tier4_in_excess_of_dni(t, y, d - t1 - t2 - t3);
+}
+
+pub relation settlement_tier3_not_311b_distribution(t: Trust, y: TaxableYear) kind institutional {
+    label en official "amounts distributed under paragraph (3) are not a corporate distribution subject to section 311(b) (section 646(e), last sentence)";
+}
+pub relation settlement_tier3_amount_by_section_643e(t: Trust, y: TaxableYear) kind institutional {
+    label en official "for the amount of a paragraph (3) distribution and the recipient's basis, section 643(e) and not section 301(b) or (d) applies (section 646(e), last sentence)";
+}
+@source(IRC_S646_E, relation = formalizes, coverage = exact, quote = "Amounts distributed to which paragraph (3) applies shall not be treated as a corporate distribution subject to section 311(b)")
+rule S646eLastSentence(t: Trust, y: TaxableYear, t3: Money) defeasible {
+    when settlement_distribution_tier3_native_corporation_distribution(t, y, t3);
+    when t3 > 0 USD;
+    then settlement_tier3_not_311b_distribution(t, y);
+}
+@source(IRC_S646_E, relation = formalizes, coverage = exact, quote = "section 643(e) and not section 301(b) or (d) shall apply")
+rule S646eLastSentence643e(t: Trust, y: TaxableYear, t3: Money) defeasible {
+    when settlement_distribution_tier3_native_corporation_distribution(t, y, t3);
+    when t3 > 0 USD;
+    then settlement_tier3_amount_by_section_643e(t, y);
+}
+
+// ============================================================================
+// §646(f)(1)(B)(iii): DNI increase on cessation
+// ============================================================================
+
+pub relation trust_assets_fair_market_value_when_first_disposable(t: Trust, amount: Money) kind empirical {
+    label en unofficial "the fair market value of the trust's assets as of the date the beneficial interest first becomes disposable (case-asserted; section 646(f)(1), flush sentence)";
+}
+pub relation section_646f1B_dni_increase(t: Trust, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the distributable net income of the trust is increased by the sponsoring corporation's adjusted earnings and profits at the close of the year, but not beyond the fair market value of the trust's assets when the interest first became disposable (section 646(f)(1)(B)(iii))";
+}
+@source(IRC_S646_F, relation = formalizes, coverage = exact, quote = "the distributable net income of such trust shall be increased by the current or accumulated earnings and profits of the sponsoring Native Corporation as of the close of such taxable year")
+rule S646f1BiiiDniIncrease(t: Trust, y0: TaxableYear, c: us.irc.core::Corporation, ep: Money, fmv: Money) defeasible {
+    label en official "DNI increase in the year disposition is first permitted, capped at the assets' fair market value at that time (section 646(f)(1)(B)(iii))";
+    when settlement_trust_first_permitted_year(t, y0);
+    when settlement_trust_election_applies_to_year(t, y0);
+    when sponsoring_native_corporation(c, t);
+    when sponsor_adjusted_earnings_and_profits(c, y0, ep);
+    when trust_assets_fair_market_value_when_first_disposable(t, fmv);
+    then section_646f1B_dni_increase(t, y0, min(max(0 USD, ep), fmv));
+}
+rule S646f1BiiiFeedsDni(t: Trust, y: TaxableYear, amount: Money) defeasible {
+    label en unofficial "the section 646(f)(1)(B)(iii) increase is a DNI addition for the year (feeds section 643(a)'s addition total)";
+    when section_646f1B_dni_increase(t, y, amount);
+    then dni_addition(t, y, Section646fEarningsAndProfitsIncrease, amount);
+}
+pub relation sponsor_earnings_and_profits_reduction_646f(c: us.irc.core::Corporation, t: Trust, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the earnings and profits of the sponsoring Native Corporation are adjusted as of the last day of the taxable year by the amount included in the trust's distributable net income (section 646(f)(1), last sentence)";
+}
+@source(IRC_S646_F, relation = formalizes, coverage = exact, quote = "The earnings and profits of the sponsoring Native Corporation shall be adjusted as of the last day of such taxable year by the amount of earnings and profits so included in the distributable net income of the trust.")
+rule S646f1EarningsAndProfitsAdjustment(c: us.irc.core::Corporation, t: Trust, y: TaxableYear, amount: Money) defeasible {
+    when sponsoring_native_corporation(c, t);
+    when section_646f1B_dni_increase(t, y, amount);
+    then sponsor_earnings_and_profits_reduction_646f(c, t, y, amount);
+}
+
+// ============================================================================
+// §646(i): special loss disallowance rule
+// ============================================================================
+
+pub relation electing_trust_contribution_per_share(c: us.irc.core::Corporation, cid: Text, amount: Money) kind empirical {
+    label en unofficial "a contribution to an electing Settlement Trust sponsored by the Native Corporation, made on or after the first day the trust is treated as electing, expressed per share and determined as of the day of the contribution (case-asserted, eligibility asserted with the fact; section 646(i))";
+}
+pub relation per_share_loss_adjustment_factor(c: us.irc.core::Corporation, amount: Money) kind institutional {
+    label en official "the per share loss adjustment factor: the aggregate of all contributions to all electing Settlement Trusts sponsored by the Native Corporation, on or after the first day each trust is treated as electing, expressed on a per share basis as of each contribution (section 646(i), second sentence)";
+}
+@source(IRC_S646_I, relation = formalizes, coverage = exact, quote = "The per share loss adjustment factor shall be the aggregate of all contributions to all electing Settlement Trusts sponsored by such Native Corporation")
+rule S646iPerShareFactor(c: us.irc.core::Corporation, cid0: Text) defeasible {
+    when electing_trust_contribution_per_share(c, cid0, _);
+    then per_share_loss_adjustment_factor(c, sum all amount: Money for cid: Text where electing_trust_contribution_per_share(c, cid, amount));
+}
+pub relation shareholder_loss_on_share_disposition(s: Person, c: us.irc.core::Corporation, loss: Money) kind empirical {
+    label en unofficial "the loss that would otherwise be recognized by a shareholder upon a disposition of one share of the sponsoring Native Corporation (case-asserted; section 646(i))";
+}
+pub relation section_646i_recognized_loss(s: Person, c: us.irc.core::Corporation, loss: Money) kind institutional {
+    label en official "the loss otherwise recognized on a disposition of a share of a sponsoring Native Corporation, reduced (but not below zero) by the per share loss adjustment factor (section 646(i))";
+}
+@source(IRC_S646_I, relation = formalizes, coverage = exact, quote = "Any loss that would otherwise be recognized by a shareholder upon a disposition of a share of stock of a sponsoring Native Corporation shall be reduced (but not below zero) by the per share loss adjustment factor.")
+rule S646iLossDisallowance(s: Person, c: us.irc.core::Corporation, loss: Money, factor: Money, t: Trust) defeasible {
+    label en official "a shareholder's loss on a share of the sponsoring Native Corporation is reduced, not below zero, by the per share loss adjustment factor (section 646(i))";
+    when sponsoring_native_corporation(c, t);
+    when shareholder_loss_on_share_disposition(s, c, loss);
+    when per_share_loss_adjustment_factor(c, factor);
+    then section_646i_recognized_loss(s, c, max(0 USD, loss - factor));
+}

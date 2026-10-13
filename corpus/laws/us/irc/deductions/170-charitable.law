@@ -1,0 +1,309 @@
+// Section 170 — Charitable, etc., contributions and gifts. Stage 1 (IRC-06),
+// priority section.
+//
+// Scope: (a) general rule; (b) percentage limitations — 60% cash to 50%-orgs
+// (2018-2025 window), 50% general, 30% "other" cap, 30% capital-gain
+// property to 50%-orgs, 20% capital-gain property to non-50%-orgs, each with
+// the 5-year carryover of (d); (c) charitable contribution defined; (e)
+// ordinary-income/short-term-gain property reduction; (f)(8) substantiation
+// >=$250 as a validity condition; (f)(11) qualified appraisal; (f)(12)
+// vehicles; Pub. L. 119-21 changes: (p) non-itemizer deduction permanent
+// reinstatement and increase (section 70424), 0.5% individual floor
+// (section 70425), 1% corporate floor (section 70426), each as an edition.
+//
+// SIMPLIFICATION (recorded, not hidden): the four percentage-limitation
+// categories interact through a statutory ORDERING (cash-to-50%-orgs first,
+// then capital-gain-to-50%-orgs, then the general 50% bucket, then the 30%
+// "other" bucket, then 20% capital-gain-to-non-50%-orgs, each computed net
+// of amounts already taken into account earlier in the order) that this
+// stage does not fully wire as a single composed computation; each category
+// is instead computed against the FULL contribution base independently,
+// which is INTERPRETATION, not a `deduction_allowed` guarantee that the
+// combined total independently satisfies the aggregate 60%-of-AGI ceiling
+// a taxpayer making several kinds of contributions in the same year would
+// need. Flagged in the coverage rows as INTERPRETATION/TECH_GAP.
+
+use self::{
+    DeductionKind,
+    IRC_S170_A,
+    IRC_S170_B,
+    IRC_S170_E,
+    IRC_S170_F,
+    IRC_S170_P,
+    Individual,
+    Person,
+    TaxableYear,
+    deduction_allowed,
+};
+
+pub enum CharitableContributionKind {
+    CashTo50PercentOrg;               // (b)(1)(A) cash, or (b)(1)(G) increased cash cap
+    OtherTo50PercentOrgOrNotDescribed; // (b)(1)(B) "other contributions"
+    CapitalGainPropertyTo50PercentOrg; // (b)(1)(C)
+    CapitalGainPropertyToOtherOrg;     // (b)(1)(D)
+}
+pub relation charitable_contribution_made(p: Individual, y: TaxableYear, item: Integer, kind: CharitableContributionKind, amount: Money) kind institutional {
+    label en official "a charitable contribution (section 170(c)) of the stated kind and amount, made during the taxable year";
+}
+pub relation contribution_base(p: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en official "contribution base: AGI computed without regard to any NOL carryback to the taxable year (section 170(b)(1)(H))";
+}
+pub relation substantiated_contemporaneous_written_acknowledgment(p: Individual, y: TaxableYear, item: Integer) kind empirical {
+    label en official "the taxpayer obtained, on or before the earlier of the return filing date or its due date with extensions, a contemporaneous written acknowledgment meeting section 170(f)(8)(B)'s content requirements (section 170(f)(8)(C))";
+}
+pub relation charitable_carryover(p: Individual, from_y: TaxableYear, to_y: TaxableYear, amount: Money) kind institutional {
+    label en official "an excess charitable contribution carried over from one taxable year to a succeeding taxable year (section 170(b)(1)/(d)(1), 5 succeeding years in order of time)";
+}
+
+// --- §170(a)/(c): general rule and definition ----------------------------------
+
+pub relation qualifying_donee_organization(org: Integer) kind empirical {
+    label en official "the donee is an organization described in one of the section 170(c) categories (state/possession for public purposes; a domestic religious/charitable/scientific/literary/educational corporation or trust meeting the organizational and political-activity tests; war veterans' posts; domestic fraternal societies (individual donors only); cemetery companies; certain section 501(c)(19) federally chartered corporations)";
+}
+
+@source(IRC_S170_A, quote = "There shall be allowed as a deduction any charitable contribution")
+rule CharitableContributionGeneralRuleAllowedIfSubstantiated(p: Individual, y: TaxableYear, item: Integer, kind: CharitableContributionKind, amount: Money) strict {
+    label en official "a charitable contribution is allowed as a deduction, subject to the section 170(b) percentage limitations, PROVIDED the section 170(f)(8) substantiation requirement (validity condition, not a duty) is satisfied for a contribution of $250 or more";
+    when charitable_contribution_made(p, y, item, kind, amount);
+    when amount < 250.00 USD;
+    then deduction_allowed(p, y, Section170Charitable, amount);
+}
+@source(IRC_S170_F, quote = "No deduction shall be allowed under subsection (a) for any contribution of $250 or more unless the taxpayer substantiates the contribution by a contemporaneous written acknowledgment")
+rule SubstantiationRequiredForLargeContribution(p: Individual, y: TaxableYear, item: Integer, kind: CharitableContributionKind, amount: Money) strict {
+    label en official "a contribution of $250 or more is allowed only if substantiated by a contemporaneous written acknowledgment meeting the content requirements (section 170(f)(8)); this is a VALIDITY CONDITION of the deduction, not a duty to obtain one";
+    when charitable_contribution_made(p, y, item, kind, amount);
+    when amount >= 250.00 USD;
+    when substantiated_contemporaneous_written_acknowledgment(p, y, item);
+    then deduction_allowed(p, y, Section170Charitable, amount);
+}
+@source(IRC_S170_F, quote = "No deduction shall be allowed under subsection (a) for any contribution of $250 or more unless the taxpayer substantiates the contribution by a contemporaneous written acknowledgment")
+rule SubstantiationMissingDeniesLargeContribution(p: Individual, y: TaxableYear, item: Integer, kind: CharitableContributionKind, amount: Money) strict {
+    label en official "a contribution of $250 or more without the required contemporaneous written acknowledgment is not allowed (section 170(f)(8)(A))";
+    when charitable_contribution_made(p, y, item, kind, amount);
+    when amount >= 250.00 USD;
+    when not_known(substantiated_contemporaneous_written_acknowledgment(p, y, item));
+    then not deduction_allowed(p, y, Section170Charitable, amount);
+}
+
+// --- §170(b)(1): percentage limitations for individuals -------------------------
+
+pub relation charitable_contribution_aggregate_by_kind(p: Individual, y: TaxableYear, kind: CharitableContributionKind, amount: Money) kind institutional {
+    label en official "the aggregate, by section 170(b)(1) category, of charitable contributions made for the taxable year (sum of `charitable_contribution_made` items of that kind)";
+}
+// One rule per named category (rather than a single rule ranging freely
+// over the enum, which would need an unbound-`kind` enumeration this
+// language's range-restriction does not offer) — each sums that category's
+// items via a case-provided anchor item so the sum is well-founded.
+@source(IRC_S170_A, quote = "There shall be allowed as a deduction any charitable contribution")
+rule AggregateCashTo50PercentOrg(p: Individual, y: TaxableYear, item0: Integer, amount0: Money) strict {
+    label en official "helper: sums cash-to-50%-organization contribution items into the category aggregate (section 170(b)(1)(A)/(G))";
+    when charitable_contribution_made(p, y, item0, CashTo50PercentOrg, amount0);
+    then charitable_contribution_aggregate_by_kind(p, y, CashTo50PercentOrg,
+        sum all amount: Money for item: Integer where charitable_contribution_made(p, y, item, CashTo50PercentOrg, amount));
+}
+@source(IRC_S170_A, quote = "There shall be allowed as a deduction any charitable contribution")
+rule AggregateOtherTo50PercentOrg(p: Individual, y: TaxableYear, item0: Integer, amount0: Money) strict {
+    label en official "helper: sums 'other contributions' items into the category aggregate (section 170(b)(1)(B))";
+    when charitable_contribution_made(p, y, item0, OtherTo50PercentOrgOrNotDescribed, amount0);
+    then charitable_contribution_aggregate_by_kind(p, y, OtherTo50PercentOrgOrNotDescribed,
+        sum all amount: Money for item: Integer where charitable_contribution_made(p, y, item, OtherTo50PercentOrgOrNotDescribed, amount));
+}
+@source(IRC_S170_A, quote = "There shall be allowed as a deduction any charitable contribution")
+rule AggregateCapitalGainPropertyTo50PercentOrg(p: Individual, y: TaxableYear, item0: Integer, amount0: Money) strict {
+    label en official "helper: sums capital-gain-property-to-50%-organization items into the category aggregate (section 170(b)(1)(C))";
+    when charitable_contribution_made(p, y, item0, CapitalGainPropertyTo50PercentOrg, amount0);
+    then charitable_contribution_aggregate_by_kind(p, y, CapitalGainPropertyTo50PercentOrg,
+        sum all amount: Money for item: Integer where charitable_contribution_made(p, y, item, CapitalGainPropertyTo50PercentOrg, amount));
+}
+@source(IRC_S170_A, quote = "There shall be allowed as a deduction any charitable contribution")
+rule AggregateCapitalGainPropertyToOtherOrg(p: Individual, y: TaxableYear, item0: Integer, amount0: Money) strict {
+    label en official "helper: sums capital-gain-property-to-other-organization items into the category aggregate (section 170(b)(1)(D))";
+    when charitable_contribution_made(p, y, item0, CapitalGainPropertyToOtherOrg, amount0);
+    then charitable_contribution_aggregate_by_kind(p, y, CapitalGainPropertyToOtherOrg,
+        sum all amount: Money for item: Integer where charitable_contribution_made(p, y, item, CapitalGainPropertyToOtherOrg, amount));
+}
+
+@source(IRC_S170_B, quote = "shall be allowed to the extent that the aggregate of such contributions does not exceed 50 percent of the taxpayer's contribution base for the taxable year")
+rule OtherContributionsFiftyPercentLimitPre2018Or2026(p: Individual, y: TaxableYear, amount: Money, base: Money) strict {
+    label en official "cash contributions to a 50%-organization, outside the temporary 60% window, are limited to 50% of contribution base (section 170(b)(1)(A))";
+    effective (-infinity, @2018-01-01);
+    when charitable_contribution_aggregate_by_kind(p, y, CashTo50PercentOrg, amount);
+    when contribution_base(p, y, base);
+    when amount <= round(base * 0.50, 2, "HALF_UP");
+    then deduction_allowed(p, y, Section170Charitable, amount);
+}
+@source(IRC_S170_B, quote = "the total amount of such contributions which may be taken into account under subsection (a) for any taxable year beginning after December 31, 2017, and before January 1, 2026, shall not exceed 60 percent of the taxpayer's contribution base for such year")
+rule CashTo50PercentOrgSixtyPercentLimit(p: Individual, y: TaxableYear, amount: Money, base: Money) strict {
+    label en official "for taxable years beginning after December 31, 2017 and before January 1, 2026: cash contributions to a 50%-organization are limited to 60% of contribution base (section 170(b)(1)(G))";
+    effective [@2018-01-01, @2026-01-01);
+    when charitable_contribution_aggregate_by_kind(p, y, CashTo50PercentOrg, amount);
+    when contribution_base(p, y, base);
+    when amount <= round(base * 0.60, 2, "HALF_UP");
+    then deduction_allowed(p, y, Section170Charitable, amount);
+}
+@source(IRC_S170_B, quote = "the total amount of such contributions which may be taken into account under subsection (a) for any taxable year beginning after December 31, 2017, and before January 1, 2026, shall not exceed 60 percent of the taxpayer's contribution base for such year")
+rule CashTo50PercentOrgSixtyPercentExcessCarriedOver(p: Individual, y: TaxableYear, y_next: TaxableYear, amount: Money, base: Money) strict {
+    label en official "cash contributions to a 50%-organization exceeding the 60%-of-base cap are carried over for up to 5 succeeding taxable years (section 170(b)(1)(G)(ii))";
+    effective [@2018-01-01, @2026-01-01);
+    when charitable_contribution_aggregate_by_kind(p, y, CashTo50PercentOrg, amount);
+    when contribution_base(p, y, base);
+    when amount > round(base * 0.60, 2, "HALF_UP");
+    when us.irc.core::year_of(p, y_next);
+    then charitable_carryover(p, y, y_next, amount - round(base * 0.60, 2, "HALF_UP"));
+}
+@source(IRC_S170_B, quote = "shall be allowed to the extent that the aggregate of such contributions does not exceed the lesser of")
+rule OtherContributionsThirtyPercentOrResidualFiftyLimit(p: Individual, y: TaxableYear, amount: Money, base: Money, a_amount: Money) strict {
+    label en official "contributions other than cash-to-50%-organizations (and other than capital gain property) are limited to the lesser of 30% of contribution base or the excess of 50% of base over the (A)-category amount allowed (section 170(b)(1)(B))";
+    when charitable_contribution_aggregate_by_kind(p, y, OtherTo50PercentOrgOrNotDescribed, amount);
+    when contribution_base(p, y, base);
+    when charitable_contribution_aggregate_by_kind(p, y, CashTo50PercentOrg, a_amount);
+    when amount <= min(round(base * 0.30, 2, "HALF_UP"), round(base * 0.50, 2, "HALF_UP") - a_amount);
+    then deduction_allowed(p, y, Section170Charitable, amount);
+}
+@source(IRC_S170_B, quote = "the total amount of contributions of such property which may be taken into account under subsection (a) for any taxable year shall not exceed 30 percent of the taxpayer's contribution base for such year")
+rule CapitalGainPropertyTo50PercentOrgThirtyPercentLimit(p: Individual, y: TaxableYear, amount: Money, base: Money) strict {
+    label en official "capital gain property contributed to a 50%-organization (without a fair-market-value election) is limited to 30% of contribution base, with a 5-year carryover of the excess (section 170(b)(1)(C))";
+    when charitable_contribution_aggregate_by_kind(p, y, CapitalGainPropertyTo50PercentOrg, amount);
+    when contribution_base(p, y, base);
+    when amount <= round(base * 0.30, 2, "HALF_UP");
+    then deduction_allowed(p, y, Section170Charitable, amount);
+}
+@source(IRC_S170_B, quote = "If charitable contributions described in subparagraph (A) of capital gain property to which clause (i) applies exceeds 30 percent of the taxpayer's contribution base for any taxable year, such excess shall be treated")
+rule CapitalGainPropertyTo50PercentOrgExcessCarriedOver(p: Individual, y: TaxableYear, y_next: TaxableYear, amount: Money, base: Money) strict {
+    label en official "capital gain property to a 50%-organization exceeding the 30% cap is carried over for up to 5 succeeding taxable years (section 170(b)(1)(C)(ii))";
+    when charitable_contribution_aggregate_by_kind(p, y, CapitalGainPropertyTo50PercentOrg, amount);
+    when contribution_base(p, y, base);
+    when amount > round(base * 0.30, 2, "HALF_UP");
+    when us.irc.core::year_of(p, y_next);
+    then charitable_carryover(p, y, y_next, amount - round(base * 0.30, 2, "HALF_UP"));
+}
+@source(IRC_S170_B, quote = "the total amount of such contributions of such property taken into account under subsection (a) for any taxable year shall not exceed the lesser of")
+rule CapitalGainPropertyToOtherOrgTwentyPercentLimit(p: Individual, y: TaxableYear, amount: Money, base: Money, c_amount: Money) strict {
+    label en official "capital gain property contributed to an organization other than a 50%-organization is limited to the lesser of 20% of contribution base or the excess of 30% of base over the (C)-category amount, with a 5-year carryover (section 170(b)(1)(D))";
+    when charitable_contribution_aggregate_by_kind(p, y, CapitalGainPropertyToOtherOrg, amount);
+    when contribution_base(p, y, base);
+    when charitable_contribution_aggregate_by_kind(p, y, CapitalGainPropertyTo50PercentOrg, c_amount);
+    when amount <= min(round(base * 0.20, 2, "HALF_UP"), round(base * 0.30, 2, "HALF_UP") - c_amount);
+    then deduction_allowed(p, y, Section170Charitable, amount);
+}
+
+// --- §170(e): ordinary-income and short-term-gain property reduction -----------
+
+pub relation ordinary_income_or_short_term_gain_if_sold(p: Individual, y: TaxableYear, item: Integer, amount: Money) kind empirical {
+    label en official "the amount of gain that would not have been long-term capital gain had the contributed property been sold by the taxpayer at fair market value at the time of contribution (section 170(e)(1)(A))";
+}
+pub relation charitable_contribution_net_of_e_reduction(p: Individual, y: TaxableYear, item: Integer, kind: CharitableContributionKind, amount: Money) kind institutional {
+    label en official "a charitable contribution of property after the section 170(e)(1)(A) ordinary-income/short-term-gain reduction";
+}
+@source(IRC_S170_E, quote = "The amount of any charitable contribution of property otherwise taken into account under this section shall be reduced by the sum of")
+rule ContributedPropertyReducedByOrdinaryIncomePortion(p: Individual, y: TaxableYear, item: Integer, kind: CharitableContributionKind, gross_amount: Money, reduction: Money) strict {
+    label en official "a charitable contribution of property is reduced by the amount of gain that would not have been long-term capital gain if sold at fair market value (section 170(e)(1)(A))";
+    when charitable_contribution_made(p, y, item, kind, gross_amount);
+    when ordinary_income_or_short_term_gain_if_sold(p, y, item, reduction);
+    when reduction > 0.00 USD;
+    then charitable_contribution_net_of_e_reduction(p, y, item, kind, gross_amount - reduction);
+}
+// JUDGMENT CALL: the reduced amount is published as a SEPARATE relation
+// (`charitable_contribution_net_of_e_reduction`) rather than fed back into
+// `charitable_contribution_made` itself — a same-relation self-reference
+// created a predicate-dependency cycle the engine rejects as
+// non-stratifiable (LDC-E4102). A scenario exercising section 170(e)
+// asserts the ALREADY-NET amount directly into `charitable_contribution_
+// made` for the percentage-limitation rules above to consume (this rule
+// then documents and cross-checks the reduction arithmetic on the side,
+// rather than driving the percentage rules itself) — TECH_GAP, recorded in
+// the coverage row.
+
+// --- §170(p): non-itemizer deduction (Pub. L. 119-21 permanent reinstatement) --
+
+pub relation non_itemizer_cash_contribution_to_a_org(p: Individual, y: TaxableYear, amount: Money) kind empirical {
+    label en official "cash contributions to a section 170(b)(1)(A) organization, other than to a section 509(a)(3) organization or a donor advised fund, for a taxpayer who does not itemize (section 170(p))";
+}
+@source(IRC_S170_P, quote = "In the case of any taxable year beginning in 2021, if the individual does not elect to itemize deductions for such taxable year, the deduction under this section shall be equal to the deduction, not in excess of $300 ($600 in the case of a joint return)")
+rule NonItemizerDeduction2021Other(p: Individual, y: TaxableYear, s: us.irc.income_individual::FilingStatus, cash: Money) strict {
+    label en official "for a taxable year beginning in 2021 only (pre-Pub.L.119-21 text), a non-itemizer may deduct qualifying cash contributions up to $300 (not a joint return)";
+    effective [@2021-01-01, @2022-01-01);
+    when not_known(us.irc.gross_income::itemizes(p, y));
+    when us.irc.income_individual::filing_status(p, y, s);
+    when s != us.irc.income_individual::Joint;
+    when non_itemizer_cash_contribution_to_a_org(p, y, cash);
+    when cash <= round(Section170pNonItemizerAmountOther, 2, "HALF_UP");
+    then us.irc.gross_income::section_170p_deduction(p, y, cash);
+}
+@source(us.irc.temporal::PL119_21_S70424, relation = derives_from, quote = "by striking \"$300 ($600\" and inserting \"$1,000 ($2,000\"")
+rule NonItemizerDeductionPermanentFrom2026Other(p: Individual, y: TaxableYear, s: us.irc.income_individual::FilingStatus, cash: Money) strict {
+    label en official "Pub. L. 119-21 section 70424: for taxable years beginning after December 31, 2025, permanently, a non-itemizer may deduct qualifying cash contributions up to $1,000 (not a joint return)";
+    effective [@2026-01-01, infinity);
+    when not_known(us.irc.gross_income::itemizes(p, y));
+    when us.irc.income_individual::filing_status(p, y, s);
+    when s != us.irc.income_individual::Joint;
+    when non_itemizer_cash_contribution_to_a_org(p, y, cash);
+    when cash <= round(Section170pNonItemizerAmountOther, 2, "HALF_UP");
+    then us.irc.gross_income::section_170p_deduction(p, y, cash);
+}
+@source(us.irc.temporal::PL119_21_S70424, relation = derives_from, quote = "by striking \"$300 ($600\" and inserting \"$1,000 ($2,000\"")
+rule NonItemizerDeductionPermanentFrom2026Joint(p: Individual, y: TaxableYear, s: us.irc.income_individual::FilingStatus, cash: Money) strict {
+    label en official "Pub. L. 119-21 section 70424: for taxable years beginning after December 31, 2025, permanently, a non-itemizer joint return may deduct qualifying cash contributions up to $2,000";
+    effective [@2026-01-01, infinity);
+    when not_known(us.irc.gross_income::itemizes(p, y));
+    when us.irc.income_individual::filing_status(p, y, s);
+    when s == us.irc.income_individual::Joint;
+    when non_itemizer_cash_contribution_to_a_org(p, y, cash);
+    when cash <= round(Section170pNonItemizerAmountJoint, 2, "HALF_UP");
+    then us.irc.gross_income::section_170p_deduction(p, y, cash);
+}
+// §170(p) lapses for taxable years 2022-2025 (the pinned text applies only
+// to a taxable year beginning in 2021, and Pub. L. 119-21's revival is not
+// effective until 2026) — a 2022-2025 scenario correctly gets NEITHER a
+// section 170(p) deduction, which this stage does NOT model with an
+// explicit "no rule fires" note beyond this comment (absence of any
+// applicable rule already yields the correct NEITHER/UNDETERMINED result).
+
+// --- §170(b)(1)/(2): 0.5%/1% floors (Pub. L. 119-21, from 2026) ----------------
+
+@source(us.irc.temporal::PL119_21_S70425, relation = derives_from, quote = "shall be allowed only to the extent that the aggregate of such contributions exceeds 0.5 percent of the taxpayer’s contribution base")
+rule IndividualCharitableFloorHalfPercentFrom2026(p: Individual, y: TaxableYear, aggregate: Money, base: Money) strict {
+    label en official "Pub. L. 119-21 section 70425: for taxable years beginning after December 31, 2025, an individual's aggregate otherwise-allowable charitable contributions are allowed only to the extent they exceed 0.5% of contribution base";
+    effective [@2026-01-01, infinity);
+    when charitable_deductions_otherwise_allowable_aggregate(p, y, aggregate);
+    when contribution_base(p, y, base);
+    when aggregate > round(base * 0.005, 2, "HALF_UP");
+    then deduction_allowed(p, y, Section170Charitable, -1 * round(base * 0.005, 2, "HALF_UP"));
+}
+pub relation charitable_deductions_otherwise_allowable_aggregate(p: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the aggregate of an individual's charitable contributions otherwise allowable (without regard to the section 170(b)(1)(I) 0.5% floor) for the taxable year";
+}
+// JUDGMENT CALL: the 0.5% floor is modelled as a NEGATIVE adjustment against
+// the aggregate rather than recomputing each of the four category rules
+// above net of the floor (which would require the statute's own
+// six-step "applicability" ordering, (D) then (C) then (B) then (E) then
+// (A) then (G) — SIMPLIFICATION noted at the top of this module and again
+// here; a scenario checks the NET result across all category rules and
+// this floor adjustment together, not any single rule's `deduction_allowed`
+// contribution in isolation.
+
+@source(us.irc.temporal::PL119_21_S70426, relation = derives_from, quote = "exceeds 1 percent of the taxpayer’s taxable income for the taxable year")
+rule CorporateCharitableFloorOnePercentFrom2026(c: us.irc.core::Corporation, y: TaxableYear, aggregate: Money, taxable_income: Money) strict {
+    label en official "Pub. L. 119-21 section 70426: for a corporation, charitable contributions (other than the (B)/(C) categories) are allowed only to the extent the aggregate exceeds 1% of taxable income, and only up to 10% of taxable income";
+    effective [@2026-01-01, infinity);
+    when charitable_deductions_otherwise_allowable_aggregate_corporate(c, y, aggregate);
+    when taxable_income_before_charitable_170(c, y, taxable_income);
+    when aggregate > round(taxable_income * 0.01, 2, "HALF_UP");
+    when aggregate <= round(taxable_income * 0.10, 2, "HALF_UP");
+    then deduction_allowed(c, y, Section170Charitable, aggregate - round(taxable_income * 0.01, 2, "HALF_UP"));
+}
+pub relation charitable_deductions_otherwise_allowable_aggregate_corporate(c: us.irc.core::Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the aggregate of a corporation's charitable contributions otherwise allowable under section 170(b)(2)(A) for the taxable year";
+}
+pub relation taxable_income_before_charitable_170(c: us.irc.core::Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "a corporation's taxable income for the section 170(b)(2) percentage limitation, computed per the section 170(b)(2)(D) special rules — dependency contract, producer: unresolved (corporations pending)";
+}
+
+// (b)(1)(E) qualified conservation contributions, (b)(1)(F) private
+// foundation categories, (b)(2)(B)/(C) conservation/Native-Corporation
+// corporate rules, (f)(9)-(f)(10) lobbying/split-dollar denials, (f)(11)
+// qualified appraisal requirement, (f)(12) vehicle donation rules, (g)
+// unreimbursed expenses, (h) qualified conservation contribution definition
+// stay "stage 2" — the task named (f)(8), (f)(11) and (f)(12) as priority;
+// (f)(11)/(f)(12) are recorded as TECH_GAP/unreviewed (not reached this
+// session) rather than silently merged into the (f)(8) rule above.

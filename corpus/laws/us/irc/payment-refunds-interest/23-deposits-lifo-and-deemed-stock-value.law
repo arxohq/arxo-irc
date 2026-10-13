@@ -1,0 +1,165 @@
+// Stage 3b (26.09.2026, DECISION-0379), implemented_unverified, NOT executed, no legal review.
+//  (1) 26 U.S.C. 6603(e)(2): a returned deposit is returned on a last-in, first-out basis (row 26/6603/e/2/u1).
+//  (2) 26 U.S.C. 6166(b)(8)(A)(i): the VALUE-based deemed stock of a business company through 1-3 holding
+//      companies (row 26/6166/b/8/a/i/u1); the voting-stock version and the third holding company are in module 18.
+//
+// JUDGMENT CALLS
+//  - LIFO: the deposits of one person are ordered by their deposit dates; the amount returned from a deposit is
+//    what remains of the total returned amount after the available amounts of the LATER deposits, clamped to
+//    the deposit's available amount (deposit less the amount already used to pay tax). Deposits made on the same
+//    date are not "later" than each other (the text names no tie rule); each is then charged the same remainder.
+//  - The total returned amount is a case fact of the person (the Secretary's return).
+//  - Value-based deemed stock reads asserted value percentages (the estate's percentage in value of the holding
+//    company; each holding company's percentage in value of the next company); rounding to 6 decimals HALF_UP.
+
+language "law.core" version "0.2";
+package us.irc.payment_refunds_interest version "0.1.1";
+namespace "urn:us:irc:payment_refunds_interest:clir";
+
+use self::{
+    BusinessInterest6166,
+    DecedentEstate,
+    Deposit,
+    IRC_S6166_B,
+    IRC_S6603_E,
+    Person,
+    business_company,
+    deposit_made,
+    executor_elects_b8,
+    holding_company,
+    interest_in_company,
+    interest_included_in_gross_estate_of,
+};
+
+relation total_deposit_amount_returned(p: Person, amount: Money) kind empirical { label en official "the total amount of deposits the Secretary returns to the person"; }
+relation deposit_amount_used_to_pay_tax(d: Deposit, amount: Money) kind empirical { label en official "the part of the deposit already used by the Secretary to pay tax"; }
+relation deposit_has_used_amount(d: Deposit) kind institutional { label en unofficial "helper: a used amount is stated for the deposit"; }
+rule S6603eDepositHasUsedAmount strict { for d: Deposit; for u: Money; when deposit_amount_used_to_pay_tax(d, u); then deposit_has_used_amount(d); }
+relation deposit_available_for_return(p: Person, d: Deposit, amount: Money) kind institutional { label en official "the part of the deposit not used to pay tax, available to be returned"; }
+rule S6603eAvailableAfterUse strict {
+    for p: Person;
+    for d: Deposit;
+    for amount: Money;
+    for on: Date;
+    for u: Money;
+    when deposit_made(d, p, amount, on) and deposit_amount_used_to_pay_tax(d, u);
+    then deposit_available_for_return(p, d, max(0 USD, amount - u));
+}
+rule S6603eAvailableUnused strict {
+    for p: Person;
+    for d: Deposit;
+    for amount: Money;
+    for on: Date;
+    when deposit_made(d, p, amount, on) and not_known(deposit_has_used_amount(d));
+    then deposit_available_for_return(p, d, amount);
+}
+relation later_deposit_available(p: Person, d: Deposit, later: Deposit, amount: Money) kind institutional { label en unofficial "a strictly later deposit of the same person and the part of it available for return"; }
+rule S6603eLaterDepositAvailable strict {
+    for p: Person;
+    for d: Deposit;
+    for later: Deposit;
+    for a1: Money;
+    for a2: Money;
+    for on1: Date;
+    for on2: Date;
+    for avail: Money;
+    when deposit_made(d, p, a1, on1) and deposit_made(later, p, a2, on2) and on2 > on1 and deposit_available_for_return(p, later, avail);
+    then later_deposit_available(p, d, later, avail);
+}
+relation has_later_deposit_available(p: Person, d: Deposit) kind institutional { label en unofficial "helper: some later deposit has an available amount"; }
+rule S6603eHasLaterDeposit strict { for p: Person; for d: Deposit; for later: Deposit; for a: Money; when later_deposit_available(p, d, later, a); then has_later_deposit_available(p, d); }
+relation later_deposits_available_total(p: Person, d: Deposit, total: Money) kind institutional { label en unofficial "the sum of the available amounts of the later deposits"; }
+rule S6603eLaterTotalSum strict {
+    for p: Person;
+    for d: Deposit;
+    for later: Deposit;
+    for a: Money;
+    when has_later_deposit_available(p, d) and later_deposit_available(p, d, later, a);
+    then later_deposits_available_total(p, d, sum all x: Money for l2: Deposit where later_deposit_available(p, d, l2, x));
+}
+rule S6603eLaterTotalNone strict {
+    for p: Person;
+    for d: Deposit;
+    for amount: Money;
+    for on: Date;
+    when deposit_made(d, p, amount, on) and not_known(has_later_deposit_available(p, d));
+    then later_deposits_available_total(p, d, 0 USD);
+}
+relation deposit_returned_last_in_first_out(p: Person, d: Deposit, amount: Money) kind institutional {
+    label en official "the part of the deposit treated as returned: deposits are treated as returned on a last-in, first-out basis";
+}
+@source(IRC_S6603_E, relation = formalizes, coverage = exact, quote = "Deposits shall be treated as returned to the taxpayer on a last-in, first-out basis.")
+rule S6603eReturnedInFullFromDeposit strict {
+    for p: Person;
+    for d: Deposit;
+    for r: Money;
+    for a: Money;
+    for t: Money;
+    when total_deposit_amount_returned(p, r) and deposit_available_for_return(p, d, a) and later_deposits_available_total(p, d, t) and r - t >= a;
+    then deposit_returned_last_in_first_out(p, d, a);
+}
+rule S6603eReturnedRemainderFromDeposit strict {
+    for p: Person;
+    for d: Deposit;
+    for r: Money;
+    for a: Money;
+    for t: Money;
+    when total_deposit_amount_returned(p, r) and deposit_available_for_return(p, d, a) and later_deposits_available_total(p, d, t) and r - t > 0 USD and r - t < a;
+    then deposit_returned_last_in_first_out(p, d, r - t);
+}
+
+// ---------------------------------------------------------------------------
+// 6166(b)(8)(A)(i): the value-based deemed stock
+// ---------------------------------------------------------------------------
+relation estate_interest_value_percent_in_company(i: BusinessInterest6166, percent: Decimal) kind empirical { label en official "the percentage in value of the holding company's stock that the interest included in the gross estate represents"; }
+relation holding_company_value_percent_in(holder: Person, target: Person, percent: Decimal) kind empirical { label en official "the percentage in value of the target company's stock that the holding company owns directly"; }
+relation deemed_value_path(e: DecedentEstate, business: Person, hop1: Person, hop2: Person, hop3: Person, percent: Decimal) kind institutional { label en official "the value-based deemed stock in a business company through one path of 1, 2 or 3 holding companies (an unused hop repeats the business company)"; }
+@source(IRC_S6166_B, relation = formalizes, coverage = partial, quote = "the portion of the stock of any holding company which represents direct ownership (or indirect ownership through 1 or more other holding companies) by such company in a business company shall be deemed to be stock in such business company")
+rule S6166B8AiValueOneHolding strict {
+    for e: DecedentEstate;
+    for ih: BusinessInterest6166;
+    for h1: Person;
+    for b: Person;
+    for x: Decimal;
+    for y: Decimal;
+    when executor_elects_b8(e) and interest_included_in_gross_estate_of(ih, e) and interest_in_company(ih, h1) and holding_company(h1) and estate_interest_value_percent_in_company(ih, x) and holding_company_value_percent_in(h1, b, y) and business_company(b);
+    then deemed_value_path(e, b, h1, b, b, div_round(x * y, 100.0, 6, "HALF_UP"));
+}
+rule S6166B8AiValueTwoHoldings strict {
+    for e: DecedentEstate;
+    for ih: BusinessInterest6166;
+    for h1: Person;
+    for h2: Person;
+    for b: Person;
+    for x: Decimal;
+    for y: Decimal;
+    for z: Decimal;
+    when executor_elects_b8(e) and interest_included_in_gross_estate_of(ih, e) and interest_in_company(ih, h1) and holding_company(h1) and estate_interest_value_percent_in_company(ih, x)
+        and holding_company_value_percent_in(h1, h2, y) and holding_company(h2) and holding_company_value_percent_in(h2, b, z) and business_company(b);
+    then deemed_value_path(e, b, h1, h2, b, div_round(div_round(x * y, 100.0, 6, "HALF_UP") * z, 100.0, 6, "HALF_UP"));
+}
+rule S6166B8AiValueThreeHoldings strict {
+    for e: DecedentEstate;
+    for ih: BusinessInterest6166;
+    for h1: Person;
+    for h2: Person;
+    for h3: Person;
+    for b: Person;
+    for x: Decimal;
+    for y: Decimal;
+    for z: Decimal;
+    for w: Decimal;
+    when executor_elects_b8(e) and interest_included_in_gross_estate_of(ih, e) and interest_in_company(ih, h1) and holding_company(h1) and estate_interest_value_percent_in_company(ih, x)
+        and holding_company_value_percent_in(h1, h2, y) and holding_company(h2) and holding_company_value_percent_in(h2, h3, z) and holding_company(h3) and holding_company_value_percent_in(h3, b, w) and business_company(b);
+    then deemed_value_path(e, b, h1, h2, h3, div_round(div_round(div_round(x * y, 100.0, 6, "HALF_UP") * z, 100.0, 6, "HALF_UP") * w, 100.0, 6, "HALF_UP"));
+}
+relation deemed_stock_value_percent(e: DecedentEstate, business: Person, percent: Decimal) kind institutional { label en official "the portion of the holding company stock deemed to be stock in the business company, by value"; }
+rule S6166B8AiValuePercentSum strict {
+    for e: DecedentEstate;
+    for b: Person;
+    for h1: Person;
+    for h2: Person;
+    for h3: Person;
+    when deemed_value_path(e, b, h1, h2, h3, _);
+    then deemed_stock_value_percent(e, b, sum all p: Decimal for x1: Person, x2: Person, x3: Person where deemed_value_path(e, b, x1, x2, x3, p));
+}

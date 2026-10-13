@@ -1,0 +1,461 @@
+// Section 1(f) (inflation adjustment of the rate tables), the section 1(j)(3)
+// and (5) applications of it, and the section 55(d)(3)-(4)(B) and 59(j)(2)
+// applications (stage 3, TECH_GAP reduction, 26.09.2026).
+//
+// WHAT IS EXECUTABLE HERE. The MECHANISM of the cost-of-living adjustment:
+// the 12-month averages of the two price indexes, the ratio of the
+// preceding-year C-CPI-U to the base-year figure ((f)(3)(A)-(C)), the
+// increase of a dollar amount by that ratio, and the two rounding rules of
+// the Code ((f)(7): the INCREASE is rounded down to a multiple of $50, or
+// $25; section 55(d)(3)(C) and (4)(B)(iii): the INCREASED AMOUNT is rounded to
+// the nearest multiple of $100). The index values themselves are Bureau of
+// Labor Statistics data. None is pinned in this repository, so they enter as
+// empirical facts (`c_cpi_u_window_month`, `cpi_window_month`): with no fact
+// asserted the derived amounts are simply not established (NEITHER), never
+// zero and never an invented figure. The published indexed figures of
+// Rev. Proc. 2024-40 (2025) and Rev. Proc. 2025-32 (2026) stay what they were,
+// rows of the A3 parameter datasets beside the modules that read them.
+//
+// TWELVE-MONTH AVERAGES WITHOUT DIVISION. Both indexes are "the average ...
+// as of the close of the 12-month period ending on August 31" ((f)(4),
+// (f)(6)(B)). The COLA is a RATIO of two such averages, so the divisor 12
+// cancels: the module compares the 12-month SUMS. The statute names no
+// rounding of the ratio; the only rounding is the rounding rule of the
+// amount, applied once to the exact quotient (`div_round`, docs/research/constructs/
+// 21-expressions-quantities/, semantics item 7). JUDGMENT CALL: the ratio is never
+// rounded to a percentage before it is applied (the text says "the percentage
+// (if any) by which", and Rev. Procs. round only the resulting amounts).
+//
+// BASE YEAR. (f)(3)(A)(ii) divides by "the CPI for calendar year 2016
+// multiplied by" the 2016 C-CPI-U/CPI ratio; a provision that substitutes a
+// year for "2016" (1992 in (f)(2)(A)(i), 1993 for the 36 and 39.6 percent
+// boundaries, 2011 in section 55(d)(3), 2017 in section 1(j)(3)(B)(i) and
+// 55(d)(4)(B), 2025 for the $1,000,000 amount after Pub. L. 119-21 section
+// 70107(b)) changes the year of the CPI factor. After 2016 (f)(3)(C) replaces
+// the whole term by the C-CPI-U of the substituted year. Both readings reduce
+// to one ratio of products, `cola_numerator / cola_denominator`, with
+//   numerator   = C-CPI-U(preceding year) x CPI(2016)              [base <= 2016]
+//   denominator = CPI(base year) x C-CPI-U(2016)
+// and, for a base after 2016, numerator = C-CPI-U(preceding), denominator =
+// C-CPI-U(base). (Sums stand for averages; the 12s cancel in every quotient.)
+//
+// REQUEST RELATION. A dollar amount is adjusted only when someone asks for
+// it: `amount_to_index(base, base_year, y, step)` names the amount, the
+// substituted year, the taxable year and the rounding step; the answer is
+// `cola_adjusted_amount`. The statutory amounts of sections 1(j)(5), 55(d)
+// and 59(j) raise their own requests in this module.
+
+// --- Index inputs (Bureau of Labor Statistics; EXTERNAL_DEPENDENCY) ----------
+
+use self::{
+    FilingStatus,
+    IRC_S1_F,
+    IRC_S1_I,
+    IRC_S1_J,
+    IRC_S55_D,
+    IRC_S59_J,
+    Person,
+    TaxableYear,
+    filing_status,
+};
+
+pub relation c_cpi_u_window_month(window_year: Integer, seq: Integer, value: Decimal) kind empirical {
+    label en official "the Chained Consumer Price Index for All Urban Consumers for one of the 12 months of the period ending on August 31 of the calendar year (seq 1 = the September before, seq 12 = August)";
+}
+pub relation cpi_window_month(window_year: Integer, seq: Integer, value: Decimal) kind empirical {
+    label en official "the Consumer Price Index for all-urban consumers (revision most consistent with calendar year 1986) for one of the 12 months of the period ending on August 31 of the calendar year";
+}
+
+pub relation c_cpi_u_twelve_month_sum(window_year: Integer, total: Decimal) kind institutional {
+    label en official "the C-CPI-U for the calendar year, as the sum of its 12 monthly values (the average is that sum divided by 12)";
+}
+pub relation cpi_twelve_month_sum(window_year: Integer, total: Decimal) kind institutional {
+    label en official "the CPI for the calendar year, as the sum of its 12 monthly values (the average is that sum divided by 12)";
+}
+
+@source(IRC_S1_F, relation = formalizes, coverage = exact, quote = "The C-CPI-U for any calendar year is the average of the C-CPI-U as of the close of the 12-month period ending on August 31 of such calendar year.")
+rule CCpiUForCalendarYear(window_year: Integer) strict {
+    label en official "section 1(f)(6)(B): the C-CPI-U for a calendar year is the average over the 12-month period ending on August 31 (kept as the 12-month sum)";
+    when c_cpi_u_window_month(window_year, 1, _);
+    when count(collect all s: Integer, v: Decimal where c_cpi_u_window_month(window_year, s, v)) == 12;
+    then c_cpi_u_twelve_month_sum(window_year, sum all v: Decimal for s: Integer where c_cpi_u_window_month(window_year, s, v));
+}
+
+@source(IRC_S1_F, relation = formalizes, coverage = exact, quote = "the CPI for any calendar year is the average of the Consumer Price Index as of the close of the 12-month period ending on August 31 of such calendar year.")
+rule CpiForCalendarYear(window_year: Integer) strict {
+    label en official "section 1(f)(4): the CPI for a calendar year is the average over the 12-month period ending on August 31 (kept as the 12-month sum)";
+    when cpi_window_month(window_year, 1, _);
+    when count(collect all s: Integer, v: Decimal where cpi_window_month(window_year, s, v)) == 12;
+    then cpi_twelve_month_sum(window_year, sum all v: Decimal for s: Integer where cpi_window_month(window_year, s, v));
+}
+
+// --- Section 1(f)(3): the cost-of-living adjustment ---------------------------
+
+pub relation cola_terms(base_year: Integer, prior_year: Integer, numerator: Decimal, denominator: Decimal) kind institutional {
+    label en official "the cost-of-living adjustment for the calendar year following prior_year against the substituted base year, as the two terms of the ratio numerator/denominator (the percentage by which the ratio exceeds 1)";
+}
+
+@source(IRC_S1_F, relation = formalizes, coverage = exact, quote = "the C-CPI-U for the preceding calendar year, exceeds")
+@source(IRC_S1_F, relation = formalizes, coverage = exact, quote = "the CPI for calendar year 2016, multiplied by the amount determined under subparagraph (B).")
+rule ColaTermsBaseAtOrBefore2016(base_year: Integer, prior: Integer, c_prior: Decimal, cpi_base: Decimal, c_2016: Decimal, cpi_2016: Decimal) strict {
+    label en official "section 1(f)(3)(A)-(B): the C-CPI-U of the preceding year against the CPI of the base year multiplied by (C-CPI-U 2016 / CPI 2016); numerator and denominator kept as products so no quotient is rounded";
+    when base_year <= 2016;
+    when c_cpi_u_twelve_month_sum(prior, c_prior);
+    when cpi_twelve_month_sum(base_year, cpi_base);
+    when c_cpi_u_twelve_month_sum(2016, c_2016);
+    when cpi_twelve_month_sum(2016, cpi_2016);
+    then cola_terms(base_year, prior, c_prior * cpi_2016, cpi_base * c_2016);
+}
+
+@source(IRC_S1_F, relation = formalizes, coverage = exact, quote = "subparagraph (A) shall be applied by substituting \"the C-CPI-U for calendar year 2016\" for \"the CPI for calendar year 2016\" and all that follows in clause (ii) thereof.")
+rule ColaTermsBaseAfter2016(base_year: Integer, prior: Integer, c_prior: Decimal, c_base: Decimal) strict {
+    label en official "section 1(f)(3)(C): for a base year after 2016 the denominator is the C-CPI-U of the substituted year";
+    when base_year > 2016;
+    when c_cpi_u_twelve_month_sum(prior, c_prior);
+    when c_cpi_u_twelve_month_sum(base_year, c_base);
+    then cola_terms(base_year, prior, c_prior, c_base);
+}
+
+// --- Requests and the two rounding rules --------------------------------------
+
+pub relation amount_to_index(base: Money, base_year: Integer, y: TaxableYear, step: Integer) kind institutional {
+    label en unofficial "a dollar amount that a provision increases by the cost-of-living adjustment for the calendar year in which the taxable year begins, with the year substituted for 2016 and the rounding step of section 1(f)(7)";
+}
+pub relation cola_adjusted_amount(base: Money, base_year: Integer, y: TaxableYear, step: Integer, adjusted: Money) kind institutional {
+    label en official "the dollar amount increased by the cost-of-living adjustment, the increase rounded down to the next lowest multiple of the step (section 1(f)(7)(A)-(B)); unchanged when there is no percentage by which the ratio exceeds 1";
+}
+
+@source(IRC_S1_F, relation = formalizes, coverage = exact, quote = "such increase shall be rounded to the next lowest multiple of $50.")
+rule ColaAdjustedAmountRoundedDown(base: Money, base_year: Integer, y: TaxableYear, step: Integer, cy: Integer, prior: Integer, numerator: Decimal, denominator: Decimal) strict {
+    label en official "section 1(f)(2)(A) and (7): amount + the increase (amount x (ratio - 1)) rounded down to a multiple of the step; one rounding over the exact quotient";
+    when amount_to_index(base, base_year, y, step);
+    when us.irc.core::calendar_year_of(y, cy);
+    when cola_terms(base_year, prior, numerator, denominator);
+    when prior == cy - 1;
+    when numerator > denominator;
+    then cola_adjusted_amount(base, base_year, y, step, base + div_round(base * (numerator - denominator), denominator * (step * 1.0), 0, "FLOOR") * step);
+}
+
+@source(IRC_S1_F, relation = formalizes, coverage = partial, quote = "the percentage (if any) by which—")
+rule ColaAdjustedAmountNoIncrease(base: Money, base_year: Integer, y: TaxableYear, step: Integer, cy: Integer, prior: Integer, numerator: Decimal, denominator: Decimal) strict {
+    label en official "section 1(f)(3)(A): where the preceding-year index does not exceed the base figure there is no percentage, so the amount is not increased";
+    when amount_to_index(base, base_year, y, step);
+    when us.irc.core::calendar_year_of(y, cy);
+    when cola_terms(base_year, prior, numerator, denominator);
+    when prior == cy - 1;
+    when numerator <= denominator;
+    then cola_adjusted_amount(base, base_year, y, step, base);
+}
+
+pub relation cola_adjusted_amount_nearest_100(base: Money, base_year: Integer, y: TaxableYear, adjusted: Money) kind institutional {
+    label en official "the dollar amount increased by the cost-of-living adjustment and the increased amount rounded to the nearest multiple of $100 (section 55(d)(3)(C), (4)(B)(iii)); ties round up";
+}
+pub relation amount_to_index_nearest_100(base: Money, base_year: Integer, y: TaxableYear) kind institutional {
+    label en unofficial "a dollar amount that section 55(d) increases by the cost-of-living adjustment and rounds to the nearest $100";
+}
+
+@source(IRC_S55_D, relation = formalizes, coverage = exact, quote = "Any increased amount determined under subparagraph (A) shall be rounded to the nearest multiple of $100.")
+rule ColaAdjustedAmountNearest100(base: Money, base_year: Integer, y: TaxableYear, cy: Integer, prior: Integer, numerator: Decimal, denominator: Decimal) strict {
+    label en official "section 55(d)(3)(A), (C): amount x ratio, rounded to the nearest multiple of $100 (JUDGMENT CALL: a tie rounds up, the statute names no tie rule)";
+    when amount_to_index_nearest_100(base, base_year, y);
+    when us.irc.core::calendar_year_of(y, cy);
+    when cola_terms(base_year, prior, numerator, denominator);
+    when prior == cy - 1;
+    when numerator > denominator;
+    then cola_adjusted_amount_nearest_100(base, base_year, y, div_round(base * numerator, denominator * 100.0, 0, "HALF_UP") * 100);
+}
+
+@source(IRC_S55_D, relation = formalizes, coverage = partial, quote = "shall each be increased by an amount equal to—")
+rule ColaAdjustedAmountNearest100NoIncrease(base: Money, base_year: Integer, y: TaxableYear, cy: Integer, prior: Integer, numerator: Decimal, denominator: Decimal) strict {
+    label en official "section 55(d)(3)(A): with no percentage by which the index exceeds the base there is no increased amount to round";
+    when amount_to_index_nearest_100(base, base_year, y);
+    when us.irc.core::calendar_year_of(y, cy);
+    when cola_terms(base_year, prior, numerator, denominator);
+    when prior == cy - 1;
+    when numerator <= denominator;
+    then cola_adjusted_amount_nearest_100(base, base_year, y, base);
+}
+
+
+pub relation amount_to_index_increase_nearest_50(base: Money, base_year: Integer, y: TaxableYear) kind institutional {
+    label en unofficial "a dollar amount that section 59(j)(2) increases by the cost-of-living adjustment, the increase rounded to the nearest $50";
+}
+pub relation cola_adjusted_amount_increase_nearest_50(base: Money, base_year: Integer, y: TaxableYear, adjusted: Money) kind institutional {
+    label en official "the dollar amount increased by the cost-of-living adjustment, the INCREASE rounded to the nearest multiple of $50 (section 59(j)(2)); ties round up";
+}
+
+@source(IRC_S59_J, relation = formalizes, coverage = exact, quote = "If any increase determined under the preceding sentence is not a multiple of $50, such increase shall be rounded to the nearest multiple of $50.")
+rule ColaAdjustedAmountIncreaseNearest50(base: Money, base_year: Integer, y: TaxableYear, cy: Integer, prior: Integer, numerator: Decimal, denominator: Decimal) strict {
+    label en official "section 59(j)(2): amount + (amount x (ratio - 1)) rounded to the nearest multiple of $50 (JUDGMENT CALL: a tie rounds up, the text names no tie rule)";
+    when amount_to_index_increase_nearest_50(base, base_year, y);
+    when us.irc.core::calendar_year_of(y, cy);
+    when cola_terms(base_year, prior, numerator, denominator);
+    when prior == cy - 1;
+    when numerator > denominator;
+    then cola_adjusted_amount_increase_nearest_50(base, base_year, y, base + div_round(base * (numerator - denominator), denominator * 50.0, 0, "HALF_UP") * 50);
+}
+@source(IRC_S59_J, relation = formalizes, coverage = partial, quote = "the cost-of-living adjustment determined under section 1(f)(3) for the calendar year in which the taxable year begins")
+rule ColaAdjustedAmountIncreaseNearest50NoIncrease(base: Money, base_year: Integer, y: TaxableYear, cy: Integer, prior: Integer, numerator: Decimal, denominator: Decimal) strict {
+    label en official "section 59(j)(2): with no percentage by which the index exceeds the base there is no increase";
+    when amount_to_index_increase_nearest_50(base, base_year, y);
+    when us.irc.core::calendar_year_of(y, cy);
+    when cola_terms(base_year, prior, numerator, denominator);
+    when prior == cy - 1;
+    when numerator <= denominator;
+    then cola_adjusted_amount_increase_nearest_50(base, base_year, y, base);
+}
+
+
+pub relation amount_to_index_floor(base: Money, base_year: Integer, y: TaxableYear, step: Integer) kind institutional {
+    label en unofficial "a dollar amount that section 1(i)(1)(C) adjusts and then rounds down (the amount after adjustment, not the increase) to a multiple of the step";
+}
+pub relation cola_adjusted_amount_floor(base: Money, base_year: Integer, y: TaxableYear, step: Integer, adjusted: Money) kind institutional {
+    label en official "the dollar amount after the cost-of-living adjustment, rounded down to the next lowest multiple of the step (section 1(i)(1)(C), last sentence)";
+}
+
+@source(IRC_S1_I, relation = formalizes, coverage = exact, quote = "If any amount after adjustment under the preceding sentence is not a multiple of $50, such amount shall be rounded to the next lowest multiple of $50.")
+rule ColaAdjustedAmountFloor(base: Money, base_year: Integer, y: TaxableYear, step: Integer, cy: Integer, prior: Integer, numerator: Decimal, denominator: Decimal) strict {
+    label en official "section 1(i)(1)(C): the amount x ratio, the AMOUNT (not the increase) rounded down to a multiple of the step; one rounding over the exact quotient";
+    when amount_to_index_floor(base, base_year, y, step);
+    when us.irc.core::calendar_year_of(y, cy);
+    when cola_terms(base_year, prior, numerator, denominator);
+    when prior == cy - 1;
+    when numerator > denominator;
+    then cola_adjusted_amount_floor(base, base_year, y, step, div_round(base * numerator, denominator * (step * 1.0), 0, "FLOOR") * step);
+}
+@source(IRC_S1_I, relation = formalizes, coverage = partial, quote = "In prescribing the tables under subsection (f) which apply with respect to taxable years beginning in calendar years after 2003—")
+rule ColaAdjustedAmountFloorNoIncrease(base: Money, base_year: Integer, y: TaxableYear, step: Integer, cy: Integer, prior: Integer, numerator: Decimal, denominator: Decimal) strict {
+    label en official "section 1(i)(1)(C): with no percentage by which the index exceeds the base there is no adjustment";
+    when amount_to_index_floor(base, base_year, y, step);
+    when us.irc.core::calendar_year_of(y, cy);
+    when cola_terms(base_year, prior, numerator, denominator);
+    when prior == cy - 1;
+    when numerator <= denominator;
+    then cola_adjusted_amount_floor(base, base_year, y, step, base);
+}
+
+// --- Section 1(f)(1): the Secretary prescribes the tables --------------------
+
+pub relation secretary_has_prescribed_tables_for(n: Integer) kind empirical {
+    label en official "the Secretary has prescribed the tables that apply in lieu of the tables in subsections (a)-(e) for taxable years beginning in the calendar year n";
+}
+pub relation indexed_tables_apply_in_lieu(n: Integer) kind institutional {
+    label en official "the tables prescribed under paragraph (1) apply in lieu of the tables contained in subsections (a), (b), (c), (d) and (e) for taxable years beginning in the calendar year n";
+}
+
+@source(IRC_S1_F, relation = formalizes, coverage = exact, quote = "The table which under paragraph (1) is to apply in lieu of the table contained in subsection (a), (b), (c), (d), or (e), as the case may be, with respect to taxable years beginning in any calendar year shall be prescribed")
+rule PrescribedTablesApplyInLieu(n: Integer) strict {
+    label en official "section 1(f)(1)-(2): the tables the Secretary prescribes for a calendar year apply in lieu of the tables of subsections (a)-(e)";
+    when secretary_has_prescribed_tables_for(n);
+    then indexed_tables_apply_in_lieu(n);
+}
+
+@source(IRC_S1_F, relation = formalizes, coverage = exact, quote = "Not later than December 15 of 1993, and each subsequent calendar year, the Secretary shall prescribe tables which shall apply in lieu of the tables contained in subsections (a), (b), (c), (d), and (e) with respect to taxable years beginning in the succeeding calendar year.")
+rule SecretaryPrescribesIndexedTables defeasible {
+    label en official "section 1(f)(1): not later than December 15 of each calendar year the Secretary shall prescribe the tables for taxable years beginning in the succeeding calendar year (the taxable year stands for the calendar year it begins in; December 15 is 17 days before January 1)";
+    for y: TaxableYear;
+    for n: Integer;
+    for start: Date;
+    for calendar_before_1: Date;
+    when us.irc.core::calendar_year_of(y, n);
+    when us.irc.core::begins(y, start);
+    when n >= 1994
+        and us.irc.core::civil_calendar_boundary_before(start, 17, us.irc.core::CalendarDay, calendar_before_1);
+    then duty PrescribeIndexedTablesDuty {
+        bearer us.irc.core::Secretary;
+        goal achievement {
+            condition secretary_has_prescribed_tables_for(n);
+            window [@1993-01-01, calendar_before_1];
+        }
+    };
+}
+
+// --- Section 1(f)(2)(A)(i)-(ii) and 1(j)(3)(B)(i): the substituted base year --
+
+pub enum BracketBoundaryClass {
+    GeneralBoundary;
+    HighRateBoundary;
+}
+
+pub relation bracket_boundary_class(ending_rate: Decimal, beginning_rate: Decimal, c: BracketBoundaryClass) kind institutional {
+    label en unofficial "a boundary between a bracket of the ending rate and the next bracket of the beginning rate: HighRateBoundary is the boundary at which the 36 percent bracket begins or the 39.6 percent bracket begins (section 1(f)(2)(A)(ii))";
+}
+pub relation cola_base_year_for_boundary(c: BracketBoundaryClass, y: TaxableYear, base_year: Integer) kind institutional {
+    label en official "the year substituted for 2016 in section 1(f)(3)(A)(ii) for the adjustment of the boundary in the taxable year";
+}
+pub relation section_1f_rounding_step(p: Person, y: TaxableYear, step: Integer) kind institutional {
+    label en official "the multiple to which the increase is rounded down under section 1(f)(7): $50, or $25 for a married individual filing a separate return (and, after 2018, an unmarried individual other than a surviving spouse or head of household)";
+}
+
+@source(IRC_S1_F, relation = formalizes, coverage = exact, quote = "(ii) in the case of adjustments to the dollar amounts at which the 36 percent rate bracket begins or at which the 39.6 percent rate bracket begins, by substituting \"1993\" for \"2016\" in paragraph (3)(A)(ii),")
+rule HighRateBoundaryBeginning36(ending_rate: Decimal, beginning_rate: Decimal) strict {
+    label en official "section 1(f)(2)(A)(ii): the boundary at which the 36 percent bracket begins";
+    when boundary_rates(ending_rate, beginning_rate);
+    when beginning_rate == 0.36;
+    then bracket_boundary_class(ending_rate, beginning_rate, HighRateBoundary);
+}
+@source(IRC_S1_F, relation = formalizes, coverage = exact, quote = "(ii) in the case of adjustments to the dollar amounts at which the 36 percent rate bracket begins or at which the 39.6 percent rate bracket begins, by substituting \"1993\" for \"2016\" in paragraph (3)(A)(ii),")
+rule HighRateBoundaryBeginning396(ending_rate: Decimal, beginning_rate: Decimal) strict {
+    label en official "section 1(f)(2)(A)(ii): the boundary at which the 39.6 percent bracket begins";
+    when boundary_rates(ending_rate, beginning_rate);
+    when beginning_rate == 0.396;
+    then bracket_boundary_class(ending_rate, beginning_rate, HighRateBoundary);
+}
+
+@source(IRC_S1_F, relation = formalizes, coverage = exact, quote = "(i) except as provided in clause (ii), by substituting \"1992\" for \"2016\" in paragraph (3)(A)(ii), and")
+rule BaseYear1992ForGeneralBoundary(y: TaxableYear) strict {
+    label en official "section 1(f)(2)(A)(i): 1992 is substituted for 2016 (for the tables of subsections (a)-(e) in force before section 1(j) applied)";
+    effective [@1993-01-01, @2018-01-01);
+    when us.irc.core::calendar_year_of(y, _);
+    then cola_base_year_for_boundary(GeneralBoundary, y, 1992);
+}
+@source(IRC_S1_F, relation = formalizes, coverage = exact, quote = "(ii) in the case of adjustments to the dollar amounts at which the 36 percent rate bracket begins or at which the 39.6 percent rate bracket begins, by substituting \"1993\" for \"2016\" in paragraph (3)(A)(ii),")
+rule BaseYear1993ForHighRateBoundary(y: TaxableYear) strict {
+    label en official "section 1(f)(2)(A)(ii): 1993 is substituted for 2016 for the 36 and 39.6 percent boundaries";
+    effective [@1993-01-01, @2018-01-01);
+    when us.irc.core::calendar_year_of(y, _);
+    then cola_base_year_for_boundary(HighRateBoundary, y, 1993);
+}
+@source(IRC_S1_J, relation = formalizes, coverage = exact, quote = "subsection (f)(3) shall be applied by substituting \"calendar year 2017\" for \"calendar year 2016\" in subparagraph (A)(ii) thereof,")
+rule BaseYear2017ForSection1jBoundaryUpTo2025(y: TaxableYear, cy: Integer) strict {
+    label en official "section 1(j)(3)(B)(i), 2019-2025: 2017 is substituted for 2016 for every boundary";
+    effective [@2019-01-01, @2026-01-01);
+    when us.irc.core::calendar_year_of(y, cy);
+    then cola_base_year_for_boundary(GeneralBoundary, y, 2017);
+}
+@source(IRC_S1_J, relation = formalizes, coverage = exact, quote = "subsection (f)(3) shall be applied by substituting \"calendar year 2017\" for \"calendar year 2016\" in subparagraph (A)(ii) thereof,")
+rule BaseYear2017ForSection1jHighBoundaryUpTo2025(y: TaxableYear, cy: Integer) strict {
+    label en official "section 1(j)(3)(B)(i), 2019-2025: the same substitution for the boundaries of higher brackets";
+    effective [@2019-01-01, @2026-01-01);
+    when us.irc.core::calendar_year_of(y, cy);
+    then cola_base_year_for_boundary(HighRateBoundary, y, 2017);
+}
+
+// Pub. L. 119-21 section 70101(b) (taxable years beginning after 2025): the
+// substitution of 2017 is made "solely for purposes of determining the dollar
+// amounts at which any rate bracket higher than 12 percent ends and at which
+// any rate bracket higher than 22 percent begins". Every other boundary keeps
+// "calendar year 2016" of (f)(3)(A)(ii). A boundary is described by the rate
+// of the bracket that ends and the rate of the bracket that begins.
+pub relation boundary_rates(ending_rate: Decimal, beginning_rate: Decimal) kind empirical {
+    label en unofficial "a bracket boundary of the rate table: the rate of the bracket that ends there and the rate of the bracket that begins there";
+}
+pub relation boundary_uses_2017_base_after_2025(ending_rate: Decimal, beginning_rate: Decimal) kind institutional {
+    label en official "the boundary at which a rate bracket higher than 12 percent ends or at which a rate bracket higher than 22 percent begins (section 1(j)(3)(B)(i) as amended by Pub. L. 119-21 section 70101(b))";
+}
+
+@source(IRC_S1_J, relation = formalizes, coverage = partial, quote = "subsection (f)(3) shall be applied by substituting \"calendar year 2017\" for \"calendar year 2016\" in subparagraph (A)(ii) thereof,")
+rule Boundary2017WhereEndingBracketAbove12(ending_rate: Decimal, beginning_rate: Decimal) strict {
+    label en official "Pub. L. 119-21 section 70101(b): a rate bracket higher than 12 percent ends at the boundary";
+    when boundary_rates(ending_rate, beginning_rate);
+    when ending_rate > 0.12;
+    then boundary_uses_2017_base_after_2025(ending_rate, beginning_rate);
+}
+@source(IRC_S1_J, relation = formalizes, coverage = partial, quote = "subsection (f)(3) shall be applied by substituting \"calendar year 2017\" for \"calendar year 2016\" in subparagraph (A)(ii) thereof,")
+rule Boundary2017WhereBeginningBracketAbove22(ending_rate: Decimal, beginning_rate: Decimal) strict {
+    label en official "Pub. L. 119-21 section 70101(b): a rate bracket higher than 22 percent begins at the boundary";
+    when boundary_rates(ending_rate, beginning_rate);
+    when beginning_rate > 0.22;
+    then boundary_uses_2017_base_after_2025(ending_rate, beginning_rate);
+}
+
+// --- Section 1(j)(3)(A)-(B): the years in which the (j)(2) tables are adjusted --
+
+pub relation section_1j_tables_adjusted_for_year(y: TaxableYear) kind institutional {
+    label en official "the section 1(j)(2) tables are adjusted by the Secretary's tables for the taxable year (section 1(j)(3)(B)); the 2018 tables apply without adjustment (section 1(j)(3)(A))";
+}
+
+@source(IRC_S1_J, relation = formalizes, coverage = exact, quote = "For taxable years beginning after December 31, 2018, the Secretary shall prescribe tables which shall apply in lieu of the tables contained in paragraph (2)")
+rule Section1jTablesAdjustedAfter2018(y: TaxableYear, cy: Integer) strict {
+    label en official "section 1(j)(3)(B): from taxable years beginning after December 31, 2018 the (j)(2) tables are replaced by the adjusted tables";
+    effective [@2019-01-01, infinity);
+    when us.irc.core::calendar_year_of(y, cy);
+    then section_1j_tables_adjusted_for_year(y);
+}
+
+@source(IRC_S1_J, relation = formalizes, coverage = exact, quote = "The tables contained in paragraph (2) shall apply without adjustment for taxable years beginning after December 31, 2017, and before January 1, 2019.")
+rule Section1jTablesUnadjustedIn2018(y: TaxableYear) strict {
+    label en official "section 1(j)(3)(A): no adjustment in 2018 (the tables of paragraph (2) apply as enacted)";
+    effective [@2018-01-01, @2019-01-01);
+    when us.irc.core::calendar_year_of(y, _);
+    then section_1j_tables_unadjusted_for_year(y);
+}
+pub relation section_1j_tables_unadjusted_for_year(y: TaxableYear) kind institutional {
+    label en official "the section 1(j)(2) tables apply without adjustment for the taxable year (section 1(j)(3)(A))";
+}
+
+// --- Section 1(f)(7): the rounding step by filing status ----------------------
+
+@source(IRC_S1_F, relation = formalizes, coverage = exact, quote = "such increase shall be rounded to the next lowest multiple of $50.")
+rule RoundingStep50(p: Person, y: TaxableYear, s: FilingStatus) strict {
+    label en official "section 1(f)(7)(A): the increase is rounded to a multiple of $50 (other than for a married individual filing separately and, in the years to which section 1(j)(3)(B)(ii) applies, an unmarried individual)";
+    when filing_status(p, y, s);
+    when s != MarriedSeparate;
+    when s != Unmarried;
+    then section_1f_rounding_step(p, y, 50);
+}
+@source(IRC_S1_F, relation = formalizes, coverage = exact, quote = "such increase shall be rounded to the next lowest multiple of $50.")
+rule RoundingStep50UnmarriedBefore2019(p: Person, y: TaxableYear, n: Integer) strict {
+    label en official "section 1(f)(7)(A): an unmarried individual's increase is rounded to a multiple of $50 until section 1(j)(3)(B)(ii) applies";
+    when filing_status(p, y, Unmarried);
+    when us.irc.core::calendar_year_of(y, n);
+    when n < 2019;
+    then section_1f_rounding_step(p, y, 50);
+}
+@source(IRC_S1_J, relation = formalizes, coverage = exact, quote = "subsection (f)(7)(B) shall apply to any unmarried individual other than a surviving spouse or head of household, and")
+rule RoundingStep25UnmarriedFrom2019(p: Person, y: TaxableYear, n: Integer) strict {
+    label en official "section 1(j)(3)(B)(ii): for taxable years beginning after December 31, 2018 the $25 step applies to an unmarried individual other than a surviving spouse or head of household";
+    when filing_status(p, y, Unmarried);
+    when us.irc.core::calendar_year_of(y, n);
+    when n >= 2019;
+    then section_1f_rounding_step(p, y, 25);
+}
+@source(IRC_S1_F, relation = formalizes, coverage = exact, quote = "In the case of a married individual filing a separate return, subparagraph (A) (other than with respect to sections 63(c)(4) and 151(d)(4)(A)) shall be applied by substituting \"$25\" for \"$50\" each place it appears.")
+rule RoundingStep25MarriedSeparate(p: Person, y: TaxableYear) strict {
+    label en official "section 1(f)(7)(B): $25 for a married individual filing a separate return";
+    when filing_status(p, y, MarriedSeparate);
+    then section_1f_rounding_step(p, y, 25);
+}
+
+// --- Section 1(f)(8): marriage penalty in the 15-percent bracket --------------
+
+pub relation max_taxable_income_15_percent_bracket_unmarried(y: TaxableYear, amount: Money) kind empirical {
+    label en official "the maximum taxable income in the 15-percent rate bracket in the table contained in subsection (c), after any other adjustment under this subsection";
+}
+pub relation max_taxable_income_15_percent_bracket_joint(y: TaxableYear, amount: Money) kind institutional {
+    label en official "the maximum taxable income in the 15-percent rate bracket in the table contained in subsection (a), and the minimum taxable income in the next higher bracket";
+}
+pub relation max_taxable_income_15_percent_bracket_separate(y: TaxableYear, amount: Money) kind institutional {
+    label en official "the comparable taxable income amounts in the table contained in subsection (d)";
+}
+
+@source(IRC_S1_F, relation = formalizes, coverage = exact, quote = "the maximum taxable income in the 15-percent rate bracket in the table contained in subsection (a) (and the minimum taxable income in the next higher taxable income bracket in such table) shall be 200 percent of the maximum taxable income in the 15-percent rate bracket in the table contained in subsection (c)")
+rule MarriagePenaltyEliminationJoint(y: TaxableYear, unmarried_max: Money) strict {
+    label en official "section 1(f)(8)(A): 200 percent of the subsection (c) 15-percent bracket maximum, for taxable years beginning after December 31, 2003 (and, by section 1(j)(3)(B)(iii), not in years to which the section 1(j) tables apply)";
+    effective [@2004-01-01, @2018-01-01);
+    when max_taxable_income_15_percent_bracket_unmarried(y, unmarried_max);
+    then max_taxable_income_15_percent_bracket_joint(y, unmarried_max * 2);
+}
+@source(IRC_S1_F, relation = formalizes, coverage = exact, quote = "the comparable taxable income amounts in the table contained in subsection (d) shall be ½ of the amounts determined under subparagraph (A).")
+rule MarriagePenaltyEliminationSeparate(y: TaxableYear, joint_max: Money) strict {
+    label en official "section 1(f)(8)(B): half of the subparagraph (A) amount for the table of subsection (d)";
+    effective [@2004-01-01, @2018-01-01);
+    when max_taxable_income_15_percent_bracket_joint(y, joint_max);
+    then max_taxable_income_15_percent_bracket_separate(y, joint_max * 0.5);
+}
+
+// --- Section 1(f)(2)(B): the rates are not changed ----------------------------
+
+pub relation indexed_bracket_rate(base_rate: Decimal, indexed_rate: Decimal) kind institutional {
+    label en official "the rate applicable to a rate bracket as adjusted under subparagraph (A)";
+}
+pub relation table_bracket_rate(rate: Decimal) kind empirical {
+    label en unofficial "a rate of a bracket of a section 1 table as enacted";
+}
+
+@source(IRC_S1_F, relation = formalizes, coverage = exact, quote = "(B) by not changing the rate applicable to any rate bracket as adjusted under subparagraph (A), and")
+rule IndexedBracketKeepsRate(rate: Decimal) strict {
+    label en official "section 1(f)(2)(B): adjusting a bracket boundary does not change its rate";
+    when table_bracket_rate(rate);
+    then indexed_bracket_rate(rate, rate);
+}

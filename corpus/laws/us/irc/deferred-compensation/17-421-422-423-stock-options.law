@@ -1,0 +1,784 @@
+// Sections 421, 422, 423 (and the 424(d) attribution rule those two
+// sections invoke) — statutory stock options. Stage 2c (IRC-09),
+// DECISION-0379, priority items: "§422 (ISOs: $100,000 rule (d) with the
+// FMV-at-grant aggregation, holding periods (a)(1) 2 years/1 year exact,
+// (b) requirements incl. exercise price >= FMV, 10-year term, (c) special
+// rules incl. 10% owners 110%/5 years); §423 (ESPPs: 85% option price,
+// $25,000 per year limit, the (b)(1)-(9) requirements, (c) disposition of
+// stock); §421 (general rules on non-recognition at exercise; (b)
+// disqualifying dispositions)".
+//
+// NOTE (stage 2d): this module was rewritten verbatim after the working
+// tree reverted this package's stage-2c files between sessions (a shared-
+// tree hazard, not a design change — see docs/status/2026-09-25-us-irc-
+// deferred-compensation-stage-2d.ru.md).
+//
+// Method: an option is a case-asserted entity (`StockOption`); its grant,
+// exercise and any disposition are case-asserted events (mirrors this
+// package's own `Distribution`/`Contribution` convention in
+// `01-ontology.law`). `incentive_stock_option`/`espp_qualified` are the
+// (b)-level classifications (the option satisfies the ISO/ESPP DEFINITION);
+// `section_421a_applies` is the (a)-level favorable-treatment test (holding
+// period + employment, tested against an option that already IS an ISO/
+// ESPP option); `iso_disqualifying_disposition`/`espp_disqualifying_
+// disposition` and the shared `disqualifying_disposition` feed section
+// 421(b)'s timing rule. Required owner-interface names per the task:
+// `incentive_stock_option`, `iso_disqualifying_disposition`,
+// `espp_qualified` (all declared `pub` below).
+//
+// SCOPE CUT recorded here, not modeled this pass (see TECH-GAPS.md
+// G371-G375 for the reproduction of each):
+//   * section 424(a) (corporate-reorganization option substitution/
+//     assumption), 424(b) (stock received in a tax-free distribution),
+//     424(c) (the "disposition" definition beyond an ordinary sale/
+//     exchange/gift/pledge), 424(e)-(g) (parent/subsidiary corporation
+//     CHAIN definitions), 424(h) (modification/extension/renewal deemed-
+//     new-grant rule), 424(i) (stockholder-approval grant-date rule) —
+//     "parent or subsidiary corporation" and "a transaction to which
+//     section 424(a) applies" are read as case-asserted facts throughout;
+//   * section 421(c) (exercise by a decedent's estate) and 421(d)
+//     (conflict-of-interest divestiture sales) — independent bounded
+//     branches, not reached this pass;
+//   * section 422(c)(3) (insolvent-individual bankruptcy-fiduciary
+//     transfer is not a "disposition") and 422(c)(4) (permissible option
+//     terms that do not disqualify ISO status) — narrow safe-harbor
+//     clarifications, not wired into the disposition/qualification tests;
+//   * section 422(d)/423(b)(8) aggregation: the THRESHOLD comparison is
+//     executable, but the per-option SUMMATION across a calendar year and
+//     (d)(2)'s grant-order allocation of which option loses ISO status are
+//     case-asserted aggregates, not derived (G371/G372 — same construct
+//     class as the registry's existing G1/G97/G287-style sequential-
+//     ledger gaps);
+//   * section 423(b)(4)/(5) (population-wide plan-design tests: coverage
+//     of "all employees" and "same rights and privileges" across the whole
+//     workforce) are modeled only at the PER-EMPLOYEE exclusion-category
+//     level ((4)); the uniformity test (5) is not modeled at all (G373);
+//   * section 424(d)(2) (entity look-through: stock owned by a
+//     corporation/partnership/estate/trust attributed proportionately to
+//     its owners) is not modeled — only 424(d)(1) (family attribution:
+//     siblings, spouse, ancestors, lineal descendants) is (G374); the
+//     423(b)(3) second-sentence addition of outstanding-option shares to
+//     the 5-percent test is also not wired in (same G374 note).
+
+use self::{
+    Corporation,
+    IRC_S421_A,
+    IRC_S421_B,
+    IRC_S422_A,
+    IRC_S422_B,
+    IRC_S422_C,
+    IRC_S422_D,
+    IRC_S423_A,
+    IRC_S423_B,
+    IRC_S423_C,
+    IRC_S424_D,
+    Individual,
+    OwnershipInterest,
+    TaxableYear,
+};
+
+type EmployerCorpGroup = Corporation;
+
+pub entity CompensatoryOptionPlan {
+    label en unofficial "a written stock option plan of an employer corporation (section 422(b)(1) / section 423(b))";
+}
+
+pub entity StockOption {
+    label en unofficial "a compensatory stock option granted to an individual by a corporation";
+}
+
+// =====================================================================
+// Plan-level facts shared by 422(b)(1) and 423(b)(2): plan adoption and
+// stockholder approval, and the 424(d) family-attribution ownership test
+// shared by 422(b)(6) and 423(b)(3).
+// =====================================================================
+
+pub relation plan_adopted_on(plan: CompensatoryOptionPlan, on: Date) kind empirical {
+    label en unofficial "the date the plan was adopted, case-asserted";
+}
+
+pub relation plan_approved_by_stockholders_on(plan: CompensatoryOptionPlan, on: Date) kind empirical {
+    label en unofficial "the date the plan was approved by the stockholders of the granting corporation, case-asserted";
+}
+
+pub relation plan_meets_stockholder_approval_timing(plan: CompensatoryOptionPlan) kind institutional {
+    label en official "sections 422(b)(1) / 423(b)(2): stockholder approval within 12 months before or after plan adoption";
+}
+
+@source(IRC_S422_B, relation = formalizes, coverage = exact, quote = "approved by the stockholders of the granting corporation within 12 months before or after the date such plan is adopted")
+rule PlanMeetsStockholderApprovalTiming(plan: CompensatoryOptionPlan, adopted: Date, approved: Date, calendar_before_1: Date) strict {
+    label en official "the stockholder-approval date must fall within the 12 months before or after the plan's adoption date";
+    when plan_adopted_on(plan, adopted)
+        and plan_approved_by_stockholders_on(plan, approved)
+        and approved >= calendar_before_1
+        and approved <= add_calendar_period(adopted, 12 calendar_month)
+        and us.irc.core::civil_calendar_boundary_before(adopted, 12, us.irc.core::CalendarMonth, calendar_before_1);
+    then plan_meets_stockholder_approval_timing(plan);
+}
+
+// --- 424(d)(1): family attribution for the 422(b)(6)/423(b)(3) tests -------
+// Only (d)(1) (family: spouse via `us.irc.corporations::spouse_of`,
+// siblings, ancestors and lineal descendants) is modeled; (d)(2) (entity
+// look-through) is TECH_GAP G374. This is a NARROWER reuse than section
+// 318(a) attribution (`us.irc.corporations::constructive_ownership`): 424(d)
+// includes brothers/sisters, which 318(a)(1) does NOT, and excludes
+// options/entity-attribution kinds 318(a) has — so it is modeled as its
+// OWN relation, not a call into module 03 of `corporations`.
+
+pub enum AttributionKind424D {
+    Actual;
+    Family;
+    label en unofficial "424(d)(1) attribution kind: actual ownership, or family attribution (spouse, sibling, ancestor/descendant)";
+}
+
+pub relation sibling_of(a: Individual, b: Individual) kind empirical {
+    label en official "a is a brother or sister (whole or half blood) of b, for purposes of section 424(d)(1)";
+}
+
+pub relation ancestor_or_lineal_descendant_of(a: Individual, b: Individual) kind empirical {
+    label en official "a is an ancestor or lineal descendant of b (any number of generations), for purposes of section 424(d)(1) — broader than section 318(a)(1)(A)(ii)'s child/grandchild/parent, case-asserted";
+}
+
+pub relation stock_ownership_424d(p: Individual, corp: Corporation, share: Decimal, via: AttributionKind424D) kind institutional {
+    label en official "section 424(d)(1): a person's stock ownership (actual, or attributed from a spouse/sibling/ancestor/descendant) for the section 422(b)(6)/423(b)(3) percentage tests";
+}
+
+@source(IRC_S424_D, relation = formalizes, coverage = contextual, quote = "in applying the percentage limitations of sections 422(b)(6) and 423(b)(3)")
+rule ActualOwnership424D(p: Individual, corp: Corporation, share: Decimal, oi: OwnershipInterest) strict {
+    label en unofficial "actual (direct) ownership restated under stock_ownership_424d, tagged Actual";
+    when us.irc.core::ownership_interest(oi, p, corp, share);
+    then stock_ownership_424d(p, corp, share, Actual);
+}
+
+@source(IRC_S424_D, relation = formalizes, coverage = exact, quote = "the individual with respect to whom such limitation is being determined shall be considered as owning the stock owned, directly or indirectly, by or for his brothers and sisters (whether by the whole or half blood), spouse, ancestors, and lineal descendants")
+rule FamilyAttributionSpouse424D(individual: Individual, spouse: Individual, corp: Corporation, share: Decimal, oi: OwnershipInterest) defeasible {
+    label en official "section 424(d)(1): stock owned by the individual's spouse is attributed to the individual";
+    when us.irc.corporations::spouse_of(spouse, individual);
+    when us.irc.core::ownership_interest(oi, spouse, corp, share);
+    then stock_ownership_424d(individual, corp, share, Family);
+}
+
+@source(IRC_S424_D, relation = formalizes, coverage = exact, quote = "his brothers and sisters (whether by the whole or half blood)")
+rule FamilyAttributionSibling424D(individual: Individual, sibling: Individual, corp: Corporation, share: Decimal, oi: OwnershipInterest) defeasible {
+    label en official "section 424(d)(1): stock owned by the individual's brother or sister is attributed to the individual";
+    when sibling_of(sibling, individual);
+    when us.irc.core::ownership_interest(oi, sibling, corp, share);
+    then stock_ownership_424d(individual, corp, share, Family);
+}
+
+@source(IRC_S424_D, relation = formalizes, coverage = exact, quote = "ancestors, and lineal descendants")
+rule FamilyAttributionLineal424D(individual: Individual, relative: Individual, corp: Corporation, share: Decimal, oi: OwnershipInterest) defeasible {
+    label en official "section 424(d)(1): stock owned by an ancestor or lineal descendant of the individual is attributed to the individual";
+    when ancestor_or_lineal_descendant_of(relative, individual);
+    when us.irc.core::ownership_interest(oi, relative, corp, share);
+    then stock_ownership_424d(individual, corp, share, Family);
+}
+
+pub relation total_stock_ownership_424d(p: Individual, corp: Corporation, share: Decimal) kind institutional {
+    label en official "the sum, across Actual and Family attribution, of a person's stock ownership share in a corporation for the section 422(b)(6)/423(b)(3) tests";
+}
+
+@source(IRC_S424_D, relation = formalizes, coverage = contextual, quote = "in applying the percentage limitations of sections 422(b)(6) and 423(b)(3)")
+rule TotalStockOwnership424D(p: Individual, corp: Corporation) defeasible {
+    label en official "sums stock_ownership_424d over both attribution kinds for the (person, corporation) pair";
+    when stock_ownership_424d(p, corp, _, _);
+    then total_stock_ownership_424d(p, corp, sum all share: Decimal for via: AttributionKind424D where stock_ownership_424d(p, corp, share, via));
+}
+
+// =====================================================================
+// Section 422 — Incentive stock options
+// =====================================================================
+
+// --- (b): the ISO definition -------------------------------------------
+
+pub relation option_granted_under_plan(opt: StockOption, plan: CompensatoryOptionPlan) kind empirical {
+    label en unofficial "this option was granted under this plan, case-asserted";
+}
+
+pub relation stock_option_grant(opt: StockOption, granting_corp: Corporation, individual: Individual, granted_on: Date, option_price: Money) kind empirical {
+    label en unofficial "the option was granted by this corporation to this individual on this date at this option (exercise) price, case-asserted";
+}
+
+pub relation fmv_at_grant(opt: StockOption, amount: Money) kind empirical {
+    label en unofficial "the fair market value of the stock at the time the option was granted, case-asserted (section 422(c)(7)/423: determined without regard to any restriction other than one that by its terms will never lapse — a valuation instruction to the case, not independently executable, see coverage note)";
+}
+
+pub relation option_expires_on(opt: StockOption, on: Date) kind empirical {
+    label en unofficial "the date the option terminates by its own terms, case-asserted";
+}
+
+pub relation option_nontransferable_except_at_death(opt: StockOption) kind empirical {
+    label en unofficial "by its terms the option is not transferable other than by will or the laws of descent and distribution, and is exercisable during the individual's lifetime only by the individual, case-asserted";
+}
+
+pub relation option_marked_not_iso_at_grant(opt: StockOption) kind empirical {
+    label en unofficial "the option's terms, as of the time of grant, provide that it will not be treated as an incentive stock option, case-asserted";
+}
+
+pub relation election_under_83i_made(opt: StockOption) kind empirical {
+    label en unofficial "an election under section 83(i) was made with respect to the stock received on exercise of this option, case-asserted (section 83(i) itself is not formalized by this package)";
+}
+
+pub relation plan_specifies_shares_and_eligible_employees(plan: CompensatoryOptionPlan) kind empirical {
+    label en unofficial "the plan includes the aggregate number of shares issuable under options and the employees (or class) eligible to receive them, case-asserted";
+}
+
+pub relation plan_meets_422b1(plan: CompensatoryOptionPlan) kind institutional {
+    label en official "section 422(b)(1): the plan states the required terms and was timely approved by the stockholders";
+}
+
+@source(IRC_S422_B, relation = formalizes, coverage = exact, quote = "the option is granted pursuant to a plan which includes the aggregate number of shares which may be issued under options and the employees (or class of employees) eligible to receive options")
+rule PlanMeets422b1(plan: CompensatoryOptionPlan) strict {
+    label en official "section 422(b)(1): required plan content plus timely stockholder approval";
+    when plan_specifies_shares_and_eligible_employees(plan) and plan_meets_stockholder_approval_timing(plan);
+    then plan_meets_422b1(plan);
+}
+
+pub relation option_meets_422b2(opt: StockOption) kind institutional {
+    label en official "section 422(b)(2): the option is granted within 10 years of the earlier of plan adoption or stockholder approval";
+}
+
+@source(IRC_S422_B, relation = formalizes, coverage = exact, quote = "such option is granted within 10 years from the date such plan is adopted, or the date such plan is approved by the stockholders, whichever is earlier")
+rule Option422b2(opt: StockOption, plan: CompensatoryOptionPlan, granted_on: Date, adopted: Date, approved: Date) strict {
+    label en official "grant date <= 10 years after BOTH the adoption date and the approval date (i.e. <= 10 years after the earlier of the two)";
+    when option_granted_under_plan(opt, plan)
+        and stock_option_grant(opt, _, _, granted_on, _)
+        and plan_adopted_on(plan, adopted)
+        and plan_approved_by_stockholders_on(plan, approved)
+        and granted_on <= add_calendar_period(adopted, 10 calendar_year)
+        and granted_on <= add_calendar_period(approved, 10 calendar_year);
+    then option_meets_422b2(opt);
+}
+
+pub relation option_meets_422b3(opt: StockOption) kind institutional {
+    label en official "section 422(b)(3): the option is not exercisable more than 10 years after grant";
+}
+
+@source(IRC_S422_B, relation = formalizes, coverage = exact, quote = "such option by its terms is not exercisable after the expiration of 10 years from the date such option is granted")
+rule Option422b3(opt: StockOption, granted_on: Date, expires_on: Date) strict {
+    label en official "expiration date <= 10 years after grant";
+    when stock_option_grant(opt, _, _, granted_on, _)
+        and option_expires_on(opt, expires_on)
+        and expires_on <= add_calendar_period(granted_on, 10 calendar_year);
+    then option_meets_422b3(opt);
+}
+
+pub relation option_meets_422b4(opt: StockOption) kind institutional {
+    label en official "section 422(b)(4): the option price is not less than the fair market value of the stock at the time of grant";
+}
+
+@source(IRC_S422_B, relation = formalizes, coverage = exact, quote = "the option price is not less than the fair market value of the stock at the time such option is granted")
+rule Option422b4(opt: StockOption, option_price: Money, fmv: Money) strict {
+    label en official "option price >= FMV at grant";
+    when stock_option_grant(opt, _, _, _, option_price) and fmv_at_grant(opt, fmv) and option_price >= fmv;
+    then option_meets_422b4(opt);
+}
+
+// (c)(1): good-faith valuation exception to (b)(4) — DECISION-0194
+// evaluative channel ("a failure ... made in good faith"); the Secretary's
+// regulations, not this package, adjudicate what counts as good faith.
+external judgment relation good_faith_attempt_to_meet_422b4(opt: StockOption) {
+    authority Secretary;
+    label en official "section 422(c)(1): there was a failure, made in a good faith attempt, to meet the section 422(b)(4) fair-market-value requirement — an evaluative determination, not computed by this package";
+}
+
+@source(IRC_S422_C, relation = formalizes, coverage = exact, quote = "If a share of stock is transferred pursuant to the exercise by an individual of an option which would fail to qualify as an incentive stock option under subsection (b) because there was a failure in an attempt, made in good faith, to meet the requirement of subsection (b)(4), the requirement of subsection (b)(4) shall be considered to have been met")
+rule Option422b4GoodFaithException(opt: StockOption) strict {
+    label en official "section 422(c)(1): a good-faith attempt failing only (b)(4) is treated as having met (b)(4)";
+    when good_faith_attempt_to_meet_422b4(opt);
+    then option_meets_422b4(opt);
+}
+
+pub relation option_meets_422b5(opt: StockOption) kind institutional {
+    label en official "section 422(b)(5): the option is nontransferable except at death and exercisable only by the individual during life";
+}
+
+@source(IRC_S422_B, relation = formalizes, coverage = exact, quote = "such option by its terms is not transferable by such individual otherwise than by will or the laws of descent and distribution, and is exercisable, during his lifetime, only by him")
+rule Option422b5(opt: StockOption) strict {
+    label en official "restates the nontransferability fact as the (b)(5) classification";
+    when option_nontransferable_except_at_death(opt);
+    then option_meets_422b5(opt);
+}
+
+pub relation owns_more_than_10pct_voting_power_422(individual: Individual, corp: Corporation) kind institutional {
+    label en official "the individual owns (actually or under section 424(d)(1)) more than 10 percent of the total combined voting power of the corporation";
+}
+
+@source(IRC_S422_B, relation = formalizes, coverage = exact, quote = "such individual, at the time the option is granted, does not own stock possessing more than 10 percent of the total combined voting power of all classes of stock of the employer corporation or of its parent or subsidiary corporation")
+rule OwnsMoreThan10PctVotingPower422(individual: Individual, corp: Corporation, pct: Decimal) defeasible {
+    label en official "more than 10 percent under the 424(d)(1) attribution total";
+    when total_stock_ownership_424d(individual, corp, pct) and pct > 0.10;
+    then owns_more_than_10pct_voting_power_422(individual, corp);
+}
+
+pub relation option_meets_422b6(opt: StockOption) kind institutional {
+    label en official "section 422(b)(6): the 10-percent-owner condition (or its (c)(5) 110%/5-year exception) is satisfied";
+}
+
+@source(IRC_S422_B, relation = formalizes, coverage = exact, quote = "does not own stock possessing more than 10 percent of the total combined voting power of all classes of stock of the employer corporation or of its parent or subsidiary corporation")
+rule Option422b6NotTenPercentOwner(opt: StockOption, individual: Individual, corp: Corporation) defeasible {
+    label en official "satisfied outright when the individual is not a more-than-10-percent owner";
+    when stock_option_grant(opt, corp, individual, _, _)
+        and not_known(owns_more_than_10pct_voting_power_422(individual, corp));
+    then option_meets_422b6(opt);
+}
+
+@source(IRC_S422_C, relation = formalizes, coverage = exact, quote = "Subsection (b)(6) shall not apply if at the time such option is granted the option price is at least 110 percent of the fair market value of the stock subject to the option and such option by its terms is not exercisable after the expiration of 5 years from the date such option is granted")
+rule Option422b6TenPercentOwnerException(opt: StockOption, individual: Individual, corp: Corporation, granted_on: Date, option_price: Money, fmv: Money, expires_on: Date) defeasible {
+    label en official "section 422(c)(5): a 10-percent owner still satisfies (b)(6) if the option price is >= 110% of FMV at grant and the option expires within 5 years of grant";
+    when stock_option_grant(opt, corp, individual, granted_on, option_price)
+        and owns_more_than_10pct_voting_power_422(individual, corp)
+        and fmv_at_grant(opt, fmv)
+        and option_price >= round(fmv * 1.10, 2, "HALF_UP")
+        and option_expires_on(opt, expires_on)
+        and expires_on <= add_calendar_period(granted_on, 5 calendar_year);
+    then option_meets_422b6(opt);
+}
+
+pub relation incentive_stock_option(opt: StockOption) kind institutional {
+    label en official "section 422(b): this option is an incentive stock option";
+}
+
+@source(IRC_S422_B, relation = formalizes, coverage = exact, quote = "the term \"incentive stock option\" means an option granted to an individual for any reason connected with his employment by a corporation, if granted by the employer corporation or its parent or subsidiary corporation, to purchase stock of any of such corporations, but only if")
+rule IncentiveStockOptionQualifies(opt: StockOption, plan: CompensatoryOptionPlan) defeasible {
+    label en official "section 422(b): the option meets (b)(1)-(6) and neither closing-sentence carve-out applies";
+    when option_granted_under_plan(opt, plan)
+        and plan_meets_422b1(plan)
+        and option_meets_422b2(opt)
+        and option_meets_422b3(opt)
+        and option_meets_422b4(opt)
+        and option_meets_422b5(opt)
+        and option_meets_422b6(opt)
+        and not_known(option_marked_not_iso_at_grant(opt))
+        and not_known(election_under_83i_made(opt));
+    then incentive_stock_option(opt);
+}
+
+// --- (a): the holding-period/employment test for 421(a) treatment --------
+
+pub relation stock_option_exercised(opt: StockOption, exercised_on: Date, fmv_at_exercise_amount: Money) kind empirical {
+    label en unofficial "the option was exercised on this date, with this fair market value at exercise, case-asserted";
+}
+
+pub relation stock_option_disposition(opt: StockOption, disposed_on: Date, amount_realized: Money, adjusted_basis: Money) kind empirical {
+    label en unofficial "a disposition (section 424(c)) of the share acquired by exercise of this option, case-asserted";
+}
+
+pub relation last_continuously_employed_on(opt: StockOption, individual: Individual, on: Date) kind empirical {
+    label en unofficial "the last date through which, counting back from the date of grant without a break, the individual was an employee of the granting corporation or a parent/subsidiary corporation, case-asserted";
+}
+
+pub relation individual_disabled_22e3(individual: Individual) kind empirical {
+    label en unofficial "the individual is disabled within the meaning of section 22(e)(3), case-asserted (section 22(e)(3) itself is formalized elsewhere, if at all; read here as a case fact)";
+}
+
+pub relation option_meets_422a2(opt: StockOption) kind institutional {
+    label en official "section 422(a)(2): continuous employment from grant until 3 months (or, if disabled per (c)(6), 1 year) before exercise";
+}
+
+@source(IRC_S422_A, relation = formalizes, coverage = exact, quote = "at all times during the period beginning on the date of the granting of the option and ending on the day 3 months before the date of such exercise, such individual was an employee")
+rule Option422a2General(opt: StockOption, individual: Individual, exercised_on: Date, last_employed: Date, calendar_before_1: Date) strict {
+    label en official "general rule: continuous employment through at least 3 months before exercise";
+    when stock_option_exercised(opt, exercised_on, _)
+        and last_continuously_employed_on(opt, individual, last_employed)
+        and not_known(individual_disabled_22e3(individual))
+        and last_employed >= calendar_before_1
+        and us.irc.core::civil_calendar_boundary_before(exercised_on, 3, us.irc.core::CalendarMonth, calendar_before_1);
+    then option_meets_422a2(opt);
+}
+
+@source(IRC_S422_C, relation = formalizes, coverage = exact, quote = "For purposes of subsection (a)(2), in the case of an employee who is disabled (within the meaning of section 22(e)(3)), the 3-month period of subsection (a)(2) shall be 1 year")
+rule Option422a2Disabled(opt: StockOption, individual: Individual, exercised_on: Date, last_employed: Date, calendar_before_1: Date) strict {
+    label en official "section 422(c)(6): for a disabled employee the 3-month period of (a)(2) becomes 1 year";
+    when stock_option_exercised(opt, exercised_on, _)
+        and last_continuously_employed_on(opt, individual, last_employed)
+        and individual_disabled_22e3(individual)
+        and last_employed >= calendar_before_1
+        and us.irc.core::civil_calendar_boundary_before(exercised_on, 1, us.irc.core::CalendarYear, calendar_before_1);
+    then option_meets_422a2(opt);
+}
+
+pub relation disposition_is_loss_sale(opt: StockOption) kind empirical {
+    label en unofficial "the disposition is a sale or exchange with respect to which a loss, if sustained, would be recognized to the individual, case-asserted";
+}
+
+pub relation iso_disqualifying_disposition(opt: StockOption) kind institutional {
+    label en official "a disposition of ISO stock before the section 422(a)(1) holding period (2 years from grant / 1 year from exercise) is satisfied — section 421(b) governs the resulting tax treatment";
+}
+
+@source(IRC_S422_A, relation = formalizes, coverage = exact, quote = "no disposition of such share is made by him within 2 years from the date of the granting of the option nor within 1 year after the transfer of such share to him")
+rule IsoDisqualifyingDisposition(opt: StockOption, granted_on: Date, exercised_on: Date, disposed_on: Date) defeasible {
+    label en official "a disposition before 2 years from grant, or before 1 year from exercise (the exercise being the transfer of the share), disqualifies the holding-period test — exact date arithmetic, no rounding to whole years";
+    when incentive_stock_option(opt)
+        and stock_option_grant(opt, _, _, granted_on, _)
+        and stock_option_exercised(opt, exercised_on, _)
+        and stock_option_disposition(opt, disposed_on, _, _)
+        and (disposed_on < add_calendar_period(granted_on, 2 calendar_year)
+            or disposed_on < add_calendar_period(exercised_on, 1 calendar_year));
+    then iso_disqualifying_disposition(opt);
+}
+
+pub relation iso_disqualifying_disposition_compensation_income(opt: StockOption, amount: Money) kind institutional {
+    label en official "section 422(c)(2): on a disqualifying disposition that is a loss sale, the compensation income includible (and the employer's deduction) is capped at the excess, if any, of the amount realized over the adjusted basis";
+}
+
+@source(IRC_S422_C, relation = formalizes, coverage = exact, quote = "the amount which is includible in the gross income of such individual, and the amount which is deductible from the income of his employer corporation, as compensation attributable to the exercise of such option shall not exceed the excess (if any) of the amount realized on such sale or exchange over the adjusted basis of such share")
+rule IsoDisqualifyingDispositionLossCapPositive(opt: StockOption, realized: Money, basis: Money) defeasible {
+    label en official "cap = amount realized - adjusted basis, when that excess is positive";
+    when iso_disqualifying_disposition(opt)
+        and disposition_is_loss_sale(opt)
+        and stock_option_disposition(opt, _, realized, basis)
+        and realized > basis;
+    then iso_disqualifying_disposition_compensation_income(opt, realized - basis);
+}
+
+@source(IRC_S422_C, relation = formalizes, coverage = exact, quote = "shall not exceed the excess (if any) of the amount realized on such sale or exchange over the adjusted basis of such share")
+rule IsoDisqualifyingDispositionLossCapZero(opt: StockOption, realized: Money, basis: Money) defeasible {
+    label en official "cap = $0 when the amount realized does not exceed the adjusted basis (no positive excess)";
+    when iso_disqualifying_disposition(opt)
+        and disposition_is_loss_sale(opt)
+        and stock_option_disposition(opt, _, realized, basis)
+        and realized <= basis;
+    then iso_disqualifying_disposition_compensation_income(opt, 0.00 USD);
+}
+
+// --- (d): $100,000 per-year limitation -------------------------------------
+// TECH_GAP G371: the threshold comparison is executable; the underlying
+// per-option summation across a calendar year and the (d)(2) grant-order
+// allocation of WHICH option loses ISO status are not derived — the case
+// supplies the aggregate directly.
+
+pub relation aggregate_iso_fmv_first_exercisable_this_year(individual: Individual, employer_group: EmployerCorpGroup, y: TaxableYear, total: Money) kind empirical {
+    label en unofficial "the aggregate fair market value (at grant) of stock under ISOs (determined without regard to subsection (d)) exercisable for the first time by this individual during this calendar year, under all plans of the employer corporation and its parent/subsidiary corporations — case-asserted (TECH_GAP G371: the per-option summation is not derived by this package)";
+}
+
+pub relation section422d_limit_exceeded(individual: Individual, employer_group: EmployerCorpGroup, y: TaxableYear) kind institutional {
+    label en official "section 422(d)(1): the $100,000 aggregate first-exercisable-value limitation is exceeded for this individual and calendar year";
+}
+
+@source(IRC_S422_D, relation = formalizes, coverage = exact, quote = "the aggregate fair market value of stock with respect to which incentive stock options (determined without regard to this subsection) are exercisable for the 1st time by any individual during any calendar year (under all plans of the individual's employer corporation and its parent and subsidiary corporations) exceeds $100,000, such options shall be treated as options which are not incentive stock options")
+rule Section422dLimitExceeded(individual: Individual, employer_group: EmployerCorpGroup, y: TaxableYear, total: Money) strict {
+    label en official "exceeded when the case-asserted aggregate first-exercisable FMV total exceeds $100,000 (the (d)(2) ordering rule for which options this treats as non-ISO is TECH_GAP G371, not derived here)";
+    when aggregate_iso_fmv_first_exercisable_this_year(individual, employer_group, y, total)
+        and total > 100000.00 USD;
+    then section422d_limit_exceeded(individual, employer_group, y);
+}
+
+// =====================================================================
+// Section 423 — Employee stock purchase plans
+// =====================================================================
+
+pub relation plan_grants_only_to_group_employees(plan: CompensatoryOptionPlan) kind empirical {
+    label en unofficial "under the plan's terms options are granted only to employees of the employer corporation or its parent/subsidiary corporation, to purchase stock in any such corporation, case-asserted";
+}
+
+pub relation owns_5pct_or_more_423(individual: Individual, corp: Corporation) kind institutional {
+    label en official "the individual owns (under the section 424(d)(1) attribution total) 5 percent or more of the total combined voting power or value of the corporation's stock";
+}
+
+@source(IRC_S423_B, relation = formalizes, coverage = partial, quote = "no employee can be granted an option if such employee, immediately after the option is granted, owns stock possessing 5 percent or more of the total combined voting power or value of all classes of stock of the employer corporation or of its parent or subsidiary corporation")
+rule Owns5PctOrMore423(individual: Individual, corp: Corporation, pct: Decimal) defeasible {
+    label en official "5 percent or more under the 424(d)(1) attribution total (NOTE: the (b)(3) second-sentence addition of shares purchasable under outstanding options is TECH_GAP G374, not added here)";
+    when total_stock_ownership_424d(individual, corp, pct) and pct >= 0.05;
+    then owns_5pct_or_more_423(individual, corp);
+}
+
+pub relation option_meets_423b3(opt: StockOption) kind institutional {
+    label en official "section 423(b)(3): the employee is not a 5-percent-or-more owner immediately after the grant";
+}
+
+@source(IRC_S423_B, relation = formalizes, coverage = exact, quote = "no employee can be granted an option if such employee, immediately after the option is granted, owns stock possessing 5 percent or more of the total combined voting power or value of all classes of stock of the employer corporation or of its parent or subsidiary corporation")
+rule Option423b3(opt: StockOption, individual: Individual, corp: Corporation) defeasible {
+    label en official "satisfied when the employee is not a 5-percent-or-more owner";
+    when stock_option_grant(opt, corp, individual, _, _)
+        and not_known(owns_5pct_or_more_423(individual, corp));
+    then option_meets_423b3(opt);
+}
+
+pub enum PermittedExclusionCategory423 {
+    LessThanTwoYearsEmployed;
+    TwentyHoursOrLessPerWeek;
+    FiveMonthsOrLessPerYear;
+    HighlyCompensated414q;
+    label en unofficial "the four permitted-exclusion categories of section 423(b)(4)(A)-(D)";
+}
+
+pub relation employee_excludable_423b4(plan: CompensatoryOptionPlan, employee: Individual, category: PermittedExclusionCategory423) kind empirical {
+    label en unofficial "the employee falls within this permitted section 423(b)(4) exclusion category, case-asserted";
+}
+
+pub relation plan_may_exclude_employee_423b4(plan: CompensatoryOptionPlan, employee: Individual) kind institutional {
+    label en official "section 423(b)(4): the plan may exclude this employee from option grants without failing the all-employees requirement";
+}
+
+@source(IRC_S423_B, relation = formalizes, coverage = exact, quote = "there may be excluded")
+rule PlanMayExcludeEmployee423b4(plan: CompensatoryOptionPlan, employee: Individual, category: PermittedExclusionCategory423) strict {
+    label en official "any one of the four (b)(4) categories is a permitted exclusion";
+    when employee_excludable_423b4(plan, employee, category);
+    then plan_may_exclude_employee_423b4(plan, employee);
+}
+// (b)(4)'s own affirmative "all employees" coverage requirement, and (b)(5)
+// (uniform rights and privileges across the whole workforce, with its two
+// permitted variations) are population-wide plan-design tests this package
+// does not aggregate over — TECH_GAP G373; only the per-employee exclusion
+// CLASSIFICATION above is modeled.
+
+pub relation fmv_at_exercise(opt: StockOption, amount: Money) kind empirical {
+    label en unofficial "the fair market value of the stock at the time the option is exercised, case-asserted — its presence signals the plan uses the (b)(6)(B)/(b)(7)(A) exercise-time pricing formula rather than the (b)(6)(A)/(b)(7)(B) fixed-at-grant formula";
+}
+
+pub relation option_meets_423b6(opt: StockOption) kind institutional {
+    label en official "section 423(b)(6): the option price is not less than 85 percent of fair market value (at grant, or guaranteed at exercise)";
+}
+
+@source(IRC_S423_B, relation = formalizes, coverage = exact, quote = "an amount equal to 85 percent of the fair market value of the stock at the time such option is granted")
+rule Option423b6ViaGrantFormula(opt: StockOption, option_price: Money, fmv_grant: Money) strict {
+    label en official "(A): price >= 85% of FMV at grant";
+    when stock_option_grant(opt, _, _, _, option_price)
+        and fmv_at_grant(opt, fmv_grant)
+        and option_price >= round(fmv_grant * 0.85, 2, "HALF_UP");
+    then option_meets_423b6(opt);
+}
+
+@source(IRC_S423_B, relation = formalizes, coverage = exact, quote = "an amount which under the terms of the option may not be less than 85 percent of the fair market value of the stock at the time such option is exercised")
+rule Option423b6ViaExerciseFormula(opt: StockOption, option_price: Money, fmv_exercise: Money) strict {
+    label en official "(B): price >= 85% of FMV at exercise";
+    when stock_option_grant(opt, _, _, _, option_price)
+        and fmv_at_exercise(opt, fmv_exercise)
+        and option_price >= round(fmv_exercise * 0.85, 2, "HALF_UP");
+    then option_meets_423b6(opt);
+}
+
+pub relation option_uses_exercise_time_pricing_formula(opt: StockOption) kind institutional {
+    label en unofficial "the option's price is set under the (b)(6)(B) exercise-time 85%-of-FMV formula rather than the (b)(6)(A) fixed-at-grant formula — signalled by the presence of an fmv_at_exercise fact";
+}
+
+rule OptionUsesExerciseTimePricingFormula(opt: StockOption, fmv_exercise: Money) strict {
+    label en unofficial "derives the pricing-formula signal from the presence of fmv_at_exercise, so downstream rules can test its absence with not_known on a proper (unary) relation instead of a wildcard-bearing negated atom";
+    when fmv_at_exercise(opt, fmv_exercise);
+    then option_uses_exercise_time_pricing_formula(opt);
+}
+
+pub relation option_meets_423b7(opt: StockOption) kind institutional {
+    label en official "section 423(b)(7): the option's term does not exceed 5 years (exercise-time pricing) or 27 months (grant-time pricing)";
+}
+
+@source(IRC_S423_B, relation = formalizes, coverage = exact, quote = "5 years from the date such option is granted if, under the terms of such plan, the option price is to be not less than 85 percent of the fair market value of such stock at the time of the exercise of the option")
+rule Option423b7FiveYears(opt: StockOption, granted_on: Date, expires_on: Date) strict {
+    label en official "5-year term ceiling when the plan uses the exercise-time 85% pricing formula";
+    when stock_option_grant(opt, _, _, granted_on, _)
+        and option_expires_on(opt, expires_on)
+        and option_uses_exercise_time_pricing_formula(opt)
+        and expires_on <= add_calendar_period(granted_on, 5 calendar_year);
+    then option_meets_423b7(opt);
+}
+
+@source(IRC_S423_B, relation = formalizes, coverage = exact, quote = "27 months from the date such option is granted, if the option price is not determinable in the manner described in subparagraph (A)")
+rule Option423b7TwentySevenMonths(opt: StockOption, granted_on: Date, expires_on: Date) defeasible {
+    label en official "27-month term ceiling when the plan uses the grant-time 85% pricing formula";
+    when stock_option_grant(opt, _, _, granted_on, _)
+        and option_expires_on(opt, expires_on)
+        and not_known(option_uses_exercise_time_pricing_formula(opt))
+        and expires_on <= add_calendar_period(granted_on, 27 calendar_month);
+    then option_meets_423b7(opt);
+}
+// (b)(8) $25,000-per-year accrual limit: modeled as a threshold test only
+// (TECH_GAP G372, same class as G371): the case supplies the aggregate
+// accrual directly rather than this package deriving it option-by-option.
+
+pub relation espp_accrual_this_year(individual: Individual, employer_group: EmployerCorpGroup, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the aggregate fair-market-value accrual rate (section 423(b)(8)) for this individual and calendar year, case-asserted (TECH_GAP G372)";
+}
+
+pub relation espp_accrual_limit_exceeded(individual: Individual, employer_group: EmployerCorpGroup, y: TaxableYear) kind institutional {
+    label en official "section 423(b)(8): the $25,000-per-calendar-year accrual limit is exceeded";
+}
+
+@source(IRC_S423_B, relation = formalizes, coverage = exact, quote = "no employee may be granted an option which permits his rights to purchase stock under all such plans of his employer corporation and its parent and subsidiary corporations to accrue at a rate which exceeds $25,000 of fair market value of such stock (determined at the time such option is granted) for each calendar year in which such option is outstanding at any time")
+rule EsppAccrualLimitExceeded(individual: Individual, employer_group: EmployerCorpGroup, y: TaxableYear, amount: Money) strict {
+    label en official "exceeded when the case-asserted aggregate accrual exceeds $25,000 for the year";
+    when espp_accrual_this_year(individual, employer_group, y, amount) and amount > 25000.00 USD;
+    then espp_accrual_limit_exceeded(individual, employer_group, y);
+}
+
+pub relation option_meets_423b9(opt: StockOption) kind institutional {
+    label en official "section 423(b)(9): the option is nontransferable except at death and exercisable only by the individual during life";
+}
+
+@source(IRC_S423_B, relation = formalizes, coverage = exact, quote = "such option is not transferable by such individual otherwise than by will or the laws of descent and distribution, and is exercisable, during his lifetime, only by him")
+rule Option423b9(opt: StockOption) strict {
+    label en official "restates the shared nontransferability fact as the (b)(9) classification";
+    when option_nontransferable_except_at_death(opt);
+    then option_meets_423b9(opt);
+}
+
+pub relation espp_qualified(opt: StockOption) kind institutional {
+    label en official "the option was granted under an employee stock purchase plan meeting section 423(b)";
+}
+
+@source(IRC_S423_B, relation = formalizes, coverage = partial, quote = "the term \"employee stock purchase plan\" means a plan which meets the following requirements")
+rule EsppQualified(opt: StockOption, plan: CompensatoryOptionPlan) defeasible {
+    label en official "section 423(b): plan-level (1)/(2) and option-level (3)/(6)/(7)/(9) requirements met, and neither the 83(i) carve-out nor an explicit non-qualification applies ((4)/(5)/(8) are TECH_GAP G372/G373, not gating conditions here)";
+    when option_granted_under_plan(opt, plan)
+        and plan_grants_only_to_group_employees(plan)
+        and plan_meets_stockholder_approval_timing(plan)
+        and option_meets_423b3(opt)
+        and option_meets_423b6(opt)
+        and option_meets_423b7(opt)
+        and option_meets_423b9(opt)
+        and not_known(election_under_83i_made(opt));
+    then espp_qualified(opt);
+}
+
+// --- (a): the holding-period/employment test for 421(a) treatment --------
+
+pub relation option_meets_423a2(opt: StockOption) kind institutional {
+    label en official "section 423(a)(2): continuous employment from grant until 3 months before exercise";
+}
+
+@source(IRC_S423_A, relation = formalizes, coverage = exact, quote = "at all times during the period beginning with the date of the granting of the option and ending on the day 3 months before the date of such exercise, he is an employee")
+rule Option423a2(opt: StockOption, individual: Individual, exercised_on: Date, last_employed: Date, calendar_before_1: Date) strict {
+    label en official "continuous employment through at least 3 months before exercise (section 423(a) has no disabled-employee extension analogous to 422(c)(6))";
+    when stock_option_exercised(opt, exercised_on, _)
+        and last_continuously_employed_on(opt, individual, last_employed)
+        and last_employed >= calendar_before_1
+        and us.irc.core::civil_calendar_boundary_before(exercised_on, 3, us.irc.core::CalendarMonth, calendar_before_1);
+    then option_meets_423a2(opt);
+}
+
+pub relation espp_disqualifying_disposition(opt: StockOption) kind institutional {
+    label en official "a disposition of ESPP stock before the section 423(a)(1) holding period (2 years from grant / 1 year from exercise) is satisfied — section 421(b) governs the resulting tax treatment";
+}
+
+@source(IRC_S423_A, relation = formalizes, coverage = exact, quote = "no disposition of such share is made by him within 2 years after the date of the granting of the option nor within 1 year after the transfer of such share to him")
+rule EsppDisqualifyingDisposition(opt: StockOption, granted_on: Date, exercised_on: Date, disposed_on: Date) defeasible {
+    label en official "a disposition before 2 years from grant, or before 1 year from exercise — exact date arithmetic";
+    when espp_qualified(opt)
+        and stock_option_grant(opt, _, _, granted_on, _)
+        and stock_option_exercised(opt, exercised_on, _)
+        and stock_option_disposition(opt, disposed_on, _, _)
+        and (disposed_on < add_calendar_period(granted_on, 2 calendar_year)
+            or disposed_on < add_calendar_period(exercised_on, 1 calendar_year));
+    then espp_disqualifying_disposition(opt);
+}
+
+// --- (c): compensation income where option price < 100% of FMV at grant ----
+// Method: models only the "disposition meeting the (a) holding period"
+// branch of (c)'s opening sentence; the "or death" branch is TECH_GAP
+// (an independent scope cut, not reached this pass).
+
+pub relation espp_compensation_income_on_qualifying_disposition(opt: StockOption, amount: Money) kind institutional {
+    label en official "section 423(c): on a disposition meeting the (a) holding period, where the option price was below 100% of FMV at grant, compensation income equal to the lesser of the two statutory excesses is includible (not as capital gain)";
+}
+
+@source(IRC_S423_C, relation = formalizes, coverage = exact, quote = "there shall be included as compensation (and not as gain upon the sale or exchange of a capital asset) in his gross income, for the taxable year in which falls the date of such disposition or for the taxable year closing with his death, whichever applies, an amount equal to the lesser of")
+rule EsppCompensationIncomeOnQualifyingDisposition(opt: StockOption, option_price: Money, fmv_grant: Money, disposed_on: Date, fmv_at_disposition: Money) defeasible {
+    label en official "lesser of (excess of FMV-at-disposition over option price) and (excess of FMV-at-grant over option price), each floored at $0";
+    when stock_option_grant(opt, _, _, _, option_price)
+        and fmv_at_grant(opt, fmv_grant)
+        and option_price < fmv_grant
+        and not_known(espp_disqualifying_disposition(opt))
+        and stock_option_disposition(opt, disposed_on, _, _)
+        and fmv_at_exercise(opt, fmv_at_disposition);
+    then espp_compensation_income_on_qualifying_disposition(opt, min(max(0.00 USD, fmv_at_disposition - option_price), max(0.00 USD, fmv_grant - option_price)));
+}
+// NOTE: the case is expected to assert the disposition-date fair market
+// value through `fmv_at_exercise` for this rule (the module has no separate
+// "fmv at disposition" relation; disclosed here rather than adding a fourth
+// FMV relation this pass).
+
+// =====================================================================
+// Section 421 — general rules (nonrecognition, and disqualifying-
+// disposition timing)
+// =====================================================================
+
+pub relation section_421a_applies(opt: StockOption) kind institutional {
+    label en official "section 421(a): the transfer of stock on exercise of this option qualifies for nonrecognition (either as an ISO under 422(a) or as an ESPP option under 423(a))";
+}
+
+@source(IRC_S421_A, relation = formalizes, coverage = contextual, quote = "If a share of stock is transferred to an individual in a transfer in respect of which the requirements of section 422(a) or 423(a) are met")
+rule Section421aAppliesViaIso(opt: StockOption) defeasible {
+    label en official "via section 422(a): ISO status plus the (a)(2) employment test, absent a disqualifying disposition";
+    when incentive_stock_option(opt) and option_meets_422a2(opt) and not_known(iso_disqualifying_disposition(opt));
+    then section_421a_applies(opt);
+}
+
+@source(IRC_S421_A, relation = formalizes, coverage = contextual, quote = "If a share of stock is transferred to an individual in a transfer in respect of which the requirements of section 422(a) or 423(a) are met")
+rule Section421aAppliesViaEspp(opt: StockOption) defeasible {
+    label en official "via section 423(a): ESPP qualification plus the (a)(2) employment test, absent a disqualifying disposition";
+    when espp_qualified(opt) and option_meets_423a2(opt) and not_known(espp_disqualifying_disposition(opt));
+    then section_421a_applies(opt);
+}
+
+pub relation no_income_at_exercise_421a(opt: StockOption) kind institutional {
+    label en official "section 421(a)(1): no income results at the time of transfer of the share on exercise of the option";
+}
+
+@source(IRC_S421_A, relation = formalizes, coverage = exact, quote = "no income shall result at the time of the transfer of such share to the individual upon his exercise of the option with respect to such share")
+rule NoIncomeAtExercise421a(opt: StockOption) defeasible {
+    label en official "nonrecognition at exercise";
+    when section_421a_applies(opt);
+    then no_income_at_exercise_421a(opt);
+}
+
+pub relation no_employer_deduction_421a(opt: StockOption) kind institutional {
+    label en official "section 421(a)(2): no section 162 trade-or-business-expense deduction is allowable to the employer corporation (or a parent/subsidiary, or a section 424(a) successor) for the transferred share";
+}
+
+@source(IRC_S421_A, relation = formalizes, coverage = exact, quote = "no deduction under section 162 (relating to trade or business expenses) shall be allowable at any time to the employer corporation, a parent or subsidiary corporation of such corporation, or a corporation issuing or assuming a stock option in a transaction to which section 424(a) applies, with respect to the share so transferred")
+rule NoEmployerDeduction421a(opt: StockOption) defeasible {
+    label en official "no employer deduction for the transferred share";
+    when section_421a_applies(opt);
+    then no_employer_deduction_421a(opt);
+}
+
+pub relation no_other_amount_received_421a(opt: StockOption) kind institutional {
+    label en official "section 421(a)(3): no amount other than the option price is considered received by the corporation for the transferred share";
+}
+
+@source(IRC_S421_A, relation = formalizes, coverage = exact, quote = "no amount other than the price paid under the option shall be considered as received by any of such corporations for the share so transferred")
+rule NoOtherAmountReceived421a(opt: StockOption) defeasible {
+    label en official "the corporation is treated as having received only the option price";
+    when section_421a_applies(opt);
+    then no_other_amount_received_421a(opt);
+}
+
+pub relation disqualifying_disposition(opt: StockOption) kind institutional {
+    label en official "a disqualifying disposition under either section 422(a)(1) (ISO) or section 423(a)(1) (ESPP) has occurred";
+}
+
+@source(IRC_S421_B, relation = formalizes, coverage = contextual, quote = "there is a failure to meet any of the holding period requirements of section 422(a)(1) or 423(a)(1)")
+rule DisqualifyingDispositionViaIso(opt: StockOption) defeasible {
+    label en unofficial "unifies the ISO branch under the shared 421(b) relation";
+    when iso_disqualifying_disposition(opt);
+    then disqualifying_disposition(opt);
+}
+
+@source(IRC_S421_B, relation = formalizes, coverage = contextual, quote = "there is a failure to meet any of the holding period requirements of section 422(a)(1) or 423(a)(1)")
+rule DisqualifyingDispositionViaEspp(opt: StockOption) defeasible {
+    label en unofficial "unifies the ESPP branch under the shared 421(b) relation";
+    when espp_disqualifying_disposition(opt);
+    then disqualifying_disposition(opt);
+}
+
+pub relation disqualifying_disposition_income_recognized_on(opt: StockOption, on: Date) kind institutional {
+    label en official "section 421(b): any increase in income (or employer deduction) attributable to the disqualifying disposition is treated as arising in the taxable year of the disposition, not the (earlier) taxable year of exercise";
+}
+
+@source(IRC_S421_B, relation = formalizes, coverage = exact, quote = "any increase in the income of such individual or deduction from the income of his employer corporation for the taxable year in which such exercise occurred attributable to such disposition, shall be treated as an increase in income or a deduction from income in the taxable year of such individual or of such employer corporation in which such disposition occurred")
+rule DisqualifyingDispositionTiming421b(opt: StockOption, disposed_on: Date) defeasible {
+    label en official "the income/deduction year is the disposition date's taxable year, not the exercise date's";
+    when disqualifying_disposition(opt) and stock_option_disposition(opt, disposed_on, _, _);
+    then disqualifying_disposition_income_recognized_on(opt, disposed_on);
+}
+
+pub relation no_withholding_on_disqualifying_disposition_421b(opt: StockOption) kind institutional {
+    label en official "section 421(b) last sentence: no amount is required to be deducted and withheld under chapter 24 with respect to the disqualifying-disposition income increase";
+}
+
+@source(IRC_S421_B, relation = formalizes, coverage = exact, quote = "No amount shall be required to be deducted and withheld under chapter 24 with respect to any increase in income attributable to a disposition described in the preceding sentence")
+rule NoWithholdingOnDisqualifyingDisposition421b(opt: StockOption) defeasible {
+    label en official "no chapter 24 withholding on the 421(b) income increase";
+    when disqualifying_disposition(opt);
+    then no_withholding_on_disqualifying_disposition_421b(opt);
+}

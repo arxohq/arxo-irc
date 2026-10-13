@@ -1,0 +1,938 @@
+// Section 460(b)(2)(A)-(C), (b)(5)(D)(ii): the look-back interest (stage 4,
+// DECISION-0379 with deontics). Closes G4800-G4802 (the previous stage could
+// not compound daily interest: no Decimal power, no multi-year ledger).
+//
+// TECHNIQUE (stated): BOUNDED UNROLLING. The look-back years are walked along
+// the interest accrual periods of section 460(b)(7)(B) (return due date to
+// return due date) with a Horner-style balance: at the start of each accrual
+// period the year's overpayment or underpayment (signed: positive is an
+// underpayment) is added to the running balance, and during the period the
+// balance grows by the daily factor (1 + r/365)^days of the adjusted
+// overpayment rate of that period (section 460(b)(2)(C), compounded daily).
+// The interest is the final balance minus the sum of the amounts. Because
+// overpayments and underpayments carry the same rate, the net amount gives
+// the net interest (positive: the taxpayer pays; negative: entitled to
+// receive, section 460(b)(1)(B)).
+// DEPTH: at most 10 accrual periods after the first look-back year; a contract
+// that completes later gets NO interest here (NEITHER), never a wrong number.
+// The chain uses distinct relations per level (a recursive relation is
+// LDC-E4102). The daily growth factor comes from module 49 (14-bit binary
+// exponentiation: at most 16383 days per period).
+//
+// JUDGMENT CALLS: (1) the overpayment or underpayment of tax for each year
+// under paragraph (2)(B) is the tax owner's function (section 1/11 tax
+// recomputed on the reallocated income, with NOL, credits, barred years) and
+// is a CASE-SUPPLIED signed amount, or, for a pass-thru entity, is derived by
+// the simplified method of paragraph (4)(A)(ii) (module 35); (2) interest runs
+// from the return due date of the year to the completion date (the statute does
+// not spell the ends; the regulations do), counted as the days between the two
+// dates; (3) the daily rate is the annual rate divided by 365 (rounded to 12
+// places HALF_UP); (4) the running balance is rounded to cents HALF_UP at the
+// end of each accrual period; (5) the completion date is the fact of section
+// 460(c)(3)(B) (`contract_completion_date_460c3B`).
+//
+// Not modelled: the discounting of amounts taken into account after
+// completion is in this module (section 460(b)(2), last sentences); the
+// regulations that fix the exact accrual dates are not.
+
+// ===================== (B): the amount of each look-back year =====================
+
+use self::{
+    IRC_S460_B,
+    Person,
+    TaxableYear,
+    adjusted_overpayment_rate_460b7A,
+    contract_completion_date_460c3B,
+    elects_out_of_discounting_460b2,
+    growth_factor,
+    growth_request,
+    look_back_cumulative_income_460b2A,
+    look_back_not_applicable_460b3B,
+    look_back_not_required_for_small_discrepancies_460b6B,
+    look_back_overpayment_460b4Aii,
+    look_back_underpayment_460b4Aii,
+    preceding_taxable_year_465,
+    return_due_date_without_extensions_460b7B,
+    semiannual_factor,
+    semiannual_factor_request,
+    ten_percent_method_applies_to_contract_460b5C,
+    ten_percent_year_460b5Bii,
+};
+
+pub relation look_back_first_year_460b2(p: Person, contract: Integer, y: TaxableYear) kind empirical {
+    label en official "the first taxable year to which the income of the contract is allocated by the look-back method (section 460(b)(2)(A))";
+}
+pub relation look_back_tax_change_460b2B(p: Person, contract: Integer, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the overpayment (negative) or underpayment (positive) of tax for the year that results solely from the allocation of paragraph (2)(A), computed for interest only; the tax function of the tax owner is applied outside this package (section 460(b)(2)(B)); a case fact, alternative to the pass-thru derivation (never both)";
+}
+relation look_back_year_request_460b2(p: Person, contract: Integer, y: TaxableYear) kind institutional {
+    label en official "the chain asks for the amount of a look-back year (arithmetic helper)";
+}
+pub relation look_back_year_has_change_460b2B(p: Person, contract: Integer, y: TaxableYear) kind institutional {
+    label en official "the year has an overpayment or underpayment amount, asserted or derived by the pass-thru method";
+}
+rule LookBackYearHasAssertedChange(p: Person, contract: Integer, y: TaxableYear, amount: Money) defeasible {
+    label en official "an asserted amount exists";
+    when look_back_tax_change_460b2B(p, contract, y, amount);
+    then look_back_year_has_change_460b2B(p, contract, y);
+}
+rule LookBackYearHasPassThruUnderpayment(p: Person, contract: Integer, y: TaxableYear, amount: Money) defeasible {
+    label en official "a pass-thru underpayment exists";
+    when look_back_underpayment_460b4Aii(p, contract, y, amount);
+    then look_back_year_has_change_460b2B(p, contract, y);
+}
+rule LookBackYearHasPassThruOverpayment(p: Person, contract: Integer, y: TaxableYear, amount: Money) defeasible {
+    label en official "a pass-thru overpayment exists";
+    when look_back_overpayment_460b4Aii(p, contract, y, amount);
+    then look_back_year_has_change_460b2B(p, contract, y);
+}
+pub relation look_back_year_amount_460b2B(p: Person, contract: Integer, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the signed amount of the look-back year (positive: underpayment; negative: overpayment); zero when the year has none";
+}
+@source(IRC_S460_B, quote = "(B) second, determining (solely for purposes of computing such interest) the overpayment or underpayment of tax for each taxable year referred to in subparagraph (A) which would result solely from the application of subparagraph (A), and")
+rule LookBackYearAmountAsserted(p: Person, contract: Integer, y: TaxableYear, amount: Money) defeasible {
+    label en official "the asserted overpayment or underpayment of the year (section 460(b)(2)(B))";
+    when look_back_year_request_460b2(p, contract, y);
+    when look_back_tax_change_460b2B(p, contract, y, amount);
+    then look_back_year_amount_460b2B(p, contract, y, amount);
+}
+@source(IRC_S460_B, quote = "shall be treated as giving rise to an underpayment determined by applying the highest rate for such year to such increase, and")
+rule LookBackYearAmountPassThruUnderpayment(p: Person, contract: Integer, y: TaxableYear, amount: Money) defeasible {
+    label en official "a pass-thru entity's underpayment of the year (section 460(b)(4)(A)(ii)(I) feeding (b)(2)(B))";
+    when look_back_year_request_460b2(p, contract, y);
+    when look_back_underpayment_460b4Aii(p, contract, y, amount);
+    then look_back_year_amount_460b2B(p, contract, y, amount);
+}
+@source(IRC_S460_B, quote = "shall be treated as giving rise to an overpayment determined by applying the highest rate for such year to such decrease, and")
+rule LookBackYearAmountPassThruOverpayment(p: Person, contract: Integer, y: TaxableYear, amount: Money) defeasible {
+    label en official "a pass-thru entity's overpayment of the year, entered as a negative amount (section 460(b)(4)(A)(ii)(II) feeding (b)(2)(B))";
+    when look_back_year_request_460b2(p, contract, y);
+    when look_back_overpayment_460b4Aii(p, contract, y, amount);
+    then look_back_year_amount_460b2B(p, contract, y, 0.00 USD - amount);
+}
+rule LookBackYearAmountNone(p: Person, contract: Integer, y: TaxableYear) defeasible {
+    label en official "a year without an overpayment or underpayment counts zero";
+    when look_back_year_request_460b2(p, contract, y);
+    when not_known(look_back_year_has_change_460b2B(p, contract, y));
+    then look_back_year_amount_460b2B(p, contract, y, 0.00 USD);
+}
+
+// ===================== (C): interest compounded daily =====================
+
+pub relation look_back_interest_applies_460b1B(p: Person, contract: Integer) kind institutional {
+    label en official "the look-back interest of paragraph (2) is to be computed for the contract: it is not excluded by (b)(3)(B) (small short contracts) or by (b)(6) (de minimis election)";
+}
+rule LookBackInterestAppliesUnlessExcluded(p: Person, contract: Integer, y0: TaxableYear) defeasible {
+    label en official "look-back interest applies unless an exclusion applies (section 460(b)(1)(B), (b)(3)(B), (b)(6))";
+    when look_back_first_year_460b2(p, contract, y0);
+    when not_known(look_back_not_applicable_460b3B(p, contract));
+    when not_known(look_back_not_required_for_small_discrepancies_460b6B(p, contract));
+    then look_back_interest_applies_460b1B(p, contract);
+}
+rule LookBackYearRequestFirst(p: Person, contract: Integer, y0: TaxableYear) defeasible {
+    label en official "the chain asks for the first year's amount";
+    when look_back_first_year_460b2(p, contract, y0);
+    when look_back_interest_applies_460b1B(p, contract);
+    then look_back_year_request_460b2(p, contract, y0);
+}
+
+relation look_back_level_0(p: Person, contract: Integer, y: TaxableYear) kind institutional {
+    label en official "level 0: the accrual period after look-back year number 1 is reached (calendar walk, independent of amounts)";
+}
+relation look_back_final_period_0(p: Person, contract: Integer, y: TaxableYear, step: Decimal, days: Integer) kind institutional {
+    label en official "level 0: the contract is completed inside this accrual period; the daily step and the days from the return due date to the completion date";
+}
+relation look_back_full_period_0(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) kind institutional {
+    label en official "level 0: the accrual period runs to the next return due date; the daily step and its days";
+}
+relation look_back_state_0(p: Person, contract: Integer, y: TaxableYear, balance: Money, principal: Money) kind institutional {
+    label en official "level 0: the balance at the start of the accrual period after look-back year number 1, with the sum of the year amounts so far";
+}
+relation look_back_level_1(p: Person, contract: Integer, y: TaxableYear) kind institutional {
+    label en official "level 1: the accrual period after look-back year number 2 is reached (calendar walk, independent of amounts)";
+}
+relation look_back_final_period_1(p: Person, contract: Integer, y: TaxableYear, step: Decimal, days: Integer) kind institutional {
+    label en official "level 1: the contract is completed inside this accrual period; the daily step and the days from the return due date to the completion date";
+}
+relation look_back_full_period_1(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) kind institutional {
+    label en official "level 1: the accrual period runs to the next return due date; the daily step and its days";
+}
+relation look_back_state_1(p: Person, contract: Integer, y: TaxableYear, balance: Money, principal: Money) kind institutional {
+    label en official "level 1: the balance at the start of the accrual period after look-back year number 2, with the sum of the year amounts so far";
+}
+relation look_back_level_2(p: Person, contract: Integer, y: TaxableYear) kind institutional {
+    label en official "level 2: the accrual period after look-back year number 3 is reached (calendar walk, independent of amounts)";
+}
+relation look_back_final_period_2(p: Person, contract: Integer, y: TaxableYear, step: Decimal, days: Integer) kind institutional {
+    label en official "level 2: the contract is completed inside this accrual period; the daily step and the days from the return due date to the completion date";
+}
+relation look_back_full_period_2(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) kind institutional {
+    label en official "level 2: the accrual period runs to the next return due date; the daily step and its days";
+}
+relation look_back_state_2(p: Person, contract: Integer, y: TaxableYear, balance: Money, principal: Money) kind institutional {
+    label en official "level 2: the balance at the start of the accrual period after look-back year number 3, with the sum of the year amounts so far";
+}
+relation look_back_level_3(p: Person, contract: Integer, y: TaxableYear) kind institutional {
+    label en official "level 3: the accrual period after look-back year number 4 is reached (calendar walk, independent of amounts)";
+}
+relation look_back_final_period_3(p: Person, contract: Integer, y: TaxableYear, step: Decimal, days: Integer) kind institutional {
+    label en official "level 3: the contract is completed inside this accrual period; the daily step and the days from the return due date to the completion date";
+}
+relation look_back_full_period_3(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) kind institutional {
+    label en official "level 3: the accrual period runs to the next return due date; the daily step and its days";
+}
+relation look_back_state_3(p: Person, contract: Integer, y: TaxableYear, balance: Money, principal: Money) kind institutional {
+    label en official "level 3: the balance at the start of the accrual period after look-back year number 4, with the sum of the year amounts so far";
+}
+relation look_back_level_4(p: Person, contract: Integer, y: TaxableYear) kind institutional {
+    label en official "level 4: the accrual period after look-back year number 5 is reached (calendar walk, independent of amounts)";
+}
+relation look_back_final_period_4(p: Person, contract: Integer, y: TaxableYear, step: Decimal, days: Integer) kind institutional {
+    label en official "level 4: the contract is completed inside this accrual period; the daily step and the days from the return due date to the completion date";
+}
+relation look_back_full_period_4(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) kind institutional {
+    label en official "level 4: the accrual period runs to the next return due date; the daily step and its days";
+}
+relation look_back_state_4(p: Person, contract: Integer, y: TaxableYear, balance: Money, principal: Money) kind institutional {
+    label en official "level 4: the balance at the start of the accrual period after look-back year number 5, with the sum of the year amounts so far";
+}
+relation look_back_level_5(p: Person, contract: Integer, y: TaxableYear) kind institutional {
+    label en official "level 5: the accrual period after look-back year number 6 is reached (calendar walk, independent of amounts)";
+}
+relation look_back_final_period_5(p: Person, contract: Integer, y: TaxableYear, step: Decimal, days: Integer) kind institutional {
+    label en official "level 5: the contract is completed inside this accrual period; the daily step and the days from the return due date to the completion date";
+}
+relation look_back_full_period_5(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) kind institutional {
+    label en official "level 5: the accrual period runs to the next return due date; the daily step and its days";
+}
+relation look_back_state_5(p: Person, contract: Integer, y: TaxableYear, balance: Money, principal: Money) kind institutional {
+    label en official "level 5: the balance at the start of the accrual period after look-back year number 6, with the sum of the year amounts so far";
+}
+relation look_back_level_6(p: Person, contract: Integer, y: TaxableYear) kind institutional {
+    label en official "level 6: the accrual period after look-back year number 7 is reached (calendar walk, independent of amounts)";
+}
+relation look_back_final_period_6(p: Person, contract: Integer, y: TaxableYear, step: Decimal, days: Integer) kind institutional {
+    label en official "level 6: the contract is completed inside this accrual period; the daily step and the days from the return due date to the completion date";
+}
+relation look_back_full_period_6(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) kind institutional {
+    label en official "level 6: the accrual period runs to the next return due date; the daily step and its days";
+}
+relation look_back_state_6(p: Person, contract: Integer, y: TaxableYear, balance: Money, principal: Money) kind institutional {
+    label en official "level 6: the balance at the start of the accrual period after look-back year number 7, with the sum of the year amounts so far";
+}
+relation look_back_level_7(p: Person, contract: Integer, y: TaxableYear) kind institutional {
+    label en official "level 7: the accrual period after look-back year number 8 is reached (calendar walk, independent of amounts)";
+}
+relation look_back_final_period_7(p: Person, contract: Integer, y: TaxableYear, step: Decimal, days: Integer) kind institutional {
+    label en official "level 7: the contract is completed inside this accrual period; the daily step and the days from the return due date to the completion date";
+}
+relation look_back_full_period_7(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) kind institutional {
+    label en official "level 7: the accrual period runs to the next return due date; the daily step and its days";
+}
+relation look_back_state_7(p: Person, contract: Integer, y: TaxableYear, balance: Money, principal: Money) kind institutional {
+    label en official "level 7: the balance at the start of the accrual period after look-back year number 8, with the sum of the year amounts so far";
+}
+relation look_back_level_8(p: Person, contract: Integer, y: TaxableYear) kind institutional {
+    label en official "level 8: the accrual period after look-back year number 9 is reached (calendar walk, independent of amounts)";
+}
+relation look_back_final_period_8(p: Person, contract: Integer, y: TaxableYear, step: Decimal, days: Integer) kind institutional {
+    label en official "level 8: the contract is completed inside this accrual period; the daily step and the days from the return due date to the completion date";
+}
+relation look_back_full_period_8(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) kind institutional {
+    label en official "level 8: the accrual period runs to the next return due date; the daily step and its days";
+}
+relation look_back_state_8(p: Person, contract: Integer, y: TaxableYear, balance: Money, principal: Money) kind institutional {
+    label en official "level 8: the balance at the start of the accrual period after look-back year number 9, with the sum of the year amounts so far";
+}
+relation look_back_level_9(p: Person, contract: Integer, y: TaxableYear) kind institutional {
+    label en official "level 9: the accrual period after look-back year number 10 is reached (calendar walk, independent of amounts)";
+}
+relation look_back_final_period_9(p: Person, contract: Integer, y: TaxableYear, step: Decimal, days: Integer) kind institutional {
+    label en official "level 9: the contract is completed inside this accrual period; the daily step and the days from the return due date to the completion date";
+}
+relation look_back_full_period_9(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) kind institutional {
+    label en official "level 9: the accrual period runs to the next return due date; the daily step and its days";
+}
+relation look_back_state_9(p: Person, contract: Integer, y: TaxableYear, balance: Money, principal: Money) kind institutional {
+    label en official "level 9: the balance at the start of the accrual period after look-back year number 10, with the sum of the year amounts so far";
+}
+pub relation look_back_balance_at_completion_460b2C(p: Person, contract: Integer, balance: Money, principal: Money) kind institutional {
+    label en official "the balance at completion (the year amounts compounded daily at the adjusted overpayment rates) and the sum of the year amounts";
+}
+pub relation look_back_interest_460b2C(p: Person, contract: Integer, interest: Money) kind institutional {
+    label en official "the net look-back interest: the compounded balance minus the sum of the year amounts (positive: the taxpayer pays; negative: the taxpayer is entitled to receive); depth: at most 10 accrual periods (stated bound)";
+}
+pub relation look_back_interest_payable_460b1B(p: Person, contract: Integer, amount: Money) kind institutional {
+    label en official "the interest the taxpayer shall pay upon completion of the contract (section 460(b)(1)(B))";
+}
+pub relation look_back_interest_receivable_460b1B(p: Person, contract: Integer, amount: Money) kind institutional {
+    label en official "the interest the taxpayer shall be entitled to receive upon completion of the contract (section 460(b)(1)(B))";
+}
+rule LookBackLevel0(p: Person, contract: Integer, y0: TaxableYear) defeasible {
+    label en official "the walk starts at the first look-back year (section 460(b)(2)(A))";
+    when look_back_first_year_460b2(p, contract, y0);
+    when look_back_interest_applies_460b1B(p, contract);
+    then look_back_level_0(p, contract, y0);
+}
+@source(IRC_S460_B, quote = "(A) first, allocating income under the contract among taxable years before the year in which the contract is completed on the basis of the actual contract price and costs instead of the estimated contract price and costs,")
+rule LookBackState0(p: Person, contract: Integer, y0: TaxableYear, d0: Money) defeasible {
+    label en official "the balance starts with the first look-back year's amount (section 460(b)(2)(A)-(B))";
+    when look_back_first_year_460b2(p, contract, y0);
+    when look_back_interest_applies_460b1B(p, contract);
+    when look_back_year_amount_460b2B(p, contract, y0, d0);
+    then look_back_state_0(p, contract, y0, d0, d0);
+}
+@source(IRC_S460_B, quote = "(C) then using the adjusted overpayment rate (as defined in paragraph (7)), compounded daily, on the overpayment or underpayment determined under subparagraph (B).")
+rule LookBackFinalPeriod0(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, due: Date, due_next: Date, dc: Date, r: Decimal) defeasible {
+    label en official "the contract is completed inside the accrual period of level 0: daily interest at the adjusted overpayment rate up to the completion date (section 460(b)(2)(C))";
+    when look_back_level_0(p, contract, y);
+    when preceding_taxable_year_465(y, y_next);
+    when return_due_date_without_extensions_460b7B(p, y, due);
+    when return_due_date_without_extensions_460b7B(p, y_next, due_next);
+    when contract_completion_date_460c3B(contract, dc);
+    when dc <= due_next;
+    when adjusted_overpayment_rate_460b7A(p, y, r);
+    then look_back_final_period_0(p, contract, y, div_round(r, 365.0, 12, "HALF_UP"), max(days_between(due, dc), 0));
+}
+rule LookBackFullPeriod0(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, due: Date, due_next: Date, dc: Date, r: Decimal) defeasible {
+    label en official "the accrual period of level 0 ends before completion: daily interest for the whole period (section 460(b)(2)(C), (b)(7)(B))";
+    when look_back_level_0(p, contract, y);
+    when preceding_taxable_year_465(y, y_next);
+    when return_due_date_without_extensions_460b7B(p, y, due);
+    when return_due_date_without_extensions_460b7B(p, y_next, due_next);
+    when contract_completion_date_460c3B(contract, dc);
+    when dc > due_next;
+    when adjusted_overpayment_rate_460b7A(p, y, r);
+    then look_back_full_period_0(p, contract, y, y_next, div_round(r, 365.0, 12, "HALF_UP"), days_between(due, due_next));
+}
+rule LookBackRequestFinal0(p: Person, contract: Integer, y: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the daily growth factor of the final period";
+    when look_back_final_period_0(p, contract, y, step, days);
+    then growth_request(step, days);
+}
+rule LookBackRequestFull0(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the daily growth factor of the full period";
+    when look_back_full_period_0(p, contract, y, y_next, step, days);
+    then growth_request(step, days);
+}
+rule LookBackRequestNextYear0(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the next look-back year's amount";
+    when look_back_full_period_0(p, contract, y, y_next, step, days);
+    then look_back_year_request_460b2(p, contract, y_next);
+}
+rule LookBackBalanceAtCompletion0(p: Person, contract: Integer, y: TaxableYear, bal: Money, prin: Money, step: Decimal, days: Integer, f: Decimal) defeasible {
+    label en official "the final balance: the balance grown by the daily factor of the last period, rounded to cents HALF_UP (JUDGMENT CALL)";
+    when look_back_state_0(p, contract, y, bal, prin);
+    when look_back_final_period_0(p, contract, y, step, days);
+    when growth_factor(step, days, f);
+    then look_back_balance_at_completion_460b2C(p, contract, round(bal * f, 2, "HALF_UP"), prin);
+}
+rule LookBackLevel1(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "the walk moves to the next accrual period";
+    when look_back_full_period_0(p, contract, y, y_next, step, days);
+    then look_back_level_1(p, contract, y_next);
+}
+rule LookBackState1From0(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, bal: Money, prin: Money, step: Decimal, days: Integer, f: Decimal, dn: Money) defeasible {
+    label en official "the balance grown over the full period plus the next year's amount starts the next level (section 460(b)(2)(B)-(C))";
+    when look_back_state_0(p, contract, y, bal, prin);
+    when look_back_full_period_0(p, contract, y, y_next, step, days);
+    when growth_factor(step, days, f);
+    when look_back_year_amount_460b2B(p, contract, y_next, dn);
+    then look_back_state_1(p, contract, y_next, round(bal * f, 2, "HALF_UP") + dn, prin + dn);
+}
+@source(IRC_S460_B, quote = "(C) then using the adjusted overpayment rate (as defined in paragraph (7)), compounded daily, on the overpayment or underpayment determined under subparagraph (B).")
+rule LookBackFinalPeriod1(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, due: Date, due_next: Date, dc: Date, r: Decimal) defeasible {
+    label en official "the contract is completed inside the accrual period of level 1: daily interest at the adjusted overpayment rate up to the completion date (section 460(b)(2)(C))";
+    when look_back_level_1(p, contract, y);
+    when preceding_taxable_year_465(y, y_next);
+    when return_due_date_without_extensions_460b7B(p, y, due);
+    when return_due_date_without_extensions_460b7B(p, y_next, due_next);
+    when contract_completion_date_460c3B(contract, dc);
+    when dc <= due_next;
+    when adjusted_overpayment_rate_460b7A(p, y, r);
+    then look_back_final_period_1(p, contract, y, div_round(r, 365.0, 12, "HALF_UP"), max(days_between(due, dc), 0));
+}
+rule LookBackFullPeriod1(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, due: Date, due_next: Date, dc: Date, r: Decimal) defeasible {
+    label en official "the accrual period of level 1 ends before completion: daily interest for the whole period (section 460(b)(2)(C), (b)(7)(B))";
+    when look_back_level_1(p, contract, y);
+    when preceding_taxable_year_465(y, y_next);
+    when return_due_date_without_extensions_460b7B(p, y, due);
+    when return_due_date_without_extensions_460b7B(p, y_next, due_next);
+    when contract_completion_date_460c3B(contract, dc);
+    when dc > due_next;
+    when adjusted_overpayment_rate_460b7A(p, y, r);
+    then look_back_full_period_1(p, contract, y, y_next, div_round(r, 365.0, 12, "HALF_UP"), days_between(due, due_next));
+}
+rule LookBackRequestFinal1(p: Person, contract: Integer, y: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the daily growth factor of the final period";
+    when look_back_final_period_1(p, contract, y, step, days);
+    then growth_request(step, days);
+}
+rule LookBackRequestFull1(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the daily growth factor of the full period";
+    when look_back_full_period_1(p, contract, y, y_next, step, days);
+    then growth_request(step, days);
+}
+rule LookBackRequestNextYear1(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the next look-back year's amount";
+    when look_back_full_period_1(p, contract, y, y_next, step, days);
+    then look_back_year_request_460b2(p, contract, y_next);
+}
+rule LookBackBalanceAtCompletion1(p: Person, contract: Integer, y: TaxableYear, bal: Money, prin: Money, step: Decimal, days: Integer, f: Decimal) defeasible {
+    label en official "the final balance: the balance grown by the daily factor of the last period, rounded to cents HALF_UP (JUDGMENT CALL)";
+    when look_back_state_1(p, contract, y, bal, prin);
+    when look_back_final_period_1(p, contract, y, step, days);
+    when growth_factor(step, days, f);
+    then look_back_balance_at_completion_460b2C(p, contract, round(bal * f, 2, "HALF_UP"), prin);
+}
+rule LookBackLevel2(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "the walk moves to the next accrual period";
+    when look_back_full_period_1(p, contract, y, y_next, step, days);
+    then look_back_level_2(p, contract, y_next);
+}
+rule LookBackState2From1(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, bal: Money, prin: Money, step: Decimal, days: Integer, f: Decimal, dn: Money) defeasible {
+    label en official "the balance grown over the full period plus the next year's amount starts the next level (section 460(b)(2)(B)-(C))";
+    when look_back_state_1(p, contract, y, bal, prin);
+    when look_back_full_period_1(p, contract, y, y_next, step, days);
+    when growth_factor(step, days, f);
+    when look_back_year_amount_460b2B(p, contract, y_next, dn);
+    then look_back_state_2(p, contract, y_next, round(bal * f, 2, "HALF_UP") + dn, prin + dn);
+}
+@source(IRC_S460_B, quote = "(C) then using the adjusted overpayment rate (as defined in paragraph (7)), compounded daily, on the overpayment or underpayment determined under subparagraph (B).")
+rule LookBackFinalPeriod2(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, due: Date, due_next: Date, dc: Date, r: Decimal) defeasible {
+    label en official "the contract is completed inside the accrual period of level 2: daily interest at the adjusted overpayment rate up to the completion date (section 460(b)(2)(C))";
+    when look_back_level_2(p, contract, y);
+    when preceding_taxable_year_465(y, y_next);
+    when return_due_date_without_extensions_460b7B(p, y, due);
+    when return_due_date_without_extensions_460b7B(p, y_next, due_next);
+    when contract_completion_date_460c3B(contract, dc);
+    when dc <= due_next;
+    when adjusted_overpayment_rate_460b7A(p, y, r);
+    then look_back_final_period_2(p, contract, y, div_round(r, 365.0, 12, "HALF_UP"), max(days_between(due, dc), 0));
+}
+rule LookBackFullPeriod2(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, due: Date, due_next: Date, dc: Date, r: Decimal) defeasible {
+    label en official "the accrual period of level 2 ends before completion: daily interest for the whole period (section 460(b)(2)(C), (b)(7)(B))";
+    when look_back_level_2(p, contract, y);
+    when preceding_taxable_year_465(y, y_next);
+    when return_due_date_without_extensions_460b7B(p, y, due);
+    when return_due_date_without_extensions_460b7B(p, y_next, due_next);
+    when contract_completion_date_460c3B(contract, dc);
+    when dc > due_next;
+    when adjusted_overpayment_rate_460b7A(p, y, r);
+    then look_back_full_period_2(p, contract, y, y_next, div_round(r, 365.0, 12, "HALF_UP"), days_between(due, due_next));
+}
+rule LookBackRequestFinal2(p: Person, contract: Integer, y: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the daily growth factor of the final period";
+    when look_back_final_period_2(p, contract, y, step, days);
+    then growth_request(step, days);
+}
+rule LookBackRequestFull2(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the daily growth factor of the full period";
+    when look_back_full_period_2(p, contract, y, y_next, step, days);
+    then growth_request(step, days);
+}
+rule LookBackRequestNextYear2(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the next look-back year's amount";
+    when look_back_full_period_2(p, contract, y, y_next, step, days);
+    then look_back_year_request_460b2(p, contract, y_next);
+}
+rule LookBackBalanceAtCompletion2(p: Person, contract: Integer, y: TaxableYear, bal: Money, prin: Money, step: Decimal, days: Integer, f: Decimal) defeasible {
+    label en official "the final balance: the balance grown by the daily factor of the last period, rounded to cents HALF_UP (JUDGMENT CALL)";
+    when look_back_state_2(p, contract, y, bal, prin);
+    when look_back_final_period_2(p, contract, y, step, days);
+    when growth_factor(step, days, f);
+    then look_back_balance_at_completion_460b2C(p, contract, round(bal * f, 2, "HALF_UP"), prin);
+}
+rule LookBackLevel3(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "the walk moves to the next accrual period";
+    when look_back_full_period_2(p, contract, y, y_next, step, days);
+    then look_back_level_3(p, contract, y_next);
+}
+rule LookBackState3From2(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, bal: Money, prin: Money, step: Decimal, days: Integer, f: Decimal, dn: Money) defeasible {
+    label en official "the balance grown over the full period plus the next year's amount starts the next level (section 460(b)(2)(B)-(C))";
+    when look_back_state_2(p, contract, y, bal, prin);
+    when look_back_full_period_2(p, contract, y, y_next, step, days);
+    when growth_factor(step, days, f);
+    when look_back_year_amount_460b2B(p, contract, y_next, dn);
+    then look_back_state_3(p, contract, y_next, round(bal * f, 2, "HALF_UP") + dn, prin + dn);
+}
+@source(IRC_S460_B, quote = "(C) then using the adjusted overpayment rate (as defined in paragraph (7)), compounded daily, on the overpayment or underpayment determined under subparagraph (B).")
+rule LookBackFinalPeriod3(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, due: Date, due_next: Date, dc: Date, r: Decimal) defeasible {
+    label en official "the contract is completed inside the accrual period of level 3: daily interest at the adjusted overpayment rate up to the completion date (section 460(b)(2)(C))";
+    when look_back_level_3(p, contract, y);
+    when preceding_taxable_year_465(y, y_next);
+    when return_due_date_without_extensions_460b7B(p, y, due);
+    when return_due_date_without_extensions_460b7B(p, y_next, due_next);
+    when contract_completion_date_460c3B(contract, dc);
+    when dc <= due_next;
+    when adjusted_overpayment_rate_460b7A(p, y, r);
+    then look_back_final_period_3(p, contract, y, div_round(r, 365.0, 12, "HALF_UP"), max(days_between(due, dc), 0));
+}
+rule LookBackFullPeriod3(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, due: Date, due_next: Date, dc: Date, r: Decimal) defeasible {
+    label en official "the accrual period of level 3 ends before completion: daily interest for the whole period (section 460(b)(2)(C), (b)(7)(B))";
+    when look_back_level_3(p, contract, y);
+    when preceding_taxable_year_465(y, y_next);
+    when return_due_date_without_extensions_460b7B(p, y, due);
+    when return_due_date_without_extensions_460b7B(p, y_next, due_next);
+    when contract_completion_date_460c3B(contract, dc);
+    when dc > due_next;
+    when adjusted_overpayment_rate_460b7A(p, y, r);
+    then look_back_full_period_3(p, contract, y, y_next, div_round(r, 365.0, 12, "HALF_UP"), days_between(due, due_next));
+}
+rule LookBackRequestFinal3(p: Person, contract: Integer, y: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the daily growth factor of the final period";
+    when look_back_final_period_3(p, contract, y, step, days);
+    then growth_request(step, days);
+}
+rule LookBackRequestFull3(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the daily growth factor of the full period";
+    when look_back_full_period_3(p, contract, y, y_next, step, days);
+    then growth_request(step, days);
+}
+rule LookBackRequestNextYear3(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the next look-back year's amount";
+    when look_back_full_period_3(p, contract, y, y_next, step, days);
+    then look_back_year_request_460b2(p, contract, y_next);
+}
+rule LookBackBalanceAtCompletion3(p: Person, contract: Integer, y: TaxableYear, bal: Money, prin: Money, step: Decimal, days: Integer, f: Decimal) defeasible {
+    label en official "the final balance: the balance grown by the daily factor of the last period, rounded to cents HALF_UP (JUDGMENT CALL)";
+    when look_back_state_3(p, contract, y, bal, prin);
+    when look_back_final_period_3(p, contract, y, step, days);
+    when growth_factor(step, days, f);
+    then look_back_balance_at_completion_460b2C(p, contract, round(bal * f, 2, "HALF_UP"), prin);
+}
+rule LookBackLevel4(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "the walk moves to the next accrual period";
+    when look_back_full_period_3(p, contract, y, y_next, step, days);
+    then look_back_level_4(p, contract, y_next);
+}
+rule LookBackState4From3(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, bal: Money, prin: Money, step: Decimal, days: Integer, f: Decimal, dn: Money) defeasible {
+    label en official "the balance grown over the full period plus the next year's amount starts the next level (section 460(b)(2)(B)-(C))";
+    when look_back_state_3(p, contract, y, bal, prin);
+    when look_back_full_period_3(p, contract, y, y_next, step, days);
+    when growth_factor(step, days, f);
+    when look_back_year_amount_460b2B(p, contract, y_next, dn);
+    then look_back_state_4(p, contract, y_next, round(bal * f, 2, "HALF_UP") + dn, prin + dn);
+}
+@source(IRC_S460_B, quote = "(C) then using the adjusted overpayment rate (as defined in paragraph (7)), compounded daily, on the overpayment or underpayment determined under subparagraph (B).")
+rule LookBackFinalPeriod4(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, due: Date, due_next: Date, dc: Date, r: Decimal) defeasible {
+    label en official "the contract is completed inside the accrual period of level 4: daily interest at the adjusted overpayment rate up to the completion date (section 460(b)(2)(C))";
+    when look_back_level_4(p, contract, y);
+    when preceding_taxable_year_465(y, y_next);
+    when return_due_date_without_extensions_460b7B(p, y, due);
+    when return_due_date_without_extensions_460b7B(p, y_next, due_next);
+    when contract_completion_date_460c3B(contract, dc);
+    when dc <= due_next;
+    when adjusted_overpayment_rate_460b7A(p, y, r);
+    then look_back_final_period_4(p, contract, y, div_round(r, 365.0, 12, "HALF_UP"), max(days_between(due, dc), 0));
+}
+rule LookBackFullPeriod4(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, due: Date, due_next: Date, dc: Date, r: Decimal) defeasible {
+    label en official "the accrual period of level 4 ends before completion: daily interest for the whole period (section 460(b)(2)(C), (b)(7)(B))";
+    when look_back_level_4(p, contract, y);
+    when preceding_taxable_year_465(y, y_next);
+    when return_due_date_without_extensions_460b7B(p, y, due);
+    when return_due_date_without_extensions_460b7B(p, y_next, due_next);
+    when contract_completion_date_460c3B(contract, dc);
+    when dc > due_next;
+    when adjusted_overpayment_rate_460b7A(p, y, r);
+    then look_back_full_period_4(p, contract, y, y_next, div_round(r, 365.0, 12, "HALF_UP"), days_between(due, due_next));
+}
+rule LookBackRequestFinal4(p: Person, contract: Integer, y: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the daily growth factor of the final period";
+    when look_back_final_period_4(p, contract, y, step, days);
+    then growth_request(step, days);
+}
+rule LookBackRequestFull4(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the daily growth factor of the full period";
+    when look_back_full_period_4(p, contract, y, y_next, step, days);
+    then growth_request(step, days);
+}
+rule LookBackRequestNextYear4(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the next look-back year's amount";
+    when look_back_full_period_4(p, contract, y, y_next, step, days);
+    then look_back_year_request_460b2(p, contract, y_next);
+}
+rule LookBackBalanceAtCompletion4(p: Person, contract: Integer, y: TaxableYear, bal: Money, prin: Money, step: Decimal, days: Integer, f: Decimal) defeasible {
+    label en official "the final balance: the balance grown by the daily factor of the last period, rounded to cents HALF_UP (JUDGMENT CALL)";
+    when look_back_state_4(p, contract, y, bal, prin);
+    when look_back_final_period_4(p, contract, y, step, days);
+    when growth_factor(step, days, f);
+    then look_back_balance_at_completion_460b2C(p, contract, round(bal * f, 2, "HALF_UP"), prin);
+}
+rule LookBackLevel5(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "the walk moves to the next accrual period";
+    when look_back_full_period_4(p, contract, y, y_next, step, days);
+    then look_back_level_5(p, contract, y_next);
+}
+rule LookBackState5From4(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, bal: Money, prin: Money, step: Decimal, days: Integer, f: Decimal, dn: Money) defeasible {
+    label en official "the balance grown over the full period plus the next year's amount starts the next level (section 460(b)(2)(B)-(C))";
+    when look_back_state_4(p, contract, y, bal, prin);
+    when look_back_full_period_4(p, contract, y, y_next, step, days);
+    when growth_factor(step, days, f);
+    when look_back_year_amount_460b2B(p, contract, y_next, dn);
+    then look_back_state_5(p, contract, y_next, round(bal * f, 2, "HALF_UP") + dn, prin + dn);
+}
+@source(IRC_S460_B, quote = "(C) then using the adjusted overpayment rate (as defined in paragraph (7)), compounded daily, on the overpayment or underpayment determined under subparagraph (B).")
+rule LookBackFinalPeriod5(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, due: Date, due_next: Date, dc: Date, r: Decimal) defeasible {
+    label en official "the contract is completed inside the accrual period of level 5: daily interest at the adjusted overpayment rate up to the completion date (section 460(b)(2)(C))";
+    when look_back_level_5(p, contract, y);
+    when preceding_taxable_year_465(y, y_next);
+    when return_due_date_without_extensions_460b7B(p, y, due);
+    when return_due_date_without_extensions_460b7B(p, y_next, due_next);
+    when contract_completion_date_460c3B(contract, dc);
+    when dc <= due_next;
+    when adjusted_overpayment_rate_460b7A(p, y, r);
+    then look_back_final_period_5(p, contract, y, div_round(r, 365.0, 12, "HALF_UP"), max(days_between(due, dc), 0));
+}
+rule LookBackFullPeriod5(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, due: Date, due_next: Date, dc: Date, r: Decimal) defeasible {
+    label en official "the accrual period of level 5 ends before completion: daily interest for the whole period (section 460(b)(2)(C), (b)(7)(B))";
+    when look_back_level_5(p, contract, y);
+    when preceding_taxable_year_465(y, y_next);
+    when return_due_date_without_extensions_460b7B(p, y, due);
+    when return_due_date_without_extensions_460b7B(p, y_next, due_next);
+    when contract_completion_date_460c3B(contract, dc);
+    when dc > due_next;
+    when adjusted_overpayment_rate_460b7A(p, y, r);
+    then look_back_full_period_5(p, contract, y, y_next, div_round(r, 365.0, 12, "HALF_UP"), days_between(due, due_next));
+}
+rule LookBackRequestFinal5(p: Person, contract: Integer, y: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the daily growth factor of the final period";
+    when look_back_final_period_5(p, contract, y, step, days);
+    then growth_request(step, days);
+}
+rule LookBackRequestFull5(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the daily growth factor of the full period";
+    when look_back_full_period_5(p, contract, y, y_next, step, days);
+    then growth_request(step, days);
+}
+rule LookBackRequestNextYear5(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the next look-back year's amount";
+    when look_back_full_period_5(p, contract, y, y_next, step, days);
+    then look_back_year_request_460b2(p, contract, y_next);
+}
+rule LookBackBalanceAtCompletion5(p: Person, contract: Integer, y: TaxableYear, bal: Money, prin: Money, step: Decimal, days: Integer, f: Decimal) defeasible {
+    label en official "the final balance: the balance grown by the daily factor of the last period, rounded to cents HALF_UP (JUDGMENT CALL)";
+    when look_back_state_5(p, contract, y, bal, prin);
+    when look_back_final_period_5(p, contract, y, step, days);
+    when growth_factor(step, days, f);
+    then look_back_balance_at_completion_460b2C(p, contract, round(bal * f, 2, "HALF_UP"), prin);
+}
+rule LookBackLevel6(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "the walk moves to the next accrual period";
+    when look_back_full_period_5(p, contract, y, y_next, step, days);
+    then look_back_level_6(p, contract, y_next);
+}
+rule LookBackState6From5(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, bal: Money, prin: Money, step: Decimal, days: Integer, f: Decimal, dn: Money) defeasible {
+    label en official "the balance grown over the full period plus the next year's amount starts the next level (section 460(b)(2)(B)-(C))";
+    when look_back_state_5(p, contract, y, bal, prin);
+    when look_back_full_period_5(p, contract, y, y_next, step, days);
+    when growth_factor(step, days, f);
+    when look_back_year_amount_460b2B(p, contract, y_next, dn);
+    then look_back_state_6(p, contract, y_next, round(bal * f, 2, "HALF_UP") + dn, prin + dn);
+}
+@source(IRC_S460_B, quote = "(C) then using the adjusted overpayment rate (as defined in paragraph (7)), compounded daily, on the overpayment or underpayment determined under subparagraph (B).")
+rule LookBackFinalPeriod6(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, due: Date, due_next: Date, dc: Date, r: Decimal) defeasible {
+    label en official "the contract is completed inside the accrual period of level 6: daily interest at the adjusted overpayment rate up to the completion date (section 460(b)(2)(C))";
+    when look_back_level_6(p, contract, y);
+    when preceding_taxable_year_465(y, y_next);
+    when return_due_date_without_extensions_460b7B(p, y, due);
+    when return_due_date_without_extensions_460b7B(p, y_next, due_next);
+    when contract_completion_date_460c3B(contract, dc);
+    when dc <= due_next;
+    when adjusted_overpayment_rate_460b7A(p, y, r);
+    then look_back_final_period_6(p, contract, y, div_round(r, 365.0, 12, "HALF_UP"), max(days_between(due, dc), 0));
+}
+rule LookBackFullPeriod6(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, due: Date, due_next: Date, dc: Date, r: Decimal) defeasible {
+    label en official "the accrual period of level 6 ends before completion: daily interest for the whole period (section 460(b)(2)(C), (b)(7)(B))";
+    when look_back_level_6(p, contract, y);
+    when preceding_taxable_year_465(y, y_next);
+    when return_due_date_without_extensions_460b7B(p, y, due);
+    when return_due_date_without_extensions_460b7B(p, y_next, due_next);
+    when contract_completion_date_460c3B(contract, dc);
+    when dc > due_next;
+    when adjusted_overpayment_rate_460b7A(p, y, r);
+    then look_back_full_period_6(p, contract, y, y_next, div_round(r, 365.0, 12, "HALF_UP"), days_between(due, due_next));
+}
+rule LookBackRequestFinal6(p: Person, contract: Integer, y: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the daily growth factor of the final period";
+    when look_back_final_period_6(p, contract, y, step, days);
+    then growth_request(step, days);
+}
+rule LookBackRequestFull6(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the daily growth factor of the full period";
+    when look_back_full_period_6(p, contract, y, y_next, step, days);
+    then growth_request(step, days);
+}
+rule LookBackRequestNextYear6(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the next look-back year's amount";
+    when look_back_full_period_6(p, contract, y, y_next, step, days);
+    then look_back_year_request_460b2(p, contract, y_next);
+}
+rule LookBackBalanceAtCompletion6(p: Person, contract: Integer, y: TaxableYear, bal: Money, prin: Money, step: Decimal, days: Integer, f: Decimal) defeasible {
+    label en official "the final balance: the balance grown by the daily factor of the last period, rounded to cents HALF_UP (JUDGMENT CALL)";
+    when look_back_state_6(p, contract, y, bal, prin);
+    when look_back_final_period_6(p, contract, y, step, days);
+    when growth_factor(step, days, f);
+    then look_back_balance_at_completion_460b2C(p, contract, round(bal * f, 2, "HALF_UP"), prin);
+}
+rule LookBackLevel7(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "the walk moves to the next accrual period";
+    when look_back_full_period_6(p, contract, y, y_next, step, days);
+    then look_back_level_7(p, contract, y_next);
+}
+rule LookBackState7From6(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, bal: Money, prin: Money, step: Decimal, days: Integer, f: Decimal, dn: Money) defeasible {
+    label en official "the balance grown over the full period plus the next year's amount starts the next level (section 460(b)(2)(B)-(C))";
+    when look_back_state_6(p, contract, y, bal, prin);
+    when look_back_full_period_6(p, contract, y, y_next, step, days);
+    when growth_factor(step, days, f);
+    when look_back_year_amount_460b2B(p, contract, y_next, dn);
+    then look_back_state_7(p, contract, y_next, round(bal * f, 2, "HALF_UP") + dn, prin + dn);
+}
+@source(IRC_S460_B, quote = "(C) then using the adjusted overpayment rate (as defined in paragraph (7)), compounded daily, on the overpayment or underpayment determined under subparagraph (B).")
+rule LookBackFinalPeriod7(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, due: Date, due_next: Date, dc: Date, r: Decimal) defeasible {
+    label en official "the contract is completed inside the accrual period of level 7: daily interest at the adjusted overpayment rate up to the completion date (section 460(b)(2)(C))";
+    when look_back_level_7(p, contract, y);
+    when preceding_taxable_year_465(y, y_next);
+    when return_due_date_without_extensions_460b7B(p, y, due);
+    when return_due_date_without_extensions_460b7B(p, y_next, due_next);
+    when contract_completion_date_460c3B(contract, dc);
+    when dc <= due_next;
+    when adjusted_overpayment_rate_460b7A(p, y, r);
+    then look_back_final_period_7(p, contract, y, div_round(r, 365.0, 12, "HALF_UP"), max(days_between(due, dc), 0));
+}
+rule LookBackFullPeriod7(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, due: Date, due_next: Date, dc: Date, r: Decimal) defeasible {
+    label en official "the accrual period of level 7 ends before completion: daily interest for the whole period (section 460(b)(2)(C), (b)(7)(B))";
+    when look_back_level_7(p, contract, y);
+    when preceding_taxable_year_465(y, y_next);
+    when return_due_date_without_extensions_460b7B(p, y, due);
+    when return_due_date_without_extensions_460b7B(p, y_next, due_next);
+    when contract_completion_date_460c3B(contract, dc);
+    when dc > due_next;
+    when adjusted_overpayment_rate_460b7A(p, y, r);
+    then look_back_full_period_7(p, contract, y, y_next, div_round(r, 365.0, 12, "HALF_UP"), days_between(due, due_next));
+}
+rule LookBackRequestFinal7(p: Person, contract: Integer, y: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the daily growth factor of the final period";
+    when look_back_final_period_7(p, contract, y, step, days);
+    then growth_request(step, days);
+}
+rule LookBackRequestFull7(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the daily growth factor of the full period";
+    when look_back_full_period_7(p, contract, y, y_next, step, days);
+    then growth_request(step, days);
+}
+rule LookBackRequestNextYear7(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the next look-back year's amount";
+    when look_back_full_period_7(p, contract, y, y_next, step, days);
+    then look_back_year_request_460b2(p, contract, y_next);
+}
+rule LookBackBalanceAtCompletion7(p: Person, contract: Integer, y: TaxableYear, bal: Money, prin: Money, step: Decimal, days: Integer, f: Decimal) defeasible {
+    label en official "the final balance: the balance grown by the daily factor of the last period, rounded to cents HALF_UP (JUDGMENT CALL)";
+    when look_back_state_7(p, contract, y, bal, prin);
+    when look_back_final_period_7(p, contract, y, step, days);
+    when growth_factor(step, days, f);
+    then look_back_balance_at_completion_460b2C(p, contract, round(bal * f, 2, "HALF_UP"), prin);
+}
+rule LookBackLevel8(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "the walk moves to the next accrual period";
+    when look_back_full_period_7(p, contract, y, y_next, step, days);
+    then look_back_level_8(p, contract, y_next);
+}
+rule LookBackState8From7(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, bal: Money, prin: Money, step: Decimal, days: Integer, f: Decimal, dn: Money) defeasible {
+    label en official "the balance grown over the full period plus the next year's amount starts the next level (section 460(b)(2)(B)-(C))";
+    when look_back_state_7(p, contract, y, bal, prin);
+    when look_back_full_period_7(p, contract, y, y_next, step, days);
+    when growth_factor(step, days, f);
+    when look_back_year_amount_460b2B(p, contract, y_next, dn);
+    then look_back_state_8(p, contract, y_next, round(bal * f, 2, "HALF_UP") + dn, prin + dn);
+}
+@source(IRC_S460_B, quote = "(C) then using the adjusted overpayment rate (as defined in paragraph (7)), compounded daily, on the overpayment or underpayment determined under subparagraph (B).")
+rule LookBackFinalPeriod8(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, due: Date, due_next: Date, dc: Date, r: Decimal) defeasible {
+    label en official "the contract is completed inside the accrual period of level 8: daily interest at the adjusted overpayment rate up to the completion date (section 460(b)(2)(C))";
+    when look_back_level_8(p, contract, y);
+    when preceding_taxable_year_465(y, y_next);
+    when return_due_date_without_extensions_460b7B(p, y, due);
+    when return_due_date_without_extensions_460b7B(p, y_next, due_next);
+    when contract_completion_date_460c3B(contract, dc);
+    when dc <= due_next;
+    when adjusted_overpayment_rate_460b7A(p, y, r);
+    then look_back_final_period_8(p, contract, y, div_round(r, 365.0, 12, "HALF_UP"), max(days_between(due, dc), 0));
+}
+rule LookBackFullPeriod8(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, due: Date, due_next: Date, dc: Date, r: Decimal) defeasible {
+    label en official "the accrual period of level 8 ends before completion: daily interest for the whole period (section 460(b)(2)(C), (b)(7)(B))";
+    when look_back_level_8(p, contract, y);
+    when preceding_taxable_year_465(y, y_next);
+    when return_due_date_without_extensions_460b7B(p, y, due);
+    when return_due_date_without_extensions_460b7B(p, y_next, due_next);
+    when contract_completion_date_460c3B(contract, dc);
+    when dc > due_next;
+    when adjusted_overpayment_rate_460b7A(p, y, r);
+    then look_back_full_period_8(p, contract, y, y_next, div_round(r, 365.0, 12, "HALF_UP"), days_between(due, due_next));
+}
+rule LookBackRequestFinal8(p: Person, contract: Integer, y: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the daily growth factor of the final period";
+    when look_back_final_period_8(p, contract, y, step, days);
+    then growth_request(step, days);
+}
+rule LookBackRequestFull8(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the daily growth factor of the full period";
+    when look_back_full_period_8(p, contract, y, y_next, step, days);
+    then growth_request(step, days);
+}
+rule LookBackRequestNextYear8(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the next look-back year's amount";
+    when look_back_full_period_8(p, contract, y, y_next, step, days);
+    then look_back_year_request_460b2(p, contract, y_next);
+}
+rule LookBackBalanceAtCompletion8(p: Person, contract: Integer, y: TaxableYear, bal: Money, prin: Money, step: Decimal, days: Integer, f: Decimal) defeasible {
+    label en official "the final balance: the balance grown by the daily factor of the last period, rounded to cents HALF_UP (JUDGMENT CALL)";
+    when look_back_state_8(p, contract, y, bal, prin);
+    when look_back_final_period_8(p, contract, y, step, days);
+    when growth_factor(step, days, f);
+    then look_back_balance_at_completion_460b2C(p, contract, round(bal * f, 2, "HALF_UP"), prin);
+}
+rule LookBackLevel9(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "the walk moves to the next accrual period";
+    when look_back_full_period_8(p, contract, y, y_next, step, days);
+    then look_back_level_9(p, contract, y_next);
+}
+rule LookBackState9From8(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, bal: Money, prin: Money, step: Decimal, days: Integer, f: Decimal, dn: Money) defeasible {
+    label en official "the balance grown over the full period plus the next year's amount starts the next level (section 460(b)(2)(B)-(C))";
+    when look_back_state_8(p, contract, y, bal, prin);
+    when look_back_full_period_8(p, contract, y, y_next, step, days);
+    when growth_factor(step, days, f);
+    when look_back_year_amount_460b2B(p, contract, y_next, dn);
+    then look_back_state_9(p, contract, y_next, round(bal * f, 2, "HALF_UP") + dn, prin + dn);
+}
+@source(IRC_S460_B, quote = "(C) then using the adjusted overpayment rate (as defined in paragraph (7)), compounded daily, on the overpayment or underpayment determined under subparagraph (B).")
+rule LookBackFinalPeriod9(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, due: Date, due_next: Date, dc: Date, r: Decimal) defeasible {
+    label en official "the contract is completed inside the accrual period of level 9: daily interest at the adjusted overpayment rate up to the completion date (section 460(b)(2)(C))";
+    when look_back_level_9(p, contract, y);
+    when preceding_taxable_year_465(y, y_next);
+    when return_due_date_without_extensions_460b7B(p, y, due);
+    when return_due_date_without_extensions_460b7B(p, y_next, due_next);
+    when contract_completion_date_460c3B(contract, dc);
+    when dc <= due_next;
+    when adjusted_overpayment_rate_460b7A(p, y, r);
+    then look_back_final_period_9(p, contract, y, div_round(r, 365.0, 12, "HALF_UP"), max(days_between(due, dc), 0));
+}
+rule LookBackFullPeriod9(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, due: Date, due_next: Date, dc: Date, r: Decimal) defeasible {
+    label en official "the accrual period of level 9 ends before completion: daily interest for the whole period (section 460(b)(2)(C), (b)(7)(B))";
+    when look_back_level_9(p, contract, y);
+    when preceding_taxable_year_465(y, y_next);
+    when return_due_date_without_extensions_460b7B(p, y, due);
+    when return_due_date_without_extensions_460b7B(p, y_next, due_next);
+    when contract_completion_date_460c3B(contract, dc);
+    when dc > due_next;
+    when adjusted_overpayment_rate_460b7A(p, y, r);
+    then look_back_full_period_9(p, contract, y, y_next, div_round(r, 365.0, 12, "HALF_UP"), days_between(due, due_next));
+}
+rule LookBackRequestFinal9(p: Person, contract: Integer, y: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the daily growth factor of the final period";
+    when look_back_final_period_9(p, contract, y, step, days);
+    then growth_request(step, days);
+}
+rule LookBackRequestFull9(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the daily growth factor of the full period";
+    when look_back_full_period_9(p, contract, y, y_next, step, days);
+    then growth_request(step, days);
+}
+rule LookBackRequestNextYear9(p: Person, contract: Integer, y: TaxableYear, y_next: TaxableYear, step: Decimal, days: Integer) defeasible {
+    label en official "ask for the next look-back year's amount";
+    when look_back_full_period_9(p, contract, y, y_next, step, days);
+    then look_back_year_request_460b2(p, contract, y_next);
+}
+rule LookBackBalanceAtCompletion9(p: Person, contract: Integer, y: TaxableYear, bal: Money, prin: Money, step: Decimal, days: Integer, f: Decimal) defeasible {
+    label en official "the final balance: the balance grown by the daily factor of the last period, rounded to cents HALF_UP (JUDGMENT CALL)";
+    when look_back_state_9(p, contract, y, bal, prin);
+    when look_back_final_period_9(p, contract, y, step, days);
+    when growth_factor(step, days, f);
+    then look_back_balance_at_completion_460b2C(p, contract, round(bal * f, 2, "HALF_UP"), prin);
+}
+rule LookBackInterestIsBalanceMinusPrincipal(p: Person, contract: Integer, bal: Money, prin: Money) defeasible {
+    label en official "interest = compounded balance - sum of the year amounts (section 460(b)(2)(C))";
+    when look_back_balance_at_completion_460b2C(p, contract, bal, prin);
+    then look_back_interest_460b2C(p, contract, bal - prin);
+}
+@source(IRC_S460_B, quote = "the taxpayer shall pay (or shall be entitled to receive) interest computed under the look-back method of paragraph (2).")
+rule LookBackInterestPayable(p: Person, contract: Integer, interest: Money) defeasible {
+    label en official "a positive net interest is payable by the taxpayer (section 460(b)(1)(B))";
+    when look_back_interest_460b2C(p, contract, interest);
+    when interest > 0.00 USD;
+    then look_back_interest_payable_460b1B(p, contract, interest);
+}
+rule LookBackInterestReceivable(p: Person, contract: Integer, interest: Money) defeasible {
+    label en official "a negative net interest is receivable by the taxpayer (section 460(b)(1)(B))";
+    when look_back_interest_460b2C(p, contract, interest);
+    when interest < 0.00 USD;
+    then look_back_interest_receivable_460b1B(p, contract, 0.00 USD - interest);
+}
+
+// ===================== the 10-percent method inside the look-back =====================
+
+pub relation look_back_cumulative_income_ten_percent_460b5Dii(p: Person, contract: Integer, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the cumulative look-back income under the 10-percent method: nothing before the 10-percent year, the ordinary look-back amount from that year (section 460(b)(5)(D)(ii)); JUDGMENT CALL: the 10-percent year is the one of section 460(b)(5)(B)(ii) (estimated costs)";
+}
+@source(IRC_S460_B, quote = "The 10-percent method shall be taken into account for purposes of applying the look-back method of paragraph (2) to any taxpayer making an election under this paragraph.")
+rule LookBackIncomeTenPercentFromTheTenPercentYear(p: Person, contract: Integer, y: TaxableYear, y10: TaxableYear, d10: Date, d: Date, amount: Money) defeasible {
+    label en official "from the 10-percent year the look-back income is the ordinary look-back amount (section 460(b)(5)(D)(ii))";
+    when ten_percent_method_applies_to_contract_460b5C(p, contract);
+    when ten_percent_year_460b5Bii(p, contract, y10);
+    when us.irc.core::begins(y10, d10);
+    when us.irc.core::begins(y, d);
+    when d >= d10;
+    when look_back_cumulative_income_460b2A(p, contract, y, amount);
+    then look_back_cumulative_income_ten_percent_460b5Dii(p, contract, y, amount);
+}
+rule LookBackIncomeTenPercentBeforeTheTenPercentYear(p: Person, contract: Integer, y: TaxableYear, y10: TaxableYear, d10: Date, d: Date, amount: Money) defeasible {
+    label en official "before the 10-percent year no item is taken into account in the look-back either (section 460(b)(5)(D)(ii))";
+    when ten_percent_method_applies_to_contract_460b5C(p, contract);
+    when ten_percent_year_460b5Bii(p, contract, y10);
+    when us.irc.core::begins(y10, d10);
+    when us.irc.core::begins(y, d);
+    when d < d10;
+    when look_back_cumulative_income_460b2A(p, contract, y, amount);
+    then look_back_cumulative_income_ten_percent_460b5Dii(p, contract, y, 0.00 USD);
+}
+
+// ===================== amounts taken into account after completion =====================
+
+pub relation amount_taken_into_account_after_completion_460b2(p: Person, contract: Integer, item: Integer, taken_on: Date, amount: Money) kind empirical {
+    label en official "an amount properly taken into account after completion of the contract, and the date on which it is properly taken into account (section 460(b)(2), last sentences)";
+}
+pub relation federal_mid_term_rate_as_of_460b2(taken_on: Date, rate: Decimal) kind empirical {
+    label en official "the Federal mid-term rate under section 1274(d) as of the time the amount was properly taken into account, an annual rate compounded semiannually; the published value is asserted (SOURCE_GAP: no IRB rate table pinned)";
+}
+pub relation discounted_post_completion_amount_460b2(p: Person, contract: Integer, item: Integer, amount: Money) kind institutional {
+    label en official "the post-completion amount discounted to its value as of the completion of the contract: amount / factor, factor = (1 + rate/2)^n over the whole six-month periods times simple interest over the stub, one rounding to cents HALF_UP (JUDGMENT CALL); the discounting is absent when the taxpayer elected out";
+}
+relation post_completion_discount_request_460b2(p: Person, contract: Integer, item: Integer, taken_on: Date, dc: Date, rate: Decimal, amount: Money) kind institutional {
+    label en official "helper: the item is to be discounted";
+}
+@source(IRC_S460_B, quote = "For purposes of the preceding sentence, any amount properly taken into account after completion of the contract shall be taken into account by discounting (using the Federal mid-term rate determined under section 1274(d) as of the time such amount was properly taken into account) such amount to its value as of the completion of the contract.")
+rule PostCompletionDiscountRequest(p: Person, contract: Integer, item: Integer, taken_on: Date, dc: Date, rate: Decimal, amount: Money) defeasible {
+    label en official "an amount taken into account after completion is discounted unless the taxpayer elected out (section 460(b)(2))";
+    when amount_taken_into_account_after_completion_460b2(p, contract, item, taken_on, amount);
+    when contract_completion_date_460c3B(contract, dc);
+    when federal_mid_term_rate_as_of_460b2(taken_on, rate);
+    when not_known(elects_out_of_discounting_460b2(p, contract));
+    then post_completion_discount_request_460b2(p, contract, item, taken_on, dc, rate, amount);
+}
+rule PostCompletionDiscountAsksFactor(p: Person, contract: Integer, item: Integer, taken_on: Date, dc: Date, rate: Decimal, amount: Money) defeasible {
+    label en official "the discount factor of the span from completion to the date taken into account";
+    when post_completion_discount_request_460b2(p, contract, item, taken_on, dc, rate, amount);
+    then semiannual_factor_request(rate, dc, taken_on);
+}
+rule PostCompletionDiscountedAmount(p: Person, contract: Integer, item: Integer, taken_on: Date, dc: Date, rate: Decimal, amount: Money, f: Decimal) defeasible {
+    label en official "the value as of completion";
+    when post_completion_discount_request_460b2(p, contract, item, taken_on, dc, rate, amount);
+    when semiannual_factor(rate, dc, taken_on, f);
+    then discounted_post_completion_amount_460b2(p, contract, item, div_round(amount, f, 2, "HALF_UP"));
+}
+rule PostCompletionAmountWhenElectedOut(p: Person, contract: Integer, item: Integer, taken_on: Date, amount: Money) defeasible {
+    label en official "with the election out of discounting the amount is taken into account at its face value (section 460(b)(2), last sentence)";
+    when amount_taken_into_account_after_completion_460b2(p, contract, item, taken_on, amount);
+    when elects_out_of_discounting_460b2(p, contract);
+    then discounted_post_completion_amount_460b2(p, contract, item, amount);
+}
+

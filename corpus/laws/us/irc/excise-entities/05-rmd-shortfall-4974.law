@@ -1,0 +1,147 @@
+// Section 4974 — excise tax on certain accumulations in qualified retirement
+// plans (RMD shortfall). Reuses the shared candidate/earliest-of machinery
+// from 01-excise-act-and-taxable-period.law (`taxable_period_end_candidate`,
+// `earlier_taxable_period_end_candidate_exists`, `taxable_period_ends`) for
+// the (e)(2) "correction window", which is the identical
+// earliest-of-notice/assessment/[a different third event] shape — only the
+// BEGIN event (date the tax is imposed, not the date of an act) and the
+// THIRD candidate (the second-taxable-year-end of (e)(2)(C), not a
+// correction-completed date) differ from section 4941's instantiation, so
+// this module adds its OWN begin relation and its own third-candidate rule
+// instead of reusing `excise_act_occurred_on`/`act_corrected_on` (whose
+// labels are self-dealing-specific) — but calls into the SAME shared
+// `taxable_period_end_candidate` head, demonstrating the reuse the
+// assignment's method note asks for.
+//
+// SCOPE: (a) the 25% tax and its (e) 10%-if-corrected-in-the-window
+// reduction are modelled fully. (b) "minimum required distribution" is
+// PARTIALLY wired as of WIRE-2 (25.09.2026): `us.irc.deferred_compensation`
+// now publishes `pub required_minimum_distribution(who: Individual, plan:
+// Plan, y: TaxableYear, amount: Money)` (TECH-GAPS G216 was stale — that
+// pub was added in an earlier pass). This package tracks the shortfall by
+// `ExciseAct`, not by (Individual, Plan, TaxableYear), so a bridging fact
+// (`rmd_plan_and_year`) plus `rmd_payee` (retyped `Individual`, was
+// `Person`) connect the two; `Rmd4974MinimumFromDeferredCompensation` below
+// derives `rmd_minimum_required_distribution` from the import ADDITIVELY —
+// the case-asserted form (used by this package's own 3 existing scenarios)
+// still works unchanged. (c) (the
+// per-plan-type minimum-required-distribution formulas for section
+// 401(a)(9)/403(b)(10)/408(a)(6)/408(b)(3)/457(d)(2)) is NOT modelled here
+// at all — it belongs to whichever package eventually owns those
+// cross-referenced sections, not to this excise package. (d) (repealed by
+// SECURE 2.0? — this package's pinned text was not checked for a (d)
+// paragraph beyond what DISPOSITIONS.json lists; not modelled, TECH_GAP).
+
+use self::{
+    ExciseAct,
+    ExciseActKind,
+    IRC_S4974_A,
+    IRC_S4974_B,
+    IRC_S4974_E,
+    Individual,
+    Plan,
+    TaxableYear,
+    excise_act_kind,
+    rmd_shortfall_tax_waived,
+    taxable_period_end_candidate,
+    taxable_period_ends,
+};
+
+enum RmdCorrectionWindowEndSource {
+    SecondTaxableYearEnd;
+}
+
+@source(IRC_S4974_A, coverage = partial, quote = "there is hereby imposed a tax equal to 25 percent of the amount by which such minimum required distribution exceeds the actual amount distributed during the taxable year")
+pub relation rmd_shortfall_tax_imposed_on(a: ExciseAct, on: Date) kind empirical {
+    label en unofficial "the date the section 4974(a) tax was imposed with respect to this shortfall — begins the (e)(2) correction window";
+}
+
+@source(IRC_S4974_B, coverage = partial, quote = "the term \"minimum required distribution\" means the minimum amount required to be distributed during a taxable year under section 401(a)(9), 403(b)(10), 408(a)(6), 408(b)(3), or 457(d)(2)")
+pub relation rmd_minimum_required_distribution(a: ExciseAct, amount: Money) kind empirical {
+    label en unofficial "section 4974(b): the minimum required distribution for the taxable year — case-asserted directly (for a case that does not name a plan/year), OR derived from us.irc.deferred_compensation::required_minimum_distribution via Rmd4974MinimumFromDeferredCompensation below (WIRE-2, 25.09.2026)";
+}
+pub relation rmd_actual_distribution(a: ExciseAct, amount: Money) kind empirical {
+    label en unofficial "the actual amount distributed during the taxable year";
+}
+pub relation rmd_payee(a: ExciseAct, payee: Individual) kind empirical {
+    label en unofficial "the payee under the qualified retirement plan or eligible deferred compensation plan (WIRE-2: retyped Individual, was Person, to match us.irc.deferred_compensation::required_minimum_distribution's first parameter)";
+}
+pub relation rmd_plan_and_year(a: ExciseAct, plan: Plan, y: TaxableYear) kind empirical {
+    label en unofficial "case fact: identifies the qualified retirement plan and taxable year this section 4974 excise act's RMD shortfall concerns — links to us.irc.deferred_compensation::required_minimum_distribution (WIRE-2, 25.09.2026)";
+}
+@source(IRC_S4974_B, coverage = contextual, quote = "the minimum amount required to be distributed during a taxable year")
+rule Rmd4974MinimumFromDeferredCompensation(a: ExciseAct, payee: Individual, plan: Plan, y: TaxableYear, amount: Money) defeasible {
+    label en unofficial "bridges this package's ExciseAct-keyed shortfall to us.irc.deferred_compensation's (Individual, Plan, TaxableYear)-keyed computation, when a case supplies the plan/year link";
+    when rmd_payee(a, payee)
+        and rmd_plan_and_year(a, plan, y)
+        and us.irc.deferred_compensation::required_minimum_distribution(payee, plan, y, amount);
+    then rmd_minimum_required_distribution(a, amount);
+}
+
+@source(IRC_S4974_E, coverage = partial, quote = "the last day of the second taxable year that begins after the end of the taxable year in which the tax under subsection (a) is imposed")
+pub relation rmd_second_taxable_year_end(a: ExciseAct, on: Date) kind empirical {
+    label en unofficial "section 4974(e)(2)(C): the last day of the second taxable year beginning after the taxable year the (a) tax was imposed for — case-asserted (no calendar-year-counting rule is built here, matching the caveat already logged for section 4941's own year-count TECH_GAP)";
+}
+rule RmdCorrectionWindowEndCandidateFromSecondYearEnd(a: ExciseAct, on: Date) defeasible {
+    label en official "section 4974(e)(2)(C): the second-taxable-year-end is a candidate end of the correction window";
+    when rmd_second_taxable_year_end(a, on);
+    then taxable_period_end_candidate(a, on);
+}
+// The (e)(2)(A)/(B) notice-mailing/assessment candidates are already
+// supplied by `TaxablePeriodEndCandidateFromNotice`/`...FromAssessment` in
+// 01-excise-act-and-taxable-period.law via the SAME `notice_for_act`/
+// `assessment_for_act` relations — no re-declaration needed here.
+
+@source(IRC_S4974_E, coverage = partial, quote = "receives a distribution, during the correction window, of the amount which resulted in imposition of a tax under subsection (a) from the same plan to which such tax relates")
+pub relation rmd_shortfall_distributed_during_window(a: ExciseAct, on: Date) kind empirical {
+    label en unofficial "section 4974(e)(1)(A): the shortfall amount was distributed from the same plan on this date";
+}
+@source(IRC_S4974_E, coverage = partial, quote = "submits a return, during the correction window, reflecting such tax (as modified by this subsection)")
+pub relation rmd_return_submitted_during_window(a: ExciseAct, on: Date) kind empirical {
+    label en unofficial "section 4974(e)(1)(B): a return reflecting the (as-modified) tax was submitted on this date";
+}
+
+@source(IRC_S4974_E, coverage = partial, quote = "the period of time beginning on the date on which the tax under subsection (a) is imposed with respect to a shortfall of distributions from a plan described in subsection (a), and ending on the earliest of")
+pub relation rmd_corrected_within_window(a: ExciseAct) kind institutional {
+    label en official "section 4974(e)(1): both the shortfall distribution and the return were made within the correction window (begins when the (a) tax is imposed, ends on the earliest of notice mailing / assessment / second-taxable-year-end)";
+}
+rule RmdCorrectedWithinWindow(a: ExciseAct, distributed_on: Date, filed_on: Date, imposed_on: Date, ends: Date) defeasible {
+    label en official "section 4974(e)(1)(A)-(B): the shortfall was distributed and the return submitted, both during the correction window";
+    when rmd_shortfall_tax_imposed_on(a, imposed_on);
+    when rmd_shortfall_distributed_during_window(a, distributed_on);
+    when rmd_return_submitted_during_window(a, filed_on);
+    when taxable_period_ends(a, ends);
+    when imposed_on <= distributed_on;
+    when distributed_on <= ends;
+    when imposed_on <= filed_on;
+    when filed_on <= ends;
+    then rmd_corrected_within_window(a);
+}
+
+@source(IRC_S4974_A, coverage = partial, quote = "If the amount distributed during the taxable year of the payee under any qualified retirement plan or any eligible deferred compensation plan (as defined in section 457(b)) is less than the minimum required distribution for such taxable year, there is hereby imposed a tax equal to 25 percent of the amount by which such minimum required distribution exceeds the actual amount distributed during the taxable year. The tax imposed by this section shall be paid by the payee.")
+pub relation rmd_shortfall_tax(a: ExciseAct, payee: Individual, amount: Money) kind institutional {
+    label en official "section 4974(a)/(e): 25 percent (10 percent if corrected within the (e) correction window) of the shortfall between the minimum required distribution and the actual amount distributed";
+}
+rule RmdShortfallTaxStandardRate(a: ExciseAct, payee: Individual, amount: Money, required: Money, actual: Money) defeasible {
+    label en official "section 4974(a): 25 percent of the shortfall, paid by the payee, when the actual distribution is less than the minimum required distribution";
+    when excise_act_kind(a, RmdShortfall);
+    when rmd_payee(a, payee);
+    when rmd_minimum_required_distribution(a, required);
+    when rmd_actual_distribution(a, actual);
+    when actual < required;
+    unless rmd_corrected_within_window(a) and rmd_payee(a, payee) and rmd_minimum_required_distribution(a, required) and rmd_actual_distribution(a, actual);
+    // Stage 3: section 4974(d) waiver (33-*.law).
+    unless rmd_shortfall_tax_waived(a) and rmd_payee(a, payee) and rmd_minimum_required_distribution(a, required) and rmd_actual_distribution(a, actual);
+    then rmd_shortfall_tax(a, payee, (required - actual) * RmdShortfallStandardRate);
+}
+rule RmdShortfallTaxReducedRateWhenCorrected(a: ExciseAct, payee: Individual, amount: Money, required: Money, actual: Money) defeasible {
+    label en official "section 4974(e)(1): 10 percent (substituted for 25 percent) when the shortfall is distributed and the return submitted within the correction window";
+    when excise_act_kind(a, RmdShortfall);
+    when rmd_payee(a, payee);
+    when rmd_minimum_required_distribution(a, required);
+    when rmd_actual_distribution(a, actual);
+    when actual < required;
+    when rmd_corrected_within_window(a);
+    unless rmd_shortfall_tax_waived(a) and rmd_payee(a, payee) and rmd_minimum_required_distribution(a, required) and rmd_actual_distribution(a, actual);
+    then rmd_shortfall_tax(a, payee, (required - actual) * RmdShortfallReducedRate);
+}

@@ -1,0 +1,258 @@
+// Section 318 — constructive ownership of stock. Stage 1 (IRC-08 stage 1,
+// A06), priority section; PLAN family-4 probe ("ownership/attribution
+// through several persons"). HANDOFF.md flags this as the class of chain
+// most likely to hit `property-transactions`' G24/G25 self-loop findings
+// (a predicate cannot both consume and produce itself even across distinct
+// argument keys) — modelled below as a BOUNDED chain with a DISTINCT
+// relation per attribution kind (family / entity-to-owner / owner-to-entity
+// / option), each reading only DIRECT `us.irc.core::ownership_interest`
+// facts plus the OTHER kinds' outputs, never its own output, so no relation
+// recurses into itself. This gives exactly one attribution "hop" of each
+// kind; a chain of three or more hops needing the SAME kind applied twice
+// (e.g. family-attribution-of-family-attribution, which (a)(5)(B) forbids
+// anyway) is out of scope by construction — see the no-double-attribution
+// note below, which is why this bound is not a loss of coverage for (a)(5).
+//
+// `constructive_ownership(p, corp, share, via)` is the PUBLIC result
+// relation named in the owner interface; `via` is an attribution-kind tag
+// (an enum) rather than a free-form audit trail, since the compiler traps
+// collected by the first wave reject self-recursive derivations that would
+// be needed to build a real path list.
+
+
+use self::{
+    Corporation,
+    Estate,
+    IRC_S318_A,
+    Individual,
+    OwnershipInterest,
+    Partnership,
+    Person,
+    Trust,
+};
+
+pub enum AttributionKind {
+    Actual;
+    Family;
+    FromEntity;
+    ToEntity;
+    Option;
+    label en unofficial "the kind of ownership (direct, or the section 318(a) attribution rule) that establishes constructive_ownership";
+}
+
+pub relation constructive_ownership(p: Person, corp: Corporation, share: Decimal, via: AttributionKind) kind institutional {
+    label en official "a person is considered as owning stock (share of the corporation) actually or constructively under section 318(a)";
+}
+
+// --- Actual ownership restated as constructive_ownership(..., Actual) ------
+// section 318(a) attribution operates on stock a person "owns, directly or
+// indirectly" — every attribution paragraph below reads DIRECT
+// `us.irc.core::ownership_interest` facts, so actual ownership itself is
+// exposed under the same relation for a consumer that wants "actual or
+// constructive" in one place, tagged distinctly from every attributed hop.
+rule ActualOwnershipIsConstructiveOwnership(p: Person, corp: Corporation, share: Decimal, oi: OwnershipInterest) strict {
+    label en unofficial "actual (direct) stock ownership, restated as constructive_ownership tagged Actual, so a consumer can read 'owns actually or constructively' from one relation";
+    when us.irc.core::ownership_interest(oi, p, corp, share);
+    then constructive_ownership(p, corp, share, Actual);
+}
+
+// --- Section 318(a)(1): family attribution ----------------------------------
+
+pub relation spouse_of(a: Individual, b: Individual) kind empirical {
+    label en unofficial "a is the spouse of b, for purposes of section 318(a)(1)(A)(i)";
+}
+pub relation legally_separated_spouse(a: Individual, b: Individual) kind empirical {
+    label en official "a is a spouse of b who is legally separated from b under a decree of divorce or separate maintenance — excluded from section 318(a)(1)(A)(i) attribution";
+}
+pub relation child_grandchild_or_parent_of(a: Individual, b: Individual) kind empirical {
+    label en official "a is a child, grandchild, or parent of b, for purposes of section 318(a)(1)(A)(ii) (a legally adopted child is treated as a child by blood, section 318(a)(1)(B) — asserted directly as a case fact of this relation, not as a separate adoption predicate, since the statute equates the two for this purpose)";
+}
+
+@source(IRC_S318_A, quote = "his spouse (other than a spouse who is legally separated from the individual under a decree of divorce or separate maintenance)")
+rule FamilyAttributionFromSpouse(ind: Individual, spouse: Individual, corp: Corporation, share: Decimal, oi: OwnershipInterest) defeasible {
+    label en official "section 318(a)(1)(A)(i): an individual is considered as owning the stock owned by the individual's spouse (unless legally separated)";
+    when spouse_of(spouse, ind);
+    when not_known(legally_separated_spouse(spouse, ind));
+    when us.irc.core::ownership_interest(oi, spouse, corp, share);
+    then constructive_ownership(ind, corp, share, Family);
+}
+@source(IRC_S318_A, quote = "his children, grandchildren, and parents")
+rule FamilyAttributionFromLinealRelative(ind: Individual, relative: Individual, corp: Corporation, share: Decimal, oi: OwnershipInterest) defeasible {
+    label en official "section 318(a)(1)(A)(ii): an individual is considered as owning the stock owned by the individual's children, grandchildren, and parents";
+    when child_grandchild_or_parent_of(relative, ind);
+    when us.irc.core::ownership_interest(oi, relative, corp, share);
+    then constructive_ownership(ind, corp, share, Family);
+}
+
+// --- Section 318(a)(2): attribution FROM entities to owners -----------------
+
+pub relation partner_of(person: Person, partnership: Partnership, interest_share: Decimal) kind empirical {
+    label en official "person is a partner of the partnership, holding interest_share of it, for purposes of section 318(a)(2)(A)/(a)(3)(A)";
+}
+pub relation beneficiary_of_estate(person: Person, estate: Estate, interest_share: Decimal) kind empirical {
+    label en official "person is a beneficiary of the estate, holding interest_share of it, for purposes of section 318(a)(2)(A)/(a)(3)(A)";
+}
+pub relation beneficiary_of_trust_actuarial_share(person: Person, trust: Trust, actuarial_share: Decimal) kind empirical {
+    label en official "person is a beneficiary of the trust, with actuarial_share of the beneficial interest, for purposes of section 318(a)(2)(B)(i)/(a)(3)(B)(i) (an employees' trust exempt under section 401(a)/501(a) is excluded — asserted, not derived, this stage)";
+}
+pub relation deemed_owner_of_trust_portion(person: Person, trust: Trust) kind empirical {
+    label en official "person is considered the owner of a portion of the trust under subpart E of part I of subchapter J (grantor trust rules), for purposes of section 318(a)(2)(B)(ii)/(a)(3)(B)(ii)";
+}
+pub relation fifty_percent_or_more_owner_of_corp(person: Person, corp: Corporation, owned_share: Decimal) kind empirical {
+    label en official "person owns, directly or indirectly, 50 percent or more in value of the stock of the corporation, for purposes of section 318(a)(2)(C)/(a)(3)(C)";
+}
+
+@source(IRC_S318_A, quote = "Stock owned, directly or indirectly, by or for a partnership or estate shall be considered as owned proportionately by its partners or beneficiaries.")
+rule EntityAttributionFromPartnership(partner: Person, partnership: Partnership, interest_share: Decimal, corp: Corporation, share: Decimal, oi: OwnershipInterest) defeasible {
+    label en official "section 318(a)(2)(A): a partner is considered as owning the partnership's stock proportionately to the partner's interest";
+    when partner_of(partner, partnership, interest_share);
+    when us.irc.core::ownership_interest(oi, partnership, corp, share);
+    then constructive_ownership(partner, corp, share * interest_share, FromEntity);
+}
+@source(IRC_S318_A, quote = "Stock owned, directly or indirectly, by or for a partnership or estate shall be considered as owned proportionately by its partners or beneficiaries.")
+rule EntityAttributionFromEstate(beneficiary: Person, estate: Estate, interest_share: Decimal, corp: Corporation, share: Decimal, oi: OwnershipInterest) defeasible {
+    label en official "section 318(a)(2)(A): a beneficiary of an estate is considered as owning the estate's stock proportionately to the beneficiary's interest";
+    when beneficiary_of_estate(beneficiary, estate, interest_share);
+    when us.irc.core::ownership_interest(oi, estate, corp, share);
+    then constructive_ownership(beneficiary, corp, share * interest_share, FromEntity);
+}
+@source(IRC_S318_A, quote = "Stock owned, directly or indirectly, by or for a trust (other than an employees' trust described in section 401(a) which is exempt from tax under section 501(a)) shall be considered as owned by its beneficiaries in proportion to the actuarial interest of such beneficiaries in such trust.")
+rule EntityAttributionFromTrustByActuarialInterest(beneficiary: Person, trust: Trust, actuarial_share: Decimal, corp: Corporation, share: Decimal, oi: OwnershipInterest) defeasible {
+    label en official "section 318(a)(2)(B)(i): a trust beneficiary is considered as owning the trust's stock in proportion to the beneficiary's actuarial interest";
+    when beneficiary_of_trust_actuarial_share(beneficiary, trust, actuarial_share);
+    when us.irc.core::ownership_interest(oi, trust, corp, share);
+    then constructive_ownership(beneficiary, corp, share * actuarial_share, FromEntity);
+}
+@source(IRC_S318_A, quote = "Stock owned, directly or indirectly, by or for any portion of a trust of which a person is considered the owner under subpart E of part I of subchapter J (relating to grantors and others treated as substantial owners) shall be considered as owned by such person.")
+rule EntityAttributionFromTrustGrantor(owner: Person, trust: Trust, corp: Corporation, share: Decimal, oi: OwnershipInterest) defeasible {
+    label en official "section 318(a)(2)(B)(ii): the deemed owner of a portion of a grantor trust is considered as owning that portion's stock";
+    when deemed_owner_of_trust_portion(owner, trust);
+    when us.irc.core::ownership_interest(oi, trust, corp, share);
+    then constructive_ownership(owner, corp, share, FromEntity);
+}
+@source(IRC_S318_A, quote = "If 50 percent or more in value of the stock in a corporation is owned, directly or indirectly, by or for any person, such person shall be considered as owning the stock owned, directly or indirectly, by or for such corporation, in that proportion which the value of the stock which such person so owns bears to the value of all the stock in such corporation.")
+rule EntityAttributionFromFiftyPercentOwnedCorp(owner: Person, held: Corporation, owned_share: Decimal, target: Corporation, held_share: Decimal, oi: OwnershipInterest) defeasible {
+    label en official "section 318(a)(2)(C): a 50-percent-or-more owner of a corporation is considered as owning that corporation's stock in another corporation, proportionately";
+    when fifty_percent_or_more_owner_of_corp(owner, held, owned_share);
+    when owned_share >= 0.50;
+    when us.irc.core::ownership_interest(oi, held, target, held_share);
+    then constructive_ownership(owner, target, held_share * owned_share, FromEntity);
+}
+
+// --- Section 318(a)(3): attribution TO entities from owners -----------------
+
+@source(IRC_S318_A, quote = "Stock owned, directly or indirectly, by or for a partner or a beneficiary of an estate shall be considered as owned by the partnership or estate.")
+rule EntityAttributionToPartnershipFromPartner(partnership: Partnership, partner: Person, corp: Corporation, share: Decimal, oi: OwnershipInterest) defeasible {
+    label en official "section 318(a)(3)(A): a partnership is considered as owning the stock owned by its partners";
+    when partner_of(partner, partnership, _);
+    when us.irc.core::ownership_interest(oi, partner, corp, share);
+    then constructive_ownership(partnership, corp, share, ToEntity);
+}
+@source(IRC_S318_A, quote = "Stock owned, directly or indirectly, by or for a partner or a beneficiary of an estate shall be considered as owned by the partnership or estate.")
+rule EntityAttributionToEstateFromBeneficiary(estate: Estate, beneficiary: Person, corp: Corporation, share: Decimal, oi: OwnershipInterest) defeasible {
+    label en official "section 318(a)(3)(A): an estate is considered as owning the stock owned by its beneficiaries";
+    when beneficiary_of_estate(beneficiary, estate, _);
+    when us.irc.core::ownership_interest(oi, beneficiary, corp, share);
+    then constructive_ownership(estate, corp, share, ToEntity);
+}
+pub relation trust_beneficiary_remote_contingent_interest(beneficiary: Person, trust: Trust) kind empirical {
+    label en official "the beneficiary's interest in the trust is a remote contingent interest (5 percent or less of trust property value under maximum trustee discretion), excluded from section 318(a)(3)(B)(i) attribution";
+}
+@source(IRC_S318_A, quote = "Stock owned, directly or indirectly, by or for a beneficiary of a trust (other than an employees' trust described in section 401(a) which is exempt from tax under section 501(a)) shall be considered as owned by the trust, unless such beneficiary's interest in the trust is a remote contingent interest.")
+rule EntityAttributionToTrustFromBeneficiary(trust: Trust, beneficiary: Person, corp: Corporation, share: Decimal, oi: OwnershipInterest) defeasible {
+    label en official "section 318(a)(3)(B)(i): a trust is considered as owning the stock owned by its beneficiaries, unless the beneficiary's interest is a remote contingent interest";
+    when beneficiary_of_trust_actuarial_share(beneficiary, trust, _);
+    when not_known(trust_beneficiary_remote_contingent_interest(beneficiary, trust));
+    when us.irc.core::ownership_interest(oi, beneficiary, corp, share);
+    then constructive_ownership(trust, corp, share, ToEntity);
+}
+@source(IRC_S318_A, quote = "Stock owned, directly or indirectly, by or for a person who is considered the owner of any portion of a trust under subpart E of part I of subchapter J (relating to grantors and others treated as substantial owners) shall be considered as owned by the trust.")
+rule EntityAttributionToTrustFromGrantor(trust: Trust, owner: Person, corp: Corporation, share: Decimal, oi: OwnershipInterest) defeasible {
+    label en official "section 318(a)(3)(B)(ii): a trust is considered as owning the stock owned by a person treated as the owner of a portion of it";
+    when deemed_owner_of_trust_portion(owner, trust);
+    when us.irc.core::ownership_interest(oi, owner, corp, share);
+    then constructive_ownership(trust, corp, share, ToEntity);
+}
+@source(IRC_S318_A, quote = "If 50 percent or more in value of the stock in a corporation is owned, directly or indirectly, by or for any person, such corporation shall be considered as owning the stock owned, directly or indirectly, by or for such person.")
+rule EntityAttributionToCorpFromFiftyPercentOwner(held: Corporation, owner: Person, owned_share: Decimal, target: Corporation, held_share: Decimal, oi: OwnershipInterest) defeasible {
+    label en official "section 318(a)(3)(C): a corporation is considered as owning the stock owned by any person who owns 50 percent or more in value of its stock";
+    when fifty_percent_or_more_owner_of_corp(owner, held, owned_share);
+    when owned_share >= 0.50;
+    when us.irc.core::ownership_interest(oi, owner, target, held_share);
+    then constructive_ownership(held, target, held_share, ToEntity);
+}
+
+// --- Section 318(a)(4): options ---------------------------------------------
+
+pub relation option_to_acquire_stock(holder: Person, corp: Corporation, share: Decimal) kind empirical {
+    label en official "the holder has an option to acquire the stated share of the corporation's stock (an option to acquire an option, and each in a series of such options, is itself treated as an option to acquire the stock, section 318(a)(4) second sentence — asserted directly here as the same relation, since the statute collapses a chain of options to one option fact)";
+}
+@source(IRC_S318_A, quote = "If any person has an option to acquire stock, such stock shall be considered as owned by such person.")
+rule OptionAttribution(holder: Person, corp: Corporation, share: Decimal) defeasible {
+    label en official "section 318(a)(4): a person with an option to acquire stock is considered as owning that stock";
+    when option_to_acquire_stock(holder, corp, share);
+    then constructive_ownership(holder, corp, share, Option);
+}
+
+// --- Section 318(a)(5): operating rules --------------------------------------
+//
+// (5)(A) says stock attributed under (1)-(4) is treated as ACTUALLY owned
+// for purposes of RE-APPLYING (1)-(4) — i.e., a further hop is allowed
+// EXCEPT where (B) or (C) blocks it. Given this module's bounded, one-hop-
+// per-kind design (see file header), a full re-application chain (family
+// attribution feeding partnership attribution feeding option attribution,
+// etc.) is NOT modelled as a generic re-entry: each rule above reads
+// `us.irc.core::ownership_interest` (ACTUAL ownership) only, not
+// `constructive_ownership`. This is a DELIBERATE, DOCUMENTED
+// UNDER-approximation of (5)(A) (a real multi-hop chain — e.g. attribute
+// from a partner to the partnership under (a)(3), THEN from the
+// partnership to a second corporation's shareholder under (a)(2)(C) — is
+// NOT derived), traded off against the compiler's rejection of a predicate
+// that consumes and produces itself (HANDOFF.md G24/G25). TECH_GAP,
+// recorded in TECH-GAPS.md with a minimal two-hop reproduction. What IS
+// enforced without a chain is the anti-cycle discipline itself:
+//
+// (5)(B): stock constructively owned by an individual under (1) [family]
+// is NOT re-attributed under (1) again ("no double family attribution") —
+// automatically satisfied here because `FamilyAttributionFrom*` reads only
+// direct `ownership_interest`, never `constructive_ownership(..., Family)`;
+// there is no rule that could re-apply family attribution to a family-
+// attributed share. Recorded as an explicit invariant, not left implicit:
+pub relation would_double_family_attribute(ind: Individual, corp: Corporation) kind institutional {
+    label en unofficial "a diagnostic predicate that is never derivable by construction — section 318(a)(5)(B)'s no-double-family-attribution limit; kept as a named invariant for the coverage row and a scenario that shows it stays false";
+}
+// (deliberately no rule concludes this relation)
+
+// (5)(C): stock constructively owned by a partnership/estate/trust/
+// corporation under (3) [entity-to-owner direction... actually FROM-owner-
+// TO-entity, i.e. ToEntity] is NOT re-attributed under (2) [FromEntity] to
+// make another the constructive owner ("no sidewise attribution" through
+// the SAME entity in both directions). Same construction: `EntityAttribution
+// From*` (kind FromEntity) reads only direct `ownership_interest` of the
+// entity, never `constructive_ownership(..., ToEntity)` of that entity, so
+// stock the entity constructively holds via (3) can never be re-attributed
+// back out via (2). Recorded as the analogous named invariant:
+pub relation would_sidewise_attribute(entity_person: Person, corp: Corporation) kind institutional {
+    label en unofficial "a diagnostic predicate that is never derivable by construction — section 318(a)(5)(C)'s no-sidewise-attribution limit; kept as a named invariant for the coverage row and a scenario that shows it stays false";
+}
+// (deliberately no rule concludes this relation)
+
+// (5)(D) (stock attributable to an individual under BOTH (1) and (4) is
+// considered owned under (4)) is a TIE-BREAK between two attribution kinds
+// this module already tags distinctly (`Family` vs `Option`); a consumer
+// needing the (5)(D) priority reads BOTH tags and prefers `Option` where
+// both are present for the same (person, corp) pair — recorded as a
+// judgment call (no `priority` block needed: both rules can co-derive
+// without conflict since `constructive_ownership` is not a single-valued
+// head, so this is advisory, not an arbitration).
+
+// (5)(E) (S corporation treated as a partnership, its shareholders as
+// partners, for purposes of this SUBSECTION, except for determining
+// whether stock IN THE S CORPORATION itself is constructively owned) is an
+// EXTERNAL_DEPENDENCY: it needs the `us.irc.definitions`/`s-corporations`
+// classification of which corporations are S corporations, not asserted or
+// derived by this package. TECH_GAP/EXTERNAL_DEPENDENCY, not modelled.
+
+// Section 318(b) is a pure cross-reference list (sections 302, 304,
+// 306(b)(1)(A), 338(h)(3), 382(l)(3), 856(d), 958(b), 6038(e)(2)) —
+// NON_NORMATIVE.

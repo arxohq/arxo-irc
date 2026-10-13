@@ -1,0 +1,167 @@
+// Shared shape for the chapter 41-50A two-tier excise pattern: an initial
+// tax on an act/expenditure/transaction, an additional tax if the act is
+// not corrected within a "taxable period" running from the act date to the
+// earliest of notice-of-deficiency mailing / assessment / correction. The
+// assignment's method note asks for this shape to be "modeled ONCE as a
+// reusable shape and instantiated per section with its rates as
+// `.lawparam.json`". This module gives the reusable relation heads;
+// `03-self-dealing-4941.law` is the first instantiation (section 4941(e)
+// is the anchor for the taxable-period wording; sections 4945, 4955, 4958,
+// 4971 etc. use the identical "earliest of notice/assessment/correction"
+// pattern in their own subsections and can populate the SAME heads in a
+// later stage instead of re-deriving the minimum-of-candidates logic).
+//
+// JUDGMENT CALL: the engine has no min/max-over-derived aggregate (see
+// AGENT-BRIEF.md "Compiler traps": "there is no max-over-derived"). The
+// earliest-of-three-candidates computation below is done WITHOUT such an
+// aggregate, by a "no strictly earlier candidate exists" pairwise rule
+// (`EarlierCandidateExists` / `TaxablePeriodEndsAtMinimalCandidate`) — this
+// generalizes to any number of candidate dates without needing MIN itself,
+// so it is not a TECH_GAP.
+
+// --- the taxable act instance ---
+
+use self::{
+    Assessment,
+    IRC_S4941_E,
+    Notice,
+    Person,
+};
+
+// One instance per taxable act/expenditure/transaction that a chapter
+// 41-50A excise attaches to (a self-dealing act, and — in a later stage —
+// a taxable expenditure, an excess benefit transaction, a prohibited
+// transaction...). Kept thin on purpose: the identifying facts of the
+// underlying transaction (parties, property, amount involved) belong to
+// the section-specific module; this entity only carries what the shared
+// taxable-period / two-tier-tax machinery needs.
+entity ExciseAct { label en unofficial "one act/expenditure/transaction that a chapter 41-50A excise tax attaches to"; }
+
+enum ExciseActKind {
+    SelfDealingAct;
+    UndistributedIncomeYear;
+    ExcessBusinessHolding;
+    TaxableExpenditure;
+    ExcessBenefitTransaction;
+    RmdShortfall;
+    ProhibitedTransaction;
+    JeopardizingInvestment;
+    TrustSelfDealingAct;
+    TrustTaxableExpenditure;
+    PoliticalExpenditure;
+    ProhibitedTaxShelter;
+    DonorAdvisedFundDistribution;
+    DonorAdvisedFundAdvice;
+    FundingDeficiency;
+    LiquidityShortfall;
+    PlanFundingFailure;
+    GroupHealthPlanFailure;
+    LongTermCareInsuranceFailure;
+    BenefitAccrualNoticeFailure;
+    CobraFailure;
+}
+
+pub relation excise_act_kind(a: ExciseAct, k: ExciseActKind) kind empirical {
+    label en unofficial "which chapter 42 (etc.) excise-triggering act this instance is";
+}
+
+@source(IRC_S4941_E, coverage = partial, quote = "the period beginning with the date on which the act of self-dealing occurs")
+pub relation excise_act_occurred_on(a: ExciseAct, on: Date) kind empirical {
+    label en unofficial "the date the excise-triggering act occurred — starts the taxable period (section 4941(e)(1) pattern, reused by other chapter 42 taxable/correction periods)";
+}
+
+pub relation notice_for_act(n: Notice, a: ExciseAct) kind institutional {
+    label en unofficial "the section 6212 notice of deficiency is with respect to the initial tax on this act";
+}
+
+pub relation assessment_for_act(asmt: Assessment, a: ExciseAct) kind institutional {
+    label en unofficial "the assessment is of the initial tax on this act";
+}
+
+@source(IRC_S4941_E, coverage = partial, quote = "the date on which correction of the act of self-dealing is completed")
+pub relation act_corrected_on(a: ExciseAct, on: Date) kind empirical {
+    label en unofficial "the date correction of the act was completed (section 4941(e)(1)(C) pattern)";
+}
+
+// --- taxable period end: earliest of notice mailing / assessment / correction ---
+
+relation taxable_period_end_candidate(a: ExciseAct, on: Date) kind institutional {
+    label en unofficial "a candidate end date for the taxable period: one of notice mailing, assessment, or correction";
+}
+@source(IRC_S4941_E, coverage = partial, quote = "the date of mailing a notice of deficiency with respect to the tax imposed by subsection (a)(1) under section 6212")
+rule TaxablePeriodEndCandidateFromNotice(a: ExciseAct, on: Date, n: Notice) defeasible {
+    label en official "section 4941(e)(1)(A) pattern: the date of mailing a notice of deficiency is a candidate end of the taxable period";
+    when notice_for_act(n, a);
+    when us.irc.core::mailed_on(n, on);
+    then taxable_period_end_candidate(a, on);
+}
+@source(IRC_S4941_E, coverage = partial, quote = "the date on which the tax imposed by subsection (a)(1) is assessed")
+rule TaxablePeriodEndCandidateFromAssessment(a: ExciseAct, on: Date, asmt: Assessment) defeasible {
+    label en official "section 4941(e)(1)(B) pattern: the date the tax is assessed is a candidate end of the taxable period";
+    when assessment_for_act(asmt, a);
+    when us.irc.core::assessed_on(asmt, on);
+    then taxable_period_end_candidate(a, on);
+}
+@source(IRC_S4941_E, coverage = partial, quote = "the date on which correction of the act of self-dealing is completed")
+rule TaxablePeriodEndCandidateFromCorrection(a: ExciseAct, on: Date) defeasible {
+    label en official "section 4941(e)(1)(C) pattern: the date correction is completed is a candidate end of the taxable period";
+    when act_corrected_on(a, on);
+    then taxable_period_end_candidate(a, on);
+}
+
+relation earlier_taxable_period_end_candidate_exists(a: ExciseAct, on: Date) kind institutional {
+    label en unofficial "some OTHER candidate end date for this act is strictly earlier than `on` — used to pick the minimum without a min-over-derived aggregate";
+}
+rule EarlierCandidateExists(a: ExciseAct, on: Date, on2: Date) defeasible {
+    label en unofficial "a candidate is disqualified from being the taxable-period end if a strictly earlier candidate exists";
+    when taxable_period_end_candidate(a, on);
+    when taxable_period_end_candidate(a, on2);
+    when on2 < on;
+    then earlier_taxable_period_end_candidate_exists(a, on);
+}
+
+@source(IRC_S4941_E, coverage = partial, quote = "ending on the earliest of")
+pub relation taxable_period_ends(a: ExciseAct, on: Date) kind institutional {
+    label en official "the taxable period ends on the earliest of the notice-mailing / assessment / correction dates (section 4941(e)(1) pattern, reused by other chapter 42 taxable/correction periods)";
+}
+rule TaxablePeriodEndsAtMinimalCandidate(a: ExciseAct, on: Date) defeasible {
+    label en official "the taxable period ends on the earliest known candidate date";
+    when taxable_period_end_candidate(a, on);
+    unless earlier_taxable_period_end_candidate_exists(a, on);
+    then taxable_period_ends(a, on);
+}
+
+@source(IRC_S4941_E, coverage = partial, quote = "The term \"taxable period\" means, with respect to any act of self-dealing, the period beginning with the date on which the act of self-dealing occurs and ending on the earliest of")
+pub relation taxable_period(a: ExciseAct, begins: Date, ends: Date) kind institutional {
+    label en official "section 4941(e)(1) pattern: the taxable period runs from the date the act occurs to the earliest of the three closing events";
+}
+rule TaxablePeriod(a: ExciseAct, begins: Date, ends: Date) defeasible {
+    label en official "section 4941(e)(1) pattern: the taxable period runs from the date the act occurs to the earliest of the three closing events";
+    when excise_act_occurred_on(a, begins);
+    when taxable_period_ends(a, ends);
+    then taxable_period(a, begins, ends);
+}
+
+pub relation corrected_within_taxable_period(a: ExciseAct) kind institutional {
+    label en official "correction of the act was completed on or before the end of the taxable period — the two-tier pattern's condition for NOT owing the additional (second-tier) tax";
+}
+rule CorrectedWithinTaxablePeriod(a: ExciseAct, con: Date, ends: Date) defeasible {
+    label en official "the act is corrected within the taxable period when the correction date is on or before the taxable period's end";
+    when act_corrected_on(a, con);
+    when taxable_period_ends(a, ends);
+    when con <= ends;
+    then corrected_within_taxable_period(a);
+}
+
+// --- shared two-tier tax heads. Each section-specific module contributes
+// its OWN rules to these SAME relation heads, keyed by the ExciseAct
+// instance and the bearer of the tax (the disqualified person / foundation
+// manager / other bearer the section names); this is what makes the shape
+// reusable rather than merely duplicated. ---
+
+pub relation initial_tax(a: ExciseAct, bearer: Person, amount: Money) kind institutional {
+    label en official "the first-tier (initial) excise tax on the act, owed by `bearer` — populated per section (e.g. section 4941(a))";
+}
+pub relation additional_tax(a: ExciseAct, bearer: Person, amount: Money) kind institutional {
+    label en official "the second-tier (additional) excise tax for failure to correct the act within the taxable period, owed by `bearer` — populated per section (e.g. section 4941(b))";
+}

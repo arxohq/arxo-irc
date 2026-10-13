@@ -1,0 +1,171 @@
+// 26 U.S.C. §§6151-6158 — Chapter 62, Subchapter A: the taxpayer's core duty
+// to pay tax shown on a return (§6151), payment on notice and demand (§6155),
+// and the narrow FUTA quarterly-payment duty (§6157). §§6152-6154, 6156, 6158
+// are repealed — NON_NORMATIVE (no current text; see coverage rows).
+//
+// JUDGMENT CALLS AND GAPS (see report):
+//  - §6151(a)'s "without regard to any extension of time for filing the
+//    return" is satisfied by construction: `us.irc.core::due_date(r, d)`
+//    is documented by core as §6072(a)'s date BEFORE any extension, and
+//    `extension_granted` is a separate relation this rule never reads.
+//  - §6151(b)(1) (§6014 election not to compute tax) is EXTERNAL_DEPENDENCY:
+//    whether an election under §6014 was made is the `returns` package's own
+//    norm (not yet formalized; DEPENDENCIES.json row pending). The 30-day
+//    payment-after-notice duty itself is stated here over a case-asserted
+//    election fact so the duty is not lost while §6014 is pending elsewhere.
+//  - §6151(b)(2) is a pure cross-reference to §6302(c) (Secretary's authority
+//    over depositaries) — NON_NORMATIVE, no testable condition of its own.
+//  - §6155(b) is a pure cross-reference list (§§6212-6213, 6873, chapter 70
+//    subchapter A) — NON_NORMATIVE.
+//  - §6157 is modeled at the level the statute states it (a quarterly FUTA
+//    computation duty with a $100 de minimis floor); it does not reify the
+//    "preceding calendar year" continuity test of (a)(1)-(2) as a separate
+//    relation because no other rule in this package's scope reads it —
+//    `is_futa_employer` is asserted directly rather than derived through
+//    `us.irc.core`'s generic `Employer` role (kept local, narrow use).
+
+language "law.core" version "0.2";
+package us.irc.payment_refunds_interest version "0.1.1";
+namespace "urn:us:irc:payment_refunds_interest:clir";
+
+use self::{
+    IRC_S6151_A,
+    IRC_S6151_B,
+    IRC_S6155_A,
+    IRC_S6157_A,
+    IRC_S6157_B,
+    Notice,
+    Person,
+    Return,
+    Secretary,
+    TaxKind,
+    TaxableYear,
+    fully_paid,
+};
+
+// --- §6151(a): general rule — pay the tax shown on the return ---------------
+
+@source(IRC_S6151_A, relation = formalizes, coverage = exact, quote = "the person required to make such return shall, without assessment or notice and demand from the Secretary, pay such tax to the internal revenue officer with whom the return is filed, and shall pay such tax at the time and place fixed for filing the return (determined without regard to any extension of time for filing the return)")
+rule S6151PayTaxShownOnReturn strict {
+    for p: Person;
+    for r: Return;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for d: Date;
+    when us.irc.core::return_of(r, p, y, kind) and us.irc.core::filed_by(r, p) and us.irc.core::due_date(r, d);
+    then duty PayTaxShownOnReturn {
+        bearer p;
+        beneficiary Secretary;
+        goal achievement {
+            condition fully_paid(p, y, kind);
+            window [-infinity, d];
+        }
+    };
+}
+
+// --- §6151(b)(1): §6014 election — pay within 30 days of Secretary's notice --
+
+relation elects_under_s6014(p: Person, y: TaxableYear) kind institutional {
+    label en unofficial "EXTERNAL_DEPENDENCY: the taxpayer elected under §6014 not to show the tax on the return (owner: returns, pending — DEPENDENCIES.json 26/6151/b/1)";
+}
+relation s6014_amount_notice(n: Notice, p: Person, y: TaxableYear) kind empirical {
+    label en unofficial "the Secretary's notice under §6151(b)(1) stating the amount determined as payable and making demand";
+}
+
+@source(IRC_S6151_B, relation = formalizes, coverage = partial, quote = "the amount determined by the Secretary as payable shall be paid within 30 days after the mailing by the Secretary to the taxpayer of a notice stating such amount and making demand therefor")
+rule S6151PayAfterS6014Notice defeasible {
+    for p: Person;
+    for y: TaxableYear;
+    for n: Notice;
+    for mailed: Date;
+    when elects_under_s6014(p, y) and s6014_amount_notice(n, p, y) and us.irc.core::mailed_on(n, mailed);
+    then duty PayAfterS6014Notice {
+        bearer p;
+        beneficiary Secretary;
+        goal achievement {
+            condition fully_paid(p, y, us.irc.core::IncomeCh1);
+            window [mailed, add_calendar_period(mailed, 30 calendar_day)];
+        }
+    };
+}
+
+// --- §6155(a): payment upon notice and demand -------------------------------
+
+relation notice_and_demand_amount(n: Notice, p: Person, amount: Money) kind institutional {
+    label en official "the amount of any tax (including any interest, additional amounts, additions to tax, and assessable penalties) stated in such notice and demand";
+}
+relation notice_and_demand_paid(n: Notice, p: Person) kind institutional {
+    label en unofficial "the amount stated in the §6155 notice and demand has been paid at the place and time stated";
+}
+
+@source(IRC_S6155_A, relation = formalizes, coverage = exact, quote = "Upon receipt of notice and demand from the Secretary, there shall be paid at the place and time stated in such notice the amount of any tax (including any interest, additional amounts, additions to tax, and assessable penalties) stated in such notice and demand.")
+rule S6155PayOnNoticeAndDemand strict {
+    for n: Notice;
+    for p: Person;
+    for amount: Money;
+    for mailed: Date;
+    when us.irc.core::notice_of(n, us.irc.core::NoticeAndDemand, p) and notice_and_demand_amount(n, p, amount) and us.irc.core::mailed_on(n, mailed);
+    then duty PayOnNoticeAndDemand {
+        bearer p;
+        beneficiary Secretary;
+        goal achievement {
+            condition notice_and_demand_paid(n, p);
+            window [mailed, infinity];
+        }
+    };
+}
+
+// --- §6157: FUTA tax on a quarterly (or other) period basis -----------------
+
+relation is_futa_employer(p: Person, y: Integer) kind empirical {
+    label en unofficial "the person is an employer (§3306(a)) for the calendar year y — the continuity test of (a)(1)-(2) is not reified separately (no other rule in this package reads it)";
+}
+relation futa_wages_for_period(p: Person, y: Integer, quarter: Integer, wages: Money) kind empirical {
+    label en unofficial "wages paid in the calendar quarter/period on which the §3301 tax for that period is computed";
+}
+relation futa_prior_unpaid_for_year(p: Person, y: Integer, quarter: Integer, prior: Money) kind empirical {
+    label en unofficial "unpaid §3301 tax amounts for prior periods in the same calendar year (§6157(c))";
+}
+
+pub relation futa_period_tax(p: Person, y: Integer, quarter: Integer, tax: Money) kind institutional {
+    label en unofficial "the §3301 tax computed for the period under §6157(b)";
+}
+@source(IRC_S6157_B, relation = formalizes, coverage = exact, quote = "The tax for any calendar quarter or other period referred to in paragraph (1) or (2) of subsection (a) shall be computed by multiplying the amount of wages (as defined in section 3306(b)) paid in such calendar quarter or other period by 0.6 percent.")
+rule S6157ComputeFutaPeriodTax strict {
+    for p: Person;
+    for y: Integer;
+    for quarter: Integer;
+    for wages: Money;
+    when futa_wages_for_period(p, y, quarter, wages);
+    then futa_period_tax(p, y, quarter, round(wages * 0.006, 2, "HALF_UP"));
+}
+
+relation futa_period_tax_due(p: Person, y: Integer, quarter: Integer) kind institutional {
+    label en unofficial "the §6157(a)/(c) duty to pay applies: the period tax plus unpaid prior-period amounts exceeds $100";
+}
+rule S6157PaymentDueAboveDeMinimis strict {
+    for p: Person;
+    for y: Integer;
+    for quarter: Integer;
+    for tax: Money;
+    for prior: Money;
+    when futa_period_tax(p, y, quarter, tax) and futa_prior_unpaid_for_year(p, y, quarter, prior) and (tax + prior) > 100 USD;
+    then futa_period_tax_due(p, y, quarter);
+}
+
+relation futa_period_tax_paid(p: Person, y: Integer, quarter: Integer) kind institutional;
+@source(IRC_S6157_A, relation = formalizes, coverage = partial, quote = "The tax for any calendar quarter or other period shall be computed as provided in subsection (b) and the tax as so computed shall, except as otherwise provided in subsection (c), be paid in such manner and at such time as may be provided in regulations prescribed by the Secretary.")
+rule S6157PayFutaPeriodTax strict {
+    for p: Person;
+    for y: Integer;
+    for quarter: Integer;
+    when is_futa_employer(p, y) and futa_period_tax_due(p, y, quarter);
+    then duty PayFutaPeriodTax {
+        bearer p;
+        beneficiary Secretary;
+        goal achievement {
+            condition futa_period_tax_paid(p, y, quarter);
+            window [-infinity, infinity];
+        }
+    };
+}

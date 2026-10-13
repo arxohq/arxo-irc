@@ -1,0 +1,1092 @@
+// 26 U.S.C. §§3401(i), 3402(e),(g),(l),(s), 3406(e), 3510(d), 3511(c),(e),(f).
+// Stage 3 (26.09.2026, TECH_GAP reduction, DECISION-0379). Status:
+// implemented_unverified — scenarios are written, not executed.
+//
+// SCOPE. Chapter 24 rules and the §§3510-3511 exceptions left as TECH_GAP:
+//  - §3401(i): qualified stock under a §83(i) election is wages received on the
+//    earliest date of §83(i)(1)(B), in the amount included in income under §83.
+//  - §3402(e): the payroll-period majority test (day counts of a
+//    `PayPeriodOfService`, declared in 14-futa-definitions-and-state-law-safeguards.law).
+//  - §3402(g): the four cases in which the Secretary's regulations fix the manner
+//    of withholding; the Secretary's duty to prescribe them.
+//  - §3402(l): marital status for the tables — the employer's default (single),
+//    the employee's entitlement to certify "married", the two-way test of
+//    paragraph (3), and the duty to re-certify.
+//  - §3402(s): the vehicle fringe benefit — the employer's election not to
+//    withhold and its conditions.
+//  - §3406(e): the WINDOW in which backup withholding applies is computed from
+//    the notice / receipt dates (30-day waiting periods, stop date, the
+//    determination effective date, grace periods with the payor's elections);
+//    it feeds `backup_withholding_required` of 06-backup-withholding.law.
+//  - §3510(d): the regulatory exception for employers liable for other
+//    Subtitle C taxes.
+//  - §3511(c),(e),(f): CPEO liability for non-work-site individuals, the
+//    related-party exclusion and the self-employed carve-out.
+
+// ============================================================================
+// §3401(i) — qualified stock under a section 83(i) election
+// ============================================================================
+
+use self::{
+    BackupWithholdingTrigger,
+    IRC_S3401_I,
+    IRC_S3402_E,
+    IRC_S3402_G,
+    IRC_S3402_L,
+    IRC_S3402_S,
+    IRC_S3406_E,
+    IRC_S3510_D,
+    IRC_S3511_C,
+    IRC_S3511_E,
+    IRC_S3511_F,
+    PayPeriodOfService,
+    Person,
+    ReportablePayment,
+    ReportablePaymentKind,
+    Secretary,
+    TaxableYear,
+    WagePayment,
+    backup_withholding_required,
+    certified_cpeo,
+    cpeo_remits_remuneration_to,
+    pay_period_length_in_days,
+    reportable_payment,
+    wage_payment,
+    wages_3401,
+    work_site_employee_of,
+};
+
+pub relation qualified_stock_83i_election_in_effect(stock: WagePayment) kind empirical {
+    label en official "qualified stock (section 83(i)) with respect to which an election is made under section 83(i)";
+}
+pub relation earliest_date_described_in_83i_1B(stock: WagePayment, on: Date) kind empirical {
+    label en official "the earliest date described in section 83(i)(1)(B)";
+}
+pub relation amount_included_in_income_under_83_for_year(stock: WagePayment, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the amount included in income under section 83 for the taxable year";
+}
+pub relation qualified_stock_wages_received_on(stock: WagePayment, on: Date) kind institutional {
+    label en official "the qualified stock is treated as wages received on the earliest date described in section 83(i)(1)(B)";
+}
+@source(IRC_S3401_I, relation = formalizes, coverage = exact, quote = "(1) received on the earliest date described in section 83(i)(1)(B), and")
+rule S3401i1ReceivedOnEarliestDate strict {
+    label en official "wages received on the earliest date";
+    for stock: WagePayment;
+    for on: Date;
+    when qualified_stock_83i_election_in_effect(stock)
+        and earliest_date_described_in_83i_1B(stock, on);
+    then qualified_stock_wages_received_on(stock, on);
+}
+pub relation qualified_stock_wages_amount(stock: WagePayment, amount: Money) kind institutional {
+    label en official "the qualified stock is treated as wages in an amount equal to the amount included in income under section 83 for the taxable year which includes the earliest date";
+}
+@source(IRC_S3401_I, relation = formalizes, coverage = exact, quote = "(2) in an amount equal to the amount included in income under section 83 for the taxable year which includes such date.")
+rule S3401i2AmountIncludedForTheYearOfTheDate strict {
+    label en official "the amount for the taxable year that contains the earliest date";
+    for stock: WagePayment;
+    for on: Date;
+    for y: TaxableYear;
+    for yearBegins: Date;
+    for yearEnds: Date;
+    for amount: Money;
+    when qualified_stock_83i_election_in_effect(stock)
+        and earliest_date_described_in_83i_1B(stock, on)
+        and amount_included_in_income_under_83_for_year(stock, y, amount)
+        and us.irc.core::begins(y, yearBegins)
+        and us.irc.core::ends(y, yearEnds)
+        and yearBegins <= on
+        and on <= yearEnds;
+    then qualified_stock_wages_amount(stock, amount);
+}
+@source(IRC_S3401_I, relation = formalizes, coverage = exact, quote = "For purposes of subsection (a), qualified stock (as defined in section 83(i)) with respect to which an election is made under section 83(i) shall be treated as wages—")
+rule S3401iStockIsWages strict {
+    label en official "the stock is wages within section 3401(a) in the computed amount";
+    for stock: WagePayment;
+    for amount: Money;
+    when qualified_stock_wages_amount(stock, amount);
+    then wages_3401(stock, amount);
+}
+
+// ============================================================================
+// §3402(e) — included and excluded wages (payroll-period majority test)
+// ============================================================================
+
+pub relation payroll_period_days_with_wage_service(pp: PayPeriodOfService, days: Integer) kind empirical {
+    label en official "the number of days of the payroll period for the services performed during which the remuneration constitutes wages";
+}
+pub relation payroll_period_within_3402e(pp: PayPeriodOfService) kind institutional {
+    label en official "a payroll period of not more than 31 consecutive days";
+}
+rule S3402ePayrollPeriodLength defeasible {
+    label en official "not more than 31 consecutive days";
+    for pp: PayPeriodOfService;
+    for days: Integer;
+    when pay_period_length_in_days(pp, days)
+        and days <= 31;
+    then payroll_period_within_3402e(pp);
+}
+pub relation payroll_all_remuneration_deemed_wages(pp: PayPeriodOfService) kind institutional {
+    label en official "all the remuneration paid by the employer to the employee for the period is deemed to be wages";
+}
+@source(IRC_S3402_E, relation = formalizes, coverage = exact, quote = "constitutes wages, all the remuneration paid by such employer to such employee for such period shall be deemed to be wages")
+rule S3402eOneHalfOrMoreIsWages defeasible {
+    label en official "services for one-half or more of the period produce wages: all the remuneration is wages";
+    for pp: PayPeriodOfService;
+    for days: Integer;
+    for wageDays: Integer;
+    when payroll_period_within_3402e(pp)
+        and pay_period_length_in_days(pp, days)
+        and payroll_period_days_with_wage_service(pp, wageDays)
+        and wageDays * 2 >= days;
+    then payroll_all_remuneration_deemed_wages(pp);
+}
+pub relation payroll_no_remuneration_deemed_wages(pp: PayPeriodOfService) kind institutional {
+    label en official "none of the remuneration paid by the employer to the employee for the period is deemed to be wages";
+}
+@source(IRC_S3402_E, relation = formalizes, coverage = exact, quote = "but if the remuneration paid by an employer to an employee for services performed during more than one-half of any such payroll period does not constitute wages, then none of the remuneration paid by such employer to such employee for such period shall be deemed to be wages")
+rule S3402eMoreThanHalfNotWages defeasible {
+    label en official "services for more than one-half of the period produce no wages: none of the remuneration is wages";
+    for pp: PayPeriodOfService;
+    for days: Integer;
+    for wageDays: Integer;
+    when payroll_period_within_3402e(pp)
+        and pay_period_length_in_days(pp, days)
+        and payroll_period_days_with_wage_service(pp, wageDays)
+        and wageDays * 2 < days;
+    then payroll_no_remuneration_deemed_wages(pp);
+}
+
+// ============================================================================
+// §3402(g) — overlapping pay periods, payment by an agent or fiduciary
+// ============================================================================
+
+pub relation payment_for_overlapping_payroll_period(pay: WagePayment) kind empirical {
+    label en official "the payment is made with respect to a payroll period or other period, any part of which is included in a period with respect to which wages are also paid to the employee by the employer";
+}
+pub relation payment_without_regard_to_period_within_other_period(pay: WagePayment) kind empirical {
+    label en official "the payment is made without regard to any payroll period, but on or prior to the expiration of a period with respect to which wages are also paid to the employee by the employer";
+}
+pub relation payment_for_period_spanning_two_calendar_years(pay: WagePayment) kind empirical {
+    label en official "the payment is made with respect to a period beginning in one and ending in another calendar year";
+}
+pub relation payment_through_agent_holding_other_employer_wages(pay: WagePayment) kind empirical {
+    label en official "the payment is made through an agent, fiduciary or other person who also has the control, receipt, custody or disposal of, or pays, the wages payable by another employer to the employee";
+}
+pub relation withholding_governed_by_3402g_regulations(pay: WagePayment) kind institutional {
+    label en official "the manner of withholding and the amount to be deducted are determined in accordance with the Secretary's regulations under which the allowance approximates the allowance for an annual payroll period";
+}
+@source(IRC_S3402_G, relation = formalizes, coverage = exact, quote = "(1) with respect to a payroll period or other period, any part of which is included in a payroll period or other period with respect to which wages are also paid to such employee by such employer, or")
+rule S3402g1Overlapping defeasible {
+    label en official "overlapping periods";
+    for pay: WagePayment;
+    when payment_for_overlapping_payroll_period(pay);
+    then withholding_governed_by_3402g_regulations(pay);
+}
+@source(IRC_S3402_G, relation = formalizes, coverage = exact, quote = "(2) without regard to any payroll period or other period, but on or prior to the expiration of a payroll period or other period with respect to which wages are also paid to such employee by such employer, or")
+rule S3402g2WithinOtherPeriod defeasible {
+    label en official "payment inside another period";
+    for pay: WagePayment;
+    when payment_without_regard_to_period_within_other_period(pay);
+    then withholding_governed_by_3402g_regulations(pay);
+}
+@source(IRC_S3402_G, relation = formalizes, coverage = exact, quote = "(3) with respect to a period beginning in one and ending in another calendar year, or")
+rule S3402g3SpanningYears defeasible {
+    label en official "period spanning two calendar years";
+    for pay: WagePayment;
+    when payment_for_period_spanning_two_calendar_years(pay);
+    then withholding_governed_by_3402g_regulations(pay);
+}
+@source(IRC_S3402_G, relation = formalizes, coverage = exact, quote = "(4) through an agent, fiduciary, or other person who also has the control, receipt, custody, or disposal of, or pays, the wages payable by another employer to such employee,")
+rule S3402g4ThroughAgent defeasible {
+    label en official "payment through an agent holding another employer's wages";
+    for pay: WagePayment;
+    when payment_through_agent_holding_other_employer_wages(pay);
+    then withholding_governed_by_3402g_regulations(pay);
+}
+pub relation secretary_prescribed_3402g_regulations(pay: WagePayment) kind empirical {
+    label en official "the Secretary has prescribed regulations that determine the manner of withholding for the payment with an allowance approximating the annual payroll period allowance";
+}
+@source(IRC_S3402_G, relation = formalizes, coverage = exact, quote = "the manner of withholding and the amount to be deducted and withheld under this chapter shall be determined in accordance with regulations prescribed by the Secretary")
+pub rule S3402gRegulationsDutyRule defeasible {
+    label en official "the Secretary shall determine the manner of withholding for these payments by regulations (no date stated: open window)";
+    for pay: WagePayment;
+    when withholding_governed_by_3402g_regulations(pay);
+    then duty S3402gRegulationsDuty {
+        bearer Secretary;
+        goal achievement {
+            condition secretary_prescribed_3402g_regulations(pay);
+            window [-infinity, infinity];
+        }
+    };
+}
+
+// ============================================================================
+// §3402(l) — determination and disclosure of marital status
+// ============================================================================
+
+pub relation employee_married_under_state_law_on(employee: Person, day: Date) kind empirical {
+    label en unofficial "the employee is married on the day (before the special rules of paragraph (3))";
+}
+pub relation employee_legally_separated_under_decree_on(employee: Person, day: Date) kind empirical {
+    label en official "the employee is legally separated from his spouse under a decree of divorce or separate maintenance";
+}
+pub relation employee_or_spouse_nonresident_alien_this_or_earlier_day_in_year(employee: Person, day: Date) kind empirical {
+    label en official "either the employee or his spouse is, or on any preceding day within the calendar year was, a nonresident alien";
+}
+pub relation spouse_died_in_preceding_part_of_taxable_year(employee: Person, day: Date) kind empirical {
+    label en official "the employee's spouse died within the portion of his taxable year which precedes the day";
+}
+pub relation spouse_died_in_one_of_two_preceding_years_and_reasonably_expects_surviving_spouse(employee: Person, day: Date) kind empirical {
+    label en official "the spouse died during one of the two taxable years immediately preceding and, on the facts at the beginning of the day, the employee reasonably expects at the close of his taxable year to be a surviving spouse (section 2(a)) — an evaluative expectation, asserted by the case";
+}
+pub relation employee_considered_not_married_3402l(employee: Person, day: Date) kind institutional {
+    label en official "the employee is considered as not married on the day (paragraph (3)(A))";
+}
+@source(IRC_S3402_L, relation = formalizes, coverage = exact, quote = "(A) as not married, if (i) he is legally separated from his spouse under a decree of divorce or separate maintenance")
+rule S3402l3ALegallySeparated defeasible {
+    label en official "legally separated: not married";
+    for employee: Person;
+    for day: Date;
+    when employee_legally_separated_under_decree_on(employee, day);
+    then employee_considered_not_married_3402l(employee, day);
+}
+@source(IRC_S3402_L, relation = formalizes, coverage = exact, quote = "or (ii) either he or his spouse is, or on any preceding day within the calendar year was, a nonresident alien")
+rule S3402l3ANonresidentAlien defeasible {
+    label en official "nonresident alien employee or spouse: not married";
+    for employee: Person;
+    for day: Date;
+    when employee_or_spouse_nonresident_alien_this_or_earlier_day_in_year(employee, day);
+    then employee_considered_not_married_3402l(employee, day);
+}
+pub relation employee_considered_married_3402l(employee: Person, day: Date) kind institutional {
+    label en official "the employee is considered as married on the day for the purpose of paragraph (2)";
+}
+@source(IRC_S3402_L, relation = formalizes, coverage = exact, quote = "(B) as married, if (i) his spouse (other than a spouse referred to in subparagraph (A)) died within the portion of his taxable year which precedes such day")
+rule S3402l3BSpouseDiedThisYear defeasible {
+    label en official "spouse died earlier in the taxable year: married";
+    for employee: Person;
+    for day: Date;
+    when spouse_died_in_preceding_part_of_taxable_year(employee, day);
+    then employee_considered_married_3402l(employee, day);
+    unless employee_considered_not_married_3402l(employee, day) and spouse_died_in_preceding_part_of_taxable_year(employee, day);
+}
+@source(IRC_S3402_L, relation = formalizes, coverage = exact, quote = "or (ii) his spouse died during one of the two taxable years immediately preceding the current taxable year and, on the basis of facts existing at the beginning of such day, the employee reasonably expects, at the close of his taxable year, to be a surviving spouse")
+rule S3402l3BSurvivingSpouse defeasible {
+    label en official "spouse died in the two preceding years and surviving-spouse expectation: married";
+    for employee: Person;
+    for day: Date;
+    when spouse_died_in_one_of_two_preceding_years_and_reasonably_expects_surviving_spouse(employee, day);
+    then employee_considered_married_3402l(employee, day);
+    unless employee_considered_not_married_3402l(employee, day) and spouse_died_in_one_of_two_preceding_years_and_reasonably_expects_surviving_spouse(employee, day);
+}
+rule S3402l3MarriedByState defeasible {
+    label en unofficial "an employee married under State law is considered married unless paragraph (3)(A) applies";
+    for employee: Person;
+    for day: Date;
+    when employee_married_under_state_law_on(employee, day);
+    then employee_considered_married_3402l(employee, day);
+    unless employee_considered_not_married_3402l(employee, day) and employee_married_under_state_law_on(employee, day);
+}
+pub relation withholding_certificate_indicating_married_in_effect(pay: WagePayment) kind empirical {
+    label en official "a withholding allowance certificate furnished after the date of enactment of the subsection indicating that the employee is married is in effect with respect to the payment of wages";
+}
+pub relation employer_treats_employee_as_single_for_tables(pay: WagePayment) kind institutional {
+    label en official "the employer treats the employee as a single person in applying the tables of subsections (a) and (c)";
+}
+@source(IRC_S3402_L, relation = formalizes, coverage = exact, quote = "the employer shall treat the employee as a single person unless there is in effect with respect to such payment of wages a withholding allowance certificate")
+rule S3402l1SingleByDefault defeasible {
+    label en official "single unless a certificate indicating married is in effect";
+    for pay: WagePayment;
+    when wage_payment(pay, _, _, _, _, _)
+        and not_known(withholding_certificate_indicating_married_in_effect(pay));
+    then employer_treats_employee_as_single_for_tables(pay);
+}
+pub relation employer_treats_employee_as_married_for_tables(pay: WagePayment) kind institutional {
+    label en official "the employer applies the tables for a married person";
+}
+rule S3402l1MarriedByCertificate defeasible {
+    label en official "a certificate indicating married is in effect";
+    for pay: WagePayment;
+    when withholding_certificate_indicating_married_in_effect(pay);
+    then employer_treats_employee_as_married_for_tables(pay);
+}
+pub relation employee_furnishes_certificate_indicating_married(employee: Person, employer: Person, day: Date) kind empirical {
+    label en official "the employee furnishes the employer a withholding allowance certificate indicating he is married";
+}
+pub relation employee_not_married_on_day_3402l(employee: Person, day: Date) kind institutional {
+    label en unofficial "the employee is not married on the day (considered not married under (3)(A), or neither married under State law nor considered married)";
+}
+rule S3402l2NotMarriedByParagraph3 defeasible {
+    for employee: Person;
+    for day: Date;
+    when employee_considered_not_married_3402l(employee, day);
+    then employee_not_married_on_day_3402l(employee, day);
+}
+pub relation employee_single_under_state_law_on(employee: Person, day: Date) kind empirical {
+    label en unofficial "the employee is single under State law on the day (an explicit fact, as absence of a marriage fact is not read as single)";
+}
+rule S3402l2SingleByStateLaw defeasible {
+    for employee: Person;
+    for day: Date;
+    when employee_single_under_state_law_on(employee, day);
+    then employee_not_married_on_day_3402l(employee, day);
+    unless employee_considered_married_3402l(employee, day) and employee_single_under_state_law_on(employee, day);
+}
+@source(IRC_S3402_L, relation = formalizes, coverage = exact, quote = "An employee shall be entitled to furnish the employer with a withholding allowance certificate indicating he is married only if, on the day of such furnishing, he is married")
+pub rule S3402l2OnlyIfMarried defeasible {
+    label en official "an employee who is not married may not furnish a certificate indicating married";
+    for employee: Person;
+    for employer: Person;
+    for day: Date;
+    when employee_furnishes_certificate_indicating_married(employee, employer, day)
+        and employee_not_married_on_day_3402l(employee, day);
+    then prohibition S3402l2NoMarriedCertificateProhibition {
+        bearer employee;
+        beneficiary employer;
+        action employee_furnishes_certificate_indicating_married(employee, employer, day);
+        window [day, day];
+    };
+}
+pub relation employee_marital_status_changed_to_single_on(employee: Person, employer: Person, changedOn: Date) kind empirical {
+    label en official "the employee's marital status changes from married to single";
+}
+pub relation employee_furnished_new_certificate(employee: Person, employer: Person) kind empirical {
+    label en official "the employee furnished the employer a new withholding allowance certificate";
+}
+@source(IRC_S3402_L, relation = formalizes, coverage = exact, quote = "An employee whose marital status changes from married to single shall, at such time as the Secretary may by regulations prescribe, furnish the employer with a new withholding allowance certificate.")
+pub rule S3402l2NewCertificateRule defeasible {
+    label en official "an employee whose status changes to single shall furnish a new certificate (the time is set by regulations not pinned here: open window)";
+    for employee: Person;
+    for employer: Person;
+    for changedOn: Date;
+    when employee_marital_status_changed_to_single_on(employee, employer, changedOn);
+    then duty S3402l2NewCertificateDuty {
+        bearer employee;
+        beneficiary employer;
+        goal achievement {
+            condition employee_furnished_new_certificate(employee, employer);
+            window [changedOn, infinity];
+        }
+    };
+}
+
+// ============================================================================
+// §3402(s) — vehicle fringe benefit
+// ============================================================================
+
+pub relation benefit_provides_highway_motor_vehicle(benefit: WagePayment) kind empirical {
+    label en official "the fringe benefit consists of providing a highway motor vehicle for the use of the employee";
+}
+pub relation vehicle_fringe_benefit(benefit: WagePayment) kind institutional {
+    label en official "a fringe benefit which constitutes wages (section 3401) and consists of providing a highway motor vehicle for the employee's use";
+}
+@source(IRC_S3402_S, relation = formalizes, coverage = exact, quote = "the term \"vehicle fringe benefit\" means any fringe benefit—")
+rule S3402s3VehicleFringeBenefit defeasible {
+    label en official "wages and a highway motor vehicle";
+    for benefit: WagePayment;
+    for amount: Money;
+    when wages_3401(benefit, amount)
+        and benefit_provides_highway_motor_vehicle(benefit);
+    then vehicle_fringe_benefit(benefit);
+}
+pub relation vehicle_fringe_benefit_wages_for_6051(benefit: WagePayment) kind institutional {
+    label en official "the vehicle fringe benefit is treated as wages from which amounts are required to be deducted and withheld under this chapter for purposes of section 6051";
+}
+@source(IRC_S3402_S, relation = formalizes, coverage = exact, quote = "Any vehicle fringe benefit shall be treated as wages from which amounts are required to be deducted and withheld under this chapter for purposes of section 6051.")
+rule S3402s2TreatedAsWagesFor6051 defeasible {
+    label en official "a vehicle fringe benefit is wages subject to withholding for section 6051";
+    for benefit: WagePayment;
+    when vehicle_fringe_benefit(benefit);
+    then vehicle_fringe_benefit_wages_for_6051(benefit);
+}
+pub relation employee_notified_of_election_not_to_withhold(benefit: WagePayment) kind empirical {
+    label en official "the employee is notified by the employer of the election (at the time and in the manner the Secretary prescribes)";
+}
+pub relation benefit_included_on_timely_6051_statement(benefit: WagePayment) kind empirical {
+    label en official "the amount of the benefit is included by the employer on a statement timely furnished under section 6051";
+}
+pub relation employer_elects_not_to_withhold_on_vehicle_fringe_benefit(employer: Person, benefit: WagePayment) kind empirical {
+    label en official "the employer elects not to deduct and withhold any tax under this chapter with respect to the vehicle fringe benefit";
+}
+@source(IRC_S3402_S, relation = formalizes, coverage = exact, quote = "The employer may elect not to deduct and withhold any tax under this chapter with respect to any vehicle fringe benefit provided to any employee if such employee is notified by the employer of such election")
+pub rule S3402s1ElectionLiberty defeasible {
+    label en official "the employer may elect not to withhold on a vehicle fringe benefit if the employee is notified and the amount is included on the timely section 6051 statement";
+    for employer: Person;
+    for employee: Person;
+    for benefit: WagePayment;
+    when wage_payment(benefit, employer, employee, _, _, _)
+        and vehicle_fringe_benefit(benefit)
+        and employee_notified_of_election_not_to_withhold(benefit)
+        and benefit_included_on_timely_6051_statement(benefit);
+    then liberty S3402s1ElectNotToWithholdLiberty {
+        holder employer;
+        against employee;
+        action employer_elects_not_to_withhold_on_vehicle_fringe_benefit(employer, benefit);
+        window [-infinity, infinity];
+    };
+}
+
+// ============================================================================
+// §3406(e) — period for which backup withholding is in effect
+// ============================================================================
+
+pub enum BackupWithholdingPeriodBasis {
+    TinNotFurnished;            // (e)(1)
+    IncorrectTinNotified;       // (e)(2)
+    NotifiedPayeeUnderreporting; // (e)(3)
+    PayeeCertificationFailure;  // (e)(4)(A)
+    BrokerNotifiedInstrument;   // (e)(4)(B)
+    StartUpGracePeriod;         // (e)(5)(A)
+    StoppingGracePeriod;        // (e)(5)(B)
+    label en unofficial "the paragraph of section 3406(e) under which subsection (a) applies to a reportable payment";
+}
+pub relation backup_withholding_period_applies(rp: ReportablePayment, basis: BackupWithholdingPeriodBasis) kind institutional {
+    label en official "subsection (a) applies to the reportable payment under the paragraph of subsection (e)";
+}
+rule S3406eFeedsRequired strict {
+    label en unofficial "a payment inside a section 3406(e) period is subject to backup withholding (adds to the trigger relation of 06-backup-withholding.law)";
+    for rp: ReportablePayment;
+    for basis: BackupWithholdingPeriodBasis;
+    when backup_withholding_period_applies(rp, basis);
+    then backup_withholding_required(rp);
+}
+// (1) TIN not furnished
+pub relation payee_failed_to_furnish_tin(payee: Person, payor: Person) kind empirical {
+    label en official "the payee fails to furnish his TIN to the payor in the manner required";
+}
+pub relation payee_furnished_tin_in_manner_required_on(payee: Person, payor: Person, on: Date) kind empirical {
+    label en official "the payee furnishes the TIN in the manner required on this date";
+}
+@source(IRC_S3406_E, relation = formalizes, coverage = exact, quote = "subsection (a) shall apply to any reportable payment made by such payor during the period during which the TIN has not been furnished in the manner required")
+rule S3406e1NoTinNeverFurnished strict {
+    label en official "no TIN furnished yet";
+    for rp: ReportablePayment;
+    for payor: Person;
+    for payee: Person;
+    for on: Date;
+    when reportable_payment(rp, payor, payee, _, _, on, _)
+        and payee_failed_to_furnish_tin(payee, payor)
+        and not_known(tin_furnished_on_exists(payee, payor));
+    then backup_withholding_period_applies(rp, TinNotFurnished);
+}
+relation tin_furnished_on_exists(payee: Person, payor: Person) kind institutional;
+rule TinFurnishedOnExists strict {
+    for payee: Person;
+    for payor: Person;
+    for on: Date;
+    when payee_furnished_tin_in_manner_required_on(payee, payor, on);
+    then tin_furnished_on_exists(payee, payor);
+}
+rule S3406e1NoTinBeforeFurnishing strict {
+    label en official "payments made before the TIN is furnished";
+    for rp: ReportablePayment;
+    for payor: Person;
+    for payee: Person;
+    for on: Date;
+    for furnishedOn: Date;
+    when reportable_payment(rp, payor, payee, _, _, on, _)
+        and payee_failed_to_furnish_tin(payee, payor)
+        and payee_furnished_tin_in_manner_required_on(payee, payor, furnishedOn)
+        and on < furnishedOn;
+    then backup_withholding_period_applies(rp, TinNotFurnished);
+}
+// (2) incorrect TIN
+pub relation secretary_notifies_incorrect_tin_received_on(payor: Person, payee: Person, on: Date) kind empirical {
+    label en official "the payor received the Secretary's notification that the TIN furnished by the payee is incorrect on this date";
+}
+pub relation payee_furnished_another_tin_on(payee: Person, payor: Person, on: Date) kind empirical {
+    label en official "the payee furnishes another TIN in the manner required";
+}
+pub relation incorrect_tin_period_start(payor: Person, payee: Person, startsAfter: Date) kind institutional {
+    label en official "subsection (a) applies to payments made after the close of the 30th day after the notification was received (this date)";
+}
+rule S3406e2WaitingPeriod strict {
+    label en official "the 30th day after receipt";
+    for payor: Person;
+    for payee: Person;
+    for receivedOn: Date;
+    when secretary_notifies_incorrect_tin_received_on(payor, payee, receivedOn);
+    then incorrect_tin_period_start(payor, payee, add_calendar_period(receivedOn, 30 calendar_day));
+}
+@source(IRC_S3406_E, relation = formalizes, coverage = exact, quote = "(A) after the close of the 30th day after the day on which the payor received such notification, and")
+rule S3406e2IncorrectTinOpenEnded strict {
+    label en official "after the 30th day and no other TIN yet";
+    for rp: ReportablePayment;
+    for payor: Person;
+    for payee: Person;
+    for on: Date;
+    for startsAfter: Date;
+    when reportable_payment(rp, payor, payee, _, _, on, _)
+        and incorrect_tin_period_start(payor, payee, startsAfter)
+        and on > startsAfter
+        and not_known(another_tin_furnished_exists(payee, payor));
+    then backup_withholding_period_applies(rp, IncorrectTinNotified);
+}
+relation another_tin_furnished_exists(payee: Person, payor: Person) kind institutional;
+rule AnotherTinFurnishedExists strict {
+    for payee: Person;
+    for payor: Person;
+    for on: Date;
+    when payee_furnished_another_tin_on(payee, payor, on);
+    then another_tin_furnished_exists(payee, payor);
+}
+@source(IRC_S3406_E, relation = formalizes, coverage = exact, quote = "(B) before the payee furnishes another TIN in the manner required.")
+rule S3406e2IncorrectTinBeforeAnotherTin strict {
+    label en official "after the 30th day and before the payee furnishes another TIN";
+    for rp: ReportablePayment;
+    for payor: Person;
+    for payee: Person;
+    for on: Date;
+    for startsAfter: Date;
+    for anotherOn: Date;
+    when reportable_payment(rp, payor, payee, _, _, on, _)
+        and incorrect_tin_period_start(payor, payee, startsAfter)
+        and on > startsAfter
+        and payee_furnished_another_tin_on(payee, payor, anotherOn)
+        and on < anotherOn;
+    then backup_withholding_period_applies(rp, IncorrectTinNotified);
+}
+// (3) notified payee underreporting: the determination effective date and the stop date
+pub enum UnderreportingDetermination {
+    NoUnderreporting;      // (c)(3)(A)(i)
+    UnderreportingCorrected; // (ii)
+    UndueHardship;         // (iii)
+    BonaFideDispute;       // (iv)
+    label en unofficial "the determinations of section 3406(c)(3)(A)";
+}
+pub relation secretary_determination_to_stop_withholding_made_on(payee: Person, payor: Person, kind: UnderreportingDetermination, madeOn: Date) kind empirical {
+    label en official "the Secretary makes a determination under subsection (c)(3)(A)";
+}
+pub relation determination_effective_date(payee: Person, payor: Person, effectiveOn: Date) kind institutional {
+    label en official "the determination effective date of subsection (e)(3)(C)";
+}
+@source(IRC_S3406_E, relation = formalizes, coverage = exact, quote = "the determination effective date of any determination under subsection (c)(3)(A) which is made during the 12-month period ending on October 15 of any calendar year shall be the first January 1 following such October 15")
+rule S3406e3CiMadeByOctober15 strict {
+    label en official "made on or before October 15 of its calendar year: the 12-month period ends that October 15, the first January 1 following it is January 1 of the next year";
+    for payee: Person;
+    for payor: Person;
+    for kind: UnderreportingDetermination;
+    for madeOn: Date;
+    for y: TaxableYear;
+    for yearBegins: Date;
+    for yearEnds: Date;
+    when secretary_determination_to_stop_withholding_made_on(payee, payor, kind, madeOn)
+        and us.irc.core::begins(y, yearBegins)
+        and us.irc.core::ends(y, yearEnds)
+        and yearBegins <= madeOn
+        and madeOn <= yearEnds
+        and madeOn <= add_calendar_period(add_calendar_period(yearBegins, 9 calendar_month), 14 calendar_day)
+        and kind != NoUnderreporting
+        and kind != UndueHardship;
+    then determination_effective_date(payee, payor, add_calendar_period(yearBegins, 1 calendar_year));
+}
+rule S3406e3CiMadeAfterOctober15 strict {
+    label en official "made after October 15: the period ending on the next October 15 applies, the first January 1 following it is two years on";
+    for payee: Person;
+    for payor: Person;
+    for kind: UnderreportingDetermination;
+    for madeOn: Date;
+    for y: TaxableYear;
+    for yearBegins: Date;
+    for yearEnds: Date;
+    when secretary_determination_to_stop_withholding_made_on(payee, payor, kind, madeOn)
+        and us.irc.core::begins(y, yearBegins)
+        and us.irc.core::ends(y, yearEnds)
+        and yearBegins <= madeOn
+        and madeOn <= yearEnds
+        and madeOn > add_calendar_period(add_calendar_period(yearBegins, 9 calendar_month), 14 calendar_day)
+        and kind != NoUnderreporting
+        and kind != UndueHardship;
+    then determination_effective_date(payee, payor, add_calendar_period(yearBegins, 2 calendar_year));
+}
+@source(IRC_S3406_E, relation = formalizes, coverage = exact, quote = "In the case of any determination under clause (i) or (iii) of subsection (c)(3)(A), the determination effective date shall be the date on which the Secretary's determination is made.")
+rule S3406e3CiiEffectiveOnDetermination strict {
+    label en official "no underreporting or hardship: effective on the date of the determination";
+    for payee: Person;
+    for payor: Person;
+    for kind: UnderreportingDetermination;
+    for madeOn: Date;
+    when secretary_determination_to_stop_withholding_made_on(payee, payor, kind, madeOn)
+        and (kind == NoUnderreporting or kind == UndueHardship);
+    then determination_effective_date(payee, payor, madeOn);
+}
+pub relation stop_withholding_notification_received_on(payor: Person, payee: Person, on: Date) kind empirical {
+    label en official "the payor received notification from the Secretary under subsection (c)(3)(B) to stop withholding";
+}
+pub relation payee_certification_received_on(payor: Person, payee: Person, on: Date) kind empirical {
+    label en official "the payor receives from the payee a certification provided by the Secretary under subsection (c)(3)(B)";
+}
+pub relation stop_event_on(payor: Person, payee: Person, on: Date) kind institutional {
+    label en unofficial "a day named in clause (i) or (ii) of the stop date definition";
+}
+rule StopEventFromNotification strict {
+    for payor: Person;
+    for payee: Person;
+    for on: Date;
+    when stop_withholding_notification_received_on(payor, payee, on);
+    then stop_event_on(payor, payee, on);
+}
+rule StopEventFromCertification strict {
+    for payor: Person;
+    for payee: Person;
+    for on: Date;
+    when payee_certification_received_on(payor, payee, on);
+    then stop_event_on(payor, payee, on);
+}
+pub relation earlier_stop_event_exists(payor: Person, payee: Person, on: Date) kind institutional {
+    label en unofficial "a strictly earlier stop event exists (the earliest-of-several pattern)";
+}
+rule EarlierStopEventExists strict {
+    for payor: Person;
+    for payee: Person;
+    for d1: Date;
+    for d2: Date;
+    when stop_event_on(payor, payee, d1)
+        and stop_event_on(payor, payee, d2)
+        and d2 < d1;
+    then earlier_stop_event_exists(payor, payee, d1);
+}
+pub relation earliest_stop_event(payor: Person, payee: Person, on: Date) kind institutional {
+    label en unofficial "the earlier of clauses (i) and (ii)";
+}
+rule EarliestStopEvent strict {
+    for payor: Person;
+    for payee: Person;
+    for d: Date;
+    when stop_event_on(payor, payee, d)
+        and not_known(earlier_stop_event_exists(payor, payee, d));
+    then earliest_stop_event(payor, payee, d);
+}
+pub relation stop_date(payor: Person, payee: Person, stopOn: Date) kind institutional {
+    label en official "the stop date: the determination effective date or, if later, the earlier of the day the payor received the notification to stop and the day it receives the payee's certification";
+}
+@source(IRC_S3406_E, relation = formalizes, coverage = exact, quote = "the term \"stop date\" means the determination effective date or, if later, the earlier of—")
+rule S3406e3BStopDateEventLater strict {
+    label en official "the earlier stop event is later than the effective date";
+    for payor: Person;
+    for payee: Person;
+    for effectiveOn: Date;
+    for eventOn: Date;
+    when determination_effective_date(payee, payor, effectiveOn)
+        and earliest_stop_event(payor, payee, eventOn)
+        and eventOn > effectiveOn;
+    then stop_date(payor, payee, eventOn);
+}
+rule S3406e3BStopDateEffectiveDateLater strict {
+    label en official "the effective date is not earlier than the stop event (or equal)";
+    for payor: Person;
+    for payee: Person;
+    for effectiveOn: Date;
+    for eventOn: Date;
+    when determination_effective_date(payee, payor, effectiveOn)
+        and earliest_stop_event(payor, payee, eventOn)
+        and eventOn <= effectiveOn;
+    then stop_date(payor, payee, effectiveOn);
+}
+pub relation any_stop_event_exists(payor: Person, payee: Person) kind institutional;
+rule AnyStopEventExists strict {
+    for payor: Person;
+    for payee: Person;
+    for d: Date;
+    when stop_event_on(payor, payee, d);
+    then any_stop_event_exists(payor, payee);
+}
+rule S3406e3BStopDateNoEvent strict {
+    label en official "no stop event yet: the determination effective date (INTERPRETATION: the clause is read as the effective date when neither event has occurred)";
+    for payor: Person;
+    for payee: Person;
+    for effectiveOn: Date;
+    when determination_effective_date(payee, payor, effectiveOn)
+        and not_known(any_stop_event_exists(payor, payee));
+    then stop_date(payor, payee, effectiveOn);
+}
+pub relation secretary_notifies_payee_underreporting_received_on(payor: Person, payee: Person, on: Date) kind empirical {
+    label en official "the payor received the Secretary's notification of the underreporting";
+}
+pub relation underreporting_period_start(payor: Person, payee: Person, startsAfter: Date) kind institutional {
+    label en official "subsection (a) applies to payments made after the close of this day (the 30th day after the notification)";
+}
+rule S3406e3AWaitingPeriod strict {
+    label en official "the 30th day after receipt";
+    for payor: Person;
+    for payee: Person;
+    for receivedOn: Date;
+    when secretary_notifies_payee_underreporting_received_on(payor, payee, receivedOn);
+    then underreporting_period_start(payor, payee, add_calendar_period(receivedOn, 30 calendar_day));
+}
+@source(IRC_S3406_E, relation = formalizes, coverage = exact, quote = "subsection (a) shall apply to any reportable interest or dividend payment made—")
+rule S3406e3ANotifiedUnderreportingNoStop strict {
+    label en official "interest or dividend payments after the 30th day, no stop date yet";
+    for rp: ReportablePayment;
+    for payor: Person;
+    for payee: Person;
+    for on: Date;
+    for startsAfter: Date;
+    when reportable_payment(rp, payor, payee, _, _, on, InterestOrDividend)
+        and underreporting_period_start(payor, payee, startsAfter)
+        and on > startsAfter
+        and not_known(stop_date_exists(payor, payee));
+    then backup_withholding_period_applies(rp, NotifiedPayeeUnderreporting);
+}
+relation stop_date_exists(payor: Person, payee: Person) kind institutional;
+rule StopDateExists strict {
+    for payor: Person;
+    for payee: Person;
+    for d: Date;
+    when stop_date(payor, payee, d);
+    then stop_date_exists(payor, payee);
+}
+@source(IRC_S3406_E, relation = formalizes, coverage = exact, quote = "(ii) before the stop date.")
+rule S3406e3ANotifiedUnderreportingBeforeStop strict {
+    label en official "interest or dividend payments after the 30th day and before the stop date";
+    for rp: ReportablePayment;
+    for payor: Person;
+    for payee: Person;
+    for on: Date;
+    for startsAfter: Date;
+    for stopOn: Date;
+    when reportable_payment(rp, payor, payee, _, _, on, InterestOrDividend)
+        and underreporting_period_start(payor, payee, startsAfter)
+        and on > startsAfter
+        and stop_date(payor, payee, stopOn)
+        and on < stopOn;
+    then backup_withholding_period_applies(rp, NotifiedPayeeUnderreporting);
+}
+// (4) certification failure
+pub relation payee_certification_failure(payee: Person, payor: Person) kind empirical {
+    label en official "a payee certification failure described in subsection (d)(1): the payee has not certified under penalty of perjury that he is not subject to withholding under (a)(1)(C)";
+}
+pub relation payee_certification_furnished_on(payee: Person, payor: Person, on: Date) kind empirical {
+    label en official "the certification is furnished to the payor";
+}
+@source(IRC_S3406_E, relation = formalizes, coverage = exact, quote = "subsection (a) shall apply to any reportable interest or dividend payment made during the period during which the certification described in subsection (d)(1) has not been furnished to the payor")
+rule S3406e4ANoCertification strict {
+    label en official "interest or dividend payments while no certification has been furnished";
+    for rp: ReportablePayment;
+    for payor: Person;
+    for payee: Person;
+    for on: Date;
+    when reportable_payment(rp, payor, payee, _, _, on, InterestOrDividend)
+        and payee_certification_failure(payee, payor)
+        and not_known(certification_furnished_exists(payee, payor))
+        and not_known(readily_tradable_instrument_via_broker(rp));
+    then backup_withholding_period_applies(rp, PayeeCertificationFailure);
+}
+relation certification_furnished_exists(payee: Person, payor: Person) kind institutional;
+rule CertificationFurnishedExists strict {
+    for payee: Person;
+    for payor: Person;
+    for on: Date;
+    when payee_certification_furnished_on(payee, payor, on);
+    then certification_furnished_exists(payee, payor);
+}
+pub relation readily_tradable_instrument_via_broker(rp: ReportablePayment) kind empirical {
+    label en official "the payment is on a readily tradable instrument acquired by the payee through a broker";
+}
+rule S3406e4ABeforeCertification strict {
+    label en official "interest or dividend payments made before the certification is furnished";
+    for rp: ReportablePayment;
+    for payor: Person;
+    for payee: Person;
+    for on: Date;
+    for certifiedOn: Date;
+    when reportable_payment(rp, payor, payee, _, _, on, InterestOrDividend)
+        and payee_certification_failure(payee, payor)
+        and payee_certification_furnished_on(payee, payor, certifiedOn)
+        and on < certifiedOn
+        and not_known(readily_tradable_instrument_via_broker(rp));
+    then backup_withholding_period_applies(rp, PayeeCertificationFailure);
+}
+pub relation broker_notification_received_on(payor: Person, payee: Person, on: Date) kind empirical {
+    label en official "the payor receives notification from a broker under subsection (d)(2)(B)";
+}
+pub relation broker_period_start(payor: Person, payee: Person, startsAfter: Date) kind institutional {
+    label en official "the period starts with payments made after the close of the 30th day after the payor receives the broker's notification";
+}
+rule S3406e4BWaitingPeriod strict {
+    label en official "the 30th day after the broker's notification";
+    for payor: Person;
+    for payee: Person;
+    for receivedOn: Date;
+    when broker_notification_received_on(payor, payee, receivedOn);
+    then broker_period_start(payor, payee, add_calendar_period(receivedOn, 30 calendar_day));
+}
+@source(IRC_S3406_E, relation = formalizes, coverage = exact, quote = "the period described in subparagraph (A) shall start with payments to the payee made after the close of the 30th day after the payor receives notification from a broker under subsection (d)(2)(B)")
+rule S3406e4BBrokerInstrument strict {
+    label en official "readily tradable instrument through a broker: payments after the 30th day after the notification while no certification is furnished";
+    for rp: ReportablePayment;
+    for payor: Person;
+    for payee: Person;
+    for on: Date;
+    for startsAfter: Date;
+    when reportable_payment(rp, payor, payee, _, _, on, InterestOrDividend)
+        and readily_tradable_instrument_via_broker(rp)
+        and payee_certification_failure(payee, payor)
+        and broker_period_start(payor, payee, startsAfter)
+        and on > startsAfter
+        and not_known(certification_furnished_exists(payee, payor));
+    then backup_withholding_period_applies(rp, BrokerNotifiedInstrument);
+}
+// (5) grace periods
+pub relation payor_elects_startup_grace_period(payor: Person, payee: Person) kind empirical {
+    label en official "the payor elects the application of subparagraph (A) with respect to the payee";
+}
+pub relation payor_elects_no_stopping_grace_period(payor: Person, payee: Person) kind empirical {
+    label en official "the payor elects not to have subparagraph (B) apply with respect to the payee";
+}
+pub relation payor_elects_shorter_grace_days(payor: Person, payee: Person, days: Integer) kind empirical {
+    label en official "the payor elects a grace period shorter than 30 days";
+}
+pub relation grace_period_days(payor: Person, payee: Person, days: Integer) kind institutional {
+    label en official "the length of the grace period in days: 30, or the shorter period elected under (C)";
+}
+relation shorter_grace_elected_exists(payor: Person, payee: Person) kind institutional;
+rule ShorterGraceElectedExists strict {
+    for payor: Person;
+    for payee: Person;
+    for days: Integer;
+    when payor_elects_shorter_grace_days(payor, payee, days)
+        and days < 30;
+    then shorter_grace_elected_exists(payor, payee);
+}
+rule S3406e5CDefaultThirtyDays strict {
+    label en official "30 days unless a shorter period is elected";
+    for rp: ReportablePayment;
+    for payor: Person;
+    for payee: Person;
+    when reportable_payment(rp, payor, payee, _, _, _, _)
+        and not_known(shorter_grace_elected_exists(payor, payee));
+    then grace_period_days(payor, payee, 30);
+}
+@source(IRC_S3406_E, relation = formalizes, coverage = exact, quote = "The payor may elect a period shorter than the grace period set forth in subparagraph (A) or (B), as the case may be.")
+rule S3406e5CShorterElected strict {
+    label en official "a shorter elected period";
+    for payor: Person;
+    for payee: Person;
+    for days: Integer;
+    for rp: ReportablePayment;
+    when payor_elects_shorter_grace_days(payor, payee, days)
+        and reportable_payment(rp, payor, payee, _, _, _, _)
+        and days < 30;
+    then grace_period_days(payor, payee, days);
+}
+@source(IRC_S3406_E, relation = formalizes, coverage = exact, quote = "If the payor elects the application of this subparagraph with respect to the payee, subsection (a) shall also apply to any reportable payment made during the 30-day period described in paragraph (2)(A), (3)(A), or (4)(B).")
+rule S3406e5AStartUpGraceIncorrectTin strict {
+    label en official "start-up grace for the (2)(A) waiting period: payments within the grace days after the receipt";
+    for rp: ReportablePayment;
+    for payor: Person;
+    for payee: Person;
+    for on: Date;
+    for receivedOn: Date;
+    for days: Integer;
+    when reportable_payment(rp, payor, payee, _, _, on, _)
+        and payor_elects_startup_grace_period(payor, payee)
+        and secretary_notifies_incorrect_tin_received_on(payor, payee, receivedOn)
+        and grace_period_days(payor, payee, days)
+        and on > receivedOn
+        and days_between(receivedOn, on) <= days
+        and not_known(another_tin_furnished_exists(payee, payor));
+    then backup_withholding_period_applies(rp, StartUpGracePeriod);
+}
+rule S3406e5AStartUpGraceUnderreporting strict {
+    label en official "start-up grace for the (3)(A) waiting period (interest or dividend payments)";
+    for rp: ReportablePayment;
+    for payor: Person;
+    for payee: Person;
+    for on: Date;
+    for receivedOn: Date;
+    for days: Integer;
+    when reportable_payment(rp, payor, payee, _, _, on, InterestOrDividend)
+        and payor_elects_startup_grace_period(payor, payee)
+        and secretary_notifies_payee_underreporting_received_on(payor, payee, receivedOn)
+        and grace_period_days(payor, payee, days)
+        and on > receivedOn
+        and days_between(receivedOn, on) <= days
+        and not_known(stop_date_exists(payor, payee));
+    then backup_withholding_period_applies(rp, StartUpGracePeriod);
+}
+rule S3406e5AStartUpGraceBroker strict {
+    label en official "start-up grace for the (4)(B) waiting period (interest or dividend payments)";
+    for rp: ReportablePayment;
+    for payor: Person;
+    for payee: Person;
+    for on: Date;
+    for receivedOn: Date;
+    for days: Integer;
+    when reportable_payment(rp, payor, payee, _, _, on, InterestOrDividend)
+        and payor_elects_startup_grace_period(payor, payee)
+        and broker_notification_received_on(payor, payee, receivedOn)
+        and grace_period_days(payor, payee, days)
+        and on > receivedOn
+        and days_between(receivedOn, on) <= days
+        and not_known(certification_furnished_exists(payee, payor));
+    then backup_withholding_period_applies(rp, StartUpGracePeriod);
+}
+@source(IRC_S3406_E, relation = formalizes, coverage = exact, quote = "subsection (a) shall also apply to any reportable payment made after the close of the period described in paragraph (1), (2), or (4) (as the case may be) and before the 30th day after the close of such period")
+rule S3406e5BStoppingGraceTin strict {
+    label en official "stopping grace after the (1) period: payments within the grace days after the TIN is furnished, unless the payor opts out";
+    for rp: ReportablePayment;
+    for payor: Person;
+    for payee: Person;
+    for on: Date;
+    for furnishedOn: Date;
+    for days: Integer;
+    when reportable_payment(rp, payor, payee, _, _, on, _)
+        and payee_furnished_tin_in_manner_required_on(payee, payor, furnishedOn)
+        and grace_period_days(payor, payee, days)
+        and on >= furnishedOn
+        and days_between(furnishedOn, on) < days
+        and not_known(payor_elects_no_stopping_grace_period(payor, payee));
+    then backup_withholding_period_applies(rp, StoppingGracePeriod);
+}
+rule S3406e5BStoppingGraceAnotherTin strict {
+    label en official "stopping grace after the (2) period ends with another TIN";
+    for rp: ReportablePayment;
+    for payor: Person;
+    for payee: Person;
+    for on: Date;
+    for anotherOn: Date;
+    for days: Integer;
+    when reportable_payment(rp, payor, payee, _, _, on, _)
+        and payee_furnished_another_tin_on(payee, payor, anotherOn)
+        and grace_period_days(payor, payee, days)
+        and on >= anotherOn
+        and days_between(anotherOn, on) < days
+        and not_known(payor_elects_no_stopping_grace_period(payor, payee));
+    then backup_withholding_period_applies(rp, StoppingGracePeriod);
+}
+rule S3406e5BStoppingGraceCertification strict {
+    label en official "stopping grace after the (4) period ends with the certification";
+    for rp: ReportablePayment;
+    for payor: Person;
+    for payee: Person;
+    for on: Date;
+    for certifiedOn: Date;
+    for days: Integer;
+    when reportable_payment(rp, payor, payee, _, _, on, _)
+        and payee_certification_furnished_on(payee, payor, certifiedOn)
+        and grace_period_days(payor, payee, days)
+        and on >= certifiedOn
+        and days_between(certifiedOn, on) < days
+        and not_known(payor_elects_no_stopping_grace_period(payor, payee));
+    then backup_withholding_period_applies(rp, StoppingGracePeriod);
+}
+@source(IRC_S3406_E, relation = formalizes, coverage = exact, quote = "A similar rule shall also apply with respect to the period described in paragraph (3)(A) where the stop date is determined under clause (i) or (ii) of paragraph (3)(B).")
+rule S3406e5BStoppingGraceStopDate strict {
+    label en official "stopping grace after the (3)(A) period when the stop date is determined by a stop event (interest or dividend payments)";
+    for rp: ReportablePayment;
+    for payor: Person;
+    for payee: Person;
+    for on: Date;
+    for stopOn: Date;
+    for days: Integer;
+    when reportable_payment(rp, payor, payee, _, _, on, InterestOrDividend)
+        and stop_date(payor, payee, stopOn)
+        and any_stop_event_exists(payor, payee)
+        and grace_period_days(payor, payee, days)
+        and on >= stopOn
+        and days_between(stopOn, on) < days
+        and not_known(payor_elects_no_stopping_grace_period(payor, payee));
+    then backup_withholding_period_applies(rp, StoppingGracePeriod);
+}
+
+// ============================================================================
+// §3510(d) — exception where the employer is liable for other employment taxes
+// ============================================================================
+
+pub relation regulations_provide_3510d_exception(y: TaxableYear) kind empirical {
+    label en official "regulations prescribed by the Secretary provide the exception of subsection (d) for the calendar year";
+}
+pub relation employer_liable_for_subtitle_c_tax_on_other_remuneration(employer: Person, y: TaxableYear) kind empirical {
+    label en official "the employer is liable for a tax under Subtitle C with respect to remuneration for services other than domestic service in a private home of the employer";
+}
+pub relation section_3510_not_applicable(employer: Person, y: TaxableYear) kind institutional {
+    label en official "section 3510 does not apply to the employer for the calendar year";
+}
+@source(IRC_S3510_D, relation = formalizes, coverage = exact, quote = "To the extent provided in regulations prescribed by the Secretary, this section shall not apply to any employer for any calendar year")
+rule S3510dExceptionApplies defeasible {
+    label en official "the exception applies to the extent regulations provide it";
+    for employer: Person;
+    for y: TaxableYear;
+    when regulations_provide_3510d_exception(y)
+        and employer_liable_for_subtitle_c_tax_on_other_remuneration(employer, y);
+    then section_3510_not_applicable(employer, y);
+}
+
+// ============================================================================
+// §3511(c), (e), (f) — certified professional employer organizations
+// ============================================================================
+
+pub relation individual_performs_services_under_7705e2_contract(individual: Person, cpeo: Person, customer: Person) kind empirical {
+    label en official "the individual performs services covered by a contract meeting the requirements of section 7705(e)(2)";
+}
+pub relation individual_with_self_employment_earnings_from_customer(individual: Person, customer: Person) kind empirical {
+    label en official "the individual has net earnings from self-employment derived from the customer's trade or business (including a partner in a partnership that is a customer)";
+}
+pub relation customer_related_to_cpeo_under_267b_or_707b(customer: Person, cpeo: Person) kind empirical {
+    label en official "the customer bears a relationship to the certified professional employer organization described in section 267(b) or 707(b), applied with 10 percent substituted for 50 percent";
+}
+pub relation customer_related_to_cpeo_ownership(customer: Person, cpeo: Person, percent: Decimal) kind empirical {
+    label en official "the percentage of ownership relating the customer and the organization under section 267(b) or 707(b)";
+}
+pub relation section_3511_inapplicable_to_customer(customer: Person, cpeo: Person) kind institutional {
+    label en official "section 3511 does not apply in the case of the customer";
+}
+@source(IRC_S3511_E, relation = formalizes, coverage = exact, quote = "This section shall not apply in the case of a customer which bears a relationship to a certified professional employer organization described in section 267(b) or 707(b).")
+rule S3511eRelatedParty defeasible {
+    label en official "a related customer is outside section 3511";
+    for customer: Person;
+    for cpeo: Person;
+    when customer_related_to_cpeo_under_267b_or_707b(customer, cpeo);
+    then section_3511_inapplicable_to_customer(customer, cpeo);
+}
+@source(IRC_S3511_E, relation = formalizes, coverage = exact, quote = "such sections shall be applied by substituting \"10 percent\" for \"50 percent\"")
+rule S3511eRelatedByTenPercent defeasible {
+    label en official "ownership of more than 10 percent (the substituted percentage replaces 50 percent: the threshold of 'more than 50 percent' becomes 'more than 10 percent')";
+    for customer: Person;
+    for cpeo: Person;
+    for percent: Decimal;
+    when customer_related_to_cpeo_ownership(customer, cpeo, percent)
+        and percent > 10 percent;
+    then section_3511_inapplicable_to_customer(customer, cpeo);
+}
+pub relation individual_not_work_site_employee_3511f(individual: Person, customer: Person) kind institutional {
+    label en official "an individual with net earnings from self-employment derived from the customer's business is not a work site employee";
+}
+@source(IRC_S3511_F, relation = formalizes, coverage = exact, quote = "an individual with net earnings from self-employment derived from the customer's trade or business (including a partner in a partnership that is a customer) is not a work site employee with respect to remuneration paid by a certified professional employer organization")
+rule S3511fSelfEmployedNotWorkSiteEmployee defeasible {
+    label en official "self-employed: not a work site employee";
+    for individual: Person;
+    for customer: Person;
+    when individual_with_self_employment_earnings_from_customer(individual, customer);
+    then individual_not_work_site_employee_3511f(individual, customer);
+}
+pub relation cpeo_treated_as_employer_of_non_work_site_individual(cpeo: Person, individual: Person, customer: Person) kind institutional {
+    label en official "the CPEO is treated as the employer of the individual, only with respect to remuneration it remits, solely for its liability for the taxes and other obligations of this subtitle";
+}
+@source(IRC_S3511_C, relation = formalizes, coverage = exact, quote = "a certified professional employer organization shall be treated as the employer of any individual (other than a work site employee or a person described in subsection (f)) who is performing services covered by a contract meeting the requirements of section 7705(e)(2), but only with respect to remuneration remitted by such organization to such individual")
+rule S3511c1CpeoTreatedAsEmployerOfOthers defeasible {
+    label en official "the CPEO is the employer of a non-work-site individual under a 7705(e)(2) contract for the remuneration it remits";
+    for cpeo: Person;
+    for individual: Person;
+    for customer: Person;
+    when certified_cpeo(cpeo)
+        and individual_performs_services_under_7705e2_contract(individual, cpeo, customer)
+        and cpeo_remits_remuneration_to(cpeo, individual);
+    then cpeo_treated_as_employer_of_non_work_site_individual(cpeo, individual, customer);
+    unless us.irc.employment::work_site_employee_of(individual, cpeo, customer) and certified_cpeo(cpeo) and individual_performs_services_under_7705e2_contract(individual, cpeo, customer) and cpeo_remits_remuneration_to(cpeo, individual);
+    unless individual_not_work_site_employee_3511f(individual, customer) and certified_cpeo(cpeo) and individual_performs_services_under_7705e2_contract(individual, cpeo, customer) and cpeo_remits_remuneration_to(cpeo, individual);
+    unless section_3511_inapplicable_to_customer(customer, cpeo) and certified_cpeo(cpeo) and individual_performs_services_under_7705e2_contract(individual, cpeo, customer) and cpeo_remits_remuneration_to(cpeo, individual);
+}
+pub relation employer_type_rules_apply_to_cpeo_remuneration(cpeo: Person, individual: Person) kind institutional {
+    label en official "the exemptions, exclusions, definitions and other rules based on the type of employer that would apply but for paragraph (1) apply to the taxes on that remuneration";
+}
+@source(IRC_S3511_C, relation = formalizes, coverage = exact, quote = "the exemptions, exclusions, definitions, and other rules which are based on type of employer and which would (but for paragraph (1)) apply shall apply with respect to such taxes imposed on such remuneration")
+rule S3511c2EmployerTypeRulesApply defeasible {
+    label en official "the customer's employer-type rules govern the remuneration the CPEO remits";
+    for cpeo: Person;
+    for individual: Person;
+    for customer: Person;
+    when cpeo_treated_as_employer_of_non_work_site_individual(cpeo, individual, customer);
+    then employer_type_rules_apply_to_cpeo_remuneration(cpeo, individual);
+}

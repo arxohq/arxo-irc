@@ -1,0 +1,247 @@
+// 26 U.S.C. §§704(a),(d), 705, 706(a)-(b), 707(c) — the priority core of
+// PLAN family 5: allocation/distribution flowing into partner basis and its
+// limitations, the basis history itself, the partnership's required taxable
+// year, and guaranteed payments.
+//
+// JUDGMENT CALLS AND GAPS (see report):
+//  - §704(b) ("substantial economic effect") is EVALUATIVE (DECISION-0194):
+//    whether an allocation has substantial economic effect is a regulatory
+//    test (26 CFR 1.704-1(b)) this package does not reproduce —
+//    EXTERNAL_DEPENDENCY, modeled as a case-asserted flag
+//    `lacks_substantial_economic_effect`. The statutory branching itself
+//    (agreement governs unless defective, otherwise the partner's interest
+//    governs) IS executable and is modeled below as a small chain of
+//    defeasible rules (compiler trap: an `unless` defeater must bind every
+//    head field BY ITSELF — it is compiled as its own rule with the same
+//    head — so each defeasible step here carries the minimal head that its
+//    own unless atom can bind alone, and combines with the agreement/interest
+//    percentage in a SEPARATE defeasible rule per LDC-E4103 [a strict rule
+//    may not read a bare relation produced by a defeasible rule; the correct
+//    fix, confirmed against the existing IP-licence-style corpus rows, is to
+//    make the reading rule defeasible too, not to force the producer strict]).
+//  - §704(c) (contributed-property built-in gain/loss) is OUT of this
+//    module's "fully" list; not modeled here (see the report's not-done
+//    list — the (c)(1)(A) statutory sharing rule and the ceiling-rule
+//    ceiling are both left for a later pass).
+//  - §704(d): the statutory rule and the two-year carryforward scenario are
+//    modeled as a relation BETWEEN periods (`suspended_partner_loss_carried_in/out`),
+//    not a recursive same-relation ledger (compiler trap: self-recursive
+//    arithmetic is LDC-E4102). `us.irc.core::Carryover`/`CarryoverKind`
+//    is not reused: none of its five values fits a suspended partnership
+//    loss, and this package cannot add a core enum value (out of its write
+//    scope) — TECH-GAPS.md row `us.irc.partnerships-02` names the missing
+//    `CarryoverKind` value for the coordinator.
+//  - §704(d)(3)(A)-(B) (charitable-contribution FMV-basis exception) is
+//    modeled as its own relation reducing the loss amount BEFORE the basis
+//    test, per the statute's own ordering.
+//  - §705(a)(1)(C)/(a)(3) (depletion basis adjustments) are OUT of scope
+//    (need §613A, not read by this package) — left `unreviewed`/TECH_GAP.
+//  - §705(b) (alternative basis-by-regulation on termination) is
+//    EXTERNAL_DEPENDENCY (regulations not prescribed in this snapshot).
+//  - §706(b)(4) least-aggregate-deferral is modeled as a computation with
+//    intermediate values (each candidate year's weighted deferral), but the
+//    ENUMERATION of "each partner's taxable year" as candidate years is
+//    supplied by the case (a finite, case-asserted candidate set), since
+//    the language has no construct to enumerate "the set of years used by
+//    any partner" from `ownership_interest` alone without an aggregate over
+//    a derived predicate (§111).
+//  - §706(b)(1)(C) business-purpose exception and (b)(2) partner
+//    conforming-change duty are EVALUATIVE (Secretary's satisfaction) —
+//    DECISION-0194 judgment channel, authority Secretary.
+//  - §706(c) (closing of partnership year) and (d) (varying interests) are
+//    OUT of this module (see report).
+//  - §707(c): the guaranteed-payment characterization rule is executable in
+//    full: the statute's own two cross-references (§61(a) gross income,
+//    §162(a) trade-or-business expense subject to §263) are modeled as
+//    classification facts local to this package (this package does not
+//    import `us.irc.gross_income`/a business-deduction package to avoid a
+//    premature import of an unreviewed contract — DEPENDENCIES.json rows
+//    pending on both).
+
+language "law.core" version "0.2";
+package us.irc.partnerships version "0.1.1";
+namespace "urn:us:irc:partnerships:clir";
+
+use self::{
+    DistributiveShareItem,
+    IRC_S704_A,
+    IRC_S704_B,
+    IRC_S704_D,
+    IRC_S707_C,
+    Partnership,
+    Person,
+    TaxableYear,
+    is_partner,
+    loss_for_704d_limitation,
+    partnership_interest_share,
+    partnership_level_item,
+};
+
+// ============================================================================
+// §704(a)-(b): distributive share by agreement / partner's interest
+// ============================================================================
+
+@source(IRC_S704_A, relation = formalizes, coverage = exact, quote = "A partner's distributive share of income, gain, loss, deduction, or credit shall, except as otherwise provided in this chapter, be determined by the partnership agreement.")
+pub relation distributive_share_per_agreement(partner: Person, pship: Partnership, y: TaxableYear, item: DistributiveShareItem, share: Decimal) kind empirical {
+    label en official "the partnership agreement's stated share of an item for this partner (section 704(a)) — a case fact, since the agreement's terms are not pinned text";
+}
+
+relation lacks_substantial_economic_effect(partner: Person, pship: Partnership, y: TaxableYear, item: DistributiveShareItem) kind institutional {
+    label en unofficial "EVALUATIVE/EXTERNAL_DEPENDENCY (DECISION-0194, 26 CFR 1.704-1(b)): the agreement's allocation of this item to this partner lacks substantial economic effect — a case-asserted regulatory determination, not computed by this package";
+}
+
+pub relation partnership_interest_share_for_item(partner: Person, pship: Partnership, y: TaxableYear, item: DistributiveShareItem, share: Decimal) kind institutional {
+    label en unofficial "the operative share (agreement or, absent one or a valid one, the partner's interest in the partnership) used to compute a section 702(a) item's distributive share for this partner and item";
+}
+
+relation agreement_share_governs(partner: Person, pship: Partnership, y: TaxableYear, item: DistributiveShareItem) kind institutional {
+    label en unofficial "the section 704(a) agreement share governs this item for this partner: an agreement share exists and is not flagged as lacking substantial economic effect";
+}
+@source(IRC_S704_A, relation = formalizes, coverage = exact, quote = "be determined by the partnership agreement")
+rule S704AgreementShareGovernsFlag(partner: Person, pship: Partnership, y: TaxableYear, item: DistributiveShareItem) defeasible {
+    label en official "absent a substantial-economic-effect defect, the partnership agreement's stated share governs the partner's distributive share of an item (section 704(a))";
+    when distributive_share_per_agreement(partner, pship, y, item, _);
+    unless lacks_substantial_economic_effect(partner, pship, y, item);
+    then agreement_share_governs(partner, pship, y, item);
+}
+rule S704ShareFromAgreement(partner: Person, pship: Partnership, y: TaxableYear, item: DistributiveShareItem, share: Decimal) defeasible {
+    label en official "the operative share is the agreement's stated share when the agreement governs (section 704(a))";
+    when agreement_share_governs(partner, pship, y, item);
+    when distributive_share_per_agreement(partner, pship, y, item, share);
+    then partnership_interest_share_for_item(partner, pship, y, item, share);
+}
+
+@source(IRC_S704_B, relation = formalizes, coverage = exact, quote = "the partnership agreement does not provide as to the partner's distributive share of income, gain, loss, deduction, or credit (or item thereof)")
+rule S704NoAgreementShareFlag(partner: Person, pship: Partnership, y: TaxableYear, item: DistributiveShareItem) defeasible {
+    label en official "when the partnership agreement does not provide a share for this item, the partner's interest in the partnership governs instead (section 704(b)(1))";
+    when is_partner(partner, pship);
+    when partnership_level_item(pship, y, item, _);
+    unless distributive_share_per_agreement(partner, pship, y, item, _);
+    then partners_interest_governs(partner, pship, y, item);
+}
+pub relation partners_interest_governs(partner: Person, pship: Partnership, y: TaxableYear, item: DistributiveShareItem) kind institutional {
+    label en unofficial "the section 704(b) fallback applies to this item for this partner: no agreement share, or the agreement's allocation lacks substantial economic effect";
+}
+@source(IRC_S704_B, relation = formalizes, coverage = exact, quote = "the allocation to a partner under the agreement of income, gain, loss, deduction, or credit (or item thereof) does not have substantial economic effect")
+rule S704LacksSubstantialEconomicEffectFlag(partner: Person, pship: Partnership, y: TaxableYear, item: DistributiveShareItem) strict {
+    label en official "when the agreement's allocation of an item lacks substantial economic effect, the partner's interest in the partnership governs instead (section 704(b)(2))";
+    when lacks_substantial_economic_effect(partner, pship, y, item);
+    then partners_interest_governs(partner, pship, y, item);
+}
+rule S704ShareFromPartnersInterest(partner: Person, pship: Partnership, y: TaxableYear, item: DistributiveShareItem, share: Decimal) defeasible {
+    label en official "the operative share is the partner's interest in the partnership (facts and circumstances) when the section 704(b) fallback applies";
+    when partners_interest_governs(partner, pship, y, item);
+    when partnership_interest_share(partner, pship, share);
+    then partnership_interest_share_for_item(partner, pship, y, item, share);
+}
+
+// ============================================================================
+// §704(d): limitation on allowance of losses, with carryforward
+// ============================================================================
+
+pub relation partner_distributive_share_loss(partner: Person, pship: Partnership, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the partner's distributive share of partnership loss (including capital loss) for the year, before the section 704(d) basis limitation";
+}
+pub relation partner_outside_basis_before_loss(partner: Person, pship: Partnership, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the partner's adjusted basis in the partnership interest at the end of the partnership year in which the loss occurred, before applying this year's loss (section 704(d)(1)); a case supplies it directly or via outside_basis (see 03-basis-history-and-year.law)";
+}
+pub relation suspended_partner_loss_carried_in(partner: Person, pship: Partnership, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the section 704(d)(2) excess loss carried forward INTO this year from a prior year (a case-asserted bridge fact between two TaxableYear periods, per the method note: carryovers are relations between periods, not a recursive ledger)";
+}
+pub relation charitable_contribution_fmv_excess(partner: Person, pship: Partnership, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the partner's distributive share of the excess of a contributed property's fair market value over its adjusted basis (section 704(d)(3)(B) exception amount)";
+}
+
+pub relation partner_loss_basis_ceiling(partner: Person, pship: Partnership, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "the adjusted basis available to absorb this year's loss: basis before loss plus any suspended loss carried in, per section 704(d)(1)-(2) read together";
+}
+rule S704dBasisCeilingWithCarryIn(partner: Person, pship: Partnership, y: TaxableYear, basis: Money, carried_in: Money) strict {
+    when partner_outside_basis_before_loss(partner, pship, y, basis);
+    when suspended_partner_loss_carried_in(partner, pship, y, carried_in);
+    then partner_loss_basis_ceiling(partner, pship, y, basis + carried_in);
+}
+rule S704dBasisCeilingNoCarryIn(partner: Person, pship: Partnership, y: TaxableYear, basis: Money) defeasible {
+    when partner_outside_basis_before_loss(partner, pship, y, basis);
+    unless suspended_partner_loss_carried_in(partner, pship, y, _) and partner_outside_basis_before_loss(partner, pship, y, basis);
+    then partner_loss_basis_ceiling(partner, pship, y, basis);
+}
+
+@source(IRC_S704_D, relation = formalizes, coverage = exact, quote = "A partner's distributive share of partnership loss (including capital loss) shall be allowed only to the extent of the adjusted basis of such partner's interest in the partnership at the end of the partnership year in which such loss occurred.")
+pub relation partner_loss_allowed(partner: Person, pship: Partnership, y: TaxableYear, amount: Money) kind institutional {
+    label en official "a partner's distributive share of partnership loss is allowed only to the extent of the adjusted basis of the partner's interest at the end of the year (section 704(d)(1)), net of the section 704(d)(3)(B) charitable FMV-excess carve-out";
+}
+pub relation suspended_partner_loss_carried_out(partner: Person, pship: Partnership, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the excess of the section 704(d) loss over the basis ceiling, carried forward to the year in which the excess is repaid to the partnership (section 704(d)(2))";
+}
+
+rule S704dLossAllowedWithinBasis(partner: Person, pship: Partnership, y: TaxableYear, loss: Money, ceiling: Money, charitable_excess: Money) defeasible {
+    label en official "loss net of the section 704(d)(3)(B) charitable FMV excess, tested against the basis ceiling: allowed in full when it does not exceed the ceiling (section 704(d)(1))";
+    when loss_for_704d_limitation(partner, pship, y, loss);
+    when partner_loss_basis_ceiling(partner, pship, y, ceiling);
+    when charitable_contribution_fmv_excess(partner, pship, y, charitable_excess);
+    when (loss - charitable_excess) <= ceiling;
+    then partner_loss_allowed(partner, pship, y, loss - charitable_excess);
+}
+rule S704dLossLimitedToBasis(partner: Person, pship: Partnership, y: TaxableYear, loss: Money, ceiling: Money, charitable_excess: Money) defeasible {
+    label en official "loss net of the section 704(d)(3)(B) charitable FMV excess exceeds the basis ceiling: allowed only up to the ceiling, the excess is suspended and carried forward (section 704(d)(1)-(2))";
+    when loss_for_704d_limitation(partner, pship, y, loss);
+    when partner_loss_basis_ceiling(partner, pship, y, ceiling);
+    when charitable_contribution_fmv_excess(partner, pship, y, charitable_excess);
+    when (loss - charitable_excess) > ceiling;
+    then partner_loss_allowed(partner, pship, y, ceiling);
+    then suspended_partner_loss_carried_out(partner, pship, y, (loss - charitable_excess) - ceiling);
+}
+rule S704dNoCharitableExcess(partner: Person, pship: Partnership, y: TaxableYear, loss: Money, ceiling: Money) defeasible {
+    label en official "with no section 704(d)(3)(B) charitable FMV excess to net out, the loss is allowed in full when it does not exceed the basis ceiling";
+    when loss_for_704d_limitation(partner, pship, y, loss);
+    when partner_loss_basis_ceiling(partner, pship, y, ceiling);
+    unless charitable_contribution_fmv_excess(partner, pship, y, _) and loss_for_704d_limitation(partner, pship, y, loss) and partner_loss_basis_ceiling(partner, pship, y, ceiling);
+    when loss <= ceiling;
+    then partner_loss_allowed(partner, pship, y, loss);
+}
+rule S704dNoCharitableExcessLimited(partner: Person, pship: Partnership, y: TaxableYear, loss: Money, ceiling: Money) defeasible {
+    label en official "with no section 704(d)(3)(B) charitable FMV excess to net out, and the loss exceeding the basis ceiling, only the ceiling is allowed and the rest is suspended";
+    when loss_for_704d_limitation(partner, pship, y, loss);
+    when partner_loss_basis_ceiling(partner, pship, y, ceiling);
+    unless charitable_contribution_fmv_excess(partner, pship, y, _) and loss_for_704d_limitation(partner, pship, y, loss) and partner_loss_basis_ceiling(partner, pship, y, ceiling);
+    when loss > ceiling;
+    then partner_loss_allowed(partner, pship, y, ceiling);
+    then suspended_partner_loss_carried_out(partner, pship, y, loss - ceiling);
+}
+
+// ============================================================================
+// §707(c): guaranteed payments
+// ============================================================================
+
+pub relation guaranteed_payment_amount(partner: Person, pship: Partnership, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "a payment to the partner for services or the use of capital, determined without regard to the income of the partnership (section 707(c))";
+}
+
+@source(IRC_S707_C, relation = formalizes, coverage = exact, quote = "To the extent determined without regard to the income of the partnership, payments to a partner for services or the use of capital shall be considered as made to one who is not a member of the partnership, but only for the purposes of section 61(a) (relating to gross income) and, subject to section 263, for purposes of section 162(a) (relating to trade or business expenses).")
+pub relation guaranteed_payment(partner: Person, pship: Partnership, y: TaxableYear, amount: Money) kind institutional {
+    label en official "a guaranteed payment is treated as made to a non-partner for section 61(a) gross-income and section 162(a) trade-or-business-expense purposes only (section 707(c))";
+}
+rule S707cGuaranteedPaymentCharacterization(partner: Person, pship: Partnership, y: TaxableYear, amount: Money) strict {
+    when guaranteed_payment_amount(partner, pship, y, amount);
+    then guaranteed_payment(partner, pship, y, amount);
+}
+
+pub relation guaranteed_payment_gross_income_to_partner(partner: Person, pship: Partnership, y: TaxableYear, amount: Money) kind institutional {
+    label en official "for section 61(a) purposes the guaranteed payment is gross income of the recipient partner, as if paid to a non-partner (section 707(c))";
+}
+rule S707cGuaranteedPaymentIsGrossIncome(partner: Person, pship: Partnership, y: TaxableYear, amount: Money) strict {
+    when guaranteed_payment(partner, pship, y, amount);
+    then guaranteed_payment_gross_income_to_partner(partner, pship, y, amount);
+}
+
+relation guaranteed_payment_for_capital_use(partner: Person, pship: Partnership, y: TaxableYear) kind empirical {
+    label en unofficial "the guaranteed payment is for the use of the partner's capital rather than services (section 707(c) covers both; the section 163(a) deductibility split is not this package's own norm)";
+}
+pub relation guaranteed_payment_deductible_expense_to_partnership(partner: Person, pship: Partnership, y: TaxableYear, amount: Money) kind institutional {
+    label en official "for section 162(a) purposes (subject to section 263), the guaranteed payment for services is treated as a trade-or-business expense of the partnership, as if paid to a non-partner (section 707(c))";
+}
+rule S707cGuaranteedPaymentIsExpense(partner: Person, pship: Partnership, y: TaxableYear, amount: Money) defeasible {
+    when guaranteed_payment(partner, pship, y, amount);
+    unless guaranteed_payment_for_capital_use(partner, pship, y) and guaranteed_payment(partner, pship, y, amount);
+    then guaranteed_payment_deductible_expense_to_partnership(partner, pship, y, amount);
+}

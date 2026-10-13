@@ -1,0 +1,147 @@
+// Section 3406 — backup withholding. Stage 1 scope (task instruction).
+//
+// Method: the four (a)(1)(A)-(D) trigger conditions are modelled as
+// case-asserted facts (each is itself defined at length in (b)-(d), which
+// this package does not fully re-derive — TECH_GAP per condition, noted
+// below); the DUTY fires on any one trigger being present. The rate is
+// "the fourth lowest rate of tax applicable under section 1(c)" — the same
+// EXTERNAL_DEPENDENCY on `us.irc.income_individual`'s bracket ordering as
+// section 3402(q)/(r) in `04-income-tax-withholding.law` (reusing
+// `fourth_lowest_section_1c_rate` from that file, since it is the identical
+// statutory formula).
+
+
+
+use self::{
+    IRC_S3406_A,
+    IRC_S3406_F,
+    Person,
+    Secretary,
+    TaxableYear,
+    fourth_lowest_section_1c_rate,
+};
+
+pub entity ReportablePayment;
+
+pub enum ReportablePaymentKind { InterestOrDividend; PatronageDividend; Other; }
+
+pub relation reportable_payment(rp: ReportablePayment, payor: Person, payee: Person, y: TaxableYear, amount: Money, on: Date, kind: ReportablePaymentKind) kind empirical {
+    label en official "a section 3406(b) reportable payment (interest/dividend, patronage dividend, or the other information-return categories of (b)(3)) — case fact; the (b)(5)-(7) small-payment/aggregate/window exceptions are TECH_GAP, folded into whether the case asserts the payment as reportable at all";
+}
+
+// --- (a)(1) the four triggers ------------------------------------------------
+
+pub enum BackupWithholdingTrigger {
+    NoTinFurnished;            // (A)
+    IncorrectTinNotified;      // (B)
+    NotifiedPayeeUnderreporting; // (C) — interest/dividend payments only
+    PayeeCertificationFailure;   // (D) — interest/dividend payments only
+}
+
+pub relation backup_withholding_trigger(rp: ReportablePayment, trigger: BackupWithholdingTrigger, on: Date) kind empirical {
+    label en official "one of the section 3406(a)(1) triggers is present for this reportable payment on this date (case fact). (C)/(D) require the payment to be a reportable interest or dividend payment (section 3406(a)(2)); this package does not separately enforce that restriction as a guard — TECH_GAP, the case must not assert (C)/(D) for a non-interest/dividend payment)";
+}
+
+pub relation backup_withholding_required(rp: ReportablePayment) kind institutional {
+    label en official "backup withholding under section 3406(a) applies to this reportable payment";
+}
+rule BackupWithholdingRequired(rp: ReportablePayment, trigger: BackupWithholdingTrigger, on: Date) strict {
+    when backup_withholding_trigger(rp, trigger, on);
+    then backup_withholding_required(rp);
+}
+
+pub relation backup_withholding_performed(rp: ReportablePayment, amount: Money) kind empirical {
+    label en official "the payor in fact deducted and withheld this amount under section 3406(a) (case fact — the performance side of the duty)";
+}
+@source(IRC_S3406_A, relation = formalizes, coverage = partial, quote = "then the payor shall deduct and withhold from such payment a tax equal to the product of the fourth lowest rate of tax applicable under section 1(c)")
+rule Section3406BackupWithholdingDutyRule(rp: ReportablePayment, payor: Person, payee: Person, y: TaxableYear, amount: Money, on: Date, rate: Decimal) strict {
+    when reportable_payment(rp, payor, payee, y, amount, on, _)
+        and backup_withholding_required(rp)
+        and fourth_lowest_section_1c_rate(y, rate)
+        and not backup_withholding_exception(rp);
+    then duty Section3406BackupWithholdingDuty {
+        bearer payor;
+        beneficiary Secretary;
+        goal achievement {
+            condition backup_withholding_performed(rp, round(amount * rate, 2, "HALF_UP"));
+            window [on, on];
+        }
+    };
+}
+
+// --- (g) exceptions ----------------------------------------------------------
+
+pub relation backup_withholding_exception(rp: ReportablePayment) kind empirical {
+    label en official "section 3406(g): the payment is to an exempt payee/organization, is already subject to withholding otherwise required by this title, or is within the Secretary's TIN-waiting-period exemption (case fact — the (g)(1)(A) exempt-organization list itself is not re-derived, TECH_GAP)";
+}
+
+// --- (c) notified payee underreporting: institutional side ------------------
+//
+// (c) is mostly a duty OF THE SECRETARY (determine underreporting, mail at
+// least 4 notices over 120 days, then notify payors) — an institutional
+// process this package does not own an observable case-fact shape for
+// (the Secretary's own multi-step determination); `NotifiedPayeeUnderreporting`
+// above takes the RESULT (that notice has issued) as the case fact, which is
+// the trigger the payor's duty actually depends on. The Secretary's own
+// duty to stop withholding on a no-underreporting/hardship/dispute finding
+// (c)(3) is TECH_GAP (no case-observable "Secretary's determination" entity).
+
+// --- (d) certification failure: institutional side --------------------------
+//
+// Likewise, (d)'s readily-tradable-instrument/broker-notification mechanics
+// are TECH_GAP; `PayeeCertificationFailure` above takes the ultimate fact
+// (no valid certification on file) directly.
+
+// --- (e) period for which withholding is in effect --------------------------
+//
+// Each paragraph of (e) computes a WINDOW (30-day grace periods, stop dates)
+// bounding when a trigger is "in effect." This package models the trigger as
+// a simple on/off case fact rather than deriving the window from the
+// underlying notice dates — TECH_GAP: a full model would replace
+// `backup_withholding_trigger`'s single date with a `[start, end)` window
+// computed from the (e)(1)-(5) rules (30-day grace periods on start and
+// stop) and test payment dates against it, mirroring the `add_calendar_period`
+// idiom AGENT-BRIEF documents for deadline windows elsewhere in this title.
+
+// --- (f) confidentiality of information -------------------------------------
+
+pub relation used_section_3406_information(user: Person, purpose: InformationUsePurpose) kind empirical {
+    label en official "a person used information obtained under section 3406 (case fact, with the asserted purpose)";
+}
+pub enum InformationUsePurpose { MeetingSection3406Requirement; PermittedUnderSection6103; OtherPurpose; }
+@source(IRC_S3406_F, relation = formalizes, coverage = exact, quote = "No person may use any information obtained under this section")
+rule Section3406ConfidentialityProhibitionRule(user: Person) strict {
+    when used_section_3406_information(user, _);
+    then prohibition Section3406ConfidentialityProhibition {
+        bearer user;
+        action used_section_3406_information(user, OtherPurpose);
+        window [-infinity, infinity];
+    };
+}
+
+// --- (h) other definitions and special rules --------------------------------
+//
+// "Obviously incorrect number" (digit-count test), "2 incorrect TINs in 3
+// years" (running window over TIN submissions), "payor"/"broker" definitions,
+// "readily tradable instrument": NON_NORMATIVE (pure definitions feeding (a)-
+// (e), which already take their results as case facts above) except the
+// 2-incorrect-TINs rule, which is a genuine TECH_GAP aggregate (a 3-year
+// rolling window count over case-asserted TIN submissions).
+
+// --- (i) regulations ---------------------------------------------------------
+// "The Secretary shall prescribe such regulations..." — classification =
+// NON_NORMATIVE (a rulemaking directive to the Secretary, not a rule of
+// conduct this package can test against a case).
+
+// --- Alias matching the task's own pub-interface name -----------------------
+
+pub relation backup_withholding_amount(rp: ReportablePayment, amount: Money) kind institutional {
+    label en official "the amount required to be deducted and withheld under section 3406(a) for this reportable payment — alias of the amount computed by `Section3406BackupWithholdingDutyRule`, named to match the task's own pub-interface list literally";
+}
+rule BackupWithholdingAmountAlias(rp: ReportablePayment, payor: Person, payee: Person, y: TaxableYear, amount: Money, on: Date, rate: Decimal) strict {
+    when reportable_payment(rp, payor, payee, y, amount, on, _)
+        and backup_withholding_required(rp)
+        and fourth_lowest_section_1c_rate(y, rate)
+        and not backup_withholding_exception(rp);
+    then backup_withholding_amount(rp, round(amount * rate, 2, "HALF_UP"));
+}

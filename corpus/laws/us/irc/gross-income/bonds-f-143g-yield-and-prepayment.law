@@ -1,0 +1,720 @@
+// Stage 4b (26.09.2026, DECISION-0379 with deontics): §143(g)(2)(A)-(C) yield on the issue (G6701) and the month-end of
+// an expected prepayment (G6702).
+//
+// TECHNIQUE (bounded bisection, no root-finding in the language). The yield is an internal rate of return. `pow` takes
+// integer bases only, so the discount factor is formed by REPEATED division (`div_round`, 10 places, HALF_UP), and the
+// rate by BISECTION over the closed range 0 to 50 percent, unrolled 16 steps: step k is its own predicate (a predicate
+// cannot feed itself, LDC-E4102). The width of the range after 16 steps is 50 / 2^16 = about 0.0008 percentage points;
+// the result is the midpoint of the last range, rounded to 6 places. BOUNDS (JUDGMENT CALL, recorded in TECH-GAPS G6712):
+// annual payment periods, payments at the ends of years 1 to 4 (`yield_payment_143g2`, a case input; a payment schedule
+// longer than four years is outside the bound), a yield between 0 and 50 percent, the present value of payments
+// decreasing in the rate. The issue price of (C) is a case input (sections 1273 and 1274 belong to another owner).
+
+use self::{
+    BondIssue,
+    IRC_S143_G,
+    effective_rate_spread_within_limit_143g2,
+};
+
+relation yield_payment_143g2(issue: BondIssue, year_index: Integer, amount: Money) kind empirical {
+    label en unofficial "the payment on the issue expected at the end of the year_index-th year after the issue date (1 to 4)";
+}
+relation yield_issue_price_143g2(issue: BondIssue, price: Money) kind empirical {
+    label en unofficial "the issue price of the bonds (the value that the payments are discounted to)";
+}
+relation yield_inputs_143g2(issue: BondIssue, price: Decimal, p1: Decimal, p2: Decimal, p3: Decimal, p4: Decimal) kind institutional {
+    label en unofficial "the issue price and the payments of years 1 to 4 in dollars (a year without a payment counts zero)";
+}
+@source(IRC_S143_G, relation = formalizes, coverage = partial, quote = "(ii) an expected maturity for the bonds which is consistent with the assumptions required under subparagraph (B)(iv).")
+rule YieldInputs143g2(issue: BondIssue, price: Money) strict {
+    label en official "section 143(g)(2)(C): the issue price and the expected payments, collected per year (bounded at four years)";
+    when yield_issue_price_143g2(issue, price);
+    then yield_inputs_143g2(issue, price / 1.00 USD,
+        sum(collect all a: Money where yield_payment_143g2(issue, 1, a), empty: 0.00 USD) / 1.00 USD,
+        sum(collect all a: Money where yield_payment_143g2(issue, 2, a), empty: 0.00 USD) / 1.00 USD,
+        sum(collect all a: Money where yield_payment_143g2(issue, 3, a), empty: 0.00 USD) / 1.00 USD,
+        sum(collect all a: Money where yield_payment_143g2(issue, 4, a), empty: 0.00 USD) / 1.00 USD);
+}
+relation yield_bisect_143g2_0(issue: BondIssue, lo: Decimal, hi: Decimal) kind institutional {
+    label en unofficial "bisection step 0: the range of the yield in percent (0 to 50)";
+}
+@source(IRC_S143_G, relation = formalizes, coverage = partial, quote = "(ii) an expected maturity for the bonds which is consistent with the assumptions required under subparagraph (B)(iv).")
+rule YieldBisectStart143g2(issue: BondIssue, price: Decimal, p1: Decimal, p2: Decimal, p3: Decimal, p4: Decimal) strict {
+    when yield_inputs_143g2(issue, price, p1, p2, p3, p4);
+    then yield_bisect_143g2_0(issue, 0.0, 50.0);
+}
+relation yield_mid_143g2_0(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal) kind institutional {
+    label en unofficial "bisection step 0: the midpoint of the range";
+}
+relation yield_factor_143g2_0(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, factor: Decimal) kind institutional {
+    label en unofficial "bisection step 0: one plus the midpoint rate as a fraction";
+}
+relation yield_pv_143g2_0(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, pv: Decimal) kind institutional {
+    label en unofficial "bisection step 0: the present value of the payments at the midpoint rate";
+}
+relation yield_bisect_143g2_1(issue: BondIssue, lo: Decimal, hi: Decimal) kind institutional {
+    label en unofficial "bisection step 1: the range of the yield in percent";
+}
+rule YieldMid143g2S0(issue: BondIssue, lo: Decimal, hi: Decimal) strict {
+    when yield_bisect_143g2_0(issue, lo, hi);
+    then yield_mid_143g2_0(issue, lo, hi, div_round(lo + hi, 2.0, 8, "HALF_UP"));
+}
+rule YieldFactor143g2S0(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal) strict {
+    when yield_mid_143g2_0(issue, lo, hi, mid);
+    then yield_factor_143g2_0(issue, lo, hi, mid, 1.0 + div_round(mid, 100.0, 10, "HALF_UP"));
+}
+rule YieldPv143g2S0(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, f: Decimal, price: Decimal, p1: Decimal, p2: Decimal, p3: Decimal, p4: Decimal) strict {
+    when yield_factor_143g2_0(issue, lo, hi, mid, f);
+    when yield_inputs_143g2(issue, price, p1, p2, p3, p4);
+    then yield_pv_143g2_0(issue, lo, hi, mid, p1 * div_round(1.0, f, 10, "HALF_UP") + p2 * div_round(div_round(1.0, f, 10, "HALF_UP"), f, 10, "HALF_UP") + p3 * div_round(div_round(div_round(1.0, f, 10, "HALF_UP"), f, 10, "HALF_UP"), f, 10, "HALF_UP") + p4 * div_round(div_round(div_round(div_round(1.0, f, 10, "HALF_UP"), f, 10, "HALF_UP"), f, 10, "HALF_UP"), f, 10, "HALF_UP"));
+}
+rule YieldRaiseLow143g2S0(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, pv: Decimal, price: Decimal, p1: Decimal, p2: Decimal, p3: Decimal, p4: Decimal) strict {
+    label en unofficial "the present value at the midpoint exceeds the price: the yield is above the midpoint";
+    when yield_pv_143g2_0(issue, lo, hi, mid, pv);
+    when yield_inputs_143g2(issue, price, p1, p2, p3, p4);
+    when pv > price;
+    then yield_bisect_143g2_1(issue, mid, hi);
+}
+rule YieldLowerHigh143g2S0(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, pv: Decimal, price: Decimal, p1: Decimal, p2: Decimal, p3: Decimal, p4: Decimal) strict {
+    label en unofficial "the present value at the midpoint does not exceed the price: the yield is at or below the midpoint";
+    when yield_pv_143g2_0(issue, lo, hi, mid, pv);
+    when yield_inputs_143g2(issue, price, p1, p2, p3, p4);
+    when pv <= price;
+    then yield_bisect_143g2_1(issue, lo, mid);
+}
+relation yield_mid_143g2_1(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal) kind institutional {
+    label en unofficial "bisection step 1: the midpoint of the range";
+}
+relation yield_factor_143g2_1(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, factor: Decimal) kind institutional {
+    label en unofficial "bisection step 1: one plus the midpoint rate as a fraction";
+}
+relation yield_pv_143g2_1(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, pv: Decimal) kind institutional {
+    label en unofficial "bisection step 1: the present value of the payments at the midpoint rate";
+}
+relation yield_bisect_143g2_2(issue: BondIssue, lo: Decimal, hi: Decimal) kind institutional {
+    label en unofficial "bisection step 2: the range of the yield in percent";
+}
+rule YieldMid143g2S1(issue: BondIssue, lo: Decimal, hi: Decimal) strict {
+    when yield_bisect_143g2_1(issue, lo, hi);
+    then yield_mid_143g2_1(issue, lo, hi, div_round(lo + hi, 2.0, 8, "HALF_UP"));
+}
+rule YieldFactor143g2S1(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal) strict {
+    when yield_mid_143g2_1(issue, lo, hi, mid);
+    then yield_factor_143g2_1(issue, lo, hi, mid, 1.0 + div_round(mid, 100.0, 10, "HALF_UP"));
+}
+rule YieldPv143g2S1(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, f: Decimal, price: Decimal, p1: Decimal, p2: Decimal, p3: Decimal, p4: Decimal) strict {
+    when yield_factor_143g2_1(issue, lo, hi, mid, f);
+    when yield_inputs_143g2(issue, price, p1, p2, p3, p4);
+    then yield_pv_143g2_1(issue, lo, hi, mid, p1 * div_round(1.0, f, 10, "HALF_UP") + p2 * div_round(div_round(1.0, f, 10, "HALF_UP"), f, 10, "HALF_UP") + p3 * div_round(div_round(div_round(1.0, f, 10, "HALF_UP"), f, 10, "HALF_UP"), f, 10, "HALF_UP") + p4 * div_round(div_round(div_round(div_round(1.0, f, 10, "HALF_UP"), f, 10, "HALF_UP"), f, 10, "HALF_UP"), f, 10, "HALF_UP"));
+}
+rule YieldRaiseLow143g2S1(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, pv: Decimal, price: Decimal, p1: Decimal, p2: Decimal, p3: Decimal, p4: Decimal) strict {
+    label en unofficial "the present value at the midpoint exceeds the price: the yield is above the midpoint";
+    when yield_pv_143g2_1(issue, lo, hi, mid, pv);
+    when yield_inputs_143g2(issue, price, p1, p2, p3, p4);
+    when pv > price;
+    then yield_bisect_143g2_2(issue, mid, hi);
+}
+rule YieldLowerHigh143g2S1(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, pv: Decimal, price: Decimal, p1: Decimal, p2: Decimal, p3: Decimal, p4: Decimal) strict {
+    label en unofficial "the present value at the midpoint does not exceed the price: the yield is at or below the midpoint";
+    when yield_pv_143g2_1(issue, lo, hi, mid, pv);
+    when yield_inputs_143g2(issue, price, p1, p2, p3, p4);
+    when pv <= price;
+    then yield_bisect_143g2_2(issue, lo, mid);
+}
+relation yield_mid_143g2_2(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal) kind institutional {
+    label en unofficial "bisection step 2: the midpoint of the range";
+}
+relation yield_factor_143g2_2(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, factor: Decimal) kind institutional {
+    label en unofficial "bisection step 2: one plus the midpoint rate as a fraction";
+}
+relation yield_pv_143g2_2(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, pv: Decimal) kind institutional {
+    label en unofficial "bisection step 2: the present value of the payments at the midpoint rate";
+}
+relation yield_bisect_143g2_3(issue: BondIssue, lo: Decimal, hi: Decimal) kind institutional {
+    label en unofficial "bisection step 3: the range of the yield in percent";
+}
+rule YieldMid143g2S2(issue: BondIssue, lo: Decimal, hi: Decimal) strict {
+    when yield_bisect_143g2_2(issue, lo, hi);
+    then yield_mid_143g2_2(issue, lo, hi, div_round(lo + hi, 2.0, 8, "HALF_UP"));
+}
+rule YieldFactor143g2S2(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal) strict {
+    when yield_mid_143g2_2(issue, lo, hi, mid);
+    then yield_factor_143g2_2(issue, lo, hi, mid, 1.0 + div_round(mid, 100.0, 10, "HALF_UP"));
+}
+rule YieldPv143g2S2(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, f: Decimal, price: Decimal, p1: Decimal, p2: Decimal, p3: Decimal, p4: Decimal) strict {
+    when yield_factor_143g2_2(issue, lo, hi, mid, f);
+    when yield_inputs_143g2(issue, price, p1, p2, p3, p4);
+    then yield_pv_143g2_2(issue, lo, hi, mid, p1 * div_round(1.0, f, 10, "HALF_UP") + p2 * div_round(div_round(1.0, f, 10, "HALF_UP"), f, 10, "HALF_UP") + p3 * div_round(div_round(div_round(1.0, f, 10, "HALF_UP"), f, 10, "HALF_UP"), f, 10, "HALF_UP") + p4 * div_round(div_round(div_round(div_round(1.0, f, 10, "HALF_UP"), f, 10, "HALF_UP"), f, 10, "HALF_UP"), f, 10, "HALF_UP"));
+}
+rule YieldRaiseLow143g2S2(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, pv: Decimal, price: Decimal, p1: Decimal, p2: Decimal, p3: Decimal, p4: Decimal) strict {
+    label en unofficial "the present value at the midpoint exceeds the price: the yield is above the midpoint";
+    when yield_pv_143g2_2(issue, lo, hi, mid, pv);
+    when yield_inputs_143g2(issue, price, p1, p2, p3, p4);
+    when pv > price;
+    then yield_bisect_143g2_3(issue, mid, hi);
+}
+rule YieldLowerHigh143g2S2(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, pv: Decimal, price: Decimal, p1: Decimal, p2: Decimal, p3: Decimal, p4: Decimal) strict {
+    label en unofficial "the present value at the midpoint does not exceed the price: the yield is at or below the midpoint";
+    when yield_pv_143g2_2(issue, lo, hi, mid, pv);
+    when yield_inputs_143g2(issue, price, p1, p2, p3, p4);
+    when pv <= price;
+    then yield_bisect_143g2_3(issue, lo, mid);
+}
+relation yield_mid_143g2_3(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal) kind institutional {
+    label en unofficial "bisection step 3: the midpoint of the range";
+}
+relation yield_factor_143g2_3(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, factor: Decimal) kind institutional {
+    label en unofficial "bisection step 3: one plus the midpoint rate as a fraction";
+}
+relation yield_pv_143g2_3(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, pv: Decimal) kind institutional {
+    label en unofficial "bisection step 3: the present value of the payments at the midpoint rate";
+}
+relation yield_bisect_143g2_4(issue: BondIssue, lo: Decimal, hi: Decimal) kind institutional {
+    label en unofficial "bisection step 4: the range of the yield in percent";
+}
+rule YieldMid143g2S3(issue: BondIssue, lo: Decimal, hi: Decimal) strict {
+    when yield_bisect_143g2_3(issue, lo, hi);
+    then yield_mid_143g2_3(issue, lo, hi, div_round(lo + hi, 2.0, 8, "HALF_UP"));
+}
+rule YieldFactor143g2S3(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal) strict {
+    when yield_mid_143g2_3(issue, lo, hi, mid);
+    then yield_factor_143g2_3(issue, lo, hi, mid, 1.0 + div_round(mid, 100.0, 10, "HALF_UP"));
+}
+rule YieldPv143g2S3(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, f: Decimal, price: Decimal, p1: Decimal, p2: Decimal, p3: Decimal, p4: Decimal) strict {
+    when yield_factor_143g2_3(issue, lo, hi, mid, f);
+    when yield_inputs_143g2(issue, price, p1, p2, p3, p4);
+    then yield_pv_143g2_3(issue, lo, hi, mid, p1 * div_round(1.0, f, 10, "HALF_UP") + p2 * div_round(div_round(1.0, f, 10, "HALF_UP"), f, 10, "HALF_UP") + p3 * div_round(div_round(div_round(1.0, f, 10, "HALF_UP"), f, 10, "HALF_UP"), f, 10, "HALF_UP") + p4 * div_round(div_round(div_round(div_round(1.0, f, 10, "HALF_UP"), f, 10, "HALF_UP"), f, 10, "HALF_UP"), f, 10, "HALF_UP"));
+}
+rule YieldRaiseLow143g2S3(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, pv: Decimal, price: Decimal, p1: Decimal, p2: Decimal, p3: Decimal, p4: Decimal) strict {
+    label en unofficial "the present value at the midpoint exceeds the price: the yield is above the midpoint";
+    when yield_pv_143g2_3(issue, lo, hi, mid, pv);
+    when yield_inputs_143g2(issue, price, p1, p2, p3, p4);
+    when pv > price;
+    then yield_bisect_143g2_4(issue, mid, hi);
+}
+rule YieldLowerHigh143g2S3(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, pv: Decimal, price: Decimal, p1: Decimal, p2: Decimal, p3: Decimal, p4: Decimal) strict {
+    label en unofficial "the present value at the midpoint does not exceed the price: the yield is at or below the midpoint";
+    when yield_pv_143g2_3(issue, lo, hi, mid, pv);
+    when yield_inputs_143g2(issue, price, p1, p2, p3, p4);
+    when pv <= price;
+    then yield_bisect_143g2_4(issue, lo, mid);
+}
+relation yield_mid_143g2_4(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal) kind institutional {
+    label en unofficial "bisection step 4: the midpoint of the range";
+}
+relation yield_factor_143g2_4(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, factor: Decimal) kind institutional {
+    label en unofficial "bisection step 4: one plus the midpoint rate as a fraction";
+}
+relation yield_pv_143g2_4(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, pv: Decimal) kind institutional {
+    label en unofficial "bisection step 4: the present value of the payments at the midpoint rate";
+}
+relation yield_bisect_143g2_5(issue: BondIssue, lo: Decimal, hi: Decimal) kind institutional {
+    label en unofficial "bisection step 5: the range of the yield in percent";
+}
+rule YieldMid143g2S4(issue: BondIssue, lo: Decimal, hi: Decimal) strict {
+    when yield_bisect_143g2_4(issue, lo, hi);
+    then yield_mid_143g2_4(issue, lo, hi, div_round(lo + hi, 2.0, 8, "HALF_UP"));
+}
+rule YieldFactor143g2S4(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal) strict {
+    when yield_mid_143g2_4(issue, lo, hi, mid);
+    then yield_factor_143g2_4(issue, lo, hi, mid, 1.0 + div_round(mid, 100.0, 10, "HALF_UP"));
+}
+rule YieldPv143g2S4(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, f: Decimal, price: Decimal, p1: Decimal, p2: Decimal, p3: Decimal, p4: Decimal) strict {
+    when yield_factor_143g2_4(issue, lo, hi, mid, f);
+    when yield_inputs_143g2(issue, price, p1, p2, p3, p4);
+    then yield_pv_143g2_4(issue, lo, hi, mid, p1 * div_round(1.0, f, 10, "HALF_UP") + p2 * div_round(div_round(1.0, f, 10, "HALF_UP"), f, 10, "HALF_UP") + p3 * div_round(div_round(div_round(1.0, f, 10, "HALF_UP"), f, 10, "HALF_UP"), f, 10, "HALF_UP") + p4 * div_round(div_round(div_round(div_round(1.0, f, 10, "HALF_UP"), f, 10, "HALF_UP"), f, 10, "HALF_UP"), f, 10, "HALF_UP"));
+}
+rule YieldRaiseLow143g2S4(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, pv: Decimal, price: Decimal, p1: Decimal, p2: Decimal, p3: Decimal, p4: Decimal) strict {
+    label en unofficial "the present value at the midpoint exceeds the price: the yield is above the midpoint";
+    when yield_pv_143g2_4(issue, lo, hi, mid, pv);
+    when yield_inputs_143g2(issue, price, p1, p2, p3, p4);
+    when pv > price;
+    then yield_bisect_143g2_5(issue, mid, hi);
+}
+rule YieldLowerHigh143g2S4(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, pv: Decimal, price: Decimal, p1: Decimal, p2: Decimal, p3: Decimal, p4: Decimal) strict {
+    label en unofficial "the present value at the midpoint does not exceed the price: the yield is at or below the midpoint";
+    when yield_pv_143g2_4(issue, lo, hi, mid, pv);
+    when yield_inputs_143g2(issue, price, p1, p2, p3, p4);
+    when pv <= price;
+    then yield_bisect_143g2_5(issue, lo, mid);
+}
+relation yield_mid_143g2_5(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal) kind institutional {
+    label en unofficial "bisection step 5: the midpoint of the range";
+}
+relation yield_factor_143g2_5(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, factor: Decimal) kind institutional {
+    label en unofficial "bisection step 5: one plus the midpoint rate as a fraction";
+}
+relation yield_pv_143g2_5(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, pv: Decimal) kind institutional {
+    label en unofficial "bisection step 5: the present value of the payments at the midpoint rate";
+}
+relation yield_bisect_143g2_6(issue: BondIssue, lo: Decimal, hi: Decimal) kind institutional {
+    label en unofficial "bisection step 6: the range of the yield in percent";
+}
+rule YieldMid143g2S5(issue: BondIssue, lo: Decimal, hi: Decimal) strict {
+    when yield_bisect_143g2_5(issue, lo, hi);
+    then yield_mid_143g2_5(issue, lo, hi, div_round(lo + hi, 2.0, 8, "HALF_UP"));
+}
+rule YieldFactor143g2S5(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal) strict {
+    when yield_mid_143g2_5(issue, lo, hi, mid);
+    then yield_factor_143g2_5(issue, lo, hi, mid, 1.0 + div_round(mid, 100.0, 10, "HALF_UP"));
+}
+rule YieldPv143g2S5(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, f: Decimal, price: Decimal, p1: Decimal, p2: Decimal, p3: Decimal, p4: Decimal) strict {
+    when yield_factor_143g2_5(issue, lo, hi, mid, f);
+    when yield_inputs_143g2(issue, price, p1, p2, p3, p4);
+    then yield_pv_143g2_5(issue, lo, hi, mid, p1 * div_round(1.0, f, 10, "HALF_UP") + p2 * div_round(div_round(1.0, f, 10, "HALF_UP"), f, 10, "HALF_UP") + p3 * div_round(div_round(div_round(1.0, f, 10, "HALF_UP"), f, 10, "HALF_UP"), f, 10, "HALF_UP") + p4 * div_round(div_round(div_round(div_round(1.0, f, 10, "HALF_UP"), f, 10, "HALF_UP"), f, 10, "HALF_UP"), f, 10, "HALF_UP"));
+}
+rule YieldRaiseLow143g2S5(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, pv: Decimal, price: Decimal, p1: Decimal, p2: Decimal, p3: Decimal, p4: Decimal) strict {
+    label en unofficial "the present value at the midpoint exceeds the price: the yield is above the midpoint";
+    when yield_pv_143g2_5(issue, lo, hi, mid, pv);
+    when yield_inputs_143g2(issue, price, p1, p2, p3, p4);
+    when pv > price;
+    then yield_bisect_143g2_6(issue, mid, hi);
+}
+rule YieldLowerHigh143g2S5(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, pv: Decimal, price: Decimal, p1: Decimal, p2: Decimal, p3: Decimal, p4: Decimal) strict {
+    label en unofficial "the present value at the midpoint does not exceed the price: the yield is at or below the midpoint";
+    when yield_pv_143g2_5(issue, lo, hi, mid, pv);
+    when yield_inputs_143g2(issue, price, p1, p2, p3, p4);
+    when pv <= price;
+    then yield_bisect_143g2_6(issue, lo, mid);
+}
+relation yield_mid_143g2_6(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal) kind institutional {
+    label en unofficial "bisection step 6: the midpoint of the range";
+}
+relation yield_factor_143g2_6(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, factor: Decimal) kind institutional {
+    label en unofficial "bisection step 6: one plus the midpoint rate as a fraction";
+}
+relation yield_pv_143g2_6(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, pv: Decimal) kind institutional {
+    label en unofficial "bisection step 6: the present value of the payments at the midpoint rate";
+}
+relation yield_bisect_143g2_7(issue: BondIssue, lo: Decimal, hi: Decimal) kind institutional {
+    label en unofficial "bisection step 7: the range of the yield in percent";
+}
+rule YieldMid143g2S6(issue: BondIssue, lo: Decimal, hi: Decimal) strict {
+    when yield_bisect_143g2_6(issue, lo, hi);
+    then yield_mid_143g2_6(issue, lo, hi, div_round(lo + hi, 2.0, 8, "HALF_UP"));
+}
+rule YieldFactor143g2S6(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal) strict {
+    when yield_mid_143g2_6(issue, lo, hi, mid);
+    then yield_factor_143g2_6(issue, lo, hi, mid, 1.0 + div_round(mid, 100.0, 10, "HALF_UP"));
+}
+rule YieldPv143g2S6(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, f: Decimal, price: Decimal, p1: Decimal, p2: Decimal, p3: Decimal, p4: Decimal) strict {
+    when yield_factor_143g2_6(issue, lo, hi, mid, f);
+    when yield_inputs_143g2(issue, price, p1, p2, p3, p4);
+    then yield_pv_143g2_6(issue, lo, hi, mid, p1 * div_round(1.0, f, 10, "HALF_UP") + p2 * div_round(div_round(1.0, f, 10, "HALF_UP"), f, 10, "HALF_UP") + p3 * div_round(div_round(div_round(1.0, f, 10, "HALF_UP"), f, 10, "HALF_UP"), f, 10, "HALF_UP") + p4 * div_round(div_round(div_round(div_round(1.0, f, 10, "HALF_UP"), f, 10, "HALF_UP"), f, 10, "HALF_UP"), f, 10, "HALF_UP"));
+}
+rule YieldRaiseLow143g2S6(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, pv: Decimal, price: Decimal, p1: Decimal, p2: Decimal, p3: Decimal, p4: Decimal) strict {
+    label en unofficial "the present value at the midpoint exceeds the price: the yield is above the midpoint";
+    when yield_pv_143g2_6(issue, lo, hi, mid, pv);
+    when yield_inputs_143g2(issue, price, p1, p2, p3, p4);
+    when pv > price;
+    then yield_bisect_143g2_7(issue, mid, hi);
+}
+rule YieldLowerHigh143g2S6(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, pv: Decimal, price: Decimal, p1: Decimal, p2: Decimal, p3: Decimal, p4: Decimal) strict {
+    label en unofficial "the present value at the midpoint does not exceed the price: the yield is at or below the midpoint";
+    when yield_pv_143g2_6(issue, lo, hi, mid, pv);
+    when yield_inputs_143g2(issue, price, p1, p2, p3, p4);
+    when pv <= price;
+    then yield_bisect_143g2_7(issue, lo, mid);
+}
+relation yield_mid_143g2_7(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal) kind institutional {
+    label en unofficial "bisection step 7: the midpoint of the range";
+}
+relation yield_factor_143g2_7(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, factor: Decimal) kind institutional {
+    label en unofficial "bisection step 7: one plus the midpoint rate as a fraction";
+}
+relation yield_pv_143g2_7(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, pv: Decimal) kind institutional {
+    label en unofficial "bisection step 7: the present value of the payments at the midpoint rate";
+}
+relation yield_bisect_143g2_8(issue: BondIssue, lo: Decimal, hi: Decimal) kind institutional {
+    label en unofficial "bisection step 8: the range of the yield in percent";
+}
+rule YieldMid143g2S7(issue: BondIssue, lo: Decimal, hi: Decimal) strict {
+    when yield_bisect_143g2_7(issue, lo, hi);
+    then yield_mid_143g2_7(issue, lo, hi, div_round(lo + hi, 2.0, 8, "HALF_UP"));
+}
+rule YieldFactor143g2S7(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal) strict {
+    when yield_mid_143g2_7(issue, lo, hi, mid);
+    then yield_factor_143g2_7(issue, lo, hi, mid, 1.0 + div_round(mid, 100.0, 10, "HALF_UP"));
+}
+rule YieldPv143g2S7(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, f: Decimal, price: Decimal, p1: Decimal, p2: Decimal, p3: Decimal, p4: Decimal) strict {
+    when yield_factor_143g2_7(issue, lo, hi, mid, f);
+    when yield_inputs_143g2(issue, price, p1, p2, p3, p4);
+    then yield_pv_143g2_7(issue, lo, hi, mid, p1 * div_round(1.0, f, 10, "HALF_UP") + p2 * div_round(div_round(1.0, f, 10, "HALF_UP"), f, 10, "HALF_UP") + p3 * div_round(div_round(div_round(1.0, f, 10, "HALF_UP"), f, 10, "HALF_UP"), f, 10, "HALF_UP") + p4 * div_round(div_round(div_round(div_round(1.0, f, 10, "HALF_UP"), f, 10, "HALF_UP"), f, 10, "HALF_UP"), f, 10, "HALF_UP"));
+}
+rule YieldRaiseLow143g2S7(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, pv: Decimal, price: Decimal, p1: Decimal, p2: Decimal, p3: Decimal, p4: Decimal) strict {
+    label en unofficial "the present value at the midpoint exceeds the price: the yield is above the midpoint";
+    when yield_pv_143g2_7(issue, lo, hi, mid, pv);
+    when yield_inputs_143g2(issue, price, p1, p2, p3, p4);
+    when pv > price;
+    then yield_bisect_143g2_8(issue, mid, hi);
+}
+rule YieldLowerHigh143g2S7(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, pv: Decimal, price: Decimal, p1: Decimal, p2: Decimal, p3: Decimal, p4: Decimal) strict {
+    label en unofficial "the present value at the midpoint does not exceed the price: the yield is at or below the midpoint";
+    when yield_pv_143g2_7(issue, lo, hi, mid, pv);
+    when yield_inputs_143g2(issue, price, p1, p2, p3, p4);
+    when pv <= price;
+    then yield_bisect_143g2_8(issue, lo, mid);
+}
+relation yield_mid_143g2_8(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal) kind institutional {
+    label en unofficial "bisection step 8: the midpoint of the range";
+}
+relation yield_factor_143g2_8(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, factor: Decimal) kind institutional {
+    label en unofficial "bisection step 8: one plus the midpoint rate as a fraction";
+}
+relation yield_pv_143g2_8(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, pv: Decimal) kind institutional {
+    label en unofficial "bisection step 8: the present value of the payments at the midpoint rate";
+}
+relation yield_bisect_143g2_9(issue: BondIssue, lo: Decimal, hi: Decimal) kind institutional {
+    label en unofficial "bisection step 9: the range of the yield in percent";
+}
+rule YieldMid143g2S8(issue: BondIssue, lo: Decimal, hi: Decimal) strict {
+    when yield_bisect_143g2_8(issue, lo, hi);
+    then yield_mid_143g2_8(issue, lo, hi, div_round(lo + hi, 2.0, 8, "HALF_UP"));
+}
+rule YieldFactor143g2S8(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal) strict {
+    when yield_mid_143g2_8(issue, lo, hi, mid);
+    then yield_factor_143g2_8(issue, lo, hi, mid, 1.0 + div_round(mid, 100.0, 10, "HALF_UP"));
+}
+rule YieldPv143g2S8(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, f: Decimal, price: Decimal, p1: Decimal, p2: Decimal, p3: Decimal, p4: Decimal) strict {
+    when yield_factor_143g2_8(issue, lo, hi, mid, f);
+    when yield_inputs_143g2(issue, price, p1, p2, p3, p4);
+    then yield_pv_143g2_8(issue, lo, hi, mid, p1 * div_round(1.0, f, 10, "HALF_UP") + p2 * div_round(div_round(1.0, f, 10, "HALF_UP"), f, 10, "HALF_UP") + p3 * div_round(div_round(div_round(1.0, f, 10, "HALF_UP"), f, 10, "HALF_UP"), f, 10, "HALF_UP") + p4 * div_round(div_round(div_round(div_round(1.0, f, 10, "HALF_UP"), f, 10, "HALF_UP"), f, 10, "HALF_UP"), f, 10, "HALF_UP"));
+}
+rule YieldRaiseLow143g2S8(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, pv: Decimal, price: Decimal, p1: Decimal, p2: Decimal, p3: Decimal, p4: Decimal) strict {
+    label en unofficial "the present value at the midpoint exceeds the price: the yield is above the midpoint";
+    when yield_pv_143g2_8(issue, lo, hi, mid, pv);
+    when yield_inputs_143g2(issue, price, p1, p2, p3, p4);
+    when pv > price;
+    then yield_bisect_143g2_9(issue, mid, hi);
+}
+rule YieldLowerHigh143g2S8(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, pv: Decimal, price: Decimal, p1: Decimal, p2: Decimal, p3: Decimal, p4: Decimal) strict {
+    label en unofficial "the present value at the midpoint does not exceed the price: the yield is at or below the midpoint";
+    when yield_pv_143g2_8(issue, lo, hi, mid, pv);
+    when yield_inputs_143g2(issue, price, p1, p2, p3, p4);
+    when pv <= price;
+    then yield_bisect_143g2_9(issue, lo, mid);
+}
+relation yield_mid_143g2_9(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal) kind institutional {
+    label en unofficial "bisection step 9: the midpoint of the range";
+}
+relation yield_factor_143g2_9(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, factor: Decimal) kind institutional {
+    label en unofficial "bisection step 9: one plus the midpoint rate as a fraction";
+}
+relation yield_pv_143g2_9(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, pv: Decimal) kind institutional {
+    label en unofficial "bisection step 9: the present value of the payments at the midpoint rate";
+}
+relation yield_bisect_143g2_10(issue: BondIssue, lo: Decimal, hi: Decimal) kind institutional {
+    label en unofficial "bisection step 10: the range of the yield in percent";
+}
+rule YieldMid143g2S9(issue: BondIssue, lo: Decimal, hi: Decimal) strict {
+    when yield_bisect_143g2_9(issue, lo, hi);
+    then yield_mid_143g2_9(issue, lo, hi, div_round(lo + hi, 2.0, 8, "HALF_UP"));
+}
+rule YieldFactor143g2S9(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal) strict {
+    when yield_mid_143g2_9(issue, lo, hi, mid);
+    then yield_factor_143g2_9(issue, lo, hi, mid, 1.0 + div_round(mid, 100.0, 10, "HALF_UP"));
+}
+rule YieldPv143g2S9(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, f: Decimal, price: Decimal, p1: Decimal, p2: Decimal, p3: Decimal, p4: Decimal) strict {
+    when yield_factor_143g2_9(issue, lo, hi, mid, f);
+    when yield_inputs_143g2(issue, price, p1, p2, p3, p4);
+    then yield_pv_143g2_9(issue, lo, hi, mid, p1 * div_round(1.0, f, 10, "HALF_UP") + p2 * div_round(div_round(1.0, f, 10, "HALF_UP"), f, 10, "HALF_UP") + p3 * div_round(div_round(div_round(1.0, f, 10, "HALF_UP"), f, 10, "HALF_UP"), f, 10, "HALF_UP") + p4 * div_round(div_round(div_round(div_round(1.0, f, 10, "HALF_UP"), f, 10, "HALF_UP"), f, 10, "HALF_UP"), f, 10, "HALF_UP"));
+}
+rule YieldRaiseLow143g2S9(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, pv: Decimal, price: Decimal, p1: Decimal, p2: Decimal, p3: Decimal, p4: Decimal) strict {
+    label en unofficial "the present value at the midpoint exceeds the price: the yield is above the midpoint";
+    when yield_pv_143g2_9(issue, lo, hi, mid, pv);
+    when yield_inputs_143g2(issue, price, p1, p2, p3, p4);
+    when pv > price;
+    then yield_bisect_143g2_10(issue, mid, hi);
+}
+rule YieldLowerHigh143g2S9(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, pv: Decimal, price: Decimal, p1: Decimal, p2: Decimal, p3: Decimal, p4: Decimal) strict {
+    label en unofficial "the present value at the midpoint does not exceed the price: the yield is at or below the midpoint";
+    when yield_pv_143g2_9(issue, lo, hi, mid, pv);
+    when yield_inputs_143g2(issue, price, p1, p2, p3, p4);
+    when pv <= price;
+    then yield_bisect_143g2_10(issue, lo, mid);
+}
+relation yield_mid_143g2_10(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal) kind institutional {
+    label en unofficial "bisection step 10: the midpoint of the range";
+}
+relation yield_factor_143g2_10(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, factor: Decimal) kind institutional {
+    label en unofficial "bisection step 10: one plus the midpoint rate as a fraction";
+}
+relation yield_pv_143g2_10(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, pv: Decimal) kind institutional {
+    label en unofficial "bisection step 10: the present value of the payments at the midpoint rate";
+}
+relation yield_bisect_143g2_11(issue: BondIssue, lo: Decimal, hi: Decimal) kind institutional {
+    label en unofficial "bisection step 11: the range of the yield in percent";
+}
+rule YieldMid143g2S10(issue: BondIssue, lo: Decimal, hi: Decimal) strict {
+    when yield_bisect_143g2_10(issue, lo, hi);
+    then yield_mid_143g2_10(issue, lo, hi, div_round(lo + hi, 2.0, 8, "HALF_UP"));
+}
+rule YieldFactor143g2S10(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal) strict {
+    when yield_mid_143g2_10(issue, lo, hi, mid);
+    then yield_factor_143g2_10(issue, lo, hi, mid, 1.0 + div_round(mid, 100.0, 10, "HALF_UP"));
+}
+rule YieldPv143g2S10(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, f: Decimal, price: Decimal, p1: Decimal, p2: Decimal, p3: Decimal, p4: Decimal) strict {
+    when yield_factor_143g2_10(issue, lo, hi, mid, f);
+    when yield_inputs_143g2(issue, price, p1, p2, p3, p4);
+    then yield_pv_143g2_10(issue, lo, hi, mid, p1 * div_round(1.0, f, 10, "HALF_UP") + p2 * div_round(div_round(1.0, f, 10, "HALF_UP"), f, 10, "HALF_UP") + p3 * div_round(div_round(div_round(1.0, f, 10, "HALF_UP"), f, 10, "HALF_UP"), f, 10, "HALF_UP") + p4 * div_round(div_round(div_round(div_round(1.0, f, 10, "HALF_UP"), f, 10, "HALF_UP"), f, 10, "HALF_UP"), f, 10, "HALF_UP"));
+}
+rule YieldRaiseLow143g2S10(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, pv: Decimal, price: Decimal, p1: Decimal, p2: Decimal, p3: Decimal, p4: Decimal) strict {
+    label en unofficial "the present value at the midpoint exceeds the price: the yield is above the midpoint";
+    when yield_pv_143g2_10(issue, lo, hi, mid, pv);
+    when yield_inputs_143g2(issue, price, p1, p2, p3, p4);
+    when pv > price;
+    then yield_bisect_143g2_11(issue, mid, hi);
+}
+rule YieldLowerHigh143g2S10(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, pv: Decimal, price: Decimal, p1: Decimal, p2: Decimal, p3: Decimal, p4: Decimal) strict {
+    label en unofficial "the present value at the midpoint does not exceed the price: the yield is at or below the midpoint";
+    when yield_pv_143g2_10(issue, lo, hi, mid, pv);
+    when yield_inputs_143g2(issue, price, p1, p2, p3, p4);
+    when pv <= price;
+    then yield_bisect_143g2_11(issue, lo, mid);
+}
+relation yield_mid_143g2_11(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal) kind institutional {
+    label en unofficial "bisection step 11: the midpoint of the range";
+}
+relation yield_factor_143g2_11(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, factor: Decimal) kind institutional {
+    label en unofficial "bisection step 11: one plus the midpoint rate as a fraction";
+}
+relation yield_pv_143g2_11(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, pv: Decimal) kind institutional {
+    label en unofficial "bisection step 11: the present value of the payments at the midpoint rate";
+}
+relation yield_bisect_143g2_12(issue: BondIssue, lo: Decimal, hi: Decimal) kind institutional {
+    label en unofficial "bisection step 12: the range of the yield in percent";
+}
+rule YieldMid143g2S11(issue: BondIssue, lo: Decimal, hi: Decimal) strict {
+    when yield_bisect_143g2_11(issue, lo, hi);
+    then yield_mid_143g2_11(issue, lo, hi, div_round(lo + hi, 2.0, 8, "HALF_UP"));
+}
+rule YieldFactor143g2S11(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal) strict {
+    when yield_mid_143g2_11(issue, lo, hi, mid);
+    then yield_factor_143g2_11(issue, lo, hi, mid, 1.0 + div_round(mid, 100.0, 10, "HALF_UP"));
+}
+rule YieldPv143g2S11(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, f: Decimal, price: Decimal, p1: Decimal, p2: Decimal, p3: Decimal, p4: Decimal) strict {
+    when yield_factor_143g2_11(issue, lo, hi, mid, f);
+    when yield_inputs_143g2(issue, price, p1, p2, p3, p4);
+    then yield_pv_143g2_11(issue, lo, hi, mid, p1 * div_round(1.0, f, 10, "HALF_UP") + p2 * div_round(div_round(1.0, f, 10, "HALF_UP"), f, 10, "HALF_UP") + p3 * div_round(div_round(div_round(1.0, f, 10, "HALF_UP"), f, 10, "HALF_UP"), f, 10, "HALF_UP") + p4 * div_round(div_round(div_round(div_round(1.0, f, 10, "HALF_UP"), f, 10, "HALF_UP"), f, 10, "HALF_UP"), f, 10, "HALF_UP"));
+}
+rule YieldRaiseLow143g2S11(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, pv: Decimal, price: Decimal, p1: Decimal, p2: Decimal, p3: Decimal, p4: Decimal) strict {
+    label en unofficial "the present value at the midpoint exceeds the price: the yield is above the midpoint";
+    when yield_pv_143g2_11(issue, lo, hi, mid, pv);
+    when yield_inputs_143g2(issue, price, p1, p2, p3, p4);
+    when pv > price;
+    then yield_bisect_143g2_12(issue, mid, hi);
+}
+rule YieldLowerHigh143g2S11(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, pv: Decimal, price: Decimal, p1: Decimal, p2: Decimal, p3: Decimal, p4: Decimal) strict {
+    label en unofficial "the present value at the midpoint does not exceed the price: the yield is at or below the midpoint";
+    when yield_pv_143g2_11(issue, lo, hi, mid, pv);
+    when yield_inputs_143g2(issue, price, p1, p2, p3, p4);
+    when pv <= price;
+    then yield_bisect_143g2_12(issue, lo, mid);
+}
+relation yield_mid_143g2_12(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal) kind institutional {
+    label en unofficial "bisection step 12: the midpoint of the range";
+}
+relation yield_factor_143g2_12(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, factor: Decimal) kind institutional {
+    label en unofficial "bisection step 12: one plus the midpoint rate as a fraction";
+}
+relation yield_pv_143g2_12(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, pv: Decimal) kind institutional {
+    label en unofficial "bisection step 12: the present value of the payments at the midpoint rate";
+}
+relation yield_bisect_143g2_13(issue: BondIssue, lo: Decimal, hi: Decimal) kind institutional {
+    label en unofficial "bisection step 13: the range of the yield in percent";
+}
+rule YieldMid143g2S12(issue: BondIssue, lo: Decimal, hi: Decimal) strict {
+    when yield_bisect_143g2_12(issue, lo, hi);
+    then yield_mid_143g2_12(issue, lo, hi, div_round(lo + hi, 2.0, 8, "HALF_UP"));
+}
+rule YieldFactor143g2S12(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal) strict {
+    when yield_mid_143g2_12(issue, lo, hi, mid);
+    then yield_factor_143g2_12(issue, lo, hi, mid, 1.0 + div_round(mid, 100.0, 10, "HALF_UP"));
+}
+rule YieldPv143g2S12(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, f: Decimal, price: Decimal, p1: Decimal, p2: Decimal, p3: Decimal, p4: Decimal) strict {
+    when yield_factor_143g2_12(issue, lo, hi, mid, f);
+    when yield_inputs_143g2(issue, price, p1, p2, p3, p4);
+    then yield_pv_143g2_12(issue, lo, hi, mid, p1 * div_round(1.0, f, 10, "HALF_UP") + p2 * div_round(div_round(1.0, f, 10, "HALF_UP"), f, 10, "HALF_UP") + p3 * div_round(div_round(div_round(1.0, f, 10, "HALF_UP"), f, 10, "HALF_UP"), f, 10, "HALF_UP") + p4 * div_round(div_round(div_round(div_round(1.0, f, 10, "HALF_UP"), f, 10, "HALF_UP"), f, 10, "HALF_UP"), f, 10, "HALF_UP"));
+}
+rule YieldRaiseLow143g2S12(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, pv: Decimal, price: Decimal, p1: Decimal, p2: Decimal, p3: Decimal, p4: Decimal) strict {
+    label en unofficial "the present value at the midpoint exceeds the price: the yield is above the midpoint";
+    when yield_pv_143g2_12(issue, lo, hi, mid, pv);
+    when yield_inputs_143g2(issue, price, p1, p2, p3, p4);
+    when pv > price;
+    then yield_bisect_143g2_13(issue, mid, hi);
+}
+rule YieldLowerHigh143g2S12(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, pv: Decimal, price: Decimal, p1: Decimal, p2: Decimal, p3: Decimal, p4: Decimal) strict {
+    label en unofficial "the present value at the midpoint does not exceed the price: the yield is at or below the midpoint";
+    when yield_pv_143g2_12(issue, lo, hi, mid, pv);
+    when yield_inputs_143g2(issue, price, p1, p2, p3, p4);
+    when pv <= price;
+    then yield_bisect_143g2_13(issue, lo, mid);
+}
+relation yield_mid_143g2_13(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal) kind institutional {
+    label en unofficial "bisection step 13: the midpoint of the range";
+}
+relation yield_factor_143g2_13(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, factor: Decimal) kind institutional {
+    label en unofficial "bisection step 13: one plus the midpoint rate as a fraction";
+}
+relation yield_pv_143g2_13(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, pv: Decimal) kind institutional {
+    label en unofficial "bisection step 13: the present value of the payments at the midpoint rate";
+}
+relation yield_bisect_143g2_14(issue: BondIssue, lo: Decimal, hi: Decimal) kind institutional {
+    label en unofficial "bisection step 14: the range of the yield in percent";
+}
+rule YieldMid143g2S13(issue: BondIssue, lo: Decimal, hi: Decimal) strict {
+    when yield_bisect_143g2_13(issue, lo, hi);
+    then yield_mid_143g2_13(issue, lo, hi, div_round(lo + hi, 2.0, 8, "HALF_UP"));
+}
+rule YieldFactor143g2S13(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal) strict {
+    when yield_mid_143g2_13(issue, lo, hi, mid);
+    then yield_factor_143g2_13(issue, lo, hi, mid, 1.0 + div_round(mid, 100.0, 10, "HALF_UP"));
+}
+rule YieldPv143g2S13(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, f: Decimal, price: Decimal, p1: Decimal, p2: Decimal, p3: Decimal, p4: Decimal) strict {
+    when yield_factor_143g2_13(issue, lo, hi, mid, f);
+    when yield_inputs_143g2(issue, price, p1, p2, p3, p4);
+    then yield_pv_143g2_13(issue, lo, hi, mid, p1 * div_round(1.0, f, 10, "HALF_UP") + p2 * div_round(div_round(1.0, f, 10, "HALF_UP"), f, 10, "HALF_UP") + p3 * div_round(div_round(div_round(1.0, f, 10, "HALF_UP"), f, 10, "HALF_UP"), f, 10, "HALF_UP") + p4 * div_round(div_round(div_round(div_round(1.0, f, 10, "HALF_UP"), f, 10, "HALF_UP"), f, 10, "HALF_UP"), f, 10, "HALF_UP"));
+}
+rule YieldRaiseLow143g2S13(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, pv: Decimal, price: Decimal, p1: Decimal, p2: Decimal, p3: Decimal, p4: Decimal) strict {
+    label en unofficial "the present value at the midpoint exceeds the price: the yield is above the midpoint";
+    when yield_pv_143g2_13(issue, lo, hi, mid, pv);
+    when yield_inputs_143g2(issue, price, p1, p2, p3, p4);
+    when pv > price;
+    then yield_bisect_143g2_14(issue, mid, hi);
+}
+rule YieldLowerHigh143g2S13(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, pv: Decimal, price: Decimal, p1: Decimal, p2: Decimal, p3: Decimal, p4: Decimal) strict {
+    label en unofficial "the present value at the midpoint does not exceed the price: the yield is at or below the midpoint";
+    when yield_pv_143g2_13(issue, lo, hi, mid, pv);
+    when yield_inputs_143g2(issue, price, p1, p2, p3, p4);
+    when pv <= price;
+    then yield_bisect_143g2_14(issue, lo, mid);
+}
+relation yield_mid_143g2_14(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal) kind institutional {
+    label en unofficial "bisection step 14: the midpoint of the range";
+}
+relation yield_factor_143g2_14(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, factor: Decimal) kind institutional {
+    label en unofficial "bisection step 14: one plus the midpoint rate as a fraction";
+}
+relation yield_pv_143g2_14(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, pv: Decimal) kind institutional {
+    label en unofficial "bisection step 14: the present value of the payments at the midpoint rate";
+}
+relation yield_bisect_143g2_15(issue: BondIssue, lo: Decimal, hi: Decimal) kind institutional {
+    label en unofficial "bisection step 15: the range of the yield in percent";
+}
+rule YieldMid143g2S14(issue: BondIssue, lo: Decimal, hi: Decimal) strict {
+    when yield_bisect_143g2_14(issue, lo, hi);
+    then yield_mid_143g2_14(issue, lo, hi, div_round(lo + hi, 2.0, 8, "HALF_UP"));
+}
+rule YieldFactor143g2S14(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal) strict {
+    when yield_mid_143g2_14(issue, lo, hi, mid);
+    then yield_factor_143g2_14(issue, lo, hi, mid, 1.0 + div_round(mid, 100.0, 10, "HALF_UP"));
+}
+rule YieldPv143g2S14(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, f: Decimal, price: Decimal, p1: Decimal, p2: Decimal, p3: Decimal, p4: Decimal) strict {
+    when yield_factor_143g2_14(issue, lo, hi, mid, f);
+    when yield_inputs_143g2(issue, price, p1, p2, p3, p4);
+    then yield_pv_143g2_14(issue, lo, hi, mid, p1 * div_round(1.0, f, 10, "HALF_UP") + p2 * div_round(div_round(1.0, f, 10, "HALF_UP"), f, 10, "HALF_UP") + p3 * div_round(div_round(div_round(1.0, f, 10, "HALF_UP"), f, 10, "HALF_UP"), f, 10, "HALF_UP") + p4 * div_round(div_round(div_round(div_round(1.0, f, 10, "HALF_UP"), f, 10, "HALF_UP"), f, 10, "HALF_UP"), f, 10, "HALF_UP"));
+}
+rule YieldRaiseLow143g2S14(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, pv: Decimal, price: Decimal, p1: Decimal, p2: Decimal, p3: Decimal, p4: Decimal) strict {
+    label en unofficial "the present value at the midpoint exceeds the price: the yield is above the midpoint";
+    when yield_pv_143g2_14(issue, lo, hi, mid, pv);
+    when yield_inputs_143g2(issue, price, p1, p2, p3, p4);
+    when pv > price;
+    then yield_bisect_143g2_15(issue, mid, hi);
+}
+rule YieldLowerHigh143g2S14(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, pv: Decimal, price: Decimal, p1: Decimal, p2: Decimal, p3: Decimal, p4: Decimal) strict {
+    label en unofficial "the present value at the midpoint does not exceed the price: the yield is at or below the midpoint";
+    when yield_pv_143g2_14(issue, lo, hi, mid, pv);
+    when yield_inputs_143g2(issue, price, p1, p2, p3, p4);
+    when pv <= price;
+    then yield_bisect_143g2_15(issue, lo, mid);
+}
+relation yield_mid_143g2_15(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal) kind institutional {
+    label en unofficial "bisection step 15: the midpoint of the range";
+}
+relation yield_factor_143g2_15(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, factor: Decimal) kind institutional {
+    label en unofficial "bisection step 15: one plus the midpoint rate as a fraction";
+}
+relation yield_pv_143g2_15(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, pv: Decimal) kind institutional {
+    label en unofficial "bisection step 15: the present value of the payments at the midpoint rate";
+}
+relation yield_bisect_143g2_16(issue: BondIssue, lo: Decimal, hi: Decimal) kind institutional {
+    label en unofficial "bisection step 16: the range of the yield in percent";
+}
+rule YieldMid143g2S15(issue: BondIssue, lo: Decimal, hi: Decimal) strict {
+    when yield_bisect_143g2_15(issue, lo, hi);
+    then yield_mid_143g2_15(issue, lo, hi, div_round(lo + hi, 2.0, 8, "HALF_UP"));
+}
+rule YieldFactor143g2S15(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal) strict {
+    when yield_mid_143g2_15(issue, lo, hi, mid);
+    then yield_factor_143g2_15(issue, lo, hi, mid, 1.0 + div_round(mid, 100.0, 10, "HALF_UP"));
+}
+rule YieldPv143g2S15(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, f: Decimal, price: Decimal, p1: Decimal, p2: Decimal, p3: Decimal, p4: Decimal) strict {
+    when yield_factor_143g2_15(issue, lo, hi, mid, f);
+    when yield_inputs_143g2(issue, price, p1, p2, p3, p4);
+    then yield_pv_143g2_15(issue, lo, hi, mid, p1 * div_round(1.0, f, 10, "HALF_UP") + p2 * div_round(div_round(1.0, f, 10, "HALF_UP"), f, 10, "HALF_UP") + p3 * div_round(div_round(div_round(1.0, f, 10, "HALF_UP"), f, 10, "HALF_UP"), f, 10, "HALF_UP") + p4 * div_round(div_round(div_round(div_round(1.0, f, 10, "HALF_UP"), f, 10, "HALF_UP"), f, 10, "HALF_UP"), f, 10, "HALF_UP"));
+}
+rule YieldRaiseLow143g2S15(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, pv: Decimal, price: Decimal, p1: Decimal, p2: Decimal, p3: Decimal, p4: Decimal) strict {
+    label en unofficial "the present value at the midpoint exceeds the price: the yield is above the midpoint";
+    when yield_pv_143g2_15(issue, lo, hi, mid, pv);
+    when yield_inputs_143g2(issue, price, p1, p2, p3, p4);
+    when pv > price;
+    then yield_bisect_143g2_16(issue, mid, hi);
+}
+rule YieldLowerHigh143g2S15(issue: BondIssue, lo: Decimal, hi: Decimal, mid: Decimal, pv: Decimal, price: Decimal, p1: Decimal, p2: Decimal, p3: Decimal, p4: Decimal) strict {
+    label en unofficial "the present value at the midpoint does not exceed the price: the yield is at or below the midpoint";
+    when yield_pv_143g2_15(issue, lo, hi, mid, pv);
+    when yield_inputs_143g2(issue, price, p1, p2, p3, p4);
+    when pv <= price;
+    then yield_bisect_143g2_16(issue, lo, mid);
+}
+pub relation yield_on_issue_computed_143g2(issue: BondIssue, yield_on_issue_percent: Decimal) kind institutional {
+    label en official "the yield on the issue in percent (discount rate at which the payments equal the issue price), by 16-step bisection over 0 to 50 percent";
+}
+@source(IRC_S143_G, relation = formalizes, coverage = partial, quote = "(ii) an expected maturity for the bonds which is consistent with the assumptions required under subparagraph (B)(iv).")
+rule YieldOnIssueComputed143g2(issue: BondIssue, lo: Decimal, hi: Decimal) strict {
+    label en official "section 143(g)(2)(A)(ii), (C): the yield is the midpoint of the last bisection range";
+    when yield_bisect_143g2_16(issue, lo, hi);
+    then yield_on_issue_computed_143g2(issue, div_round(lo + hi, 2.0, 6, "HALF_UP"));
+}
+relation has_computed_yield_143g2(issue: BondIssue) kind institutional {
+    label en unofficial "a yield on the issue is computed from the payment schedule";
+}
+rule HasComputedYield143g2(issue: BondIssue, y: Decimal) strict {
+    when yield_on_issue_computed_143g2(issue, y);
+    then has_computed_yield_143g2(issue);
+}
+relation effective_rate_on_mortgages_143g2(issue: BondIssue, effective_rate_percent: Decimal) kind empirical {
+    label en official "the effective rate of interest on the mortgages in percent (the input of subparagraph (A)(i); the yield is computed)";
+}
+@source(IRC_S143_G, relation = formalizes, coverage = exact, quote = "An issue shall be treated as meeting the requirements of this paragraph only if the excess of—")
+rule EffectiveRateSpreadWithinLimitComputedYield(issue: BondIssue, eff_rate: Decimal, yield_rate: Decimal) strict {
+    label en official "section 143(g)(2)(A): the excess of the effective rate over the COMPUTED yield is not greater than 1.125 percentage points";
+    when effective_rate_on_mortgages_143g2(issue, eff_rate);
+    when yield_on_issue_computed_143g2(issue, yield_rate);
+    when eff_rate - yield_rate <= 1.125;
+    then effective_rate_spread_within_limit_143g2(issue);
+}
+
+// ============================================================================
+// §143(g)(2)(B)(iv)(II): an expected prepayment is treated as received on the last day of its month (G6702)
+// ============================================================================
+// The language has no day-of-month accessor, so the case names the first day of the month of the expected prepayment
+// (`expected_prepayment_month_start_143g2`); the last day of the month is the calendar step "one month after the first
+// day, less one day" (the first day never lands on a nonexistent day, so the month-end policy of `IRC_CALENDAR_STEP`
+// never refuses it). The expected date must lie in that month (the rule states no date outside it).
+
+relation expected_prepayment_143g2(issue: BondIssue, index: Integer, expected_on: Date, month_start: Date, amount: Money) kind empirical {
+    label en unofficial "an expected prepayment of principal: its expected date, the first day of the month that contains it, and its amount";
+}
+pub relation prepayment_treated_as_received_143g2(issue: BondIssue, index: Integer, received_on: Date, amount: Money) kind institutional {
+    label en official "the expected prepayment treated as received on the last day of the month in which the issuer reasonably expects to receive it";
+}
+@source(IRC_S143_G, relation = formalizes, coverage = exact, quote = "(II) prepayments of principal shall be treated as received on the last day of the month in which the issuer reasonably expects to receive such prepayments.")
+rule PrepaymentTreatedAsReceivedOnMonthEnd(issue: BondIssue, i: Integer, d: Date, m: Date, amount: Money, calendar_before_1: Date) strict {
+    label en official "section 143(g)(2)(B)(iv)(II): the last day of the month is the day before the first day of the next month";
+    when expected_prepayment_143g2(issue, i, d, m, amount);
+    when d >= m;
+    when d < add_calendar_period(m, 1 calendar_month)
+        and us.irc.core::civil_calendar_boundary_before(add_calendar_period(m, 1 calendar_month), 1, us.irc.core::CalendarDay, calendar_before_1);
+    then prepayment_treated_as_received_143g2(issue, i, calendar_before_1, amount);
+}

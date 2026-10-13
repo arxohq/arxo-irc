@@ -1,0 +1,248 @@
+// Corporations -- stage 4 (26.09.2026, DECISION-0379, implemented_unverified): technical gaps of stage 3b that can be stated
+// with bounded sums.
+//
+// Covered: section 316(a) (the order of several distributions of one year: pro rata current earnings and profits, accumulated
+// earnings and profits in date order), section 1503(e)(1)(A), (e)(2)(C) (earnings and profits without (k) and (n), the
+// redemption adjustment (n)(7) kept), section 1503(f)(3)(B) (separately computed taxable income), section 543(d)(4)(A) last
+// sentence, (B), (C) (the period of existence, the exclusion of section 162 amounts specifically allowable elsewhere, the five
+// largest shareholders).
+//
+// METHOD AND JUDGMENT CALLS.
+//  - Sums run over asserted per-year and per-shareholder facts; where the summed element is derived by the module itself
+//    (per-distribution excess, qualifying deductions) the reader is a defeasible rule above its producers, as the module 02 rule
+//    TotalAmountDistributedInYearRule already does (section 111 completion edge; not executed).
+//  - Section 316(a): same-day distributions are not ordered against each other (each sees the pool as it stood before that day);
+//    the current-year share is the pro rata share of module 02 (floored at zero), the remainder of a distribution is charged to
+//    the accumulated pool in date order.
+//  - Section 543(d)(4)(A): the averages are compared as sums (a sum over the years of the period against 25 percent of the sum of
+//    the ordinary gross income): the number of years cancels. The years of the period are asserted; a corporation not in existence
+//    for five years asserts only the years of its existence (the period of existence substituted).
+
+language "law.core" version "0.2";
+package us.irc.corporations version "0.1.1";
+namespace "urn:us:irc:corporations:clir";
+
+use self::{
+    AffiliatedGroup,
+    Asset,
+    Corporation,
+    DistributionEvent,
+    IRC_S1503_E,
+    IRC_S1503_F,
+    IRC_S316_A,
+    IRC_S543_D,
+    Person,
+    Section312nItemKind,
+    TaxableYear,
+    amount_distributed,
+    applicable_preferred_dividends_1503f,
+    consolidated_year_1503e2b,
+    deductions_before_limitation_543d4a,
+    depreciation_allowed_for_regular_tax,
+    depreciation_straight_line_for_ep,
+    disqualified_separately_computed_income_1503f3a,
+    distribution,
+    distribution_in_year,
+    dividend_ceiling_current_share_pro_rata,
+    earnings_and_profits_adjustment_item_312n,
+    earnings_and_profits_for_intragroup_stock_basis_1503e1,
+    member_of_affiliated_group,
+    ordinary_gross_income_543d,
+    qualifying_deductions_543d4,
+    requirement_543d4_met,
+    section_108_exclusion_not_applied_to_attributes_1503e1b,
+};
+
+// ============================================================================
+// section 316(a): several distributions in one taxable year
+// ============================================================================
+
+pub relation accumulated_earnings_and_profits_at_start_of_year_316a(corp: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "section 316(a)(1): the earnings and profits accumulated after February 28, 1913 at the start of the taxable year (before the year's distributions)";
+}
+pub relation excess_over_current_share_316a(dist: DistributionEvent, excess: Money) kind institutional {
+    label en official "section 316(a): the part of the distribution not covered by its pro rata share of the current-year earnings and profits (floored at zero), which is charged to the accumulated earnings and profits";
+}
+@source(IRC_S316_A, quote = "Except as otherwise provided in this subtitle, every distribution is made out of earnings and profits to the extent thereof, and from the most recently accumulated earnings and profits.")
+rule ExcessOverCurrentShare316a(dist: DistributionEvent, amt: Money, cur: Money) defeasible {
+    label en official "section 316(a): the distribution minus its current-year share, when positive";
+    when amount_distributed(dist, amt);
+    when dividend_ceiling_current_share_pro_rata(dist, cur);
+    when amt > max(cur, 0.00 USD);
+    then excess_over_current_share_316a(dist, amt - max(cur, 0.00 USD));
+}
+@source(IRC_S316_A, quote = "Except as otherwise provided in this subtitle, every distribution is made out of earnings and profits to the extent thereof, and from the most recently accumulated earnings and profits.")
+rule NoExcessOverCurrentShare316a(dist: DistributionEvent, amt: Money, cur: Money) defeasible {
+    label en official "section 316(a): the current-year share covers the whole distribution";
+    when amount_distributed(dist, amt);
+    when dividend_ceiling_current_share_pro_rata(dist, cur);
+    when amt <= max(cur, 0.00 USD);
+    then excess_over_current_share_316a(dist, 0.00 USD);
+}
+pub relation accumulated_pool_available_to_distribution_316a(dist: DistributionEvent, available: Money) kind institutional {
+    label en official "section 316(a): the accumulated earnings and profits left for the distribution after the earlier distributions of the year (date order) have taken the part of theirs that the current-year share did not cover";
+}
+@source(IRC_S316_A, quote = "Except as otherwise provided in this subtitle, every distribution is made out of earnings and profits to the extent thereof, and from the most recently accumulated earnings and profits.")
+rule AccumulatedPoolAvailable316a(dist: DistributionEvent, corp: Corporation, y: TaxableYear, on: Date, acc: Money) defeasible {
+    label en official "section 316(a): the pool at the start of the year less the excess of the distributions dated before this one";
+    when distribution(dist, corp, _, on);
+    when distribution_in_year(dist, y);
+    when accumulated_earnings_and_profits_at_start_of_year_316a(corp, y, acc);
+    then accumulated_pool_available_to_distribution_316a(dist, max(0.00 USD, acc - sum(collect all x: Money, d2: DistributionEvent, on2: Date where distribution(d2, corp, _, on2) and distribution_in_year(d2, y) and on2 < on and excess_over_current_share_316a(d2, x), empty: 0.00 USD)));
+}
+pub relation dividend_out_of_accumulated_316a(dist: DistributionEvent, amount: Money) kind institutional {
+    label en official "section 316(a): the part of the distribution that is a dividend out of the accumulated earnings and profits";
+}
+rule DividendOutOfAccumulated316a(dist: DistributionEvent, excess: Money, available: Money) defeasible {
+    label en official "section 316(a): the smaller of the excess over the current share and the pool available";
+    when excess_over_current_share_316a(dist, excess);
+    when accumulated_pool_available_to_distribution_316a(dist, available);
+    then dividend_out_of_accumulated_316a(dist, min(excess, available));
+}
+pub relation dividend_amount_ordered_316a(dist: DistributionEvent, amount: Money) kind institutional {
+    label en official "section 316(a): the dividend part of the distribution: its share of the current-year earnings and profits (not more than the distribution) plus the part out of the accumulated earnings and profits";
+}
+rule DividendAmountOrdered316a(dist: DistributionEvent, amt: Money, cur: Money, acc: Money) defeasible {
+    label en official "section 316(a): current share (floored at zero, capped at the amount) plus accumulated part";
+    when amount_distributed(dist, amt);
+    when dividend_ceiling_current_share_pro_rata(dist, cur);
+    when dividend_out_of_accumulated_316a(dist, acc);
+    then dividend_amount_ordered_316a(dist, min(amt, max(cur, 0.00 USD)) + acc);
+}
+
+// ============================================================================
+// section 1503(e)(1)(A), (e)(2)(C): earnings and profits without regard to subsections (k) and (n)
+// ============================================================================
+
+pub relation preceding_consolidated_year_1503e1A(member: Corporation, y: TaxableYear, y2: TaxableYear, ep: Money) kind empirical {
+    label en official "section 1503(e)(1)(A): the year y2 is the year y or a preceding consolidated year of the member with respect to the group, with the member's earnings and profits of that year determined under section 312 in full";
+}
+pub relation earnings_and_profits_without_312k_and_n_derived_1503e1A(member: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 1503(e)(1)(A): the earnings and profits as if section 312 were applied for the year and all preceding consolidated years without regard to (k) and (n): the full earnings and profits less the section 312(k) depreciation adjustment (regular allowance minus straight line) and the section 312(n)(1)-(6), (8) items; the section 312(n)(7) redemption adjustment stays in (e)(2)(C)";
+}
+@source(IRC_S1503_E, quote = "(A) such earnings and profits shall be determined as if section 312 were applied for such taxable year (and all preceding consolidated years of the member with respect to such group) without regard to subsections (k) and (n) thereof, and")
+@source(IRC_S1503_E, quote = "The reference in paragraph (1) to subsection (n) of section 312 shall be treated as not including a reference to paragraph (7) of such subsection.")
+rule EarningsAndProfitsWithout312kAndNDerived1503e1A(member: Corporation, y: TaxableYear) defeasible {
+    label en official "section 1503(e)(1)(A), (e)(2)(C): a sum over the years, of full earnings and profits minus the (k) and (n)(1)-(6),(8) adjustments; the (n)(7) adjustment is not among the recorded items, so it stays";
+    when preceding_consolidated_year_1503e1A(member, y, y, _);
+    then earnings_and_profits_without_312k_and_n_derived_1503e1A(member, y, sum(collect all a: Money, y2: TaxableYear where preceding_consolidated_year_1503e1A(member, y, y2, a), empty: 0.00 USD) - (sum(collect all r: Money, y3: TaxableYear, a3: Asset, s3: Money, e3: Money where preceding_consolidated_year_1503e1A(member, y, y3, e3) and depreciation_allowed_for_regular_tax(member, y3, a3, r) and depreciation_straight_line_for_ep(member, y3, a3, s3), empty: 0.00 USD) - sum(collect all s4: Money, y4: TaxableYear, a4: Asset, r4: Money, e4: Money where preceding_consolidated_year_1503e1A(member, y, y4, e4) and depreciation_allowed_for_regular_tax(member, y4, a4, r4) and depreciation_straight_line_for_ep(member, y4, a4, s4), empty: 0.00 USD)) - sum(collect all n5: Money, y5: TaxableYear, k5: Section312nItemKind, e5: Money where preceding_consolidated_year_1503e1A(member, y, y5, e5) and earnings_and_profits_adjustment_item_312n(member, y5, k5, n5), empty: 0.00 USD));
+}
+@source(IRC_S1503_E, quote = "earnings and profits shall not include any amount excluded from gross income under section 108 to the extent the amount so excluded was not applied to reduce tax attributes (other than basis in property).")
+rule Section1503e1EarningsAndProfitsFromDerived(group: AffiliatedGroup, member: Corporation, y: TaxableYear, ep: Money, excluded: Money) defeasible {
+    label en official "section 1503(e)(1): the derived earnings and profits without (k) and (n), less the section 108 exclusion not applied to attributes";
+    when member_of_affiliated_group(group, member);
+    when consolidated_year_1503e2b(group, y);
+    when earnings_and_profits_without_312k_and_n_derived_1503e1A(member, y, ep);
+    when section_108_exclusion_not_applied_to_attributes_1503e1b(member, y, excluded);
+    then earnings_and_profits_for_intragroup_stock_basis_1503e1(member, y, ep - excluded);
+}
+
+// ============================================================================
+// section 1503(f)(3)(B): separately computed taxable income of the subsidiary
+// ============================================================================
+
+pub relation subsidiary_taxable_income_excluding_capital_and_1231_1503f3B(sub: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "section 1503(f)(3)(B): the separate taxable income of the subsidiary excluding gains and losses from capital assets and section 1231, and before any net operating loss or capital loss carryover or carryback deduction";
+}
+pub relation subsidiary_capital_asset_gains_1503f3Bi(sub: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "section 1503(f)(3)(B)(i): gains from the sale or exchange of capital assets of the year";
+}
+pub relation subsidiary_capital_asset_losses_1503f3Bi(sub: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "section 1503(f)(3)(B)(i): losses from the sale or exchange of capital assets of the year";
+}
+pub relation subsidiary_net_1231_gain_or_loss_1503f3Bi(sub: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "section 1503(f)(3)(B)(i): the net section 1231 gain (positive) or loss (negative) of the year";
+}
+pub relation subsidiary_separately_computed_taxable_income_derived_1503f3B(sub: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 1503(f)(3)(B): the ordinary component, plus the capital gains less the capital losses (a corporation deducts capital losses only against capital gains, section 1211(a): JUDGMENT CALL) and the net section 1231 result, computed without regard to any net operating loss or capital loss carryover or carryback; the adjustments the Secretary may prescribe (clause (iii)) are not applied";
+}
+@source(IRC_S1503_F, quote = "(i) by taking into account gains and losses from the sale or exchange of a capital asset and section 1231 gains and losses,")
+@source(IRC_S1503_F, quote = "(ii) without regard to any net operating loss or capital loss carryover or carryback, and")
+rule SeparatelyComputedTaxableIncomeDerived1503f3B(sub: Corporation, y: TaxableYear, ordinary: Money, gains: Money, losses: Money, s1231: Money) defeasible {
+    label en official "section 1503(f)(3)(B)(i)-(ii)";
+    when subsidiary_taxable_income_excluding_capital_and_1231_1503f3B(sub, y, ordinary);
+    when subsidiary_capital_asset_gains_1503f3Bi(sub, y, gains);
+    when subsidiary_capital_asset_losses_1503f3Bi(sub, y, losses);
+    when subsidiary_net_1231_gain_or_loss_1503f3Bi(sub, y, s1231);
+    then subsidiary_separately_computed_taxable_income_derived_1503f3B(sub, y, ordinary + max(0.00 USD, gains - losses) + s1231);
+}
+pub relation secretary_adjustments_to_separately_computed_income_1503f3Biii(sub: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "section 1503(f)(3)(B)(iii): the adjustments the Secretary may prescribe (EXTERNAL_DEPENDENCY: regulations; a case fact, zero when none)";
+}
+pub relation subsidiary_separately_computed_taxable_income_with_adjustments_1503f3B(sub: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 1503(f)(3)(B)(i)-(iii): the separately computed taxable income with the prescribed adjustments";
+}
+@source(IRC_S1503_F, quote = "(iii) with such adjustments as the Secretary may prescribe.")
+rule SeparatelyComputedTaxableIncomeWithAdjustments1503f3B(sub: Corporation, y: TaxableYear, income: Money, adj: Money) defeasible {
+    label en official "section 1503(f)(3)(B)(iii)";
+    when subsidiary_separately_computed_taxable_income_derived_1503f3B(sub, y, income);
+    when secretary_adjustments_to_separately_computed_income_1503f3Biii(sub, y, adj);
+    then subsidiary_separately_computed_taxable_income_with_adjustments_1503f3B(sub, y, income + adj);
+}
+@source(IRC_S1503_F, quote = "The term \"disqualified separately computed income\" means the portion of the separately computed taxable income of the subsidiary which does not exceed the dividends distributed by the subsidiary during the taxable year on applicable preferred stock.")
+rule DisqualifiedIncomeFromDerivedSeparatelyComputed1503f3A(sub: Corporation, y: TaxableYear, income: Money, dividends: Money) defeasible {
+    label en official "section 1503(f)(3)(A) read on the derived separately computed taxable income: the smaller of the income and the applicable preferred dividends (a loss gives no disqualified income)";
+    when subsidiary_separately_computed_taxable_income_with_adjustments_1503f3B(sub, y, income);
+    when applicable_preferred_dividends_1503f(sub, y, dividends);
+    when income > 0.00 USD;
+    then disqualified_separately_computed_income_1503f3a(sub, y, min(income, dividends));
+}
+
+// ============================================================================
+// section 543(d)(4): the 5-year period of existence, section 162 amounts, the five largest shareholders
+// ============================================================================
+
+pub relation year_in_period_543d4Aii(c: Corporation, y: TaxableYear, y2: TaxableYear) kind empirical {
+    label en official "section 543(d)(4)(A)(ii): the year y2 is in the 5-taxable year period ending with y, or, for a corporation not in existence for five years, in its period of existence";
+}
+@source(IRC_S543_D, quote = "If a corporation has not been in existence during the 5-taxable year period described in clause (ii), then the period of existence of such corporation shall be substituted for such 5-taxable year period.")
+rule Requirement543d4aiiOverPeriodOfExistence(c: Corporation, y: TaxableYear) defeasible {
+    label en official "section 543(d)(4)(A)(ii) with the period-of-existence sentence: the sum of the qualifying deductions over the period years is at least 25 percent of the sum of the ordinary gross income over them (equivalent to the comparison of the averages: the number of years cancels); at most five years";
+    when year_in_period_543d4Aii(c, y, y);
+    when count(collect z: TaxableYear where year_in_period_543d4Aii(c, y, z)) <= 5;
+    when sum(collect all og: Money, z: TaxableYear where year_in_period_543d4Aii(c, y, z) and ordinary_gross_income_543d(c, z, og), empty: 0.00 USD) > 0.00 USD;
+    when sum(collect all d: Money, z2: TaxableYear where year_in_period_543d4Aii(c, y, z2) and qualifying_deductions_543d4(c, z2, d), empty: 0.00 USD) >= sum(collect all og2: Money, z3: TaxableYear where year_in_period_543d4Aii(c, y, z3) and ordinary_gross_income_543d(c, z3, og2), empty: 0.00 USD) * 0.25;
+    then requirement_543d4_met(c, y);
+}
+pub relation deduction_claimed_under_162_543d4B(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "section 543(d)(4)(B): the deductions claimed as allowable under section 162, allocable to the paragraph (2) business";
+}
+pub relation portion_specifically_allowable_under_another_section_543d4B(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "section 543(d)(4)(B): the part of them that is specifically allowable under another section (0.00 USD when none)";
+}
+pub relation deduction_treated_as_allowable_under_162_543d4B(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 543(d)(4)(B): the section 162 deductions taken into account: a deduction is not treated as allowable under section 162 if it is specifically allowable under another section";
+}
+@source(IRC_S543_D, quote = "For purposes of subparagraph (A), a deduction shall not be treated as allowable under section 162 if it is specifically allowable under another section.")
+rule DeductionTreatedAsAllowableUnder162For543d4B(c: Corporation, y: TaxableYear, claimed: Money, other: Money) defeasible {
+    label en official "section 543(d)(4)(B)";
+    when deduction_claimed_under_162_543d4B(c, y, claimed);
+    when portion_specifically_allowable_under_another_section_543d4B(c, y, other);
+    then deduction_treated_as_allowable_under_162_543d4B(c, y, max(0.00 USD, claimed - other));
+}
+pub relation individual_shareholder_value_share_543d4C(c: Corporation, y: TaxableYear, sh: Person, pct: Decimal) kind empirical {
+    label en official "section 543(d)(4)(C): the percentage (by value) of the outstanding stock held by the individual shareholder";
+}
+pub relation share_by_544a2_attribution_only_543d4Cii(c: Corporation, y: TaxableYear, sh: Person, pct: Decimal) kind empirical {
+    label en official "section 543(d)(4)(C)(ii): the part of the individual's percentage deemed owned solely by attribution from a partner under section 544(a)(2) (0.00 when none)";
+}
+pub relation compensation_for_personal_services_543d4C(c: Corporation, y: TaxableYear, sh: Person, amount: Money) kind empirical {
+    label en official "section 543(d)(4)(C): the compensation for personal services rendered by the individual shareholder, included in the deductions";
+}
+pub relation compensation_of_five_largest_shareholders_computed_543d4C(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 543(d)(4)(C): the compensation of the 5 individual shareholders holding the largest percentage by value, individuals under 5 percent not taken into account (i) and stock by section 544(a)(2) attribution alone disregarded (ii). JUDGMENT CALL: a tie for the fifth place admits all tied shareholders' ranks below five others only";
+}
+@source(IRC_S543_D, quote = "(i) individuals holding less than 5 percent (by value) of the stock of such corporation shall not be taken into account, and")
+@source(IRC_S543_D, quote = "(ii) stock deemed to be owned by a shareholder solely by attribution from a partner under section 544(a)(2) shall be disregarded.")
+rule CompensationOfFiveLargestShareholdersComputed543d4C(c: Corporation, y: TaxableYear) defeasible {
+    label en official "section 543(d)(4)(C)(i)-(ii): a shareholder counts when its share (less the 544(a)(2) attribution-only part) is at least 5 percent and fewer than 5 other counting shareholders have a larger share";
+    when individual_shareholder_value_share_543d4C(c, y, _, _);
+    then compensation_of_five_largest_shareholders_computed_543d4C(c, y, sum(collect all comp: Money, sh: Person, p: Decimal, at: Decimal where individual_shareholder_value_share_543d4C(c, y, sh, p) and share_by_544a2_attribution_only_543d4Cii(c, y, sh, at) and compensation_for_personal_services_543d4C(c, y, sh, comp) and p - at >= 0.05 and count(collect o: Person, po: Decimal, ao: Decimal where individual_shareholder_value_share_543d4C(c, y, o, po) and share_by_544a2_attribution_only_543d4Cii(c, y, o, ao) and po - ao >= 0.05 and po - ao > p - at) < 5, empty: 0.00 USD));
+}
+@source(IRC_S543_D, quote = "no deduction shall be taken into account with respect to compensation for personal services rendered by the 5 individual shareholders holding the largest percentage (by value) of the outstanding stock of the corporation.")
+rule QualifyingDeductions543d4cFromComputedCompensation(c: Corporation, y: TaxableYear, gross: Money, top_five: Money) defeasible {
+    label en official "section 543(d)(4)(C) on the computed compensation of the five largest shareholders";
+    when deductions_before_limitation_543d4a(c, y, gross);
+    when compensation_of_five_largest_shareholders_computed_543d4C(c, y, top_five);
+    then qualifying_deductions_543d4(c, y, gross - top_five);
+}

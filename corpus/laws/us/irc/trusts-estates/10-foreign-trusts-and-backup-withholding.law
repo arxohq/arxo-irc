@@ -1,0 +1,763 @@
+// 26 U.S.C. §§643(a)(6)(B)-(C), 643(d), 643(h), 643(i), 665(d)-(e), 672(f)(2)(B)-(5),
+// 679(a)(3)-(5), 679(b), 679(c)(1)-(6), 679(d) (stage 3 "добор": rows that
+// stages 1-2 recorded as TECH_GAP "not modeled this pass").
+//
+// JUDGMENT CALLS AND GAPS (see coverage/trusts-estates.json, TECH-GAPS.md G42xx):
+//  - Every input that the statute takes from outside this package (foreign-trust
+//    status is `us.irc.definitions::foreign_trust`; US-person status is
+//    `us.irc.definitions::united_states_person`) is imported; the rest are
+//    case-asserted empirical relations, never invented values.
+//  - "Except as provided in regulations" (§643(i)(1), §679(a)(3)(A)(i)) is the
+//    Secretary's delegated authority: EXTERNAL_DEPENDENCY, not modelled as a
+//    rule; the general rule is executable without it.
+//  - §679(c)(1)-(6): the existing default `S679cHasUsBeneficiaryDefault`
+//    (module 07) reads the two case-asserted terms-bar facts; the rules below
+//    add the statutory EXTENSIONS of what counts as a payment or accumulation
+//    for the benefit of a US person as further producers of the same head
+//    `trust_has_us_beneficiary_679c` — a producer per statutory paragraph.
+//  - §679(d) is a POWER of the Secretary (presumption that the trust has a US
+//    beneficiary), rebutted by the transferor's submission plus the Secretary's
+//    satisfaction (EVALUATIVE external judgment, DECISION-0194).
+//  - §643(d): the credit allocated "on the basis of their respective shares" is
+//    `div_round(credit * (share / 1.00 USD), total / 1.00 USD, 2, "HALF_UP")`
+//    (money form of docs/research/constructs/21-expressions-quantities/); HALF_UP cents is a JUDGMENT
+//    CALL (the section names no rounding).
+//  - §679(a)(4)(A): "within 5 years" is `add_calendar_period(transfer, 60
+//    calendar_month)` (a literal quantity, LDC-E2108 avoided).
+
+language "law.core" version "0.2";
+package us.irc.trusts_estates version "0.1.1";
+namespace "urn:us:irc:trusts_estates:clir";
+
+use self::{
+    Asset,
+    IRC_S643_A,
+    IRC_S643_D,
+    IRC_S643_H,
+    IRC_S643_I,
+    IRC_S665_D,
+    IRC_S665_E,
+    IRC_S672_F,
+    IRC_S679_A,
+    IRC_S679_B,
+    IRC_S679_C,
+    IRC_S679_D,
+    Individual,
+    Person,
+    Secretary,
+    TaxableYear,
+    Transaction,
+    Trust,
+    capital_gain_allocated_to_corpus_not_distributable,
+    is_beneficiary,
+    is_grantor_of,
+    taxes_imposed_on_trust_665,
+    transfer_for_fmv_consideration_679a2b,
+    trust_becomes_foreign_trust,
+    trust_has_us_beneficiary_679c,
+    us_person_transfers_property_to_foreign_trust,
+    us_transferor_treated_as_owner_679,
+};
+
+// ============================================================================
+// §643(h): distributions by certain foreign trusts through nominees
+// ============================================================================
+
+pub relation payment_derived_from_foreign_trust_through_payor(payor: Person, recipient: Person, t: Trust, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the payor paid the recipient an amount derived directly or indirectly from the foreign trust in the year of payment (case-asserted; section 643(h))";
+}
+pub relation deemed_direct_payment_by_foreign_trust_643h(t: Trust, recipient: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "any amount paid to a United States person which is derived directly or indirectly from a foreign trust of which the payor is not the grantor is deemed in the year of payment to have been directly paid by the foreign trust to that person (section 643(h))";
+}
+@source(IRC_S643_H, relation = formalizes, coverage = exact, quote = "any amount paid to a United States person which is derived directly or indirectly from a foreign trust of which the payor is not the grantor shall be deemed in the year of payment to have been directly paid by the foreign trust to such United States person")
+rule S643hNomineePayment(payor: Person, recipient: Person, t: Trust, y: TaxableYear, amount: Money) defeasible {
+    label en official "a nominee's payment to a US person, derived from a foreign trust the payor did not create, is a direct payment by the trust (section 643(h))";
+    when payment_derived_from_foreign_trust_through_payor(payor, recipient, t, y, amount);
+    when us.irc.definitions::foreign_trust(t);
+    when us.irc.definitions::united_states_person(recipient);
+    unless is_grantor_of(payor, t) and payment_derived_from_foreign_trust_through_payor(payor, recipient, t, y, amount);
+    then deemed_direct_payment_by_foreign_trust_643h(t, recipient, y, amount);
+}
+
+// ============================================================================
+// §643(i): loans from foreign trusts
+// ============================================================================
+
+pub relation foreign_trust_loan_of_cash_or_marketable_securities(t: Trust, borrower: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the foreign trust makes a loan of cash or marketable securities, directly or indirectly, to or by the borrower in the year (case-asserted; section 643(i)(1))";
+}
+pub relation foreign_trust_permits_use_of_other_property(t: Trust, user: Person, y: TaxableYear, fair_market_value_of_use: Money) kind empirical {
+    label en unofficial "the foreign trust permits the use of trust property other than cash or marketable securities, with the fair market value of the use (case-asserted; section 643(i)(1))";
+}
+pub relation trust_paid_fair_market_value_of_use_within_reasonable_time(t: Trust, user: Person, y: TaxableYear, paid: Money) kind empirical {
+    label en unofficial "the amount the trust was paid for the use within a reasonable period of time of the use (case-asserted; section 643(i)(2)(E))";
+}
+pub relation asset_is_foreign_currency_or_cash_equivalent(a: Asset) kind empirical {
+    label en unofficial "the asset is a foreign currency or a cash equivalent (case-asserted classification; section 643(i)(2)(A))";
+}
+pub relation cash_for_643i(a: Asset) kind institutional {
+    label en official "the term cash includes foreign currencies and cash equivalents (section 643(i)(2)(A))";
+}
+@source(IRC_S643_I, relation = formalizes, coverage = exact, quote = "The term \"cash\" includes foreign currencies and cash equivalents.")
+rule S643i2ACashIncludesForeignCurrencyAndEquivalents(a: Asset) defeasible {
+    when asset_is_foreign_currency_or_cash_equivalent(a);
+    then cash_for_643i(a);
+}
+
+pub relation persons_related_under_267_or_707b(x: Person, z: Person) kind empirical {
+    label en unofficial "the relationship between x and z would result in a disallowance of losses under section 267 or 707(b), applying section 267(c)(4) as if the family of an individual includes the spouses of the members of the family (case-asserted; section 643(i)(2)(B)(i))";
+}
+pub relation related_person_for_643i(x: Person, z: Person) kind institutional {
+    label en official "a person is related to another if the relationship would disallow losses under section 267 or 707(b), with the spouse-extended family rule of section 267(c)(4) (section 643(i)(2)(B)(i))";
+}
+@source(IRC_S643_I, relation = formalizes, coverage = exact, quote = "A person is related to another person if the relationship between such persons would result in a disallowance of losses under section 267 or 707(b).")
+rule S643i2BiRelatedPerson(x: Person, z: Person) defeasible {
+    when persons_related_under_267_or_707b(x, z);
+    then related_person_for_643i(x, z);
+}
+pub relation exempt_from_tax_under_chapter_1(x: Person) kind empirical {
+    label en unofficial "the entity is exempt from tax under chapter 1 (case-asserted; section 643(i)(2)(C))";
+}
+pub relation us_person_for_643i(x: Person) kind institutional {
+    label en official "a United States person for section 643(i): a United States person other than an entity exempt from tax under chapter 1 (section 643(i)(2)(C))";
+}
+@source(IRC_S643_I, relation = formalizes, coverage = exact, quote = "The term \"United States person\" does not include any entity exempt from tax under this chapter.")
+rule S643i2CUsPerson(x: Person) defeasible {
+    when us.irc.definitions::united_states_person(x);
+    unless exempt_from_tax_under_chapter_1(x);
+    then us_person_for_643i(x);
+}
+
+pub relation loan_recipient_is_grantor_or_beneficiary_643i1A(borrower: Person, t: Trust) kind institutional {
+    label en official "the borrower or user is a grantor or beneficiary of the trust who is a United States person (section 643(i)(1)(A))";
+}
+rule S643i1AGrantor(borrower: Person, t: Trust) defeasible {
+    when is_grantor_of(borrower, t);
+    when us_person_for_643i(borrower);
+    then loan_recipient_is_grantor_or_beneficiary_643i1A(borrower, t);
+}
+rule S643i1ABeneficiary(borrower: Person, t: Trust) defeasible {
+    when is_beneficiary(borrower, t);
+    when us_person_for_643i(borrower);
+    then loan_recipient_is_grantor_or_beneficiary_643i1A(borrower, t);
+}
+pub relation section_643i2Bii_allocated_to(u: Person, gb: Person, t: Trust) kind empirical {
+    label en unofficial "where a person is related to more than one grantor or beneficiary, the grantor or beneficiary to whom the treatment applies, as determined under regulations (case-asserted; section 643(i)(2)(B)(ii) — EXTERNAL_DEPENDENCY on the Secretary's regulations)";
+}
+pub relation loan_recipient_is_related_us_person_643i1B(borrower: Person, gb: Person, t: Trust) kind institutional {
+    label en official "the borrower or user is a United States person, not described in subparagraph (A), related to a grantor or beneficiary of the trust, and the treatment is allocated to that grantor or beneficiary (section 643(i)(1)(B), (2)(B)(ii))";
+}
+rule S643i1BRelated(borrower: Person, gb: Person, t: Trust) defeasible {
+    when us_person_for_643i(borrower);
+    when related_person_for_643i(borrower, gb);
+    when section_643i2Bii_allocated_to(borrower, gb, t);
+    unless loan_recipient_is_grantor_or_beneficiary_643i1A(borrower, t) and section_643i2Bii_allocated_to(borrower, gb, t) and related_person_for_643i(borrower, gb) and us_person_for_643i(borrower);
+    then loan_recipient_is_related_us_person_643i1B(borrower, gb, t);
+}
+
+pub relation deemed_distribution_by_foreign_trust_643i(t: Trust, gb: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the amount of the loan (or the fair market value of the use of the property) is treated as a distribution by the foreign trust to the grantor or beneficiary, for subparts B, C and D (section 643(i)(1))";
+}
+@source(IRC_S643_I, relation = formalizes, coverage = exact, quote = "the amount of such loan (or the fair market value of the use of such property) shall be treated as a distribution by such trust to such grantor or beneficiary (as the case may be)")
+rule S643i1LoanToGrantorOrBeneficiary(t: Trust, borrower: Person, y: TaxableYear, amount: Money) defeasible {
+    label en official "a foreign trust's loan of cash or marketable securities to (or by) a US grantor or beneficiary is a distribution to that person (section 643(i)(1)(A))";
+    when us.irc.definitions::foreign_trust(t);
+    when foreign_trust_loan_of_cash_or_marketable_securities(t, borrower, y, amount);
+    when loan_recipient_is_grantor_or_beneficiary_643i1A(borrower, t);
+    then deemed_distribution_by_foreign_trust_643i(t, borrower, y, amount);
+}
+rule S643i1LoanToRelatedPerson(t: Trust, borrower: Person, gb: Person, y: TaxableYear, amount: Money) defeasible {
+    label en official "a foreign trust's loan to (or by) a US person related to a grantor or beneficiary is a distribution to that grantor or beneficiary (section 643(i)(1)(B))";
+    when us.irc.definitions::foreign_trust(t);
+    when foreign_trust_loan_of_cash_or_marketable_securities(t, borrower, y, amount);
+    when loan_recipient_is_related_us_person_643i1B(borrower, gb, t);
+    then deemed_distribution_by_foreign_trust_643i(t, gb, y, amount);
+}
+rule S643i1UseOfPropertyGrantorOrBeneficiary(t: Trust, user: Person, y: TaxableYear, fmv_use: Money, paid: Money) defeasible {
+    label en official "the fair market value of the use of other trust property is a distribution, to the extent the trust is not paid that value within a reasonable time (section 643(i)(1), (2)(E))";
+    when us.irc.definitions::foreign_trust(t);
+    when foreign_trust_permits_use_of_other_property(t, user, y, fmv_use);
+    when loan_recipient_is_grantor_or_beneficiary_643i1A(user, t);
+    when trust_paid_fair_market_value_of_use_within_reasonable_time(t, user, y, paid);
+    when fmv_use > paid;
+    then deemed_distribution_by_foreign_trust_643i(t, user, y, fmv_use - paid);
+}
+rule S643i1UseOfPropertyNotPaidFor(t: Trust, user: Person, y: TaxableYear, fmv_use: Money) defeasible {
+    label en official "the fair market value of the use of other trust property is a distribution when nothing was paid for the use (section 643(i)(1), (2)(E))";
+    when us.irc.definitions::foreign_trust(t);
+    when foreign_trust_permits_use_of_other_property(t, user, y, fmv_use);
+    when loan_recipient_is_grantor_or_beneficiary_643i1A(user, t);
+    unless trust_paid_fair_market_value_of_use_within_reasonable_time(t, user, y, _) and foreign_trust_permits_use_of_other_property(t, user, y, fmv_use);
+    then deemed_distribution_by_foreign_trust_643i(t, user, y, fmv_use);
+}
+
+pub relation section_643i_trust_not_simple_trust(t: Trust, y: TaxableYear) kind institutional {
+    label en official "a trust treated under section 643(i) as making a distribution is treated as not described in section 651 (section 643(i)(2)(D))";
+}
+@source(IRC_S643_I, relation = formalizes, coverage = exact, quote = "Any trust which is treated under this subsection as making a distribution shall be treated as not described in section 651.")
+rule S643i2DNotSimpleTrust(t: Trust, gb: Person, y: TaxableYear, amount: Money) defeasible {
+    when deemed_distribution_by_foreign_trust_643i(t, gb, y, amount);
+    then section_643i_trust_not_simple_trust(t, y);
+}
+pub relation subsequent_transaction_on_loan_principal(t: Trust, borrower: Person, transaction: Transaction) kind empirical {
+    label en unofficial "a later transaction between the trust and the original borrower regarding the loan principal (repayment, satisfaction, cancellation, discharge or otherwise) or the return of the property (case-asserted; section 643(i)(3))";
+}
+pub relation subsequent_transaction_disregarded_643i3(t: Trust, borrower: Person, transaction: Transaction) kind institutional {
+    label en official "a subsequent transaction between the trust and the original borrower regarding the principal of a loan taken into account under section 643(i)(1), or the return of the property, is disregarded for purposes of this title (section 643(i)(3))";
+}
+@source(IRC_S643_I, relation = formalizes, coverage = exact, quote = "any subsequent transaction between the trust and the original borrower regarding the principal of the loan")
+rule S643i3SubsequentTransactionsDisregarded(t: Trust, borrower: Person, transaction: Transaction, y: TaxableYear, amount: Money) defeasible {
+    when deemed_distribution_by_foreign_trust_643i(t, borrower, y, amount);
+    when subsequent_transaction_on_loan_principal(t, borrower, transaction);
+    then subsequent_transaction_disregarded_643i3(t, borrower, transaction);
+}
+
+// ============================================================================
+// §643(d): coordination with back-up withholding
+// ============================================================================
+
+pub relation backup_withholding_credit_31c(et: Person, y: TaxableYear, credit: Money) kind empirical {
+    label en unofficial "the credit allowable under section 31(c) for tax withheld under section 3406 on payments to the estate or trust (case-asserted; section 643(d)(1))";
+}
+pub relation payment_subject_to_withholding_total(et: Person, y: TaxableYear, total: Money) kind empirical {
+    label en unofficial "the payment subject to withholding under section 3406 taken into account under this subchapter (case-asserted; section 643(d))";
+}
+pub relation payment_share_of_beneficiary(et: Person, y: TaxableYear, b: Person, share: Money) kind empirical {
+    label en unofficial "the beneficiary's share of the payment taken into account under this subchapter (case-asserted; section 643(d)(1))";
+}
+pub relation backup_withholding_credit_allocated_to_beneficiary(et: Person, y: TaxableYear, b: Person, credit: Money) kind institutional {
+    label en official "the credit is allocated between the estate or trust and its beneficiaries on the basis of their respective shares of the payment (section 643(d)(1))";
+}
+@source(IRC_S643_D, relation = formalizes, coverage = exact, quote = "by allocating between the estate or trust and its beneficiaries any credit allowable under section 31(c)")
+rule S643d1AllocateCredit(et: Person, y: TaxableYear, b: Person, credit: Money, share: Money, total: Money) defeasible {
+    label en official "the beneficiary's part of the credit is the credit times the beneficiary's share over the total payment (section 643(d)(1))";
+    when backup_withholding_credit_31c(et, y, credit);
+    when payment_subject_to_withholding_total(et, y, total);
+    when payment_share_of_beneficiary(et, y, b, share);
+    when total > 0 USD;
+    then backup_withholding_credit_allocated_to_beneficiary(et, y, b, div_round(credit * (share / 1.00 USD), total / 1.00 USD, 2, "HALF_UP"));
+}
+pub relation beneficiary_treated_as_paid_amount_equal_to_credit_643d(et: Person, y: TaxableYear, b: Person, amount: Money) kind institutional {
+    label en official "each beneficiary to whom the credit is allocated is treated as if an amount equal to that credit had been paid to him by the estate or trust (section 643(d)(2))";
+}
+@source(IRC_S643_D, relation = formalizes, coverage = exact, quote = "by treating each beneficiary to whom such credit is allocated as if an amount equal to such credit has been paid to him by the estate or trust")
+rule S643d2BeneficiaryTreatedAsPaid(et: Person, y: TaxableYear, b: Person, credit: Money) defeasible {
+    when backup_withholding_credit_allocated_to_beneficiary(et, y, b, credit);
+    then beneficiary_treated_as_paid_amount_equal_to_credit_643d(et, y, b, credit);
+}
+pub relation total_beneficiary_payment_shares_643d(et: Person, y: TaxableYear, total: Money) kind institutional {
+    label en unofficial "intermediate value: the sum of the beneficiaries' shares of the payment (an aggregate over the empirical share facts, not over a derived predicate)";
+}
+rule S643dTotalBeneficiaryShares(et: Person, y: TaxableYear) defeasible {
+    when payment_share_of_beneficiary(et, y, _, _);
+    then total_beneficiary_payment_shares_643d(et, y,
+        sum all s: Money for b: Person where payment_share_of_beneficiary(et, y, b, s));
+}
+pub relation estate_or_trust_deduction_for_credit_allocated_643d(et: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the estate or trust is allowed a deduction equal to the credit allocated to beneficiaries (section 643(d)(3))";
+}
+@source(IRC_S643_D, relation = formalizes, coverage = exact, quote = "by allowing the estate or trust a deduction in an amount equal to the credit so allocated to beneficiaries")
+rule S643d3DeductionForAllocatedCredit(et: Person, y: TaxableYear, credit: Money, total: Money, shares: Money) defeasible {
+    label en official "the deduction equals the credit allocated to the beneficiaries: the credit times the beneficiaries' shares over the total payment (section 643(d)(3)); cents HALF_UP is a JUDGMENT CALL";
+    when backup_withholding_credit_31c(et, y, credit);
+    when payment_subject_to_withholding_total(et, y, total);
+    when total_beneficiary_payment_shares_643d(et, y, shares);
+    when total > 0 USD;
+    then estate_or_trust_deduction_for_credit_allocated_643d(et, y, div_round(credit * (shares / 1.00 USD), total / 1.00 USD, 2, "HALF_UP"));
+}
+
+// ============================================================================
+// §643(a)(6)(B)-(C): foreign trust income adjustments
+// ============================================================================
+
+pub relation foreign_trust_treaty_exempt_us_source_income(t: Trust, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "gross income from sources within the United States that section 894 (income exempt under treaty) would exclude (case-asserted; section 643(a)(6)(B))";
+}
+pub relation foreign_trust_us_source_income_without_regard_to_894(t: Trust, y: TaxableYear, amount: Money) kind institutional {
+    label en official "for a foreign trust, gross income from sources within the United States is determined without regard to section 894 — treaty-exempt income stays in the figure (section 643(a)(6)(B))";
+}
+@source(IRC_S643_A, relation = formalizes, coverage = exact, quote = "Gross income from sources within the United States shall be determined without regard to section 894")
+rule S643a6BWithoutRegardTo894(t: Trust, y: TaxableYear, treaty: Money) defeasible {
+    when us.irc.definitions::foreign_trust(t);
+    when foreign_trust_treaty_exempt_us_source_income(t, y, treaty);
+    then foreign_trust_us_source_income_without_regard_to_894(t, y, treaty);
+}
+pub relation capital_gains_from_sales_or_exchanges(t: Trust, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "gains from the sale or exchange of capital assets in the year (case-asserted; section 643(a)(6)(C))";
+}
+pub relation capital_losses_from_sales_or_exchanges(t: Trust, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "losses from the sale or exchange of capital assets in the year (case-asserted; section 643(a)(6)(C))";
+}
+pub relation foreign_trust_capital_gain_rule_643a6C(t: Trust, y: TaxableYear) kind institutional {
+    label en official "paragraph (3) does not apply to a foreign trust: capital gains allocated to corpus are not excluded from distributable net income (section 643(a)(6)(C), first sentence)";
+}
+@source(IRC_S643_A, relation = formalizes, coverage = exact, quote = "Paragraph (3) shall not apply to a foreign trust.")
+rule S643a6CParagraph3NotForForeignTrust(t: Trust, y: TaxableYear) defeasible {
+    when us.irc.definitions::foreign_trust(t);
+    when capital_gain_allocated_to_corpus_not_distributable(t, y, _);
+    then foreign_trust_capital_gain_rule_643a6C(t, y);
+}
+pub relation foreign_trust_net_capital_gain_included_643a6C(t: Trust, y: TaxableYear, amount: Money) kind institutional {
+    label en official "for a foreign trust, gains from the sale or exchange of capital assets are included, reduced by losses to the extent the losses do not exceed the gains (section 643(a)(6)(C), second sentence); the figure is not added a second time to the taxable-income start of the DNI (JUDGMENT CALL)";
+}
+@source(IRC_S643_A, relation = formalizes, coverage = exact, quote = "there shall be included gains from the sale or exchange of capital assets, reduced by losses from such sales or exchanges to the extent such losses do not exceed gains from such sales or exchanges")
+rule S643a6CNetCapitalGainIncluded(t: Trust, y: TaxableYear, gains: Money, losses: Money) defeasible {
+    when us.irc.definitions::foreign_trust(t);
+    when capital_gains_from_sales_or_exchanges(t, y, gains);
+    when capital_losses_from_sales_or_exchanges(t, y, losses);
+    then foreign_trust_net_capital_gain_included_643a6C(t, y, gains - min(losses, gains));
+}
+
+// ============================================================================
+// §665(d)-(e): taxes imposed on the trust; preceding taxable year
+// ============================================================================
+
+pub relation trust_taxes_allocable_to_undistributed_dni_and_gains(t: Trust, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the amount of taxes imposed for the taxable year under this chapter (without regard to this subpart or part IV of subchapter A) which, under regulations, are properly allocable to the undistributed portions of distributable net income and capital gains (case-asserted; section 665(d)(1))";
+}
+pub relation taxes_deemed_distributed_under_666bc(t: Trust, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the amount of those taxes deemed distributed under section 666(b) and (c) to any beneficiary (case-asserted; section 665(d)(1), last sentence)";
+}
+pub relation foreign_taxes_allocable_665d2(t: Trust, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "income, war profits and excess profits taxes imposed by a foreign country or possession on a foreign trust, properly allocable as under paragraph (1) (case-asserted; section 665(d)(2), first sentence)";
+}
+pub relation foreign_taxes_on_settlor_allocable_665d2(t: Trust, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "for a foreign trust the settlor or another person would own but for section 672(f): the allocable foreign income taxes imposed on the settlor or that person in respect of trust income (case-asserted; section 665(d)(2), second sentence)";
+}
+@source(IRC_S665_D, relation = formalizes, coverage = exact, quote = "The term \"taxes imposed on the trust\" means the amount of the taxes which are imposed for any taxable year of the trust under this chapter")
+rule S665d1TaxesImposedOnTrust(t: Trust, y: TaxableYear, allocable: Money, deemed: Money) defeasible {
+    label en official "taxes imposed on the trust: the taxes properly allocable to undistributed DNI and gains, reduced by any amount deemed distributed under section 666(b) and (c) (section 665(d)(1))";
+    when trust_taxes_allocable_to_undistributed_dni_and_gains(t, y, allocable);
+    when taxes_deemed_distributed_under_666bc(t, y, deemed);
+    unless us.irc.definitions::foreign_trust(t) and trust_taxes_allocable_to_undistributed_dni_and_gains(t, y, allocable) and taxes_deemed_distributed_under_666bc(t, y, deemed);
+    then taxes_imposed_on_trust_665(t, y, max(0 USD, allocable - deemed));
+}
+@source(IRC_S665_D, relation = formalizes, coverage = exact, quote = "In the case of any foreign trust, the term \"taxes imposed on the trust\" includes the amount")
+rule S665d2ForeignTrustTaxesImposed(t: Trust, y: TaxableYear, allocable: Money, foreign: Money, settlor: Money, deemed: Money) defeasible {
+    label en official "for a foreign trust the taxes imposed on the trust include the allocable foreign income taxes (and, for a trust the settlor would own but for section 672(f), the settlor's allocable foreign taxes), reduced by amounts deemed distributed under section 666(b) and (c) (section 665(d)(2))";
+    when us.irc.definitions::foreign_trust(t);
+    when trust_taxes_allocable_to_undistributed_dni_and_gains(t, y, allocable);
+    when foreign_taxes_allocable_665d2(t, y, foreign);
+    when foreign_taxes_on_settlor_allocable_665d2(t, y, settlor);
+    when taxes_deemed_distributed_under_666bc(t, y, deemed);
+    then taxes_imposed_on_trust_665(t, y, max(0 USD, allocable + foreign + settlor - deemed));
+}
+
+pub relation foreign_trust_created_by_us_person(t: Trust) kind empirical {
+    label en unofficial "the trust is a foreign trust created by a United States person (case-asserted; section 665(e)(1))";
+}
+pub relation part_i_does_not_apply_to_trust_year(t: Trust, py: TaxableYear) kind empirical {
+    label en unofficial "this part does not apply to the trust for the taxable year (case-asserted; section 665(e)(1))";
+}
+pub relation trust_year_qualified_under_subpart_b_without_subpart_d(t: Trust, py: TaxableYear) kind empirical {
+    label en unofficial "for the preceding taxable year the trust qualified, without regard to this subpart, under subpart B (case-asserted; section 665(e)(2))";
+}
+pub relation year_excluded_from_preceding_taxable_years_665e1(t: Trust, py: TaxableYear) kind institutional {
+    label en official "for a foreign trust created by a United States person the term preceding taxable year does not include a taxable year to which this part does not apply (section 665(e)(1))";
+}
+@source(IRC_S665_E, relation = formalizes, coverage = exact, quote = "the term \"preceding taxable year\" does not include any taxable year of the trust to which this part does not apply")
+rule S665e1PrecedingYearExcluded(t: Trust, py: TaxableYear) defeasible {
+    when foreign_trust_created_by_us_person(t);
+    when part_i_does_not_apply_to_trust_year(t, py);
+    then year_excluded_from_preceding_taxable_years_665e1(t, py);
+}
+pub relation year_treated_as_subpart_c_trust_year_665e2(t: Trust, py: TaxableYear) kind institutional {
+    label en official "a preceding taxable year for which the trust qualified under subpart B is, for applying this subpart, treated as a year of a trust to which subpart C applies (section 665(e)(2))";
+}
+@source(IRC_S665_E, relation = formalizes, coverage = exact, quote = "such trust shall, in accordance with regulations prescribed by the Secretary, be treated as a trust to which subpart C applies")
+rule S665e2SubpartBYearTreatedAsSubpartC(t: Trust, py: TaxableYear) defeasible {
+    when trust_year_qualified_under_subpart_b_without_subpart_d(t, py);
+    then year_treated_as_subpart_c_trust_year_665e2(t, py);
+}
+
+// ============================================================================
+// §672(f)(2)(B), (3), (4), (5): foreign-grantor limitation, special rules
+// ============================================================================
+
+pub relation trust_portion_distributions_taxable_as_compensation(t: Trust, portion: Text) kind empirical {
+    label en unofficial "distributions from the portion are taxable as compensation for services rendered (case-asserted; section 672(f)(2)(B))";
+}
+@source(IRC_S672_F, relation = formalizes, coverage = exact, quote = "Except as provided in regulations, paragraph (1) shall not apply to any portion of a trust distributions from which are taxable as compensation for services rendered.")
+pub relation section_672f1_inapplicable_to_compensatory_portion(t: Trust, portion: Text) kind institutional {
+    label en official "paragraph (1) does not apply to a portion of a trust distributions from which are taxable as compensation for services rendered, except as provided in regulations (section 672(f)(2)(B))";
+}
+rule S672f2BCompensatoryTrusts(t: Trust, portion: Text) defeasible {
+    when trust_portion_distributions_taxable_as_compensation(t, portion);
+    then section_672f1_inapplicable_to_compensatory_portion(t, portion);
+}
+pub relation corporation_is_controlled_foreign_corporation_957(c: us.irc.core::Corporation) kind empirical {
+    label en unofficial "the corporation is a controlled foreign corporation as defined in section 957 (case-asserted; us.irc.international is not an owner package in this world — EXTERNAL_DEPENDENCY; section 672(f)(3)(A))";
+}
+pub relation cfc_treated_as_domestic_for_672f1(c: us.irc.core::Corporation) kind institutional {
+    label en official "a controlled foreign corporation is treated as a domestic corporation for purposes of section 672(f)(1), except as regulations provide (section 672(f)(3)(A))";
+}
+@source(IRC_S672_F, relation = formalizes, coverage = exact, quote = "a controlled foreign corporation (as defined in section 957) shall be treated as a domestic corporation for purposes of paragraph (1)")
+rule S672f3ACfcTreatedAsDomestic(c: us.irc.core::Corporation) defeasible {
+    when corporation_is_controlled_foreign_corporation_957(c);
+    then cfc_treated_as_domestic_for_672f1(c);
+}
+pub relation section_672f1_inapplicable_for_section_1297(t: Trust) kind institutional {
+    label en official "paragraph (1) does not apply for purposes of applying section 1297 (passive foreign investment company rules), except as regulations provide (section 672(f)(3)(B))";
+}
+@source(IRC_S672_F, relation = formalizes, coverage = exact, quote = "paragraph (1) shall not apply for purposes of applying section 1297")
+rule S672f3BNotForSection1297(t: Trust) defeasible {
+    when us.irc.definitions::foreign_trust(t);
+    then section_672f1_inapplicable_for_section_1297(t);
+}
+pub relation transfer_from_partnership_or_foreign_corporation_treated_as_gift_by_transferee(transfer: Transaction, transferee: Person) kind empirical {
+    label en unofficial "a transfer directly or indirectly from a partnership or foreign corporation which the transferee treats as a gift or bequest (case-asserted; section 672(f)(4))";
+}
+pub relation secretary_recharacterizes_transfer_672f4(transfer: Transaction) kind empirical {
+    label en unofficial "the Secretary recharacterizes the transfer in such circumstances as the Secretary determines appropriate to prevent avoidance of the purposes of section 672(f) (the Secretary's act, case-asserted)";
+}
+pub relation transfer_recharacterized_672f4(transfer: Transaction) kind institutional {
+    label en official "the Secretary may recharacterize a purported gift or bequest from a partnership or foreign corporation to prevent avoidance of the purposes of section 672(f) (section 672(f)(4))";
+}
+@source(IRC_S672_F, relation = formalizes, coverage = exact, quote = "the Secretary may recharacterize such transfer in such circumstances as the Secretary determines to be appropriate to prevent the avoidance of the purposes of this subsection")
+rule S672f4RecharacterizationPower(transfer: Transaction, transferee: Person) defeasible {
+    label en official "the Secretary's power to recharacterize a purported gift or bequest from a partnership or foreign corporation (section 672(f)(4))";
+    when transfer_from_partnership_or_foreign_corporation_treated_as_gift_by_transferee(transfer, transferee);
+    when secretary_recharacterizes_transfer_672f4(transfer);
+    then power S672f4RecharacterizePurportedGift {
+        holder Secretary;
+        over transfer;
+        exercise secretary_recharacterizes_transfer_672f4(transfer);
+        valid_when transfer_qualifies_for_672f4_recharacterization(transfer);
+        effect create(transfer_recharacterized_672f4(transfer));
+        subject Transaction;
+        window [-infinity, infinity);
+    };
+}
+pub relation transfer_qualifies_for_672f4_recharacterization(transfer: Transaction) kind institutional {
+    label en unofficial "the transfer is a purported gift or bequest from a partnership or foreign corporation that the transferee treats as such — the only condition the section states for the power";
+}
+rule S672f4Qualifies(transfer: Transaction, transferee: Person) defeasible {
+    when transfer_from_partnership_or_foreign_corporation_treated_as_gift_by_transferee(transfer, transferee);
+    then transfer_qualifies_for_672f4_recharacterization(transfer);
+}
+
+pub relation foreign_person_would_be_owner_but_for_672f(fp: Person, t: Trust, portion: Text) kind empirical {
+    label en unofficial "but for section 672(f), a foreign person would be treated as the owner of the portion of the trust (case-asserted; section 672(f)(5)(A))";
+}
+pub relation transfers_to_foreign_person_not_full_consideration(b: Person, fp: Person, amount: Money) kind empirical {
+    label en unofficial "the beneficiary's transfers of property, directly or indirectly, to the foreign person, other than in a sale for full and adequate consideration, net of gifts excluded from taxable gifts under section 2503(b) (case-asserted amount; section 672(f)(5))";
+}
+pub relation us_beneficiary_treated_as_grantor_672f5(b: Person, t: Trust, portion: Text, amount: Money) kind institutional {
+    label en official "a United States beneficiary of a trust portion that a foreign person would own but for section 672(f) is treated as the grantor of that portion to the extent of the beneficiary's transfers to the foreign person (section 672(f)(5))";
+}
+@source(IRC_S672_F, relation = formalizes, coverage = exact, quote = "such beneficiary shall be treated as the grantor of such portion to the extent such beneficiary has made (directly or indirectly) transfers of property")
+rule S672f5BeneficiaryTreatedAsGrantor(b: Person, fp: Person, t: Trust, portion: Text, amount: Money) defeasible {
+    label en official "a US beneficiary of a trust portion a foreign person would own but for section 672(f) is treated as its grantor to the extent of the beneficiary's uncompensated transfers to that person (section 672(f)(5))";
+    when foreign_person_would_be_owner_but_for_672f(fp, t, portion);
+    when is_beneficiary(b, t);
+    when us.irc.definitions::united_states_person(b);
+    when transfers_to_foreign_person_not_full_consideration(b, fp, amount);
+    then us_beneficiary_treated_as_grantor_672f5(b, t, portion, amount);
+}
+
+// ============================================================================
+// §679(a)(3): obligations not taken into account under the FMV exception
+// ============================================================================
+
+pub relation person_related_within_643i2B_to_grantor_owner_or_beneficiary(p: Person, t: Trust) kind empirical {
+    label en unofficial "the person is related, within the meaning of section 643(i)(2)(B), to a grantor, owner or beneficiary of the trust (case-asserted; section 679(a)(3)(C)(iii))";
+}
+pub relation person_described_679a3C(p: Person, t: Trust) kind institutional {
+    label en official "the persons described: the trust, any grantor, owner or beneficiary of the trust, and any person related to a grantor, owner or beneficiary (section 679(a)(3)(C))";
+}
+@source(IRC_S679_A, relation = formalizes, coverage = exact, quote = "any grantor, owner, or beneficiary of the trust")
+rule S679a3CGrantor(p: Person, t: Trust) defeasible {
+    when is_grantor_of(p, t);
+    then person_described_679a3C(p, t);
+}
+pub relation owner_of_trust_asserted_679a3C(p: Person, t: Trust) kind empirical {
+    label en unofficial "the person is an owner of the trust (case-asserted, so that this classification does not depend on the section 679 result it feeds; section 679(a)(3)(C)(ii))";
+}
+rule S679a3COwner(p: Person, t: Trust) defeasible {
+    when owner_of_trust_asserted_679a3C(p, t);
+    then person_described_679a3C(p, t);
+}
+rule S679a3CBeneficiary(p: Person, t: Trust) defeasible {
+    when is_beneficiary(p, t);
+    then person_described_679a3C(p, t);
+}
+rule S679a3CRelated(p: Person, t: Trust) defeasible {
+    when person_related_within_643i2B_to_grantor_owner_or_beneficiary(p, t);
+    then person_described_679a3C(p, t);
+}
+rule S679a3CTheTrustItself(t: Trust) defeasible {
+    when us.irc.definitions::foreign_trust(t);
+    then person_described_679a3C(t, t);
+}
+
+pub relation consideration_received_for_transfer(t: Trust, transferor: Person, amount: Money) kind empirical {
+    label en unofficial "the consideration received by the transferor for the transfer of property to the trust, non-cash consideration at fair market value (case-asserted; section 679(a)(2)(B))";
+}
+pub relation fair_market_value_of_property_transferred(t: Trust, transferor: Person, amount: Money) kind empirical {
+    label en unofficial "the fair market value of the property the transferor transferred to the trust (case-asserted; section 679(a)(2)(B))";
+}
+pub relation consideration_obligation_of_described_person(t: Trust, transferor: Person, obligation: Text, amount: Money) kind empirical {
+    label en unofficial "an obligation of a person described in section 679(a)(3)(C), given as consideration, with its value (case-asserted per obligation; whether the obligor is a described person is asserted with the fact)";
+}
+pub relation consideration_counted_for_fmv_exception_679a3(t: Trust, transferor: Person, amount: Money) kind institutional {
+    label en official "the consideration taken into account for the section 679(a)(2)(B) exception: total consideration less obligations of persons described in section 679(a)(3)(C) (section 679(a)(3)(A)(i); the regulation-based exceptions and the guaranteed-obligation rule of (A)(ii) are EXTERNAL_DEPENDENCY)";
+}
+@source(IRC_S679_A, relation = formalizes, coverage = partial, quote = "there shall not be taken into account")
+rule S679a3AObligationsDisregarded(t: Trust, transferor: Person, total: Money) defeasible {
+    label en official "obligations of persons described in subparagraph (C) are not taken into account in applying the fair-market-value exception when the transferor is a grantor, owner, beneficiary or related person (section 679(a)(3)(A)(i))";
+    when consideration_received_for_transfer(t, transferor, total);
+    when person_described_679a3C(transferor, t);
+    then consideration_counted_for_fmv_exception_679a3(t, transferor,
+        total - sum all a: Money for o: Text where consideration_obligation_of_described_person(t, transferor, o, a));
+}
+pub relation fmv_consideration_exception_applies_679(transferor: Person, t: Trust) kind institutional {
+    label en official "the section 679(a)(2)(B) exception applies: consideration of at least the fair market value of the property, with obligations disregarded under (a)(3)";
+}
+rule S679a2BExceptionLegacyFact(transferor: Person, t: Trust) defeasible {
+    label en unofficial "the exception as asserted by the case for a transfer in which no obligation of a described person is given as consideration";
+    when transfer_for_fmv_consideration_679a2b(transferor, t);
+    unless consideration_obligation_of_described_person(t, transferor, _, _) and transfer_for_fmv_consideration_679a2b(transferor, t);
+    then fmv_consideration_exception_applies_679(transferor, t);
+}
+rule S679a2BExceptionRecomputed(transferor: Person, t: Trust, counted: Money, fmv: Money) defeasible {
+    label en official "consideration counted under (a)(3) is at least the fair market value of the transferred property (section 679(a)(2)(B), (a)(3))";
+    when consideration_counted_for_fmv_exception_679a3(t, transferor, counted);
+    when fair_market_value_of_property_transferred(t, transferor, fmv);
+    when counted >= fmv;
+    then fmv_consideration_exception_applies_679(transferor, t);
+}
+pub relation trust_principal_payment_on_disregarded_obligation(t: Trust, obligation: Text, paid_on: Date, amount: Money) kind empirical {
+    label en unofficial "a principal payment by the trust on an obligation referred to in section 679(a)(3)(A), with its date (case-asserted; section 679(a)(3)(B))";
+}
+pub relation principal_payment_counts_from_date_679a3B(t: Trust, obligation: Text, on_or_after: Date, amount: Money) kind institutional {
+    label en official "principal payments by the trust on such an obligation are taken into account on and after the date of the payment in determining the portion of the trust attributable to the property transferred (section 679(a)(3)(B))";
+}
+@source(IRC_S679_A, relation = formalizes, coverage = exact, quote = "Principal payments by the trust on any obligation referred to in subparagraph (A) shall be taken into account on and after the date of the payment")
+rule S679a3BPrincipalPayments(t: Trust, obligation: Text, paid_on: Date, amount: Money) defeasible {
+    when trust_principal_payment_on_disregarded_obligation(t, obligation, paid_on, amount);
+    then principal_payment_counts_from_date_679a3B(t, obligation, paid_on, amount);
+}
+
+// ============================================================================
+// §679(a)(4)-(5): foreign grantor who becomes a US person; outbound migrations
+// ============================================================================
+
+pub relation nonresident_alien_transfer_to_foreign_trust(p: Individual, t: Trust, transferred_on: Date) kind empirical {
+    label en unofficial "a nonresident alien individual directly or indirectly transferred property to a foreign trust on the date (case-asserted; section 679(a)(4)(A))";
+}
+pub relation trust_portion_attributable_to_property_transferred_by(p: Person, t: Trust, amount: Money) kind empirical {
+    label en unofficial "the portion of the trust attributable to the property transferred by the individual, in money terms, before adding pre-residency undistributed net income (case-asserted; section 679(a)(4)(A), (5))";
+}
+pub relation pre_residency_undistributed_net_income(p: Person, t: Trust, amount: Money) kind empirical {
+    label en unofficial "undistributed net income for periods before the individual's residency starting date (case-asserted; section 679(a)(4)(B))";
+}
+pub relation deemed_transfer_on_residency_starting_date_679a4(p: Individual, t: Trust, on: Date, amount: Money) kind institutional {
+    label en official "a nonresident alien whose residency starting date falls within 5 years after the transfer is treated as having transferred to the trust on that date an amount equal to the portion attributable to the property transferred, undistributed net income for earlier periods being counted only in determining that portion (section 679(a)(4))";
+}
+@source(IRC_S679_A, relation = formalizes, coverage = exact, quote = "If a nonresident alien individual has a residency starting date within 5 years after directly or indirectly transferring property to a foreign trust")
+rule S679a4AResidencyStartingDate(p: Individual, t: Trust, transferred_on: Date, rsd: Date, yr: Integer, portion: Money, uni: Money) defeasible {
+    label en official "residency starting date (section 7701(b)(2)(A)) within 5 years after the transfer: the individual is treated as transferring to the trust on that date the attributable portion, including pre-residency undistributed net income for the determination of the portion (section 679(a)(4)(A)-(C))";
+    when nonresident_alien_transfer_to_foreign_trust(p, t, transferred_on);
+    when us.irc.definitions::residency_starting_date(p, yr, rsd);
+    when rsd >= transferred_on;
+    when rsd <= add_calendar_period(transferred_on, 60 calendar_month);
+    when trust_portion_attributable_to_property_transferred_by(p, t, portion);
+    when pre_residency_undistributed_net_income(p, t, uni);
+    then deemed_transfer_on_residency_starting_date_679a4(p, t, rsd, portion + uni);
+}
+pub relation individual_transferred_property_to_domestic_trust(p: Individual, t: Trust) kind empirical {
+    label en unofficial "an individual who is a citizen or resident of the United States transferred property to a trust which was not a foreign trust (case-asserted; section 679(a)(5)(A))";
+}
+pub relation individual_alive_on(p: Individual, d: Date) kind empirical {
+    label en unofficial "the individual is alive on the date (case-asserted; section 679(a)(5)(B))";
+}
+pub relation deemed_transfer_on_outbound_migration_679a5(p: Individual, t: Trust, on: Date, amount: Money) kind institutional {
+    label en official "if a trust that received property from a US citizen or resident becomes a foreign trust while that individual is alive, section 679 and section 6048 apply as if the individual transferred to the trust on that date the portion attributable to the property previously transferred (section 679(a)(5))";
+}
+@source(IRC_S679_A, relation = formalizes, coverage = exact, quote = "then this section and section 6048 shall be applied as if such individual transferred to such trust on the date such trust becomes a foreign trust")
+rule S679a5OutboundMigration(p: Individual, t: Trust, d: Date, portion: Money, uni: Money) defeasible {
+    when individual_transferred_property_to_domestic_trust(p, t);
+    when trust_becomes_foreign_trust(t, d);
+    when individual_alive_on(p, d);
+    when trust_portion_attributable_to_property_transferred_by(p, t, portion);
+    when pre_residency_undistributed_net_income(p, t, uni);
+    then deemed_transfer_on_outbound_migration_679a5(p, t, d, portion + uni);
+}
+rule S679a5OutboundMigrationNoUni(p: Individual, t: Trust, d: Date, portion: Money) defeasible {
+    label en official "outbound migration without undistributed net income for earlier periods: the portion alone is the deemed transfer (section 679(a)(5))";
+    when individual_transferred_property_to_domestic_trust(p, t);
+    when trust_becomes_foreign_trust(t, d);
+    when individual_alive_on(p, d);
+    when trust_portion_attributable_to_property_transferred_by(p, t, portion);
+    unless pre_residency_undistributed_net_income(p, t, _) and individual_transferred_property_to_domestic_trust(p, t) and trust_becomes_foreign_trust(t, d) and individual_alive_on(p, d) and trust_portion_attributable_to_property_transferred_by(p, t, portion);
+    then deemed_transfer_on_outbound_migration_679a5(p, t, d, portion);
+}
+
+// ============================================================================
+// §679(b): trusts acquiring United States beneficiaries
+// ============================================================================
+
+pub relation trust_would_have_been_owned_prior_year_but_no_us_beneficiary(transferor: Person, t: Trust) kind empirical {
+    label en unofficial "subsection (a) would have applied to the trust for the immediately preceding taxable year but for the fact that there was no United States beneficiary for any portion of the trust (case-asserted; section 679(b)(2))";
+}
+pub relation undistributed_net_income_at_close_of_preceding_year_attributable(transferor: Person, t: Trust, amount: Money) kind empirical {
+    label en unofficial "the undistributed net income at the close of the immediately preceding taxable year attributable to the portion of the trust (case-asserted; section 679(b))";
+}
+pub relation section_679b_income_inclusion(transferor: Person, t: Trust, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the transferor is treated as having income for the taxable year, in addition to other income, equal to the undistributed net income at the close of the immediately preceding year attributable to the portion (section 679(b))";
+}
+@source(IRC_S679_B, relation = formalizes, coverage = exact, quote = "the transferor shall be treated as having income for the taxable year (in addition to his other income for such year) equal to the undistributed net income")
+rule S679bTrustAcquiresUsBeneficiary(transferor: Person, t: Trust, y: TaxableYear, uni: Money) defeasible {
+    when us_person_transfers_property_to_foreign_trust(transferor, t, y);
+    when us_transferor_treated_as_owner_679(transferor, t);
+    when trust_would_have_been_owned_prior_year_but_no_us_beneficiary(transferor, t);
+    when undistributed_net_income_at_close_of_preceding_year_attributable(transferor, t, uni);
+    then section_679b_income_inclusion(transferor, t, y, uni);
+}
+
+// ============================================================================
+// §679(c): trusts treated as having a United States beneficiary (extensions)
+// ============================================================================
+
+pub relation us_person_interest_in_trust_contingent_on_future_event(t: Trust, y: TaxableYear) kind empirical {
+    label en unofficial "a United States person's interest in the trust is contingent on a future event, and an amount may be accumulated for the person (case-asserted; section 679(c)(1), last sentence)";
+}
+@source(IRC_S679_C, relation = formalizes, coverage = exact, quote = "an amount shall be treated as accumulated for the benefit of a United States person even if the United States person's interest in the trust is contingent on a future event")
+rule S679c1ContingentInterestCounts(t: Trust, y: TaxableYear) defeasible {
+    label en official "an amount is treated as accumulated for a US person even if the person's interest is contingent on a future event, so the terms do not bar accumulation and the trust is treated as having a US beneficiary (section 679(c)(1), last sentence)";
+    when us_person_interest_in_trust_contingent_on_future_event(t, y);
+    then trust_has_us_beneficiary_679c(t, y);
+}
+pub relation paid_or_accumulated_to_foreign_entity(t: Trust, y: TaxableYear, foreign_entity: Person) kind empirical {
+    label en unofficial "an amount is paid to or accumulated for a foreign corporation, foreign partnership, or foreign trust or estate (case-asserted; section 679(c)(2))";
+}
+pub relation entity_is_cfc_or_partnership_with_us_partner_or_trust_with_us_beneficiary(foreign_entity: Person, y: TaxableYear) kind empirical {
+    label en unofficial "the entity is a controlled foreign corporation (section 957(a)), a foreign partnership with a United States partner, or a foreign trust or estate with a United States beneficiary within the meaning of paragraph (1) (case-asserted; section 679(c)(2)(A)-(C))";
+}
+pub relation attributed_to_us_person_679c2(t: Trust, y: TaxableYear, foreign_entity: Person) kind institutional {
+    label en official "an amount paid or accumulated to such a foreign entity is treated as paid or accumulated to or for the benefit of a United States person (section 679(c)(2))";
+}
+@source(IRC_S679_C, relation = formalizes, coverage = exact, quote = "an amount shall be treated as paid or accumulated to or for the benefit of a United States person if such amount is paid to or accumulated for a foreign corporation, foreign partnership, or foreign trust or estate")
+rule S679c2Attribution(t: Trust, y: TaxableYear, foreign_entity: Person) defeasible {
+    when paid_or_accumulated_to_foreign_entity(t, y, foreign_entity);
+    when entity_is_cfc_or_partnership_with_us_partner_or_trust_with_us_beneficiary(foreign_entity, y);
+    then attributed_to_us_person_679c2(t, y, foreign_entity);
+}
+rule S679c2TrustHasUsBeneficiary(t: Trust, y: TaxableYear, foreign_entity: Person) defeasible {
+    when attributed_to_us_person_679c2(t, y, foreign_entity);
+    then trust_has_us_beneficiary_679c(t, y);
+}
+pub relation beneficiary_first_became_us_person_on(b: Person, d: Date) kind empirical {
+    label en unofficial "the beneficiary first became a United States person on the date (case-asserted; section 679(c)(3))";
+}
+pub relation transfer_to_foreign_trust_on(t: Trust, transferor: Person, d: Date) kind empirical {
+    label en unofficial "the date of the transfer of property to the foreign trust (case-asserted; section 679(c)(3))";
+}
+pub relation beneficiary_disregarded_as_us_person_679c3(b: Person, t: Trust, transferor: Person) kind institutional {
+    label en official "a beneficiary is not treated as a United States person for a transfer if the beneficiary first became a United States person more than 5 years after the transfer (section 679(c)(3))";
+}
+@source(IRC_S679_C, relation = formalizes, coverage = exact, quote = "A beneficiary shall not be treated as a United States person in applying this section with respect to any transfer of property to foreign trust if such beneficiary first became a United States person more than 5 years after the date of such transfer.")
+rule S679c3LateUsPersonDisregarded(b: Person, t: Trust, transferor: Person, became: Date, transferred: Date) defeasible {
+    when beneficiary_first_became_us_person_on(b, became);
+    when transfer_to_foreign_trust_on(t, transferor, transferred);
+    when became > add_calendar_period(transferred, 60 calendar_month);
+    then beneficiary_disregarded_as_us_person_679c3(b, t, transferor);
+}
+pub relation person_has_discretion_to_distribute_679c4(p: Person, t: Trust, y: TaxableYear) kind empirical {
+    label en unofficial "a person has the discretion (by the trust agreement, a power of appointment or otherwise) of making a distribution from the trust to or for the benefit of any person (case-asserted; section 679(c)(4))";
+}
+pub relation terms_identify_class_of_permitted_distributees_679c4A(t: Trust, y: TaxableYear) kind empirical {
+    label en unofficial "the terms of the trust specifically identify the class of persons to whom such distributions may be made (case-asserted; section 679(c)(4)(A))";
+}
+pub relation none_of_identified_class_are_us_persons_679c4B(t: Trust, y: TaxableYear) kind empirical {
+    label en unofficial "none of the persons in the identified class are United States persons during the taxable year (case-asserted; section 679(c)(4)(B))";
+}
+@source(IRC_S679_C, relation = formalizes, coverage = exact, quote = "such trust shall be treated as having a beneficiary who is a United States person unless—")
+rule S679c4DiscretionTreatedAsUsBeneficiary(t: Trust, y: TaxableYear, p: Person) defeasible {
+    label en official "a trust in which a person has discretion to make distributions to any person is treated as having a US beneficiary unless the terms identify the class of distributees and none of them is a US person (section 679(c)(4))";
+    when person_has_discretion_to_distribute_679c4(p, t, y);
+    unless terms_identify_class_of_permitted_distributees_679c4A(t, y) and none_of_identified_class_are_us_persons_679c4B(t, y) and person_has_discretion_to_distribute_679c4(p, t, y);
+    then trust_has_us_beneficiary_679c(t, y);
+}
+pub relation us_transferor_involved_in_agreement_that_may_benefit_us_person(t: Trust, y: TaxableYear) kind empirical {
+    label en unofficial "a United States person who directly or indirectly transfers property to the trust is directly or indirectly involved in an agreement or understanding, written, oral or otherwise, that may result in income or corpus being paid or accumulated to or for a United States person (case-asserted; section 679(c)(5))";
+}
+pub relation agreement_treated_as_term_of_trust_679c5(t: Trust, y: TaxableYear) kind institutional {
+    label en official "such an agreement or understanding is treated as a term of the trust for paragraph (1)(A) (section 679(c)(5))";
+}
+@source(IRC_S679_C, relation = formalizes, coverage = exact, quote = "such agreement or understanding shall be treated as a term of the trust")
+rule S679c5AgreementIsTerm(t: Trust, y: TaxableYear) defeasible {
+    when us_transferor_involved_in_agreement_that_may_benefit_us_person(t, y);
+    then agreement_treated_as_term_of_trust_679c5(t, y);
+}
+rule S679c5TrustHasUsBeneficiary(t: Trust, y: TaxableYear) defeasible {
+    when agreement_treated_as_term_of_trust_679c5(t, y);
+    then trust_has_us_beneficiary_679c(t, y);
+}
+pub relation loan_or_use_by_us_person_679c6(t: Trust, y: TaxableYear, us_person: Person) kind empirical {
+    label en unofficial "a loan of cash or marketable securities (or the use of other trust property), directly or indirectly, to or by a United States person, whether or not a beneficiary under the terms (case-asserted; section 679(c)(6))";
+}
+pub relation loan_repaid_at_market_rate_within_reasonable_time_679c6(t: Trust, y: TaxableYear, us_person: Person) kind empirical {
+    label en unofficial "the United States person repays the loan at a market rate of interest (or pays the fair market value of the use) within a reasonable period of time (case-asserted; section 679(c)(6), second sentence)";
+}
+@source(IRC_S679_C, relation = formalizes, coverage = exact, quote = "shall be treated as paid or accumulated for the benefit of a United States person")
+rule S679c6LoanTreatedAsPayment(t: Trust, y: TaxableYear, us_person: Person) defeasible {
+    label en official "a loan to or use by a US person is treated as paid or accumulated for the benefit of a US person, except to the extent the person repays at a market rate or pays the fair market value within a reasonable time (section 679(c)(6))";
+    when loan_or_use_by_us_person_679c6(t, y, us_person);
+    unless loan_repaid_at_market_rate_within_reasonable_time_679c6(t, y, us_person) and loan_or_use_by_us_person_679c6(t, y, us_person);
+    then trust_has_us_beneficiary_679c(t, y);
+}
+
+// ============================================================================
+// §679(d): presumption that a foreign trust has a United States beneficiary
+// ============================================================================
+
+pub relation us_person_submitted_information_679d1(transferor: Person, t: Trust) kind empirical {
+    label en unofficial "the transferor submits to the Secretary the information the Secretary may require about the transfer (case-asserted; section 679(d)(1))";
+}
+external judgment relation secretary_satisfied_trust_has_no_us_beneficiary_679d2(transferor: Person, t: Trust) {
+    authority Secretary;
+    label en unofficial "the transferor demonstrates to the satisfaction of the Secretary that the trust meets subparagraphs (A) and (B) of section 679(c)(1) (DECISION-0194, Secretary's satisfaction)";
+}
+pub relation presumption_rebutted_679d(t: Trust) kind institutional {
+    label en official "the presumption is rebutted when the transferor submits the required information and demonstrates to the Secretary's satisfaction that the trust meets section 679(c)(1)(A) and (B) (section 679(d)(1)-(2))";
+}
+rule S679dRebutted(transferor: Person, t: Trust) defeasible {
+    when us_person_submitted_information_679d1(transferor, t);
+    when secretary_satisfied_trust_has_no_us_beneficiary_679d2(transferor, t);
+    then presumption_rebutted_679d(t);
+}
+pub relation presumption_available_679d(t: Trust) kind institutional {
+    label en unofficial "helper for valid_when: a US person transferred property to the foreign trust and the presumption has not been rebutted (section 679(d))";
+}
+rule S679dPresumptionAvailable(t: Trust) defeasible {
+    when us_person_transfers_property_to_foreign_trust(_, t, _);
+    unless presumption_rebutted_679d(t);
+    then presumption_available_679d(t);
+}
+pub relation secretary_treats_trust_as_having_us_beneficiary_679d(t: Trust) kind empirical {
+    label en unofficial "the Secretary treats the trust as having a United States beneficiary for applying section 679 to the transfer (the Secretary's act, case-asserted)";
+}
+pub relation trust_treated_as_having_us_beneficiary_by_presumption_679d(t: Trust) kind institutional {
+    label en official "the Secretary may treat the foreign trust as having a United States beneficiary for applying section 679 to the transfer unless the transferor rebuts (section 679(d))";
+}
+@source(IRC_S679_D, relation = formalizes, coverage = exact, quote = "the Secretary may treat such trust as having a United States beneficiary for purposes of applying this section to such transfer")
+rule S679dPresumptionPower(t: Trust) defeasible {
+    label en official "the Secretary's power to treat a foreign trust that received a US person's transfer as having a US beneficiary, valid unless the transferor has rebutted the presumption (section 679(d))";
+    when us_person_transfers_property_to_foreign_trust(_, t, _);
+    when secretary_treats_trust_as_having_us_beneficiary_679d(t);
+    then power S679dSecretaryPresumesUsBeneficiary {
+        holder Secretary;
+        over t;
+        exercise secretary_treats_trust_as_having_us_beneficiary_679d(t);
+        valid_when presumption_available_679d(t);
+        effect create(trust_treated_as_having_us_beneficiary_by_presumption_679d(t));
+        subject Trust;
+        window [-infinity, infinity);
+    };
+}
+rule S679dPresumedBeneficiary(t: Trust, y: TaxableYear) defeasible {
+    when trust_treated_as_having_us_beneficiary_by_presumption_679d(t);
+    when us_person_transfers_property_to_foreign_trust(_, t, y);
+    then trust_has_us_beneficiary_679c(t, y);
+}

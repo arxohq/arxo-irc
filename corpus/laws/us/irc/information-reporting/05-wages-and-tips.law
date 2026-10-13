@@ -1,0 +1,438 @@
+// §6051 (receipts for employees / Form W-2) and §6053 (tip reporting),
+// package `us.irc.information_reporting`, module 05. STAGE 1 FULL: §6051(a)
+// duty + (a)(1)-(17) content list (as a completeness classification, see
+// below), (d) duplicate to Secretary, (f) third-party sick pay statements;
+// §6053(a) employee-to-employer tip report by the 10th, (b) employer excess-
+// withholding statement, (c) large food/beverage 8% allocation.
+//
+// JUDGMENT CALLS
+//  - §6051(a)'s six baseline items ((1) employer name, (2) employee name/
+//    ID, (3) wages under §3401(a), (4) tax withheld under §3402, (5) wages
+//    under §3121(a), (6) tax withheld under §3101) are unconditionally
+//    required by the text ("shall furnish ... a written statement showing
+//    the following"); items (8)-(17) are each conditioned on an underlying
+//    fact the text itself names (elective deferrals exist, dependent care
+//    assistance was provided, etc.). Rather than reconstructing each
+//    condition's own classification test (§402(g)(3) elective deferrals,
+//    §223(d) HSA, §409A deferred compensation, §83(i) — each a different
+//    owner package's norm), this package reads BOTH "is this item
+//    applicable to this employee for this year" and "was the item shown"
+//    as facts a case supplies, and computes `w2_statement_complete` as the
+//    conjunction "every applicable item is shown" over all sixteen items
+//    (item (7) is repealed, Pub. L. 111-226 §219(a)(3), and dropped from
+//    the enum — NON_NORMATIVE). Item (14)'s own (A)/(B) carve-outs (do not
+//    apply to items covered by (11)/(12), or to salary-reduction FSA
+//    contributions) are folded into that item's OWN applicability test,
+//    not into the general statement-completeness rule.
+//  - The uniformed-service/Peace-Corps-volunteer substitutions for item
+//    (5), the "only such tips as are included in [§6053(a)] statements"
+//    limitation on items (3)/(5), and the §3101(c)/§3111(c) FICA-exemption
+//    carve-out on item (5) are all read as narrowing the AMOUNT of an
+//    already-applicable item, not as separate items — this package does
+//    not compute the narrowed amount itself (EXTERNAL_DEPENDENCY on
+//    `employment`'s §3121/§3401/§3111 wage-base rules).
+//  - §6051(b) (repealed, no current text in the pinned fragment) and §6051
+//    (c)/(e)/(g) (Puerto Rico/possessions extension, statements to armed-
+//    forces retirees, WOTC coordination) stay `unreviewed`, stage 2.
+//  - §6053(c)'s "large food or beverage establishment" threshold test
+//    (more than 10 employees on a typical business day, food/beverage
+//    provided for consumption on premises, tipping is customary) is read
+//    as a single classification fact (`is_large_food_or_beverage_
+//    establishment`) rather than decomposed into its own three-part test —
+//    the (4) definition paragraph stays `unreviewed`, stage 2.
+
+language "law.core" version "0.2";
+package us.irc.information_reporting version "0.1.1";
+namespace "urn:us:irc:information_reporting:clir";
+
+use self::{
+    IRC_S6051_A,
+    IRC_S6051_D,
+    IRC_S6051_F,
+    IRC_S6053_A,
+    IRC_S6053_B,
+    IRC_S6053_C,
+    Individual,
+    InformationReturnKind,
+    Period,
+    Person,
+    Secretary,
+    TaxableYear,
+    information_return_required,
+    tip_report_filed,
+    tip_report_required,
+    w2_furnished,
+    w2_required,
+};
+
+// ============================================================================
+// §6051(a) — Form W-2 duty and content list
+// ============================================================================
+
+pub enum W2ContentItem {
+    CashTipsAndOccupation6051a18;
+    QualifiedOvertimeCompensation6051a19;
+    EmployerName;
+    EmployeeNameAndId;
+    WagesUnder3401A;
+    WithheldTaxUnder3402;
+    WagesUnder3121A;
+    WithheldTaxUnder3101;
+    ElectiveDeferralsAndSection457;
+    DependentCareAssistance129D;
+    ArmedForcesEarnedIncome32;
+    ArcherMsaContribution220D;
+    HsaContribution223D;
+    NonqualifiedDeferredCompensation409A;
+    EmployerSponsoredCoverageCost4980BF4;
+    QsehraPermittedBenefit9831D;
+    Section83IIncomeIncludible;
+    Section83IDeferredAmount;
+}
+
+relation is_employer_subject_to_withholding_or_wages(employer: Person, employee: Individual, y: TaxableYear) kind empirical {
+    label en unofficial "§6051(a)'s duty-bearer test: the person deducts and withholds tax under §3101/§3402 (or would have, absent (n), with no more than one withholding exemption claimed), or is an employer engaged in a trade or business who pays remuneration for the employee's services (pending: `employment`'s own §3101/§3402/§3121 tests, asserted directly here)";
+}
+@source(IRC_S6051_A, relation = formalizes, coverage = partial, quote = "shall furnish to each such employee in respect of the remuneration paid by such person to such employee during the calendar year, on or before January 31 of the succeeding year")
+rule S6051W2Duty strict {
+    for employer: Person;
+    for employee: Individual;
+    for y: TaxableYear;
+    when is_employer_subject_to_withholding_or_wages(employer, employee, y);
+    then duty FurnishFormW2 {
+        bearer employer;
+        beneficiary employee;
+        goal achievement {
+            condition w2_furnished(employer, employee, y);
+            window [-infinity, infinity];
+        }
+    };
+    then w2_required(employer, employee, y);
+    then information_return_required(employer, employee, y, WageAndTaxStatement6051);
+}
+
+relation employment_terminated_before_calendar_year_end(employer: Person, employee: Individual, y: TaxableYear, on: Date) kind empirical;
+relation employee_written_request_received(employer: Person, employee: Individual, y: TaxableYear, on: Date) kind empirical;
+@source(IRC_S6051_A, relation = formalizes, coverage = exact, quote = "if his employment is terminated before the close of such calendar year, within 30 days after the date of receipt of a written request from the employee if such 30-day period ends before January 31,")
+rule S6051EarlyW2DueOnTerminatedEmploymentRequest defeasible {
+    for employer: Person;
+    for employee: Individual;
+    for y: TaxableYear;
+    for term_on: Date;
+    for request_on: Date;
+    for end_date: Date;
+    when employment_terminated_before_calendar_year_end(employer, employee, y, term_on);
+    when employee_written_request_received(employer, employee, y, request_on);
+    when us.irc.core::ends(y, end_date);
+    when add_calendar_period(request_on, 30 calendar_day) < add_calendar_period(add_calendar_period(end_date, 1 calendar_day), 30 calendar_day);
+    then w2_due(employer, employee, y, add_calendar_period(request_on, 30 calendar_day));
+}
+pub relation w2_due(employer: Person, employee: Individual, y: TaxableYear, d: Date) kind institutional {
+    label en unofficial "the statutory date by which the Form W-2 must be furnished — January 31 of the succeeding year in general, or the early 30-day-after-request date for a terminated employee whose 30-day period ends before January 31";
+}
+@source(IRC_S6051_A, relation = formalizes, coverage = exact, quote = "on or before January 31 of the succeeding year")
+rule S6051W2DueJanuary31 strict {
+    for employer: Person;
+    for employee: Individual;
+    for y: TaxableYear;
+    for end_date: Date;
+    when w2_required(employer, employee, y);
+    when us.irc.core::ends(y, end_date);
+    then w2_due(employer, employee, y, add_calendar_period(add_calendar_period(end_date, 1 calendar_day), 30 calendar_day));
+}
+
+// --- Content list: baseline items (1)-(6), unconditionally applicable ------
+
+relation w2_content_item_shown(employer: Person, employee: Individual, y: TaxableYear, item: W2ContentItem) kind empirical {
+    label en unofficial "case fact: the Form W-2 as furnished shows this item";
+}
+relation w2_content_item_applicable(employer: Person, employee: Individual, y: TaxableYear, item: W2ContentItem) kind institutional {
+    label en unofficial "the item is one §6051(a) requires this Form W-2 to show for this employee and year";
+}
+@source(IRC_S6051_A, relation = formalizes, coverage = partial, quote = "the name of such person,")
+rule S6051BaselineItemsApplicable strict {
+    for employer: Person;
+    for employee: Individual;
+    for y: TaxableYear;
+    when w2_required(employer, employee, y);
+    then w2_content_item_applicable(employer, employee, y, EmployerName);
+    then w2_content_item_applicable(employer, employee, y, EmployeeNameAndId);
+    then w2_content_item_applicable(employer, employee, y, WagesUnder3401A);
+    then w2_content_item_applicable(employer, employee, y, WithheldTaxUnder3402);
+    then w2_content_item_applicable(employer, employee, y, WagesUnder3121A);
+    then w2_content_item_applicable(employer, employee, y, WithheldTaxUnder3101);
+}
+
+// --- Content list: conditional items (8)-(17), applicable only when the
+//     underlying fact the text names is present for this employee/year ----
+
+relation has_elective_deferrals_or_section457(employee: Individual, y: TaxableYear) kind empirical;
+relation has_dependent_care_assistance(employee: Individual, y: TaxableYear) kind empirical;
+relation is_armed_forces_member_with_earned_income(employee: Individual, y: TaxableYear) kind empirical;
+relation has_archer_msa_contribution(employee: Individual, y: TaxableYear) kind empirical;
+relation has_hsa_contribution(employee: Individual, y: TaxableYear) kind empirical;
+relation has_409a_deferrals(employee: Individual, y: TaxableYear) kind empirical;
+relation has_employer_sponsored_coverage_cost(employee: Individual, y: TaxableYear) kind empirical;
+relation coverage_cost_covered_by_msa_or_hsa_or_fsa(employer: Person, employee: Individual, y: TaxableYear) kind institutional {
+    label en unofficial "§6051(a)(14)(A)-(B)'s carve-out: the coverage is one to which items (11)/(12) already apply, or is a salary-reduction FSA contribution — the aggregate-cost item does not separately apply";
+}
+relation has_qsehra_permitted_benefit(employee: Individual, y: TaxableYear) kind empirical;
+relation has_83i_income_event(employee: Individual, y: TaxableYear) kind empirical;
+relation has_83i_deferred_election(employee: Individual, y: TaxableYear) kind empirical;
+
+@source(IRC_S6051_A, relation = formalizes, coverage = exact, quote = "the total amount of elective deferrals (within the meaning of section 402(g)(3)) and compensation deferred under section 457, including the amount of designated Roth contributions (as defined in section 402A),")
+rule S6051Item8Applicable strict { for employer: Person; for employee: Individual; for y: TaxableYear; when w2_required(employer, employee, y); when has_elective_deferrals_or_section457(employee, y); then w2_content_item_applicable(employer, employee, y, ElectiveDeferralsAndSection457); }
+@source(IRC_S6051_A, relation = formalizes, coverage = exact, quote = "the total amount incurred for dependent care assistance with respect to such employee under a dependent care assistance program described in section 129(d),")
+rule S6051Item9Applicable strict { for employer: Person; for employee: Individual; for y: TaxableYear; when w2_required(employer, employee, y); when has_dependent_care_assistance(employee, y); then w2_content_item_applicable(employer, employee, y, DependentCareAssistance129D); }
+@source(IRC_S6051_A, relation = formalizes, coverage = exact, quote = "in the case of an employee who is a member of the Armed Forces of the United States, such employee's earned income as determined for purposes of section 32 (relating to earned income credit),")
+rule S6051Item10Applicable strict { for employer: Person; for employee: Individual; for y: TaxableYear; when w2_required(employer, employee, y); when is_armed_forces_member_with_earned_income(employee, y); then w2_content_item_applicable(employer, employee, y, ArmedForcesEarnedIncome32); }
+@source(IRC_S6051_A, relation = formalizes, coverage = exact, quote = "the amount contributed to any Archer MSA (as defined in section 220(d)) of such employee or such employee's spouse,")
+rule S6051Item11Applicable strict { for employer: Person; for employee: Individual; for y: TaxableYear; when w2_required(employer, employee, y); when has_archer_msa_contribution(employee, y); then w2_content_item_applicable(employer, employee, y, ArcherMsaContribution220D); }
+@source(IRC_S6051_A, relation = formalizes, coverage = exact, quote = "the amount contributed to any health savings account (as defined in section 223(d)) of such employee or such employee's spouse,")
+rule S6051Item12Applicable strict { for employer: Person; for employee: Individual; for y: TaxableYear; when w2_required(employer, employee, y); when has_hsa_contribution(employee, y); then w2_content_item_applicable(employer, employee, y, HsaContribution223D); }
+@source(IRC_S6051_A, relation = formalizes, coverage = exact, quote = "the total amount of deferrals for the year under a nonqualified deferred compensation plan (within the meaning of section 409A(d)),")
+rule S6051Item13Applicable strict { for employer: Person; for employee: Individual; for y: TaxableYear; when w2_required(employer, employee, y); when has_409a_deferrals(employee, y); then w2_content_item_applicable(employer, employee, y, NonqualifiedDeferredCompensation409A); }
+@source(IRC_S6051_A, relation = formalizes, coverage = exact, quote = "the aggregate cost (determined under rules similar to the rules of section 4980B(f)(4)) of applicable employer-sponsored coverage (as defined in subsection (g)), except that this paragraph shall not apply to—")
+rule S6051Item14Applicable defeasible { for employer: Person; for employee: Individual; for y: TaxableYear; when w2_required(employer, employee, y); when has_employer_sponsored_coverage_cost(employee, y); then w2_content_item_applicable(employer, employee, y, EmployerSponsoredCoverageCost4980BF4); unless coverage_cost_covered_by_msa_or_hsa_or_fsa(employer, employee, y); }
+@source(IRC_S6051_A, relation = formalizes, coverage = exact, quote = "the total amount of permitted benefit (as defined in section 9831(d)(3)(C)) for the year under a qualified small employer health reimbursement arrangement (as defined in section 9831(d)(2)) with respect to the employee,")
+rule S6051Item15Applicable strict { for employer: Person; for employee: Individual; for y: TaxableYear; when w2_required(employer, employee, y); when has_qsehra_permitted_benefit(employee, y); then w2_content_item_applicable(employer, employee, y, QsehraPermittedBenefit9831D); }
+@source(IRC_S6051_A, relation = formalizes, coverage = exact, quote = "the amount includible in gross income under subparagraph (A) of section 83(i)(1) with respect to an event described in subparagraph (B) of such section which occurs in such calendar year, and")
+rule S6051Item16Applicable strict { for employer: Person; for employee: Individual; for y: TaxableYear; when w2_required(employer, employee, y); when has_83i_income_event(employee, y); then w2_content_item_applicable(employer, employee, y, Section83IIncomeIncludible); }
+@source(IRC_S6051_A, relation = formalizes, coverage = exact, quote = "the aggregate amount of income which is being deferred pursuant to elections under section 83(i), determined as of the close of the calendar year.")
+rule S6051Item17Applicable strict { for employer: Person; for employee: Individual; for y: TaxableYear; when w2_required(employer, employee, y); when has_83i_deferred_election(employee, y); then w2_content_item_applicable(employer, employee, y, Section83IDeferredAmount); }
+
+// --- Completeness: every applicable item must be shown ---------------------
+
+pub relation w2_statement_complete(employer: Person, employee: Individual, y: TaxableYear) kind institutional {
+    label en unofficial "every item §6051(a) makes applicable to this employee and year is shown on the furnished Form W-2 — an incomplete statement does not discharge `FurnishFormW2`";
+}
+@source(IRC_S6051_A, relation = formalizes, coverage = partial, quote = "a written statement showing the following:")
+rule S6051StatementComplete defeasible {
+    for employer: Person;
+    for employee: Individual;
+    for y: TaxableYear;
+    when w2_content_item_shown(employer, employee, y, EmployerName);
+    when w2_content_item_shown(employer, employee, y, EmployeeNameAndId);
+    when w2_content_item_shown(employer, employee, y, WagesUnder3401A);
+    when w2_content_item_shown(employer, employee, y, WithheldTaxUnder3402);
+    when w2_content_item_shown(employer, employee, y, WagesUnder3121A);
+    when w2_content_item_shown(employer, employee, y, WithheldTaxUnder3101);
+    then w2_statement_complete(employer, employee, y);
+    unless w2_content_item_applicable(employer, employee, y, ElectiveDeferralsAndSection457) and not_known(w2_content_item_shown(employer, employee, y, ElectiveDeferralsAndSection457));
+    unless w2_content_item_applicable(employer, employee, y, DependentCareAssistance129D) and not_known(w2_content_item_shown(employer, employee, y, DependentCareAssistance129D));
+    unless w2_content_item_applicable(employer, employee, y, ArmedForcesEarnedIncome32) and not_known(w2_content_item_shown(employer, employee, y, ArmedForcesEarnedIncome32));
+    unless w2_content_item_applicable(employer, employee, y, ArcherMsaContribution220D) and not_known(w2_content_item_shown(employer, employee, y, ArcherMsaContribution220D));
+    unless w2_content_item_applicable(employer, employee, y, HsaContribution223D) and not_known(w2_content_item_shown(employer, employee, y, HsaContribution223D));
+    unless w2_content_item_applicable(employer, employee, y, NonqualifiedDeferredCompensation409A) and not_known(w2_content_item_shown(employer, employee, y, NonqualifiedDeferredCompensation409A));
+    unless w2_content_item_applicable(employer, employee, y, EmployerSponsoredCoverageCost4980BF4) and not_known(w2_content_item_shown(employer, employee, y, EmployerSponsoredCoverageCost4980BF4));
+    unless w2_content_item_applicable(employer, employee, y, QsehraPermittedBenefit9831D) and not_known(w2_content_item_shown(employer, employee, y, QsehraPermittedBenefit9831D));
+    unless w2_content_item_applicable(employer, employee, y, Section83IIncomeIncludible) and not_known(w2_content_item_shown(employer, employee, y, Section83IIncomeIncludible));
+    unless w2_content_item_applicable(employer, employee, y, Section83IDeferredAmount) and not_known(w2_content_item_shown(employer, employee, y, Section83IDeferredAmount));
+    unless w2_content_item_applicable(employer, employee, y, CashTipsAndOccupation6051a18) and not_known(w2_content_item_shown(employer, employee, y, CashTipsAndOccupation6051a18));
+    unless w2_content_item_applicable(employer, employee, y, QualifiedOvertimeCompensation6051a19) and not_known(w2_content_item_shown(employer, employee, y, QualifiedOvertimeCompensation6051a19));
+}
+
+// ============================================================================
+// §6051(d) — Duplicate statement filed with the Secretary
+// ============================================================================
+
+relation secretary_requires_w2_duplicate(employer: Person, employee: Individual, y: TaxableYear) kind empirical;
+relation filed_w2_duplicate_with_secretary(employer: Person, employee: Individual, y: TaxableYear) kind empirical;
+@source(IRC_S6051_D, relation = formalizes, coverage = exact, quote = "A duplicate of any statement made pursuant to this section and in accordance with regulations prescribed by the Secretary shall, when required by such regulations, be filed with the Secretary.")
+rule S6051DuplicateToSecretaryDuty strict {
+    for employer: Person;
+    for employee: Individual;
+    for y: TaxableYear;
+    when w2_furnished(employer, employee, y);
+    when secretary_requires_w2_duplicate(employer, employee, y);
+    then duty FileW2DuplicateWithSecretary {
+        bearer employer;
+        beneficiary Secretary;
+        goal achievement {
+            condition filed_w2_duplicate_with_secretary(employer, employee, y);
+            window [-infinity, infinity];
+        }
+    };
+}
+
+// ============================================================================
+// §6051(f) — Third-party sick pay statements
+// ============================================================================
+
+relation pays_third_party_sick_pay(payor: Person, employer: Person, employee: Individual, y: TaxableYear) kind empirical {
+    label en unofficial "during the calendar year, the payor makes a payment of third-party sick pay to the employee, in respect of whom the payment was made to this employer (§6051(f)(1)(A))";
+}
+relation furnished_sick_pay_statement_to_employer(payor: Person, employer: Person, employee: Individual, y: TaxableYear) kind empirical;
+@source(IRC_S6051_F, relation = formalizes, coverage = exact, quote = "such person shall, on or before January 15 of the succeeding year, furnish a written statement to the employer in respect of whom such payment was made")
+rule S6051SickPayPayorStatementDuty strict {
+    for payor: Person;
+    for employer: Person;
+    for employee: Individual;
+    for y: TaxableYear;
+    when pays_third_party_sick_pay(payor, employer, employee, y);
+    then duty FurnishSickPayStatementToEmployer {
+        bearer payor;
+        beneficiary employer;
+        goal achievement {
+            condition furnished_sick_pay_statement_to_employer(payor, employer, employee, y);
+            window [-infinity, infinity];
+        }
+    };
+}
+pub relation sick_pay_payor_statement_due(payor: Person, y: TaxableYear, d: Date) kind institutional {
+    label en unofficial "§6051(f)(1)(A): January 15 of the succeeding year";
+}
+rule S6051SickPayPayorStatementDueJanuary15 strict {
+    for payor: Person;
+    for employer: Person;
+    for employee: Individual;
+    for y: TaxableYear;
+    for end_date: Date;
+    when pays_third_party_sick_pay(payor, employer, employee, y);
+    when us.irc.core::ends(y, end_date);
+    then sick_pay_payor_statement_due(payor, y, add_calendar_period(add_calendar_period(end_date, 1 calendar_day), 14 calendar_day));
+}
+
+relation received_sick_pay_statement_from_payor(employer: Person, employee: Individual, y: TaxableYear) kind institutional;
+rule S6051SickPayEmployerReceivesStatement strict {
+    for payor: Person;
+    for employer: Person;
+    for employee: Individual;
+    for y: TaxableYear;
+    when furnished_sick_pay_statement_to_employer(payor, employer, employee, y);
+    then received_sick_pay_statement_from_payor(employer, employee, y);
+}
+relation furnished_sick_pay_statement_to_employee(employer: Person, employee: Individual, y: TaxableYear) kind empirical;
+@source(IRC_S6051_F, relation = formalizes, coverage = exact, quote = "Every employer who receives a statement under paragraph (1)(A) with respect to sick pay paid to any employee during any calendar year shall, on or before January 31 of the succeeding year, furnish a written statement to such employee")
+rule S6051SickPayEmployerStatementDuty strict {
+    for employer: Person;
+    for employee: Individual;
+    for y: TaxableYear;
+    when received_sick_pay_statement_from_payor(employer, employee, y);
+    then duty FurnishSickPayStatementToEmployee {
+        bearer employer;
+        beneficiary employee;
+        goal achievement {
+            condition furnished_sick_pay_statement_to_employee(employer, employee, y);
+            window [-infinity, infinity];
+        }
+    };
+}
+
+// ============================================================================
+// §6053(a) — Employee reports of tips to the employer
+// ============================================================================
+
+relation receives_reportable_tips_in_month(employee: Individual, employer: Person, period: Period) kind empirical {
+    label en unofficial "in the course of employment, the employee receives in the calendar month tips which are wages under §3121(a)/§3401(a), or compensation under §3231(e)";
+}
+relation is_calendar_month_period(period: Period) kind institutional;
+rule S6053CalendarMonthClassification strict {
+    for period: Period;
+    when us.irc.core::period_kind(period, us.irc.core::CalendarMonth);
+    then is_calendar_month_period(period);
+}
+@source(IRC_S6053_A, relation = formalizes, coverage = exact, quote = "shall report all such tips in one or more written statements furnished to his employer on or before the 10th day following such month.")
+rule S6053TipReportDuty strict {
+    for employee: Individual;
+    for employer: Person;
+    for period: Period;
+    when receives_reportable_tips_in_month(employee, employer, period) and is_calendar_month_period(period);
+    then duty ReportTipsToEmployer {
+        bearer employee;
+        beneficiary employer;
+        goal achievement {
+            condition tip_report_filed(employee, employer, period);
+            window [-infinity, infinity];
+        }
+    };
+    then tip_report_required(employee, employer, period);
+}
+pub relation tip_report_due(employee: Individual, employer: Person, period: Period, d: Date) kind institutional {
+    label en unofficial "§6053(a): the 10th day following the calendar month";
+}
+rule S6053TipReportDueTenthDay strict {
+    for employee: Individual;
+    for employer: Person;
+    for period: Period;
+    for end_date: Date;
+    when tip_report_required(employee, employer, period);
+    when us.irc.core::ends(period, end_date);
+    then tip_report_due(employee, employer, period, add_calendar_period(add_calendar_period(end_date, 1 calendar_day), 9 calendar_day));
+}
+
+// ============================================================================
+// §6053(b) — Employer statement of uncollectible excess tax on tips
+// ============================================================================
+
+relation employer_uncollected_tip_tax_excess(employer: Person, employee: Individual, period: Period, amount: Money) kind empirical {
+    label en unofficial "the §3101/§3201 tax on reported tips exceeds the tax the employer can collect under §3102/§3202, by this amount";
+}
+relation furnished_excess_tip_tax_statement(employer: Person, employee: Individual, period: Period) kind empirical;
+@source(IRC_S6053_B, relation = formalizes, coverage = exact, quote = "the employer shall furnish to the employee a written statement showing the amount of such excess.")
+rule S6053ExcessTipTaxStatementDuty strict {
+    for employer: Person;
+    for employee: Individual;
+    for period: Period;
+    for amount: Money;
+    when employer_uncollected_tip_tax_excess(employer, employee, period, amount);
+    when amount > 0 USD;
+    then duty FurnishExcessTipTaxStatement {
+        bearer employer;
+        beneficiary employee;
+        goal achievement {
+            condition furnished_excess_tip_tax_statement(employer, employee, period);
+            window [-infinity, infinity];
+        }
+    };
+}
+
+// ============================================================================
+// §6053(c) — Large food or beverage establishments: 8% allocation
+// ============================================================================
+
+relation is_large_food_or_beverage_establishment(establishment: Person, y: TaxableYear) kind institutional {
+    label en unofficial "the establishment meets §6053(c)(4)'s test (more than 10 employees on a typical business day, food or beverage for consumption on the premises, tipping customary) — pending, not decomposed further this stage";
+}
+relation gross_receipts_from_food_and_beverage(establishment: Person, y: TaxableYear, amount: Money) kind empirical;
+relation aggregate_charge_receipts(establishment: Person, y: TaxableYear, amount: Money) kind empirical;
+relation aggregate_charged_tips(establishment: Person, y: TaxableYear, amount: Money) kind empirical;
+relation reported_tip_total(establishment: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the sum of §6053(a)-reported tips plus §6051 service-charge-under-10%-reported amounts for the establishment's employees for the year";
+}
+relation allocated_tip_amount(establishment: Person, employee: Individual, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the amount allocated to the employee under §6053(c)(3)'s good-faith agreement or Secretary-prescribed method — this package reads the allocated amount as an asserted fact, not computed (the 8%-of-gross-receipts-less-reported-tips formula and its allocation method are TECH_GAP, see report)";
+}
+relation filed_large_establishment_report(establishment: Person, y: TaxableYear) kind empirical;
+@source(IRC_S6053_C, relation = formalizes, coverage = partial, quote = "each employer shall report to the Secretary, at such time and manner as the Secretary may prescribe by regulation, the following information with respect to each calendar year:")
+rule S6053LargeEstablishmentReportDuty strict {
+    for establishment: Person;
+    for y: TaxableYear;
+    when is_large_food_or_beverage_establishment(establishment, y);
+    then duty ReportLargeEstablishmentTipInformation {
+        bearer establishment;
+        beneficiary Secretary;
+        goal achievement {
+            condition filed_large_establishment_report(establishment, y);
+            window [-infinity, infinity];
+        }
+    };
+}
+relation furnished_allocation_statement(establishment: Person, employee: Individual, y: TaxableYear) kind empirical;
+@source(IRC_S6053_C, relation = formalizes, coverage = exact, quote = "Any statement under this paragraph shall be furnished to the employee during January of the calendar year following the calendar year for which such statement is made.")
+rule S6053AllocationStatementDuty strict {
+    for establishment: Person;
+    for employee: Individual;
+    for y: TaxableYear;
+    for amount: Money;
+    when is_large_food_or_beverage_establishment(establishment, y);
+    when allocated_tip_amount(establishment, employee, y, amount);
+    then duty FurnishTipAllocationStatement {
+        bearer establishment;
+        beneficiary employee;
+        goal achievement {
+            condition furnished_allocation_statement(establishment, employee, y);
+            window [-infinity, infinity];
+        }
+    };
+}

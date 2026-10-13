@@ -1,0 +1,151 @@
+// Section 1367 — Adjustments to basis of stock of shareholders, etc.
+//
+// SCOPE: (a)(1) increases; (a)(2) decreases (not below zero), in the
+// statutory order; (b)(1) gross-income-inclusion timing cross-reference
+// (classification); (b)(2) restoration of debt basis after a reduction;
+// (b)(3) ordering against sections 165(g)/166(d) (classification); (b)(4)
+// income-in-respect-of-a-decedent basis rules (classification / cross-
+// reference to sections 691/1014, EXTERNAL_DEPENDENCY).
+//
+// MODEL: basis is a per-(shareholder, corporation, year) SNAPSHOT computed
+// from the PRIOR year's basis plus this year's net adjustment, rather than a
+// running day-by-day ledger (same class of simplification as accounting's
+// TECH-GAPS.md G1/G10: a `predecessor_year`/`successor_year` chain, not a
+// recursive within-year computation). The chain across MULTIPLE years
+// (basis in year N+2 depending on basis in year N) is not derived
+// automatically here — TECH-GAPS.md G46 — only ONE hop (opening basis to
+// closing basis of the SAME year) is modeled; the opening basis of a later
+// year is asserted as a case fact equal to the prior year's closing basis
+// rather than computed by chaining this rule.
+
+use self::{
+    Corporation,
+    IRC_S1367_A,
+    IRC_S1367_B,
+    Person,
+    TaxableYear,
+    aggregate_loss_or_deduction_share,
+    pro_rata_share_nonseparately,
+    pro_rata_share_separately_stated,
+    shareholder_debt_basis,
+};
+
+pub relation shareholder_opening_stock_basis(sh: Person, c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the shareholder's basis in the S corporation's stock at the start of y (the prior year's closing basis, or the original cost/other section 1012 basis for the first year); case-asserted per the module note";
+}
+
+// --- (a)(1): increases -----------------------------------------------------
+
+pub relation basis_increase_total(sh: Person, c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the sum of section 1367(a)(1)(A)-(C) increase items for y: separately stated income items, nonseparately computed income, and the excess of depletion deductions over the basis of the depletable property";
+}
+pub relation depletion_deduction_excess_over_basis(sh: Person, c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the excess of the shareholder's depletion deductions over the basis of the property subject to depletion, for y (section 1367(a)(1)(C)); case-asserted pending a property-transactions-package contract";
+}
+@source(IRC_S1367_A, quote = "shall be increased for any period by the sum of the following items")
+rule BasisIncreaseTotal strict {
+    for sh: Person; for c: Corporation; for y: TaxableYear; for sep: Money; for nonsep: Money; for depl: Money;
+    when pro_rata_share_separately_stated(sh, c, y, sep);
+    when pro_rata_share_nonseparately(sh, c, y, nonsep);
+    when depletion_deduction_excess_over_basis(sh, c, y, depl);
+    when sep > 0.00 USD;
+    when nonsep > 0.00 USD;
+    then basis_increase_total(sh, c, y, sep + nonsep + depl);
+}
+// Only the case where BOTH pro rata shares are positive (genuine income) is
+// captured by the rule above; a year mixing an income share with a loss
+// share in the SAME bucket (see 05-pass-through.law's bucketing note) is
+// TECH_GAP for this stage — the (a)(1)/(a)(2) split is only exact when
+// income and loss are not netted together across the two buckets.
+
+// --- (a)(2): decreases (not below zero) ------------------------------------
+
+pub relation distribution_excluded_under_1368(sh: Person, c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "distributions by the corporation not includible in the shareholder's income by reason of section 1368, for y (section 1367(a)(2)(A))";
+}
+pub relation nondeductible_noncapital_corporate_expense_share(sh: Person, c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the shareholder's pro rata share of a corporate expense not deductible and not chargeable to capital account, for y (section 1367(a)(2)(D)); case-asserted";
+}
+pub relation basis_decrease_total(sh: Person, c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the sum of section 1367(a)(2)(A)-(E) decrease items for y, before the not-below-zero floor";
+}
+rule BasisDecreaseTotal strict {
+    for sh: Person; for c: Corporation; for y: TaxableYear; for dist: Money; for lossShare: Money; for nondeductible: Money;
+    when distribution_excluded_under_1368(sh, c, y, dist);
+    when aggregate_loss_or_deduction_share(sh, c, y, lossShare);
+    when nondeductible_noncapital_corporate_expense_share(sh, c, y, nondeductible);
+    then basis_decrease_total(sh, c, y, dist + lossShare + nondeductible);
+}
+
+pub relation shareholder_stock_basis(sh: Person, c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the shareholder's adjusted basis in the S corporation's stock as of the close of y, after the section 1367(a) increases and decreases (not below zero)";
+}
+@source(IRC_S1367_A, quote = "shall be decreased for any period (but not below zero)")
+rule ShareholderStockBasisFloorsAtZero defeasible {
+    label en official "closing basis is opening basis plus increases minus decreases, floored at zero (section 1367(a)(1)-(2))";
+    for sh: Person; for c: Corporation; for y: TaxableYear; for opening: Money; for inc: Money; for dec: Money;
+    when shareholder_opening_stock_basis(sh, c, y, opening);
+    when basis_increase_total(sh, c, y, inc);
+    when basis_decrease_total(sh, c, y, dec);
+    when opening + inc - dec >= 0.00 USD;
+    then shareholder_stock_basis(sh, c, y, opening + inc - dec);
+}
+rule ShareholderStockBasisFlooredAtZero defeasible {
+    label en official "basis cannot be reduced below zero; the excess decrease reduces debt basis instead (section 1367(a)(2), (b)(2)(A))";
+    for sh: Person; for c: Corporation; for y: TaxableYear; for opening: Money; for inc: Money; for dec: Money;
+    when shareholder_opening_stock_basis(sh, c, y, opening);
+    when basis_increase_total(sh, c, y, inc);
+    when basis_decrease_total(sh, c, y, dec);
+    when opening + inc - dec < 0.00 USD;
+    then shareholder_stock_basis(sh, c, y, 0.00 USD);
+}
+
+// --- (b)(2): restoration of debt basis --------------------------------------
+
+pub relation shareholder_opening_debt_basis(sh: Person, c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the shareholder's basis in indebtedness of the S corporation to the shareholder at the start of y; case-asserted (opening balance)";
+}
+pub relation basis_decrease_excess_over_stock_basis(sh: Person, c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the excess of the section 1367(a)(2)(B)-(E) decrease items over the amount that reduces stock basis to zero (section 1367(b)(2)(A))";
+}
+rule BasisDecreaseExcessOverStockBasis strict {
+    for sh: Person; for c: Corporation; for y: TaxableYear; for opening: Money; for inc: Money; for dec: Money;
+    when shareholder_opening_stock_basis(sh, c, y, opening);
+    when basis_increase_total(sh, c, y, inc);
+    when basis_decrease_total(sh, c, y, dec);
+    when opening + inc - dec < 0.00 USD;
+    then basis_decrease_excess_over_stock_basis(sh, c, y, 0.00 USD - (opening + inc - dec));
+}
+@source(IRC_S1367_B, quote = "such excess shall be applied to reduce (but not below zero) the shareholder's basis in any indebtedness of the S corporation to the shareholder")
+rule ShareholderDebtBasisReducedByExcess defeasible {
+    label en official "the stock-basis excess reduces debt basis, not below zero (section 1367(b)(2)(A))";
+    for sh: Person; for c: Corporation; for y: TaxableYear; for openingDebt: Money; for excess: Money;
+    when shareholder_opening_debt_basis(sh, c, y, openingDebt);
+    when basis_decrease_excess_over_stock_basis(sh, c, y, excess);
+    when openingDebt - excess >= 0.00 USD;
+    then shareholder_debt_basis(sh, c, y, openingDebt - excess);
+}
+rule ShareholderDebtBasisReducedToZero defeasible {
+    label en official "debt basis cannot be reduced below zero (section 1367(b)(2)(A))";
+    for sh: Person; for c: Corporation; for y: TaxableYear; for openingDebt: Money; for excess: Money;
+    when shareholder_opening_debt_basis(sh, c, y, openingDebt);
+    when basis_decrease_excess_over_stock_basis(sh, c, y, excess);
+    when openingDebt - excess < 0.00 USD;
+    then shareholder_debt_basis(sh, c, y, 0.00 USD);
+}
+pub relation has_basis_decrease_excess(sh: Person, c: Corporation, y: TaxableYear, openingDebt: Money) kind institutional {
+    label en official "some section 1367(b)(2)(A) stock-basis excess exists for (sh, c, y), paired with the opening debt basis it would reduce";
+}
+rule HasBasisDecreaseExcess strict {
+    for sh: Person; for c: Corporation; for y: TaxableYear; for excess: Money; for openingDebt: Money;
+    when basis_decrease_excess_over_stock_basis(sh, c, y, excess);
+    when shareholder_opening_debt_basis(sh, c, y, openingDebt);
+    then has_basis_decrease_excess(sh, c, y, openingDebt);
+}
+rule ShareholderDebtBasisUnchangedWithoutExcess defeasible {
+    label en official "with no stock-basis excess, debt basis for y is simply the opening debt basis (section 1367(b)(2) a contrario; the (b)(2)(B) restoration-before-stock-basis-increase ordering for a LATER year with net income is TECH_GAP — see module note)";
+    for sh: Person; for c: Corporation; for y: TaxableYear; for openingDebt: Money;
+    when shareholder_opening_debt_basis(sh, c, y, openingDebt);
+    unless has_basis_decrease_excess(sh, c, y, openingDebt);
+    then shareholder_debt_basis(sh, c, y, openingDebt);
+}

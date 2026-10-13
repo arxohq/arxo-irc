@@ -1,0 +1,109 @@
+// Section 45G — Railroad track maintenance credit. Stage 2d (IRC-06,
+// DECISION-0379).
+//
+// Scope / judgment calls:
+// * (a): 40 percent (50 percent for taxable years beginning before 1 January
+//   2023) of qualified railroad track maintenance expenditures; the year's
+//   beginning date is read from `us.irc.core::begins`.
+// * (b): the cap is $3,500 x (miles owned or leased, less the miles the
+//   railroad assigned away, plus the miles assigned to it). Assignments are
+//   case facts. (b)(2)(A) (one assignment per assignor year, effective at the
+//   assignor's year-end) is not enforced (TECH-GAPS G1519).
+// * (d): the expenditure amount is case-asserted as already meeting the
+//   "owned or leased as of January 1, 2015" test and the no-consideration
+//   rule; the STB class definitions of (e)(1) are external (Class II/III is
+//   a case fact).
+// * (e)(2) (section 41(f)(1) aggregation) is not modelled (TECH-GAPS G1519);
+//   (e)(3) basis reduction is exposed as an amount.
+
+use self::{
+    IRC_S45G_A,
+    IRC_S45G_B,
+    IRC_S45G_C,
+    IRC_S45G_E,
+    Person,
+    TaxableYear,
+    qualified_track_maintenance_expenditures_for_credit_45g,
+};
+
+pub relation class_ii_or_iii_railroad_45g(person: Person) kind empirical {
+    label en official "the person is a Class II or Class III railroad as those terms are given meaning by the Surface Transportation Board (section 45G(e)(1)) — case-asserted, external dependency";
+}
+pub relation track_assignment_45g(assignor: Person, assignee: Person, y: TaxableYear, miles: Decimal) kind empirical {
+    label en official "a Class II or Class III railroad assigns miles of railroad track to the assignee for purposes of section 45G(b) — case-asserted";
+}
+pub relation track_miles_owned_or_leased_45g(taxpayer: Person, y: TaxableYear, miles: Decimal) kind empirical {
+    label en official "miles of railroad track owned or leased by the taxpayer at the close of the taxable year (section 45G(b)(1)(B)(i)); 0 for a non-railroad assignee — case-asserted";
+}
+pub relation qualified_railroad_track_maintenance_expenditures_45g(taxpayer: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "gross expenditures for maintaining railroad track (section 45G(d)), already meeting the January 1, 2015 ownership test — case-asserted";
+}
+pub relation eligible_taxpayer_45g(taxpayer: Person, y: TaxableYear) kind institutional {
+    label en official "section 45G(c): a Class II or Class III railroad, or a person to whom such a railroad assigned track miles for the year";
+}
+@source(IRC_S45G_C, quote = "any Class II or Class III railroad")
+rule EligibleTaxpayerRailroad45gRule(taxpayer: Person, y: TaxableYear, owned: Decimal) defeasible {
+    when class_ii_or_iii_railroad_45g(taxpayer);
+    when track_miles_owned_or_leased_45g(taxpayer, y, owned);
+    then eligible_taxpayer_45g(taxpayer, y);
+}
+@source(IRC_S45G_C, quote = "but only with respect to miles of railroad track assigned to such person by such Class II or Class III railroad for purposes of subsection (b)")
+rule EligibleTaxpayerAssignee45gRule(taxpayer: Person, y: TaxableYear, assignor: Person, miles: Decimal) defeasible {
+    when class_ii_or_iii_railroad_45g(assignor);
+    when track_assignment_45g(assignor, taxpayer, y, miles);
+    then eligible_taxpayer_45g(taxpayer, y);
+}
+
+pub relation credit_rate_45g(y: TaxableYear, rate: Decimal) kind institutional {
+    label en official "section 45G(a): 40 percent, or 50 percent for a taxable year beginning before January 1, 2023";
+}
+@source(IRC_S45G_A, quote = "40 percent (50 percent in the case of any taxable year beginning before January 1, 2023)")
+rule CreditRate45gFromRule(y: TaxableYear, begin: Date) strict {
+    when us.irc.core::begins(y, begin);
+    when begin >= @2023-01-01;
+    then credit_rate_45g(y, 0.40);
+}
+rule CreditRate45gBeforeRule(y: TaxableYear, begin: Date) strict {
+    when us.irc.core::begins(y, begin);
+    when begin < @2023-01-01;
+    then credit_rate_45g(y, 0.50);
+}
+
+pub relation net_track_miles_45g(taxpayer: Person, y: TaxableYear, miles: Decimal) kind institutional {
+    label en official "section 45G(b)(1)(B), (b)(2)(B): miles owned or leased less the miles assigned away plus the miles assigned to the taxpayer";
+}
+@source(IRC_S45G_B, quote = "such mile may not be taken into account under this section by such railroad for such taxable year")
+rule NetTrackMiles45gRule(taxpayer: Person, y: TaxableYear, owned: Decimal) defeasible {
+    when track_miles_owned_or_leased_45g(taxpayer, y, owned);
+    then net_track_miles_45g(taxpayer, y,
+        max(0.0, owned - sum(collect all m: Decimal, to: Person where track_assignment_45g(taxpayer, to, y, m), empty: 0.0))
+        + sum(collect all m: Decimal, from: Person where track_assignment_45g(from, taxpayer, y, m), empty: 0.0));
+}
+
+pub relation railroad_track_maintenance_credit_limit_45g(taxpayer: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 45G(b)(1): $3,500 multiplied by the miles of track";
+}
+@source(IRC_S45G_B, quote = "The credit allowed under subsection (a) for any taxable year shall not exceed the product of")
+rule RailroadTrackMaintenanceCreditLimit45gRule(taxpayer: Person, y: TaxableYear, miles: Decimal) defeasible {
+    when net_track_miles_45g(taxpayer, y, miles);
+    then railroad_track_maintenance_credit_limit_45g(taxpayer, y, round(3500.00 USD * miles, 2, "HALF_UP"));
+}
+pub relation railroad_track_maintenance_credit(taxpayer: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the section 45G railroad track maintenance credit for the taxable year (a section 38(b)(16) component)";
+}
+@source(IRC_S45G_A, quote = "the railroad track maintenance credit determined under this section for the taxable year is an amount equal to")
+rule RailroadTrackMaintenanceCredit45gRule(taxpayer: Person, y: TaxableYear, rate: Decimal, spend: Money, limit: Money) defeasible {
+    when eligible_taxpayer_45g(taxpayer, y);
+    when credit_rate_45g(y, rate);
+    when qualified_track_maintenance_expenditures_for_credit_45g(taxpayer, y, spend);
+    when railroad_track_maintenance_credit_limit_45g(taxpayer, y, limit);
+    then railroad_track_maintenance_credit(taxpayer, y, min(round(rate * spend, 2, "HALF_UP"), limit));
+}
+pub relation track_basis_reduction_45g(taxpayer: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 45G(e)(3): the basis of the track is reduced by the credit allowed";
+}
+@source(IRC_S45G_E, quote = "the basis of such track shall be reduced by the amount of the credit so allowed")
+rule TrackBasisReduction45gRule(taxpayer: Person, y: TaxableYear, amount: Money) defeasible {
+    when railroad_track_maintenance_credit(taxpayer, y, amount);
+    then track_basis_reduction_45g(taxpayer, y, amount);
+}

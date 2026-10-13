@@ -1,0 +1,243 @@
+// 26 U.S.C. §2201 (combat-zone/astronaut/terrorist-victim reduced rate
+// schedule), §2204 (discharge of fiduciary from personal liability), §2206-
+// §2207B (reimbursement/recovery rights). Stage-2b module of `us.irc.
+// estate_gift` (B01/IRC-11).
+//
+// NOT MODELLED this pass (TECH_GAP, TECH-GAPS.md G483): wiring §2201's
+// substitute rate schedule into the main §2001(c) tentative-tax chain
+// (computed here as a STANDALONE `combat_zone_tentative_tax`, not fed back
+// into `tentative_tax`/`estate_tax`); §2204(b)-(c) (non-executor fiduciary
+// discharge, the section 6324A special-lien substitute for a bond); §2207A
+// (d)/§2207B(c) (penalties-and-interest extension of the recovery rules).
+//
+// JUDGMENT CALL: §§2206/2207/2207A/2207B's "right to recover" is modelled as
+// a plain computed `institutional` amount (a `calculation`), not as a
+// `power`/`claim` position — the statute itself states a formula ("entitled
+// to recover ... such portion ... as ... bears to ..."), and this package
+// has no existing `claim`-shaped position template to reuse; a future stage
+// wanting the enforcement mechanics (demand, limitations period) would add
+// a `duty`/`power` layer on top of this amount.
+
+language "law.core" version "0.2";
+package us.irc.estate_gift version "0.1.1";
+namespace "urn:us:irc:estate_gift:clir";
+
+use self::{
+    Asset,
+    Estate,
+    IRC_S2201_A,
+    IRC_S2201_D,
+    IRC_S2204_A,
+    IRC_S2204_D,
+    IRC_S2206,
+    IRC_S2207,
+    IRC_S2207A_A,
+    IRC_S2207B_A,
+    Person,
+    Secretary,
+    date_of_death,
+    estate_tax,
+    taxable_estate,
+    tentative_tax_base,
+};
+
+// =====================================================================
+// §2201 — combat zone / astronaut / terrorist-victim reduced rate schedule
+// =====================================================================
+
+relation bracket_2201c(base: Money, lower_bound: Money, base_tax: Money, rate: Decimal) kind institutional;
+
+pub enum QualifiedDecedentReason2201 {
+    KilledOrDiedInCombatZone;      // (b)(1)
+    SpecifiedTerroristVictim;      // (b)(2)
+    AstronautDiedInLineOfDuty;     // (b)(3)
+}
+pub relation qualified_decedent_2201(e: Estate, reason: QualifiedDecedentReason2201) kind empirical {
+    label en unofficial "the decedent is a qualified decedent under section 2201(b)";
+}
+pub relation executor_elects_section_2201_not_to_apply(e: Estate, x: Person, w: Interval<Instant>) kind empirical {
+    label en unofficial "the executor elects not to have section 2201 apply (section 2201(a))";
+}
+
+@source(IRC_S2201_A, relation = formalizes, coverage = exact, quote = "the rate schedule set forth in subsection (c) shall be deemed to be the rate schedule set forth in section 2001(c)")
+pub relation combat_zone_tentative_tax(e: Estate, amount: Money) kind institutional {
+    label en official "section 2201(a): tentative tax computed under the section 2201(c) reduced rate schedule instead of section 2001(c) (NOT wired into the main estate-tax chain this pass — module header, TECH-GAPS.md G483)";
+}
+rule CombatZoneTentativeTaxRule(e: Estate, base: Money, lower: Money, base_tax: Money, rate: Decimal) defeasible {
+    when qualified_decedent_2201(e, _);
+    when not_known(has_elected_section_2201_not_to_apply(e));
+    when tentative_tax_base(e, base);
+    when bracket_2201c(base, lower, base_tax, rate);
+    then combat_zone_tentative_tax(e, max(0.00 USD, base_tax + rate * (base - lower)));
+}
+relation has_elected_section_2201_not_to_apply(e: Estate) kind institutional;
+rule HasElectedSection2201NotToApplyRule(e: Estate, x: Person, w: Interval<Instant>) defeasible {
+    when executor_elects_section_2201_not_to_apply(e, x, w);
+    then has_elected_section_2201_not_to_apply(e);
+}
+
+@source(IRC_S2201_D, relation = formalizes, coverage = exact, quote = "subsection (a) shall not apply in determining the credit under section 2010")
+pub relation section_2201_applies_to_unified_credit(e: Estate) kind institutional {
+    label en official "section 2201(d): the reduced rate schedule does NOT apply in determining the section 2010 unified credit (always false — a documented negative classification, not a separate computation)";
+}
+// (deliberately no producing rule: section_2201_applies_to_unified_credit is
+// NEVER derived, matching (d)'s own negative instruction — 02-unified-
+// credit.law's ApplicableCreditAmountRule already uses the ordinary
+// `bracket_2001c` table unconditionally, which is the correct result.)
+
+// =====================================================================
+// §2204: discharge of fiduciary (executor) from personal liability
+// =====================================================================
+
+pub relation executor_application_for_discharge(e: Estate, x: Person, on: Date) kind empirical {
+    label en unofficial "the executor made written application to the Secretary for determination of the tax amount and discharge from personal liability (section 2204(a))";
+}
+pub relation secretary_notified_tax_amount(e: Estate, x: Person) kind empirical {
+    label en unofficial "the Secretary notified the executor of the amount of the tax (section 2204(a)); performance of the Secretary's duty below";
+}
+
+@source(IRC_S2204_A, relation = formalizes, coverage = partial, quote = "shall notify the executor of the amount of the tax")
+rule SecretaryNotifyTaxAmountDutyRule(e: Estate, x: Person, on: Date) defeasible {
+    label en official "the Secretary shall notify the executor of the amount of the tax within 9 months after the application (or after the return is filed, if later), but not after the section 6501 assessment period expires (section 2204(a)) — the section 6501 outer bound itself is not separately modelled";
+    when executor_application_for_discharge(e, x, on);
+    then duty SecretaryNotifyTaxAmountDuty {
+        bearer Secretary;
+        beneficiary x;
+        achieve secretary_notified_tax_amount(e, x) during [on, add_calendar_period(on, 9 calendar_month)];
+    };
+}
+
+pub relation executor_paid_notified_amount(e: Estate, x: Person) kind empirical {
+    label en unofficial "the executor paid the amount of which the Secretary notified it (section 2204(a))";
+}
+pub relation executor_discharged_from_personal_liability(e: Estate, x: Person) kind institutional {
+    label en unofficial "the executor is discharged from personal liability for any deficiency thereafter found due (section 2204(a))";
+}
+
+@source(IRC_S2204_A, relation = formalizes, coverage = partial, quote = "shall be discharged from personal liability for any deficiency in tax thereafter found to be due")
+rule ExecutorDischargeFromLiabilityPower(e: Estate, x: Person, on: Date) strict {
+    label en official "section 2204(a): the executor is discharged from personal liability on payment of the notified amount";
+    when executor_application_for_discharge(e, x, on)
+        and executor_paid_notified_amount(e, x);
+    then power ExecutorDischargeFromLiability {
+        holder x;
+        over e;
+        exercise executor_paid_notified_amount(e, x);
+        valid_when secretary_notified_tax_amount(e, x);
+        effect executor_discharged_from_personal_liability(e, x);
+        window [@0001-01-01, infinity);
+    };
+}
+
+pub relation executor_gift_tax_return_reliance(e: Estate, x: Person, gift_made_on: Date, shown_on_return: Boolean) kind empirical {
+    label en unofficial "the executor relied in good faith on gift tax returns furnished under section 6103(e)(3) for determining adjusted taxable gifts, with respect to a gift made on gift_made_on, shown_on_return indicating whether it appeared on such returns (section 2204(d))";
+}
+
+@source(IRC_S2204_D, relation = formalizes, coverage = exact, quote = "the executor shall be discharged from personal liability with respect to any deficiency of the tax imposed by this chapter which is attributable to adjusted taxable gifts which")
+pub relation executor_discharged_gift_return_reliance(e: Estate, x: Person, gift_made_on: Date) kind institutional {
+    label en official "section 2204(d): discharge from personal liability for a deficiency attributable to an adjusted taxable gift made more than 3 years before death and not shown on the relied-upon returns";
+}
+rule ExecutorDischargedGiftReturnRelianceRule(e: Estate, x: Person, gift_made_on: Date, dod: Date, calendar_before_1: Date) defeasible {
+    when executor_gift_tax_return_reliance(e, x, gift_made_on, false);
+    when date_of_death(e, dod) and gift_made_on < calendar_before_1
+        and us.irc.core::civil_calendar_boundary_before(dod, 3, us.irc.core::CalendarYear, calendar_before_1);
+    then executor_discharged_gift_return_reliance(e, x, gift_made_on);
+}
+
+// =====================================================================
+// §2206, §2207, §2207A, §2207B — recovery/reimbursement rights
+// =====================================================================
+
+pub relation life_insurance_proceeds_in_gross_estate(e: Estate, item: Asset, beneficiary: Person, value: Money) kind empirical {
+    label en unofficial "proceeds of insurance on the decedent's life, included in the gross estate, receivable by beneficiary other than the executor (section 2206)";
+}
+pub relation life_insurance_marital_deduction_amount(e: Estate, item: Asset, amount: Money) kind empirical {
+    label en unofficial "the aggregate marital deduction allowed under section 2056 attributable to the life insurance proceeds receivable by the surviving spouse (section 2206's proviso)";
+}
+
+@source(IRC_S2206, relation = formalizes, coverage = partial, quote = "the executor shall be entitled to recover from such beneficiary such portion of the total tax paid as the proceeds of such policies bear to the taxable estate")
+pub relation life_insurance_beneficiary_recovery_amount(e: Estate, item: Asset, beneficiary: Person, amount: Money) kind institutional {
+    label en official "section 2206: the executor's recovery from a life-insurance beneficiary, ratioed by the (net-of-marital-deduction) proceeds' share of the taxable estate";
+}
+rule LifeInsuranceBeneficiaryRecoveryWithMaritalRule(e: Estate, item: Asset, beneficiary: Person, proceeds: Money, marital: Money, tax: Money, taxable: Money) defeasible {
+    when life_insurance_proceeds_in_gross_estate(e, item, beneficiary, proceeds);
+    when life_insurance_marital_deduction_amount(e, item, marital);
+    when estate_tax(e, tax);
+    when taxable_estate(e, taxable) and taxable > 0.00 USD;
+    // One proportion, one rounding (TECH-GAPS G499, 26.09.2026).
+    then life_insurance_beneficiary_recovery_amount(e, item, beneficiary, div_round(tax * (max(0.00 USD, proceeds - marital) / 1.00 USD), taxable / 1.00 USD, 2, "HALF_UP"));
+}
+rule LifeInsuranceBeneficiaryRecoveryNoMaritalRule(e: Estate, item: Asset, beneficiary: Person, proceeds: Money, tax: Money, taxable: Money) defeasible {
+    when life_insurance_proceeds_in_gross_estate(e, item, beneficiary, proceeds);
+    when not_known(has_life_insurance_marital_deduction(e, item));
+    when estate_tax(e, tax);
+    when taxable_estate(e, taxable) and taxable > 0.00 USD;
+    // One proportion, one rounding (TECH-GAPS G499, 26.09.2026).
+    then life_insurance_beneficiary_recovery_amount(e, item, beneficiary, div_round(tax * (proceeds / 1.00 USD), taxable / 1.00 USD, 2, "HALF_UP"));
+}
+relation has_life_insurance_marital_deduction(e: Estate, item: Asset) kind institutional;
+rule HasLifeInsuranceMaritalDeductionRule(e: Estate, item: Asset) defeasible {
+    when life_insurance_marital_deduction_amount(e, item, _);
+    then has_life_insurance_marital_deduction(e, item);
+}
+
+pub relation power_of_appointment_property_recipient(e: Estate, item: Asset, recipient: Person, value: Money) kind empirical {
+    label en unofficial "property included in the gross estate under section 2041 (power of appointment), received by recipient by reason of the exercise, nonexercise, or release of the power (section 2207)";
+}
+@source(IRC_S2207, relation = formalizes, coverage = partial, quote = "the executor shall be entitled to recover from the person receiving such property by reason of the exercise, nonexercise, or release of a power of appointment such portion of the total tax paid as the value of such property bears to the taxable estate")
+pub relation power_of_appointment_recipient_recovery_amount(e: Estate, item: Asset, recipient: Person, amount: Money) kind institutional {
+    label en official "section 2207: the executor's recovery from a section 2041 power-of-appointment property recipient, ratioed by value over the taxable estate";
+}
+rule PowerOfAppointmentRecipientRecoveryRule(e: Estate, item: Asset, recipient: Person, value: Money, tax: Money, taxable: Money) defeasible {
+    when power_of_appointment_property_recipient(e, item, recipient, value);
+    when estate_tax(e, tax);
+    when taxable_estate(e, taxable) and taxable > 0.00 USD;
+    // One proportion, one rounding (TECH-GAPS G499, 26.09.2026).
+    then power_of_appointment_recipient_recovery_amount(e, item, recipient, div_round(tax * (value / 1.00 USD), taxable / 1.00 USD, 2, "HALF_UP"));
+}
+
+pub relation section_2044_property_recipient(decedent_estate: Estate, item: Asset, recipient: Person) kind empirical {
+    label en unofficial "recipient received property includible in the gross estate by reason of section 2044 (prior QTIP marital deduction) (section 2207A(a))";
+}
+pub relation estate_tax_without_2044_property(decedent_estate: Estate, item: Asset, amount: Money) kind empirical {
+    label en unofficial "what the chapter 11 tax would have been payable if the section 2044 property had not been included in the gross estate (section 2207A(a)(1)(B)) — case-asserted, same counterfactual-recomputation class as TECH-GAPS.md G368";
+}
+pub relation section_2207a_recovery_waived(decedent_estate: Estate, item: Asset) kind empirical {
+    label en unofficial "the decedent's will or revocable trust specifically waives the section 2207A right of recovery for this property (section 2207A(a)(2))";
+}
+
+@source(IRC_S2207A_A, relation = formalizes, coverage = exact, quote = "the decedent's estate shall be entitled to recover from the person receiving the property the amount by which")
+pub relation section_2207a_estate_tax_recovery_amount(decedent_estate: Estate, item: Asset, recipient: Person, amount: Money) kind institutional {
+    label en official "section 2207A(a): the estate's recovery from the section 2044 property recipient, absent a waiver";
+}
+rule Section2207aEstateTaxRecoveryAmountRule(decedent_estate: Estate, item: Asset, recipient: Person, with_property: Money, without_property: Money) defeasible {
+    when section_2044_property_recipient(decedent_estate, item, recipient);
+    when not_known(section_2207a_recovery_waived(decedent_estate, item));
+    when estate_tax(decedent_estate, with_property);
+    when estate_tax_without_2044_property(decedent_estate, item, without_property);
+    then section_2207a_estate_tax_recovery_amount(decedent_estate, item, recipient, max(0.00 USD, with_property - without_property));
+}
+
+pub relation retained_life_estate_property_recipient(e: Estate, item: Asset, recipient: Person, value: Money) kind empirical {
+    label en unofficial "recipient received property included in the gross estate by reason of section 2036 (retained life estate) (section 2207B(a))";
+}
+pub relation section_2207b_recovery_waived(e: Estate, item: Asset) kind empirical {
+    label en unofficial "the decedent's will or revocable trust specifically waives the section 2207B right of recovery for this property (section 2207B(a)(2))";
+}
+pub relation recipient_is_charitable_remainder_trust_2207b(item: Asset) kind empirical {
+    label en unofficial "the recipient is a trust to which section 664 applies (section 2207B(d) bar)";
+}
+
+@source(IRC_S2207B_A, relation = formalizes, coverage = exact, quote = "the decedent's estate shall be entitled to recover from the person receiving the property the amount which bears the same ratio to the total tax under this chapter which has been paid as")
+pub relation section_2207b_recovery_amount(e: Estate, item: Asset, recipient: Person, amount: Money) kind institutional {
+    label en official "section 2207B(a): the estate's recovery from a section 2036 retained-life-estate property recipient, ratioed by value over the taxable estate, absent a waiver or the (d) charitable-remainder-trust bar";
+}
+rule Section2207bRecoveryAmountRule(e: Estate, item: Asset, recipient: Person, value: Money, tax: Money, taxable: Money) defeasible {
+    when retained_life_estate_property_recipient(e, item, recipient, value);
+    when not_known(section_2207b_recovery_waived(e, item));
+    when not_known(recipient_is_charitable_remainder_trust_2207b(item));
+    when estate_tax(e, tax);
+    when taxable_estate(e, taxable) and taxable > 0.00 USD;
+    // One proportion, one rounding (TECH-GAPS G499, 26.09.2026).
+    then section_2207b_recovery_amount(e, item, recipient, div_round(tax * (value / 1.00 USD), taxable / 1.00 USD, 2, "HALF_UP"));
+}

@@ -1,0 +1,355 @@
+// Sections 831(a)-(b) (tax on insurance companies other than life insurance
+// companies; the small-company alternative tax) and 832(a),(b)(1),(3)-(5)
+// (insurance company taxable income: gross income, underwriting income,
+// premiums earned, losses incurred). Stage 1 (IRC-09 stage 1, A12),
+// priority sections.
+//
+// METHOD, section 831(a): as with section 801(a), the tax base
+// (`insurance_company_taxable_income`, section 832) is modeled; STAGE 2
+// (WIRE-2, 25.09.2026) wires the "taxes computed as provided in section 11"
+// rate step to `us.irc.corporations`'s `pub corporate_tax_rate(c, y, rate)`
+// export (module 02's header explains the mechanism and the keying
+// requirement; not repeated per-module).
+//
+// METHOD, section 831(b): the $2,200,000 net/direct-written-premiums
+// threshold is a `.lawparam.json` statutory-base value; the 831(b)(2)(E)
+// inflation adjustment (post-2015 calendar years, tied to the section
+// 1(f)(3) cost-of-living formula) is NOT itself a Title 26 dollar figure —
+// its yearly value is published by IRS revenue procedure, outside the
+// pinned statutory text — so only the $2,200,000 base is asserted, and the
+// adjusted-year figure is `SOURCE_GAP` (AGENT-BRIEF: "never invent a rate,
+// a date or a threshold"). The core 831(b)(2)(B)(i) diversification test
+// (no more than 20 percent of premiums from one policyholder) is modeled as
+// an exact cross-multiplied comparison; the 831(b)(2)(B)(ii)-(iv)
+// alternative (family-attribution / "specified holder") test and the
+// 831(b)(2)(C)-(D) controlled-group/look-through rules are NOT modeled —
+// their attribution machinery (spousal aggregation, "de minimis percentage
+// higher", lineal-descendant chains) has no cross-multiplication shape and
+// is filed as TECH-GAPS.md G101.
+//
+// METHOD, section 832: subparagraphs (b)(1)(D)-(E) (mutual fire/flood 2
+// percent addback; mortgage guaranty account addback) are NOT modeled
+// (narrow entity types outside the priority scope); (b)(4)(C) (the
+// 1986-1992 transitional addback) and all of (b)(5)(B)-(E) (the proration
+// reduction for tax-exempt/dividend income) are NOT modeled — temporal/
+// narrow-population provisions outside "the (b)(1),(3)-(5)" core computation
+// this stage targets. Section 846's discount factors (used in
+// `discounted_unpaid_losses`) are a Treasury/NAIC-determined external
+// dependency, asserted as a case fact, never invented.
+
+// ---- Section 831(a)-(b) ----
+
+use self::{
+    Corporation,
+    IRC_S831_A,
+    IRC_S831_B,
+    IRC_S832_A,
+    IRC_S832_B,
+    Person,
+    TaxableYear,
+    diversification_cap_requirement_831b2BiI,
+    insurance_company_by_816a,
+    life_insurance_company,
+    policyholder_unit_over_20_percent_831b2Bi,
+    policyholder_unit_premiums_831b2Bi,
+    section_831b_group_premiums_measure_831b2Ci,
+    section_833_applies_to_organization,
+    transitional_addback_832b4C,
+    unearned_premiums_end_of_prior_year_for_832b4B,
+    unearned_premiums_end_of_year_for_832b4B,
+};
+
+@source(IRC_S831_A, quote = "Taxes computed as provided in section 11 shall be imposed for each taxable year on the taxable income of every insurance company other than a life insurance company.")
+pub relation insurance_company_other_than_life(p: Person, y: TaxableYear) kind institutional {
+    label en official "an insurance company other than a life insurance company, per section 831(a) (the negation of the section 816(a) test)";
+}
+rule Section831aInsuranceCompanyOtherThanLife(p: Person, y: TaxableYear) defeasible {
+    label en official "section 831(a): an insurance company (section 816(a) sense) that is not a life insurance company for the taxable year is within section 831(a)";
+    when insurance_company_by_816a(p, y);
+    when not_known(life_insurance_company(p, y));
+    then insurance_company_other_than_life(p, y);
+}
+// The rate step ("taxes computed as provided in section 11"), wired below
+// once both the taxable-income base (section 832) and the "is the company
+// actually subject to section 831(a) rather than the 831(b) alternative"
+// gate (`subject_to_section_831a_tax`, declared further down this module)
+// are in scope; the rule itself is placed after those declarations to keep
+// range restriction straightforward (STAGE 2, WIRE-2).
+
+@source(IRC_S831_B, quote = "the net written premiums (or, if greater, direct written premiums) for the taxable year do not exceed $2,200,000")
+pub relation net_written_premiums(c: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "net written premiums for the taxable year, per section 831(b)(2)(A)(i)";
+}
+pub relation direct_written_premiums(c: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "direct written premiums for the taxable year, per section 831(b)(2)(A)(i)";
+}
+@source(IRC_S831_B, quote = "the net written premiums (or, if greater, direct written premiums) for the taxable year")
+pub relation section_831b_premiums_measure(c: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the greater of net written premiums or direct written premiums for the taxable year, per section 831(b)(2)(A)(i)/(B)(i)";
+}
+rule Section831bPremiumsMeasureIsNetWhenGreaterOrEqual(c: Person, y: TaxableYear, net: Money, direct: Money) strict {
+    label en official "section 831(b): the premiums measure is net written premiums when net is not less than direct";
+    when net_written_premiums(c, y, net);
+    when direct_written_premiums(c, y, direct);
+    when net >= direct;
+    then section_831b_premiums_measure(c, y, net);
+}
+rule Section831bPremiumsMeasureIsDirectWhenGreater(c: Person, y: TaxableYear, net: Money, direct: Money) strict {
+    label en official "section 831(b): the premiums measure is direct written premiums when direct exceeds net";
+    when net_written_premiums(c, y, net);
+    when direct_written_premiums(c, y, direct);
+    when direct > net;
+    then section_831b_premiums_measure(c, y, direct);
+}
+
+@source(IRC_S831_B, quote = "the net written premiums (or, if greater, direct written premiums) for the taxable year do not exceed $2,200,000")
+pub relation section_831b_premiums_threshold_met(c: Person, y: TaxableYear) kind institutional {
+    label en official "the section 831(b)(2)(A)(i) premiums-threshold condition is met for the taxable year (statutory base only; SOURCE_GAP for the post-2015 indexed amount, section 831(b)(2)(E))";
+}
+rule Section831b2AiPremiumsThreshold(c: Person, y: TaxableYear, amount: Money) strict {
+    label en official "section 831(b)(2)(A)(i): the premiums measure does not exceed $2,200,000 (statutory base value; indexed post-2015 figures are SOURCE_GAP)";
+    when section_831b_group_premiums_measure_831b2Ci(c, y, amount);
+    when amount <= 2200000.00 USD;
+    then section_831b_premiums_threshold_met(c, y);
+}
+
+@source(IRC_S831_B, quote = "no more than 20 percent of the net written premiums (or, if greater, direct written premiums) of such company for the taxable year is attributable to any one policyholder")
+pub relation premiums_from_one_policyholder(c: Person, y: TaxableYear, policyholder: Person, amount: Money) kind empirical {
+    label en unofficial "net (or direct) written premiums for the taxable year attributable to one policyholder, per section 831(b)(2)(B)(i)";
+}
+@source(IRC_S831_B, quote = "no more than 20 percent of the net written premiums (or, if greater, direct written premiums) of such company for the taxable year is attributable to any one policyholder")
+pub relation section_831b_diversification_requirement_met(c: Person, y: TaxableYear) kind institutional {
+    label en official "the section 831(b)(2)(B)(i) diversification requirement is met for the taxable year (the 20 percent one-policyholder test only; the (ii)-(iv) alternative attribution test is TECH-GAPS.md G101)";
+}
+rule Section831b2BiDiversificationByPolicyholderCap(c: Person, y: TaxableYear, policyholder: Person, unit: Money, total: Money) strict {
+    label en official "section 831(b)(2)(B)(i)(I): no policyholder unit's premiums exceed 20 percent of the section 831(b) premiums measure (units per section 831(b)(2)(C)(i)(II), (D): module 40)";
+    when section_831b_premiums_measure(c, y, total);
+    when policyholder_unit_premiums_831b2Bi(c, y, policyholder, unit);
+    when not_known(policyholder_unit_over_20_percent_831b2Bi(c, y));
+    then diversification_cap_requirement_831b2BiI(c, y);
+}
+
+@source(IRC_S831_B, quote = "such company elects the application of this subsection for such taxable year")
+pub relation elects_section_831b(c: Person, y: TaxableYear) kind empirical {
+    label en unofficial "the company's election, filed for the taxable year, to apply section 831(b), per section 831(b)(2)(A)(iii)";
+}
+@source(IRC_S831_B)
+pub relation meets_section_831b_requirements(c: Person, y: TaxableYear) kind institutional {
+    label en official "the section 831(b)(2)(A)(i)-(ii) conditions (premiums threshold and diversification) are both met for the taxable year";
+}
+rule Section831b2ARequirementsMet(c: Person, y: TaxableYear) strict {
+    label en official "section 831(b)(2)(A)(i)-(ii): premiums threshold and diversification are both met";
+    when section_831b_premiums_threshold_met(c, y);
+    when section_831b_diversification_requirement_met(c, y);
+    then meets_section_831b_requirements(c, y);
+}
+@source(IRC_S831_B)
+pub relation section_831b_alternative_tax_applies(c: Person, y: TaxableYear) kind institutional {
+    label en official "section 831(b) applies to the company for the taxable year (its taxable investment income is taxed at section 11(b) rates in lieu of section 831(a))";
+}
+rule Section831bElectionOfAlternativeTax(c: Person, y: TaxableYear) strict {
+    label en official "section 831(b)(2)(A): a valid, qualifying election makes the alternative tax on taxable investment income apply for the year";
+    when elects_section_831b(c, y);
+    then power Section831bElection {
+        holder c;
+        over c;
+        exercise elects_section_831b(c, y);
+        valid_when meets_section_831b_requirements(c, y);
+        effect create(section_831b_alternative_tax_applies(c, y));
+        window [@1987-01-01, infinity);
+    };
+}
+// section 831(b)(1)'s tax amount ("taxable investment income ... multiplied
+// by the rates provided in section 11(b)") is not computed for the same
+// rate-ownership reason as section 831(a); `taxable_investment_income` is
+// not separately defined by the pinned (b) text (it cross-references
+// section 834, not modeled at this stage) and is left MISSING_PARAMETER
+// pending that section.
+
+@source(IRC_S831_B)
+pub relation subject_to_section_831a_tax(c: Person, y: TaxableYear) kind institutional {
+    label en official "the company is subject to the section 831(a) tax for the taxable year (i.e., section 831(b) does not apply)";
+}
+rule Section831aSubjectWhenNotElectingAlternative(c: Person, y: TaxableYear) defeasible {
+    label en official "a company within section 831(a) that has not made a valid section 831(b) election is subject to the section 831(a) tax for the year";
+    when insurance_company_other_than_life(c, y);
+    when not_known(section_831b_alternative_tax_applies(c, y));
+    then subject_to_section_831a_tax(c, y);
+}
+@source(IRC_S831_B)
+pub relation nol_carryover_to_year_blocked_by_831b3a(c: Person, y: TaxableYear) kind institutional {
+    label en official "section 831(b)(3)(A): a net operating loss may not be carried to or from a year for which the company is not subject to the section 831(a) tax";
+}
+rule Section831b3ANolCarryoverBlockedNotSubjectToA(c: Person, y: TaxableYear) defeasible {
+    label en official "section 831(b)(3)(A): a year for which the company is not subject to the section 831(a) tax blocks NOL carryover to/from that year";
+    when insurance_company_other_than_life(c, y);
+    when not_known(subject_to_section_831a_tax(c, y));
+    then nol_carryover_to_year_blocked_by_831b3a(c, y);
+}
+
+// ---- Section 832(a),(b)(1),(3)-(5) ----
+
+@source(IRC_S832_A, quote = "the term \"taxable income\" means the gross income as defined in subsection (b)(1) less the deductions allowed by subsection (c)")
+pub relation insurance_deductions_832c(c: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the deductions allowed by section 832(c) for the taxable year (section 832(c) is not modeled at this stage)";
+}
+pub relation insurance_company_gross_income_832b1(c: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "gross income as defined in section 832(b)(1), for the taxable year";
+}
+pub relation insurance_company_taxable_income(c: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "insurance company taxable income for the taxable year: section 832(b)(1) gross income less section 832(c) deductions (section 832(a))";
+}
+rule Section832aTaxableIncome(c: Person, y: TaxableYear, gross: Money, deductions: Money) defeasible {
+    label en official "section 832(a): taxable income is section 832(b)(1) gross income less section 832(c) deductions";
+    when insurance_company_gross_income_832b1(c, y, gross);
+    when insurance_deductions_832c(c, y, deductions);
+    then insurance_company_taxable_income(c, y, gross - deductions);
+}
+
+// Section 831(a)'s rate step, wired to `us.irc.corporations`'s stage 2
+// `pub corporate_tax_rate(c, y, rate)` export (see module 02's header for
+// the keying mechanism; STAGE 2, WIRE-2). Gated on `subject_to_section_831a_
+// tax` so a company with a valid section 831(b) election (taxed instead on
+// taxable investment income, section 834, not modeled at this stage — see
+// the header note above `subject_to_section_831a_tax`) does not also get an
+// 831(a) amount for the same year.
+@source(IRC_S831_A, quote = "Taxes computed as provided in section 11 shall be imposed for each taxable year on the taxable income of every insurance company other than a life insurance company.")
+pub relation other_insurance_company_tax(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the tax imposed by section 831(a): the taxable income of an insurance company other than a life insurance company, taxed at the section 11 rate, for a company not subject to the section 831(b) alternative tax";
+}
+rule Section831aOtherInsuranceCompanyTax(c: Corporation, y: TaxableYear, income: Money, rate: Decimal) defeasible {
+    label en official "section 831(a): the tax is the section 11 rate applied to insurance company taxable income, for a company subject to section 831(a)";
+    when subject_to_section_831a_tax(c, y);
+    when insurance_company_taxable_income(c, y, income);
+    when us.irc.corporations::corporate_tax_rate(c, y, rate);
+    then other_insurance_company_tax(c, y, round(income * rate, 2, "HALF_UP"));
+}
+
+// (b)(2) investment income.
+@source(IRC_S832_B, quote = "To all interest, dividends, and rents received during the taxable year, add interest, dividends, and rents due and accrued at the end of the taxable year, and deduct all interest, dividends, and rents due and accrued at the end of the preceding taxable year.")
+pub relation interest_dividends_rents_received(c: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "interest, dividends and rents received during the taxable year, per section 832(b)(2)";
+}
+pub relation interest_dividends_rents_accrued_end_of_year(c: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "interest, dividends and rents due and accrued at the end of the taxable year, per section 832(b)(2)";
+}
+pub relation interest_dividends_rents_accrued_end_of_prior_year(c: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "interest, dividends and rents due and accrued at the end of the preceding taxable year, per section 832(b)(2)";
+}
+@source(IRC_S832_B, quote = "The term \"investment income\" means the gross amount of income earned during the taxable year from interest, dividends, and rents, computed as follows: To all interest, dividends, and rents received during the taxable year, add interest, dividends, and rents due and accrued at the end of the taxable year, and deduct all interest, dividends, and rents due and accrued at the end of the preceding taxable year.")
+pub relation investment_income_832b2(c: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "investment income for the taxable year, per section 832(b)(2)";
+}
+rule Section832b2InvestmentIncome(c: Person, y: TaxableYear, received: Money, accrued_end: Money, accrued_prior: Money) strict {
+    label en official "section 832(b)(2): investment income = received + accrued at end of year - accrued at end of preceding year";
+    when interest_dividends_rents_received(c, y, received);
+    when interest_dividends_rents_accrued_end_of_year(c, y, accrued_end);
+    when interest_dividends_rents_accrued_end_of_prior_year(c, y, accrued_prior);
+    then investment_income_832b2(c, y, (received + accrued_end) - accrued_prior);
+}
+
+// (b)(4) premiums earned (main rule, (A)-(B); (C) transitional addback not
+// modeled).
+@source(IRC_S832_B, quote = "From the amount of gross premiums written on insurance contracts during the taxable year, deduct return premiums and premiums paid for reinsurance.")
+pub relation gross_premiums_written(c: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "gross premiums written on insurance contracts during the taxable year, per section 832(b)(4)(A)";
+}
+pub relation return_premiums(c: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "return premiums during the taxable year, per section 832(b)(4)(A)";
+}
+pub relation premiums_paid_for_reinsurance(c: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "premiums paid for reinsurance during the taxable year, per section 832(b)(4)(A)";
+}
+pub relation unearned_premiums_end_of_prior_year(c: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "unearned premiums on outstanding business at the end of the preceding taxable year, per section 832(b)(4)(B)";
+}
+pub relation unearned_premiums_end_of_year(c: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "unearned premiums on outstanding business at the end of the taxable year, per section 832(b)(4)(B)";
+}
+@source(IRC_S832_B, quote = "The term \"premiums earned on insurance contracts during the taxable year\" means an amount computed as follows:\n(A) From the amount of gross premiums written on insurance contracts during the taxable year, deduct return premiums and premiums paid for reinsurance.\n(B) To the result so obtained, add 80 percent of the unearned premiums on outstanding business at the end of the preceding taxable year and deduct 80 percent of the unearned premiums on outstanding business at the end of the taxable year.")
+pub relation premiums_earned(c: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "premiums earned on insurance contracts during the taxable year, per section 832(b)(4)(A)-(B) (the 1986-1992 transitional (C) addback is not modeled)";
+}
+rule Section832b4PremiumsEarned(c: Person, y: TaxableYear, written: Money, returned: Money, reinsurance: Money, unearned_prior: Money, unearned_end: Money, addback: Money) defeasible {
+    label en official "section 832(b)(4)(A)-(B): premiums earned = (gross written - returns - reinsurance) + 80% * unearned at end of prior year - 80% * unearned at end of year";
+    when gross_premiums_written(c, y, written);
+    when return_premiums(c, y, returned);
+    when premiums_paid_for_reinsurance(c, y, reinsurance);
+    when unearned_premiums_end_of_prior_year_for_832b4B(c, y, unearned_prior);
+    when unearned_premiums_end_of_year_for_832b4B(c, y, unearned_end);
+    when transitional_addback_832b4C(c, y, addback);
+    when not_known(section_833_applies_to_organization(c, y));
+    then premiums_earned(c, y, (((written - returned) - reinsurance) + (round(unearned_prior * 0.80, 2, "HALF_UP") - round(unearned_end * 0.80, 2, "HALF_UP"))) + addback);
+}
+
+// (b)(5) losses incurred ((A) main computation; (B)-(E) proration reduction
+// not modeled). Section 846's discount factors are an external (Treasury)
+// dependency, asserted as a case fact.
+@source(IRC_S832_B, quote = "To losses paid during the taxable year, deduct salvage and reinsurance recovered during the taxable year.")
+pub relation losses_paid(c: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "losses paid during the taxable year, per section 832(b)(5)(A)(i)";
+}
+pub relation salvage_and_reinsurance_recovered(c: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "salvage and reinsurance recovered during the taxable year, per section 832(b)(5)(A)(i)";
+}
+pub relation unpaid_losses_on_life_and_discounted_unpaid_losses_end_of_year(c: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "unpaid losses on life insurance contracts plus discounted unpaid losses (section 846, external dependency) outstanding at the end of the taxable year, per section 832(b)(5)(A)(ii)";
+}
+pub relation unpaid_losses_on_life_and_discounted_unpaid_losses_end_of_prior_year(c: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "unpaid losses on life insurance contracts plus discounted unpaid losses outstanding at the end of the preceding taxable year, per section 832(b)(5)(A)(ii)";
+}
+pub relation estimated_salvage_and_reinsurance_recoverable_end_of_prior_year(c: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "estimated salvage and reinsurance recoverable as of the end of the preceding taxable year, per section 832(b)(5)(A)(iii)";
+}
+pub relation estimated_salvage_and_reinsurance_recoverable_end_of_year(c: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "estimated salvage and reinsurance recoverable as of the end of the taxable year, per section 832(b)(5)(A)(iii)";
+}
+pub relation losses_incurred_before_reduction_832b5A(c: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 832(b)(5)(A): losses incurred before the subparagraph (B) reduction for tax-exempt interest and dividends (stage 3: module 35 applies the reduction and concludes losses_incurred)";
+}
+@source(IRC_S832_B, quote = "The term \"losses incurred\" means losses incurred during the taxable year on insurance contracts computed as follows:\n(i) To losses paid during the taxable year, deduct salvage and reinsurance recovered during the taxable year.\n(ii) To the result so obtained, add all unpaid losses on life insurance contracts plus all discounted unpaid losses (as defined in section 846) outstanding at the end of the taxable year and deduct all unpaid losses on life insurance contracts plus all discounted unpaid losses outstanding at the end of the preceding taxable year.\n(iii) To the results so obtained, add estimated salvage and reinsurance recoverable as of the end of the preceding taxable year and deduct estimated salvage and reinsurance recoverable as of the end of the taxable year.")
+pub relation losses_incurred(c: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "losses incurred during the taxable year on insurance contracts, per section 832(b)(5)(A) (stage 3: the (B)-(E) reduction is applied in module 35)";
+}
+rule Section832b5ALossesIncurred(c: Person, y: TaxableYear, paid: Money, recovered: Money, unpaid_end: Money, unpaid_prior: Money, salvage_prior: Money, salvage_end: Money) defeasible {
+    label en official "section 832(b)(5)(A): losses incurred = (paid - recovered) + (unpaid life+discounted end - unpaid life+discounted prior) + (estimated salvage prior - estimated salvage end)";
+    when losses_paid(c, y, paid);
+    when salvage_and_reinsurance_recovered(c, y, recovered);
+    when unpaid_losses_on_life_and_discounted_unpaid_losses_end_of_year(c, y, unpaid_end);
+    when unpaid_losses_on_life_and_discounted_unpaid_losses_end_of_prior_year(c, y, unpaid_prior);
+    when estimated_salvage_and_reinsurance_recoverable_end_of_prior_year(c, y, salvage_prior);
+    when estimated_salvage_and_reinsurance_recoverable_end_of_year(c, y, salvage_end);
+    then losses_incurred_before_reduction_832b5A(c, y, ((paid - recovered) + (unpaid_end - unpaid_prior)) + (salvage_prior - salvage_end));
+}
+
+// (b)(3) underwriting income and (b)(1) gross income ((A)-(C) core items
+// only; (D)-(E) narrow-entity addbacks not modeled).
+pub relation expenses_incurred_832b6(c: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "expenses incurred, per section 832(b)(6) (not modeled at this stage beyond being asserted as a case fact)";
+}
+@source(IRC_S832_B, quote = "The term \"underwriting income\" means the premiums earned on insurance contracts during the taxable year less losses incurred and expenses incurred.")
+pub relation underwriting_income(c: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "underwriting income for the taxable year: premiums earned less losses incurred and expenses incurred (section 832(b)(3))";
+}
+rule Section832b3UnderwritingIncome(c: Person, y: TaxableYear, earned: Money, losses: Money, expenses: Money) defeasible {
+    label en official "section 832(b)(3): underwriting income = premiums earned - losses incurred - expenses incurred";
+    when premiums_earned(c, y, earned);
+    when losses_incurred(c, y, losses);
+    when expenses_incurred_832b6(c, y, expenses);
+    then underwriting_income(c, y, (earned - losses) - expenses);
+}
+pub relation gain_from_sale_or_disposition_of_property(c: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "gain during the taxable year from the sale or other disposition of property, per section 832(b)(1)(B)";
+}
+pub relation other_subchapter_b_gross_income_items(c: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "all other items constituting gross income under subchapter B, per section 832(b)(1)(C) (the mutual-fire-perpetual-policy carve-out is not modeled)";
+}
+@source(IRC_S832_B)
+rule Section832b1GrossIncomeCoreItems(c: Person, y: TaxableYear, investment: Money, underwriting: Money, gain: Money, other: Money) defeasible {
+    label en official "section 832(b)(1)(A)-(C): gross income = investment income + underwriting income + gain from property dispositions + other subchapter B items";
+    when investment_income_832b2(c, y, investment);
+    when underwriting_income(c, y, underwriting);
+    when gain_from_sale_or_disposition_of_property(c, y, gain);
+    when other_subchapter_b_gross_income_items(c, y, other);
+    then insurance_company_gross_income_832b1(c, y, ((investment + underwriting) + gain) + other);
+}

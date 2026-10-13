@@ -1,0 +1,733 @@
+// Section 414(x) — STAGE 3 (deferred-compensation, TECH_GAP reduction,
+// 26.09.2026): eligible combined defined benefit plans and qualified cash or
+// deferred arrangements. Stage 2e left the whole subsection as TECH_GAP.
+// Modelled here: the small-employer test (the 4980D(d)(2) definition with 500
+// substituted for 50, pinned in the model of section 4980D owned by
+// `excise-entities`; the threshold differs so it is not an import), the
+// benefit requirement (final average pay over the greatest consecutive-year
+// period of at most 5 years, the lesser of 1 percent per year of service and
+// 20 percent, the pay-credit table for applicable defined benefit plans), the
+// contribution requirement (automatic contribution arrangement with a 4
+// percent default, 50 percent match on the first 4 percent), the vesting and
+// uniformity requirements, the Social Security / other-plans requirement, the
+// definition of an eligible combined plan, and the consequences: separate
+// application of the title, the nondiscrimination and top-heavy deemings,
+// non-application of section 414(k), single-plan reporting.
+//
+// Method. "Each participant" requirements use the pattern violation
+// relation per participant + a plan-level relation read through `not_known`
+// of the violation (the roster is the `participates_in` facts). Pay-credit
+// percentages come from the table pinned in the model (T1: 30 or less 2,
+// over 30 but less than 40 4, 40 or over but less than 50 6, 50 or over 8);
+// the fragment text carries only the placeholder [table T1]. JUDGMENT CALL:
+// ages are completed years at the beginning of the plan year, so age 30 is
+// "30 or less" and age 31 is "over 30". The 4980D employer-size test uses
+// exact comparisons of the average number of employees.
+
+use self::{
+    DefinedBenefitPlan,
+    DefinedContributionPlan,
+    IRC_S414_X,
+    Person,
+    Plan,
+    TaxableYear,
+    applicable_defined_benefit_plan_411a13,
+    coda_maintained,
+    elective_contribution_amount,
+    employee_compensation_401k,
+    participates_in,
+    plan_administrator_of,
+};
+
+pub relation combined_plan_parts_414x(combined: Plan, db: DefinedBenefitPlan, dc: DefinedContributionPlan) kind empirical {
+    label en unofficial "the plan consists of this defined benefit plan and this defined contribution plan, case-asserted (section 414(x)(2)(A)(ii))";
+}
+
+// =====================================================================
+// (7) Applicable defined contribution plan; (2)(A)(i) small employer
+// =====================================================================
+
+pub relation applicable_defined_contribution_plan_414x7(plan: DefinedContributionPlan) kind institutional {
+    label en official "section 414(x)(7)(A): a defined contribution plan that includes a qualified cash or deferred arrangement (section 401(k)(2))";
+}
+
+@source(IRC_S414_X, relation = formalizes, coverage = exact, quote = "The term \"applicable defined contribution plan\" means a defined contribution plan which includes a qualified cash or deferred arrangement")
+rule ApplicableDefinedContributionPlan414x7(plan: DefinedContributionPlan) strict {
+    label en official "the qualified cash or deferred arrangement is the existing case fact coda_maintained (section 401(k)(2))";
+    when coda_maintained(plan);
+    then applicable_defined_contribution_plan_414x7(plan);
+}
+
+pub relation employer_average_employees_414x2A(employer: Person, average: Decimal) kind empirical {
+    label en unofficial "the average number of employees the employer (all persons treated as one employer under section 414(b), (c), (m) or (o)) employed on business days during the preceding calendar year, case-asserted (section 4980D(d)(2) as applied by section 414(x)(2)(A))";
+}
+
+pub relation employer_employees_on_first_day_414x2A(employer: Person, count: Integer) kind empirical {
+    label en unofficial "the number of employees the employer employs on the first day of the plan year, case-asserted";
+}
+
+pub relation employer_expected_average_employees_414x2A(employer: Person, average: Decimal) kind empirical {
+    label en unofficial "for an employer not in existence throughout the preceding calendar year, the average number of employees reasonably expected on business days in the current calendar year, case-asserted";
+}
+
+pub relation employer_not_in_existence_throughout_preceding_year_414x2A(employer: Person) kind empirical {
+    label en unofficial "the employer was not in existence throughout the preceding calendar year, case-asserted";
+}
+
+pub relation small_employer_414x2A(employer: Person) kind institutional {
+    label en official "section 414(x)(2)(A): a small employer as defined in section 4980D(d)(2) with 500 substituted for 50: an average of at least 2 but not more than 500 employees, and at least 2 employees on the first day of the plan year";
+}
+
+@source(IRC_S414_X, relation = formalizes, coverage = exact, quote = "except that such section shall be applied by substituting \"500\" for \"50\" each place it appears")
+rule SmallEmployerByAverage414x2A(employer: Person, average: Decimal, first_day: Integer) strict {
+    label en official "exact boundaries: 2 and 500 are included";
+    when employer_average_employees_414x2A(employer, average)
+        and employer_employees_on_first_day_414x2A(employer, first_day)
+        and average >= 2.0
+        and average <= 500.0
+        and first_day >= 2;
+    then small_employer_414x2A(employer);
+}
+
+@source(IRC_S414_X, relation = formalizes, coverage = exact, quote = "except that such section shall be applied by substituting \"500\" for \"50\" each place it appears")
+rule SmallEmployerNewEmployer414x2A(employer: Person, expected: Decimal, first_day: Integer) strict {
+    label en official "a new employer is tested on the reasonably expected average for the current year";
+    when employer_not_in_existence_throughout_preceding_year_414x2A(employer)
+        and employer_expected_average_employees_414x2A(employer, expected)
+        and employer_employees_on_first_day_414x2A(employer, first_day)
+        and expected >= 2.0
+        and expected <= 500.0
+        and first_day >= 2;
+    then small_employer_414x2A(employer);
+}
+
+pub relation employer_of_combined_plan_414x2Ai(combined: Plan, employer: Person) kind empirical {
+    label en unofficial "the employer maintaining the plan when it is established, case-asserted (section 414(x)(2)(A)(i))";
+}
+
+// =====================================================================
+// (2)(B) Benefit requirements (defined benefit plan)
+// =====================================================================
+
+pub relation compensation_period_414x2Bi(participant: Person, plan: DefinedBenefitPlan, period: Integer, years: Integer, aggregate: Money) kind empirical {
+    label en unofficial "a period of consecutive years (not exceeding 5) and the aggregate compensation from the employer in it, case-asserted candidate (section 414(x)(2)(B)(i)); the greatest aggregate is selected by rule";
+}
+
+pub relation period_exceeded_by_greater_aggregate_414x2Bi(participant: Person, plan: DefinedBenefitPlan, period: Integer) kind institutional {
+    label en official "helper: another candidate period has a strictly greater aggregate compensation";
+}
+
+rule PeriodExceededByGreaterAggregate414x2Bi(participant: Person, plan: DefinedBenefitPlan, p1: Integer, y1: Integer, a1: Money, p2: Integer, y2: Integer, a2: Money) strict {
+    label en official "no strictly greater aggregate exists for the chosen period";
+    when compensation_period_414x2Bi(participant, plan, p1, y1, a1)
+        and compensation_period_414x2Bi(participant, plan, p2, y2, a2)
+        and a2 > a1;
+    then period_exceeded_by_greater_aggregate_414x2Bi(participant, plan, p1);
+}
+
+pub relation final_average_pay_414x2Bi(participant: Person, plan: DefinedBenefitPlan, amount: Money) kind institutional {
+    label en official "section 414(x)(2)(B)(i): final average pay over the period of at most 5 consecutive years with the greatest aggregate compensation, as an annual average";
+}
+
+@source(IRC_S414_X, relation = formalizes, coverage = exact, quote = "final average pay shall be determined using the period of consecutive years (not exceeding 5) during which the participant had the greatest aggregate compensation from the employer")
+rule FinalAveragePay414x2Bi(participant: Person, plan: DefinedBenefitPlan, period: Integer, years: Integer, aggregate: Money) strict {
+    label en official "JUDGMENT CALL: the annual average of the greatest-aggregate period (ties give the same average only when the years agree); periods over 5 years are excluded";
+    when compensation_period_414x2Bi(participant, plan, period, years, aggregate)
+        and years >= 1
+        and years <= 5
+        and not_known(period_exceeded_by_greater_aggregate_414x2Bi(participant, plan, period));
+    then final_average_pay_414x2Bi(participant, plan, div_round(aggregate, years * 1.00, 2, "HALF_UP"));
+}
+
+pub relation years_of_service_count_414x2Biv(participant: Person, plan: DefinedBenefitPlan, years: Integer) kind empirical {
+    label en unofficial "the participant's years of service under the rules of section 411(a)(4), (5) and (6), case-asserted";
+}
+
+pub relation year_disregarded_for_elective_deferral_414x2Biv(participant: Person, plan: DefinedBenefitPlan) kind empirical {
+    label en unofficial "the plan disregards a year of service because the participant made, or failed to make, an elective deferral under the qualified cash or deferred arrangement, case-asserted (a prohibited disregard)";
+}
+
+pub relation years_of_service_414x2Biv(participant: Person, plan: DefinedBenefitPlan, years: Integer) kind institutional {
+    label en official "section 414(x)(2)(B)(iv): years of service under section 411(a)(4)-(6), without disregarding a year because of an elective deferral";
+}
+
+@source(IRC_S414_X, relation = formalizes, coverage = exact, quote = "except that the plan may not disregard any year of service because of a participant making, or failing to make, any elective deferral")
+rule YearsOfServiceCount414x2Biv(participant: Person, plan: DefinedBenefitPlan, years: Integer) strict {
+    label en official "the count stands unless a year was disregarded because of an elective deferral";
+    when years_of_service_count_414x2Biv(participant, plan, years)
+        and not_known(year_disregarded_for_elective_deferral_414x2Biv(participant, plan));
+    then years_of_service_414x2Biv(participant, plan, years);
+}
+
+pub relation applicable_percentage_414x2Bii(participant: Person, plan: DefinedBenefitPlan, pct: Decimal) kind institutional {
+    label en official "section 414(x)(2)(B)(ii): the lesser of 1 percent multiplied by the years of service and 20 percent";
+}
+
+@source(IRC_S414_X, relation = formalizes, coverage = exact, quote = "1 percent multiplied by the number of years of service with the employer")
+rule ApplicablePercentageOnePercentPerYear414x2Bii(participant: Person, plan: DefinedBenefitPlan, years: Integer) strict {
+    label en official "clause (I) when it is not above 20 percent (20 years or fewer)";
+    when years_of_service_414x2Biv(participant, plan, years) and years * 0.01 <= 0.20;
+    then applicable_percentage_414x2Bii(participant, plan, years * 0.01);
+}
+
+@source(IRC_S414_X, relation = formalizes, coverage = exact, quote = "20 percent")
+rule ApplicablePercentageCapped414x2Bii(participant: Person, plan: DefinedBenefitPlan, years: Integer) strict {
+    label en official "clause (II) when 1 percent per year exceeds 20 percent (21 years or more)";
+    when years_of_service_414x2Biv(participant, plan, years) and years * 0.01 > 0.20;
+    then applicable_percentage_414x2Bii(participant, plan, 0.20);
+}
+
+pub relation accrued_annual_benefit_from_employer_contributions_414x2Bi(participant: Person, plan: DefinedBenefitPlan, amount: Money) kind empirical {
+    label en unofficial "the participant's accrued benefit derived from employer contributions, expressed as an annual retirement benefit, case-asserted";
+}
+
+pub relation participant_fails_benefit_requirement_414x2Bi(participant: Person, plan: DefinedBenefitPlan) kind institutional {
+    label en official "section 414(x)(2)(B)(i): the accrued annual benefit is less than the applicable percentage of final average pay";
+}
+
+@source(IRC_S414_X, relation = formalizes, coverage = exact, quote = "is not less than the applicable percentage of the participant's final average pay")
+rule ParticipantFailsBenefitRequirement414x2Bi(participant: Person, plan: DefinedBenefitPlan, benefit: Money, fap: Money, pct: Decimal) strict {
+    label en official "exact boundary: a benefit equal to the applicable percentage of final average pay is enough";
+    when accrued_annual_benefit_from_employer_contributions_414x2Bi(participant, plan, benefit)
+        and final_average_pay_414x2Bi(participant, plan, fap)
+        and applicable_percentage_414x2Bii(participant, plan, pct)
+        and benefit < fap * pct;
+    then participant_fails_benefit_requirement_414x2Bi(participant, plan);
+}
+
+pub relation participant_meets_benefit_requirement_414x2Bi(participant: Person, plan: DefinedBenefitPlan) kind institutional {
+    label en official "helper: the participant's benefit is at least the applicable percentage of final average pay";
+}
+
+@source(IRC_S414_X, relation = formalizes, coverage = exact, quote = "is not less than the applicable percentage of the participant's final average pay")
+rule ParticipantMeetsBenefitRequirement414x2Bi(participant: Person, plan: DefinedBenefitPlan, benefit: Money, fap: Money, pct: Decimal) strict {
+    label en official "at least the applicable percentage";
+    when accrued_annual_benefit_from_employer_contributions_414x2Bi(participant, plan, benefit)
+        and final_average_pay_414x2Bi(participant, plan, fap)
+        and applicable_percentage_414x2Bii(participant, plan, pct)
+        and benefit >= fap * pct;
+    then participant_meets_benefit_requirement_414x2Bi(participant, plan);
+}
+
+pub relation pay_credit_age_at_year_start_414x2Biii(participant: Person, plan: DefinedBenefitPlan, y: TaxableYear, age: Integer) kind empirical {
+    label en unofficial "the participant's age in completed years as of the beginning of the plan year, case-asserted (table T1 of clause (iii))";
+}
+
+pub relation pay_credit_percentage_414x2Biii(participant: Person, plan: DefinedBenefitPlan, y: TaxableYear, pct: Decimal) kind institutional {
+    label en official "section 414(x)(2)(B)(iii) table: 2 percent at age 30 or less, 4 percent over 30 but less than 40, 6 percent from 40 but less than 50, 8 percent at 50 or over";
+}
+
+@source(IRC_S414_X, relation = formalizes, coverage = partial, quote = "each participant receives a pay credit for the year which is not less than the percentage of compensation determined in accordance with the following table")
+rule PayCreditPercentageAge30OrLess414x2Biii(participant: Person, plan: DefinedBenefitPlan, y: TaxableYear, age: Integer) strict {
+    label en official "PARTIAL: table T1 values are read from the model; age 30 or less: 2 percent";
+    when pay_credit_age_at_year_start_414x2Biii(participant, plan, y, age) and age <= 30;
+    then pay_credit_percentage_414x2Biii(participant, plan, y, 0.02);
+}
+
+@source(IRC_S414_X, relation = formalizes, coverage = partial, quote = "each participant receives a pay credit for the year which is not less than the percentage of compensation determined in accordance with the following table")
+rule PayCreditPercentageAge31To39414x2Biii(participant: Person, plan: DefinedBenefitPlan, y: TaxableYear, age: Integer) strict {
+    label en official "PARTIAL: over 30 but less than 40: 4 percent";
+    when pay_credit_age_at_year_start_414x2Biii(participant, plan, y, age) and age > 30 and age < 40;
+    then pay_credit_percentage_414x2Biii(participant, plan, y, 0.04);
+}
+
+@source(IRC_S414_X, relation = formalizes, coverage = partial, quote = "each participant receives a pay credit for the year which is not less than the percentage of compensation determined in accordance with the following table")
+rule PayCreditPercentageAge40To49414x2Biii(participant: Person, plan: DefinedBenefitPlan, y: TaxableYear, age: Integer) strict {
+    label en official "PARTIAL: 40 or over but less than 50: 6 percent";
+    when pay_credit_age_at_year_start_414x2Biii(participant, plan, y, age) and age >= 40 and age < 50;
+    then pay_credit_percentage_414x2Biii(participant, plan, y, 0.06);
+}
+
+@source(IRC_S414_X, relation = formalizes, coverage = partial, quote = "each participant receives a pay credit for the year which is not less than the percentage of compensation determined in accordance with the following table")
+rule PayCreditPercentageAge50Plus414x2Biii(participant: Person, plan: DefinedBenefitPlan, y: TaxableYear, age: Integer) strict {
+    label en official "PARTIAL: 50 or over: 8 percent";
+    when pay_credit_age_at_year_start_414x2Biii(participant, plan, y, age) and age >= 50;
+    then pay_credit_percentage_414x2Biii(participant, plan, y, 0.08);
+}
+
+pub relation pay_credit_and_compensation_414x2Biii(participant: Person, plan: DefinedBenefitPlan, y: TaxableYear, credit: Money, compensation: Money) kind empirical {
+    label en unofficial "the pay credit the participant receives for the year and the participant's compensation, case-asserted";
+}
+
+pub relation interest_credit_requirements_met_411b5Bi_414x2Biii(plan: DefinedBenefitPlan) kind empirical {
+    label en unofficial "the applicable defined benefit plan meets the interest credit requirements of section 411(b)(5)(B)(i), case-asserted";
+}
+
+pub relation participant_fails_pay_credit_414x2Biii(participant: Person, plan: DefinedBenefitPlan, y: TaxableYear) kind institutional {
+    label en official "section 414(x)(2)(B)(iii): the pay credit is below the table percentage of compensation";
+}
+
+@source(IRC_S414_X, relation = formalizes, coverage = exact, quote = "not less than the percentage of compensation")
+rule ParticipantFailsPayCredit414x2Biii(participant: Person, plan: DefinedBenefitPlan, y: TaxableYear, credit: Money, comp: Money, pct: Decimal) strict {
+    label en official "exact boundary: a credit equal to the percentage of compensation is enough";
+    when pay_credit_and_compensation_414x2Biii(participant, plan, y, credit, comp)
+        and pay_credit_percentage_414x2Biii(participant, plan, y, pct)
+        and credit < comp * pct;
+    then participant_fails_pay_credit_414x2Biii(participant, plan, y);
+}
+
+pub relation benefit_requirements_met_414x2B(plan: DefinedBenefitPlan) kind institutional {
+    label en official "section 414(x)(2)(B): no participant fails the final average pay test; an applicable defined benefit plan meeting the interest credit requirements may instead satisfy the pay credit table";
+}
+
+@source(IRC_S414_X, relation = formalizes, coverage = partial, quote = "The benefit requirements of this subparagraph are met with respect to the defined benefit plan forming part of the eligible combined plan if the accrued benefit of each participant")
+rule BenefitRequirementsMetByFinalAveragePay414x2B(plan: DefinedBenefitPlan, participant: Person) strict {
+    label en official "PARTIAL: at least one participant is tested and none fails (roster = participates_in facts)";
+    when participates_in(participant, plan)
+        and participant_meets_benefit_requirement_414x2Bi(participant, plan)
+        and not_known(participant_fails_benefit_requirement_414x2Bi_any(plan));
+    then benefit_requirements_met_414x2B(plan);
+}
+
+pub relation participant_fails_benefit_requirement_414x2Bi_any(plan: DefinedBenefitPlan) kind institutional {
+    label en official "helper: some participant fails the final average pay test";
+}
+
+rule ParticipantFailsBenefitRequirementAny414x2Bi(plan: DefinedBenefitPlan, participant: Person) strict {
+    label en official "helper for the plan-level not_known";
+    when participates_in(participant, plan) and participant_fails_benefit_requirement_414x2Bi(participant, plan);
+    then participant_fails_benefit_requirement_414x2Bi_any(plan);
+}
+
+pub relation participant_fails_pay_credit_any_414x2Biii(plan: DefinedBenefitPlan) kind institutional {
+    label en official "helper: some participant fails the pay credit table for a year";
+}
+
+rule ParticipantFailsPayCreditAny414x2Biii(plan: DefinedBenefitPlan, participant: Person, y: TaxableYear) strict {
+    label en official "helper for the plan-level not_known";
+    when participates_in(participant, plan) and participant_fails_pay_credit_414x2Biii(participant, plan, y);
+    then participant_fails_pay_credit_any_414x2Biii(plan);
+}
+
+@source(IRC_S414_X, relation = formalizes, coverage = partial, quote = "the plan shall be treated as meeting the requirements of clause (i) with respect to any plan year if each participant receives a pay credit")
+rule BenefitRequirementsMetByPayCredit414x2Biii(plan: DefinedBenefitPlan, participant: Person, y: TaxableYear) strict {
+    label en official "PARTIAL: an applicable defined benefit plan meeting the interest credit requirements with no failing pay credit is treated as meeting clause (i)";
+    when participates_in(participant, plan)
+        and applicable_defined_benefit_plan_411a13(plan)
+        and interest_credit_requirements_met_411b5Bi_414x2Biii(plan)
+        and pay_credit_percentage_414x2Biii(participant, plan, y, _)
+        and not_known(participant_fails_pay_credit_any_414x2Biii(plan));
+    then benefit_requirements_met_414x2B(plan);
+}
+
+// =====================================================================
+// (5) Automatic contribution arrangement; (2)(C) contribution requirements
+// =====================================================================
+
+pub relation default_election_percentage_414x5Ai(plan: DefinedContributionPlan, pct: Decimal) kind empirical {
+    label en unofficial "each eligible employee is treated as electing this percentage of compensation unless the employee specifically elects otherwise, case-asserted (section 414(x)(5)(A)(i))";
+}
+
+pub relation employees_notified_of_right_to_elect_out_414x5Bii1(plan: DefinedContributionPlan) kind empirical {
+    label en unofficial "each employee to whom the default applies receives a notice explaining the right to elect not to have contributions made or to have them made at a different rate, case-asserted (clause (ii)(I))";
+}
+
+pub relation employees_have_reasonable_period_to_elect_414x5Bii2(plan: DefinedContributionPlan) kind empirical {
+    label en unofficial "each such employee has a reasonable period after receipt of the notice and before the first elective contribution to make the election, case-asserted (clause (ii)(II); evaluative \"reasonable\")";
+}
+
+pub relation annual_notice_of_rights_and_obligations_414x5Biii(plan: DefinedContributionPlan) kind empirical {
+    label en unofficial "each eligible employee is, within a reasonable period before any year, given notice of the employee's rights and obligations, case-asserted (clause (iii); evaluative \"reasonable\")";
+}
+
+pub relation notices_meet_401k12D_content_414x5B(plan: DefinedContributionPlan) kind empirical {
+    label en unofficial "the notices meet the requirements of clauses (i) and (ii) of section 401(k)(12)(D), case-asserted";
+}
+
+pub relation notice_requirements_met_414x5B(plan: DefinedContributionPlan) kind institutional {
+    label en official "section 414(x)(5)(B): the election-period notice and the annual notice requirements, with the section 401(k)(12)(D) content";
+}
+
+@source(IRC_S414_X, relation = formalizes, coverage = exact, quote = "The requirements of this subparagraph are met if the requirements of clauses (ii) and (iii) are met")
+rule NoticeRequirementsMet414x5B(plan: DefinedContributionPlan) strict {
+    label en official "(ii)(I), (ii)(II), (iii) and the 401(k)(12)(D) content together";
+    when employees_notified_of_right_to_elect_out_414x5Bii1(plan)
+        and employees_have_reasonable_period_to_elect_414x5Bii2(plan)
+        and annual_notice_of_rights_and_obligations_414x5Biii(plan)
+        and notices_meet_401k12D_content_414x5B(plan);
+    then notice_requirements_met_414x5B(plan);
+}
+
+pub relation automatic_contribution_arrangement_414x5(plan: DefinedContributionPlan) kind institutional {
+    label en official "section 414(x)(5)(A): a qualified cash or deferred arrangement with a 4 percent default election and the notice requirements";
+}
+
+@source(IRC_S414_X, relation = formalizes, coverage = exact, quote = "in an amount equal to 4 percent of the employee's compensation unless the employee specifically elects not to have such contributions made or to have such contributions made at a different rate")
+rule AutomaticContributionArrangement414x5(plan: DefinedContributionPlan, pct: Decimal) strict {
+    label en official "exact: the default is 4 percent (0.04); (i) and (ii) together, over a qualified cash or deferred arrangement";
+    when coda_maintained(plan)
+        and default_election_percentage_414x5Ai(plan, pct)
+        and pct == 0.04
+        and notice_requirements_met_414x5B(plan);
+    then automatic_contribution_arrangement_414x5(plan);
+}
+
+pub relation employer_matching_contribution_414x2Ci(employee: Person, plan: DefinedContributionPlan, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the matching contribution the employer is required by the plan to make for the employee for the year (nonelective contributions are not counted), case-asserted";
+}
+
+pub relation required_match_414x2Ci(employee: Person, plan: DefinedContributionPlan, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 414(x)(2)(C)(i)(II): 50 percent of the employee's elective contributions to the extent they do not exceed 4 percent of compensation";
+}
+
+@source(IRC_S414_X, relation = formalizes, coverage = exact, quote = "in an amount equal to 50 percent of the elective contributions of the employee to the extent such elective contributions do not exceed 4 percent of compensation")
+rule RequiredMatch414x2Ci(employee: Person, plan: DefinedContributionPlan, y: TaxableYear, elective: Money, comp: Money) strict {
+    label en official "exact: 0.50 x min(elective, 0.04 x compensation)";
+    when elective_contribution_amount(employee, plan, y, elective)
+        and employee_compensation_401k(employee, plan, y, comp);
+    then required_match_414x2Ci(employee, plan, y, min(elective, comp * 0.04) * 0.50);
+}
+
+pub relation employee_below_required_match_414x2Ci(employee: Person, plan: DefinedContributionPlan, y: TaxableYear) kind institutional {
+    label en official "section 414(x)(2)(C)(i)(II): the required matching contribution for the employee is below the 50 percent formula";
+}
+
+@source(IRC_S414_X, relation = formalizes, coverage = exact, quote = "the employer is required to make matching contributions on behalf of each employee eligible to participate in the arrangement")
+rule EmployeeBelowRequiredMatch414x2Ci(employee: Person, plan: DefinedContributionPlan, y: TaxableYear, required: Money, actual: Money) strict {
+    label en official "JUDGMENT CALL: \"equal to\" is read as at least (subclause (D)(ii)(I) allows matching contributions in excess of the required amount); exact boundary: a match equal to the formula is enough";
+    when required_match_414x2Ci(employee, plan, y, required)
+        and employer_matching_contribution_414x2Ci(employee, plan, y, actual)
+        and actual < required;
+    then employee_below_required_match_414x2Ci(employee, plan, y);
+}
+
+pub relation any_employee_below_required_match_414x2Ci(plan: DefinedContributionPlan) kind institutional {
+    label en official "helper: some employee's required match is below the formula";
+}
+
+rule AnyEmployeeBelowRequiredMatch414x2Ci(plan: DefinedContributionPlan, employee: Person, y: TaxableYear) strict {
+    label en official "helper for the plan-level not_known";
+    when participates_in(employee, plan) and employee_below_required_match_414x2Ci(employee, plan, y);
+    then any_employee_below_required_match_414x2Ci(plan);
+}
+
+pub relation matching_formula_verified_414x2Ci(plan: DefinedContributionPlan) kind empirical {
+    label en unofficial "the plan's matching formula has been evaluated against the roster (at least one employee's required and actual match are on record), case-asserted";
+}
+
+pub relation contribution_requirements_met_414x2C(plan: DefinedContributionPlan) kind institutional {
+    label en official "section 414(x)(2)(C): the arrangement is an automatic contribution arrangement and no employee's match is below the 50 percent formula on the first 4 percent";
+}
+
+@source(IRC_S414_X, relation = formalizes, coverage = exact, quote = "The contribution requirements of this subparagraph with respect to any applicable defined contribution plan forming part of an eligible combined plan are met if")
+rule ContributionRequirementsMet414x2C(plan: DefinedContributionPlan) strict {
+    label en official "(I) and (II); nonelective contributions are not counted toward (II) and do not defeat the requirement (clause (ii))";
+    when applicable_defined_contribution_plan_414x7(plan)
+        and automatic_contribution_arrangement_414x5(plan)
+        and matching_formula_verified_414x2Ci(plan)
+        and not_known(any_employee_below_required_match_414x2Ci(plan));
+    then contribution_requirements_met_414x2C(plan);
+}
+
+pub relation nonelective_contribution_made_414x2Cii(plan: DefinedContributionPlan) kind empirical {
+    label en unofficial "the employer makes nonelective contributions under the plan, case-asserted";
+}
+
+pub relation nonelective_contributions_do_not_defeat_or_count_414x2Cii(plan: DefinedContributionPlan) kind institutional {
+    label en official "section 414(x)(2)(C)(ii): nonelective contributions do not cause a failure of clause (i) and are not taken into account for its (II)";
+}
+
+@source(IRC_S414_X, relation = formalizes, coverage = exact, quote = "shall not be treated as failing to meet the requirements of clause (i) because the employer makes nonelective contributions under the plan but such contributions shall not be taken into account in determining whether the requirements of clause (i)(II) are met")
+rule NonelectiveContributionsNeutral414x2Cii(plan: DefinedContributionPlan) strict {
+    label en official "neutral: no effect on the requirement, and excluded from the match comparison (only employer_matching_contribution_414x2Ci counts)";
+    when nonelective_contribution_made_414x2Cii(plan) and applicable_defined_contribution_plan_414x7(plan);
+    then nonelective_contributions_do_not_defeat_or_count_414x2Cii(plan);
+}
+
+// =====================================================================
+// (2)(D) Vesting; (2)(E) uniformity; (2)(F) Social Security and other plans
+// =====================================================================
+
+pub relation employee_years_of_service_and_db_vested_414x2Di(employee: Person, plan: DefinedBenefitPlan, years: Integer, pct: Decimal) kind empirical {
+    label en unofficial "the employee's years of service and the percentage of the accrued benefit derived from employer contributions that is nonforfeitable, case-asserted (clause (i))";
+}
+
+pub relation employee_fails_db_vesting_414x2Di(employee: Person, plan: DefinedBenefitPlan) kind institutional {
+    label en official "section 414(x)(2)(D)(i): an employee with at least 3 years of service is not 100 percent vested in the accrued benefit";
+}
+
+@source(IRC_S414_X, relation = formalizes, coverage = exact, quote = "an employee who has completed at least 3 years of service has a nonforfeitable right to 100 percent of the employee's accrued benefit under the plan derived from employer contributions")
+rule EmployeeFailsDbVesting414x2Di(employee: Person, plan: DefinedBenefitPlan, years: Integer, pct: Decimal) strict {
+    label en official "exact boundary: 3 years is included; a percentage below 1.00 fails";
+    when employee_years_of_service_and_db_vested_414x2Di(employee, plan, years, pct) and years >= 3 and pct < 1.00;
+    then employee_fails_db_vesting_414x2Di(employee, plan);
+}
+
+pub relation employee_matching_contribution_vested_pct_414x2Diii(employee: Person, plan: DefinedContributionPlan, pct: Decimal) kind empirical {
+    label en unofficial "the percentage of matching contributions to which the employee has a nonforfeitable right, case-asserted (clause (ii)(I))";
+}
+
+pub relation employee_fails_matching_vesting_414x2Dii1(employee: Person, plan: DefinedContributionPlan) kind institutional {
+    label en official "section 414(x)(2)(D)(ii)(I): the employee is not fully vested in matching contributions";
+}
+
+@source(IRC_S414_X, relation = formalizes, coverage = exact, quote = "an employee has a nonforfeitable right to any matching contribution made under the qualified cash or deferred arrangement")
+rule EmployeeFailsMatchingVesting414x2Dii1(employee: Person, plan: DefinedContributionPlan, pct: Decimal) strict {
+    label en official "immediate vesting: any percentage below 1.00 fails";
+    when employee_matching_contribution_vested_pct_414x2Diii(employee, plan, pct) and pct < 1.00;
+    then employee_fails_matching_vesting_414x2Dii1(employee, plan);
+}
+
+pub relation employee_years_of_service_and_nonelective_vested_414x2Dii2(employee: Person, plan: DefinedContributionPlan, years: Integer, pct: Decimal) kind empirical {
+    label en unofficial "the employee's years of service and the percentage of the accrued benefit derived from nonelective contributions that is nonforfeitable, case-asserted (clause (ii)(II))";
+}
+
+pub relation employee_fails_nonelective_vesting_414x2Dii2(employee: Person, plan: DefinedContributionPlan) kind institutional {
+    label en official "section 414(x)(2)(D)(ii)(II): an employee with at least 3 years of service is not 100 percent vested in nonelective contributions";
+}
+
+@source(IRC_S414_X, relation = formalizes, coverage = exact, quote = "an employee who has completed at least 3 years of service has a nonforfeitable right to 100 percent of the employee's accrued benefit derived under the arrangement from nonelective contributions of the employer")
+rule EmployeeFailsNonelectiveVesting414x2Dii2(employee: Person, plan: DefinedContributionPlan, years: Integer, pct: Decimal) strict {
+    label en official "exact boundary: 3 years is included";
+    when employee_years_of_service_and_nonelective_vested_414x2Dii2(employee, plan, years, pct) and years >= 3 and pct < 1.00;
+    then employee_fails_nonelective_vesting_414x2Dii2(employee, plan);
+}
+
+pub relation any_vesting_failure_db_414x2D(plan: DefinedBenefitPlan) kind institutional {
+    label en official "helper: some employee fails the defined benefit vesting rule";
+}
+
+rule AnyVestingFailureDb414x2D(plan: DefinedBenefitPlan, employee: Person) strict {
+    label en official "helper for the plan-level not_known";
+    when participates_in(employee, plan) and employee_fails_db_vesting_414x2Di(employee, plan);
+    then any_vesting_failure_db_414x2D(plan);
+}
+
+pub relation any_vesting_failure_dc_414x2D(plan: DefinedContributionPlan) kind institutional {
+    label en official "helper: some employee fails the matching or nonelective vesting rule";
+}
+
+rule AnyVestingFailureDcMatching414x2D(plan: DefinedContributionPlan, employee: Person) strict {
+    label en official "helper for the plan-level not_known: matching";
+    when participates_in(employee, plan) and employee_fails_matching_vesting_414x2Dii1(employee, plan);
+    then any_vesting_failure_dc_414x2D(plan);
+}
+
+rule AnyVestingFailureDcNonelective414x2D(plan: DefinedContributionPlan, employee: Person) strict {
+    label en official "helper for the plan-level not_known: nonelective";
+    when participates_in(employee, plan) and employee_fails_nonelective_vesting_414x2Dii2(employee, plan);
+    then any_vesting_failure_dc_414x2D(plan);
+}
+
+pub relation vesting_requirements_met_414x2D(db: DefinedBenefitPlan, dc: DefinedContributionPlan) kind institutional {
+    label en official "section 414(x)(2)(D): 3-year cliff for the defined benefit plan and for nonelective contributions, immediate vesting of matching contributions";
+}
+
+@source(IRC_S414_X, relation = formalizes, coverage = exact, quote = "The vesting requirements of this subparagraph are met if")
+rule VestingRequirementsMet414x2D(db: DefinedBenefitPlan, dc: DefinedContributionPlan, combined: Plan) strict {
+    label en official "(i), (ii)(I) and (ii)(II) for the two parts of one combined plan (a scenario asserts at least the parts; the failing employees are read through not_known)";
+    when combined_plan_parts_414x(combined, db, dc)
+        and not_known(any_vesting_failure_db_414x2D(db))
+        and not_known(any_vesting_failure_dc_414x2D(dc));
+    then vesting_requirements_met_414x2D(db, dc);
+}
+
+pub relation contributions_benefits_rights_features_provided_uniformly_414x2E(plan: Plan) kind empirical {
+    label en unofficial "all contributions and benefits, and all rights and features, under the plan must be provided uniformly to all participants, case-asserted";
+}
+
+pub relation uniformity_requirement_met_414x2E(db: DefinedBenefitPlan, dc: DefinedContributionPlan) kind institutional {
+    label en official "section 414(x)(2)(E): uniform provision for both parts";
+}
+
+@source(IRC_S414_X, relation = formalizes, coverage = exact, quote = "the requirements of this subparagraph are met if all contributions and benefits under each such plan, and all rights and features under each such plan, must be provided uniformly to all participants")
+rule UniformityRequirementMet414x2E(db: DefinedBenefitPlan, dc: DefinedContributionPlan, combined: Plan) strict {
+    label en official "both parts";
+    when combined_plan_parts_414x(combined, db, dc)
+        and contributions_benefits_rights_features_provided_uniformly_414x2E(db)
+        and contributions_benefits_rights_features_provided_uniformly_414x2E(dc);
+    then uniformity_requirement_met_414x2E(db, dc);
+}
+
+pub relation combined_plan_uses_401l_integration_414x2F(combined: Plan) kind empirical {
+    label en unofficial "the requirements of subparagraphs (B), (C) or sections 401(a)(4), 410(b) are met only by taking section 401(l) (social security integration) into account, case-asserted";
+}
+
+pub relation meets_401a4_and_410b_without_401l_414x2Fii2(plan: Plan) kind empirical {
+    label en unofficial "the plan meets the requirements of sections 401(a)(4) and 410(b) without regard to section 401(l), case-asserted (clause (ii)(II))";
+}
+
+pub relation meets_401a4_and_410b_without_other_plans_414x2Fiii(plan: Plan) kind empirical {
+    label en unofficial "the plan meets the requirements of sections 401(a)(4) and 410(b) without being combined with any other plan, case-asserted (clause (iii))";
+}
+
+pub relation social_security_requirement_met_414x2Fii(combined: Plan) kind institutional {
+    label en official "section 414(x)(2)(F)(ii): (B) and (C) are met without regard to section 401(l), and sections 401(a)(4) and 410(b) are met for both parts without regard to section 401(l)";
+}
+
+@source(IRC_S414_X, relation = formalizes, coverage = exact, quote = "the requirements of subparagraphs (B) and (C) are met without regard to section 401(l)")
+rule SocialSecurityRequirementMet414x2Fii(combined: Plan, db: DefinedBenefitPlan, dc: DefinedContributionPlan) strict {
+    label en official "(I) and (II)";
+    when combined_plan_parts_414x(combined, db, dc)
+        and benefit_requirements_met_414x2B(db)
+        and contribution_requirements_met_414x2C(dc)
+        and not_known(combined_plan_uses_401l_integration_414x2F(combined))
+        and meets_401a4_and_410b_without_401l_414x2Fii2(db)
+        and meets_401a4_and_410b_without_401l_414x2Fii2(dc);
+    then social_security_requirement_met_414x2Fii(combined);
+}
+
+pub relation other_plans_requirement_met_414x2Fiii(combined: Plan) kind institutional {
+    label en official "section 414(x)(2)(F)(iii): both parts meet sections 401(a)(4) and 410(b) without being combined with any other plan";
+}
+
+@source(IRC_S414_X, relation = formalizes, coverage = exact, quote = "meet the requirements of sections 401(a)(4) and 410(b) without being combined with any other plan")
+rule OtherPlansRequirementMet414x2Fiii(combined: Plan, db: DefinedBenefitPlan, dc: DefinedContributionPlan) strict {
+    label en official "both parts";
+    when combined_plan_parts_414x(combined, db, dc)
+        and meets_401a4_and_410b_without_other_plans_414x2Fiii(db)
+        and meets_401a4_and_410b_without_other_plans_414x2Fiii(dc);
+    then other_plans_requirement_met_414x2Fiii(combined);
+}
+
+pub relation requirements_f_met_414x2Fi(combined: Plan) kind institutional {
+    label en official "section 414(x)(2)(F)(i): the requirements of clauses (ii) and (iii) are met";
+}
+
+@source(IRC_S414_X, relation = formalizes, coverage = exact, quote = "The requirements of this subparagraph are met if the requirements of clauses (ii) and (iii) are met")
+rule RequirementsFMet414x2Fi(combined: Plan) strict {
+    label en official "(ii) and (iii)";
+    when social_security_requirement_met_414x2Fii(combined) and other_plans_requirement_met_414x2Fiii(combined);
+    then requirements_f_met_414x2Fi(combined);
+}
+
+// =====================================================================
+// (2)(A) Eligible combined plan; consequences (1), (3), (4), (6)
+// =====================================================================
+
+pub relation single_trust_with_allocated_assets_414x2Aiii(combined: Plan) kind empirical {
+    label en unofficial "the assets are held in a single trust forming part of the plan and are clearly identified and allocated to the defined benefit plan and the applicable defined contribution plan to the extent necessary for separate application of the title, case-asserted (clause (iii))";
+}
+
+pub relation eligible_combined_plan_414x2A(combined: Plan) kind institutional {
+    label en official "section 414(x)(2)(A): a plan maintained by a small employer at its establishment, consisting of a defined benefit plan and an applicable defined contribution plan, with a single trust and the benefit, contribution, vesting, uniformity and Social Security/other-plans requirements met";
+}
+
+@source(IRC_S414_X, relation = formalizes, coverage = exact, quote = "The term \"eligible combined plan\" means a plan")
+rule EligibleCombinedPlan414x2A(combined: Plan, db: DefinedBenefitPlan, dc: DefinedContributionPlan, employer: Person) strict {
+    label en official "clauses (i)-(iv) together";
+    when employer_of_combined_plan_414x2Ai(combined, employer)
+        and small_employer_414x2A(employer)
+        and combined_plan_parts_414x(combined, db, dc)
+        and applicable_defined_contribution_plan_414x7(dc)
+        and single_trust_with_allocated_assets_414x2Aiii(combined)
+        and benefit_requirements_met_414x2B(db)
+        and contribution_requirements_met_414x2C(dc)
+        and vesting_requirements_met_414x2D(db, dc)
+        and uniformity_requirement_met_414x2E(db, dc)
+        and requirements_f_met_414x2Fi(combined);
+    then eligible_combined_plan_414x2A(combined);
+}
+
+pub relation part_applied_as_separate_plan_414x1(combined: Plan, part: Plan) kind institutional {
+    label en official "section 414(x)(1): the requirements of the title apply to each part of an eligible combined plan as if it were not part of it";
+}
+
+@source(IRC_S414_X, relation = formalizes, coverage = exact, quote = "the requirements of this title shall be applied to any defined benefit plan or applicable defined contribution plan which is part of an eligible combined plan in the same manner as if each such plan were not a part of the eligible combined plan")
+rule DbPartAppliedAsSeparatePlan414x1(combined: Plan, db: DefinedBenefitPlan, dc: DefinedContributionPlan) strict {
+    label en official "the defined benefit plan is tested separately";
+    when eligible_combined_plan_414x2A(combined) and combined_plan_parts_414x(combined, db, dc);
+    then part_applied_as_separate_plan_414x1(combined, db);
+}
+
+@source(IRC_S414_X, relation = formalizes, coverage = exact, quote = "the requirements of this title shall be applied to any defined benefit plan or applicable defined contribution plan which is part of an eligible combined plan in the same manner as if each such plan were not a part of the eligible combined plan")
+rule DcPartAppliedAsSeparatePlan414x1(combined: Plan, db: DefinedBenefitPlan, dc: DefinedContributionPlan) strict {
+    label en official "the applicable defined contribution plan is tested separately";
+    when eligible_combined_plan_414x2A(combined) and combined_plan_parts_414x(combined, db, dc);
+    then part_applied_as_separate_plan_414x1(combined, dc);
+}
+
+pub relation combined_plan_terminated_on_414x1(combined: Plan, on: Date) kind empirical {
+    label en unofficial "the date the eligible combined plan (both parts) terminates, case-asserted";
+}
+
+pub relation each_part_terminated_separately_414x1(combined: Plan) kind empirical {
+    label en unofficial "the plan administrator has terminated the defined benefit plan and the applicable defined contribution plan each separately, case-asserted (goal atom)";
+}
+
+@source(IRC_S414_X, relation = formalizes, coverage = exact, quote = "the plan administrator shall terminate each such plan separately")
+rule TerminateEachPartSeparatelyDuty414x1(combined: Plan, administrator: Person, terminated: Date) strict {
+    label en official "on termination the administrator terminates each part separately; the statute sets no date";
+    when eligible_combined_plan_414x2A(combined)
+        and combined_plan_terminated_on_414x1(combined, terminated)
+        and plan_administrator_of(combined, administrator);
+    then duty TerminateEachPartSeparatelyDuty {
+        bearer administrator;
+        goal achievement {
+            condition each_part_terminated_separately_414x1(combined);
+            window [terminated, infinity];
+        }
+    };
+}
+
+pub relation coda_treated_as_meeting_401k3Aii_414x3A(dc: DefinedContributionPlan) kind institutional {
+    label en official "section 414(x)(3)(A): the qualified cash or deferred arrangement is treated as meeting section 401(k)(3)(A)(ii) when the (2)(C) contribution requirements are met";
+}
+
+@source(IRC_S414_X, relation = formalizes, coverage = exact, quote = "shall be treated as meeting the requirements of section 401(k)(3)(A)(ii) if the requirements of paragraph (2)(C) are met with respect to such arrangement")
+rule CodaTreatedAsMeeting401k3Aii414x3A(combined: Plan, db: DefinedBenefitPlan, dc: DefinedContributionPlan) strict {
+    label en official "only in an applicable defined contribution plan forming part of an eligible combined plan";
+    when eligible_combined_plan_414x2A(combined)
+        and combined_plan_parts_414x(combined, db, dc)
+        and contribution_requirements_met_414x2C(dc);
+    then coda_treated_as_meeting_401k3Aii_414x3A(dc);
+}
+
+pub relation match_treated_as_meeting_401m11_414x3B(dc: DefinedContributionPlan) kind institutional {
+    label en official "section 414(x)(3)(B): for section 401(m)(11), the (2)(C) contribution requirement and the (5)(B) notice requirements are substituted for the requirements of 401(m)(11)(A)(i) and (ii)";
+}
+
+@source(IRC_S414_X, relation = formalizes, coverage = exact, quote = "the contribution requirement of paragraph (2)(C) and the notice requirements of paragraph (5)(B) shall be substituted for the requirements otherwise applicable under clauses (i) and (ii) of section 401(m)(11)(A)")
+rule MatchTreatedAsMeeting401m11414x3B(dc: DefinedContributionPlan) strict {
+    label en official "the substituted requirements are (2)(C) and (5)(B)";
+    when contribution_requirements_met_414x2C(dc) and notice_requirements_met_414x5B(dc);
+    then match_treated_as_meeting_401m11_414x3B(dc);
+}
+
+pub relation plan_year_of_combined_plan_414x4(combined: Plan, y: TaxableYear) kind empirical {
+    label en unofficial "the plan year for which the top-heavy treatment is asked, case-asserted";
+}
+
+pub relation part_treated_as_meeting_416_414x4(combined: Plan, part: Plan, y: TaxableYear) kind institutional {
+    label en official "section 414(x)(4): the defined benefit plan and the applicable defined contribution plan forming part of an eligible combined plan are treated as meeting section 416 for the plan year";
+}
+
+@source(IRC_S414_X, relation = formalizes, coverage = exact, quote = "shall be treated as meeting the requirements of section 416 for the plan year")
+rule PartTreatedAsMeeting416Db414x4(combined: Plan, db: DefinedBenefitPlan, dc: DefinedContributionPlan, y: TaxableYear) strict {
+    label en official "the defined benefit plan";
+    when eligible_combined_plan_414x2A(combined)
+        and combined_plan_parts_414x(combined, db, dc)
+        and plan_year_of_combined_plan_414x4(combined, y);
+    then part_treated_as_meeting_416_414x4(combined, db, y);
+}
+
+@source(IRC_S414_X, relation = formalizes, coverage = exact, quote = "shall be treated as meeting the requirements of section 416 for the plan year")
+rule PartTreatedAsMeeting416Dc414x4(combined: Plan, db: DefinedBenefitPlan, dc: DefinedContributionPlan, y: TaxableYear) strict {
+    label en official "the applicable defined contribution plan";
+    when eligible_combined_plan_414x2A(combined)
+        and combined_plan_parts_414x(combined, db, dc)
+        and plan_year_of_combined_plan_414x4(combined, y);
+    then part_treated_as_meeting_416_414x4(combined, dc, y);
+}
+
+pub relation section_414k_inapplicable_414x6A(combined: Plan) kind institutional {
+    label en official "section 414(x)(6)(A): section 414(k) does not apply to an eligible combined plan";
+}
+
+@source(IRC_S414_X, relation = formalizes, coverage = exact, quote = "Section 414(k) shall not apply to an eligible combined plan")
+rule Section414kInapplicable414x6A(combined: Plan) strict {
+    label en official "for an eligible combined plan";
+    when eligible_combined_plan_414x2A(combined);
+    then section_414k_inapplicable_414x6A(combined);
+}
+
+pub relation treated_as_single_plan_for_6058_6059_414x6B(combined: Plan) kind institutional {
+    label en official "section 414(x)(6)(B): an eligible combined plan is treated as a single plan for purposes of sections 6058 and 6059";
+}
+
+@source(IRC_S414_X, relation = formalizes, coverage = exact, quote = "An eligible combined plan shall be treated as a single plan for purposes of sections 6058 and 6059")
+rule TreatedAsSinglePlanForReporting414x6B(combined: Plan) strict {
+    label en official "for an eligible combined plan";
+    when eligible_combined_plan_414x2A(combined);
+    then treated_as_single_plan_for_6058_6059_414x6B(combined);
+}

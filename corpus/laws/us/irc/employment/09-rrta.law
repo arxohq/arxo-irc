@@ -1,0 +1,603 @@
+// Chapter 22 (Railroad Retirement Tax Act), sections 3201, 3202, 3211, 3221,
+// 3231, 3241. Stage 2 scope (task instruction): tier 1 tax on employee
+// compensation using the section 3101 rates up to the tier 1 base, tier 2
+// tax by the section 3241 average-account-benefits-ratio table (an actual
+// `.lawtable.json` decision table transcribed from the pinned section
+// 3241(b) table, not invented), section 3211 employee representatives,
+// section 3221 employer tier 1/2, section 3231 definitions (employer,
+// employee, compensation with the (e) exclusions).
+//
+// RRTA reuses this package's `WagePayment` entity and `wage_payment` case
+// fact for a payment of "compensation" (the RRTA analogue of "wages"): both
+// are a payer-to-payee dated Money amount for a taxable year, and section
+// 3231(e)(1)'s own text tracks section 3121(a) closely enough (sickness/
+// accident plan payments, travel-expense reimbursement, group-term life
+// insurance, section 3121(v) deferred compensation) that introducing a
+// second payment entity would duplicate rather than clarify. Nothing in
+// this file asserts that a `WagePayment` IS FICA/FUTA wages merely because
+// it is also asserted as RRTA compensation, or vice versa — the two
+// classifications (`wages_3121`/`futa_wages` vs `rrta_compensation`) are
+// derived independently from separate case facts on the same payment.
+
+// `Person`, `TaxableYear`, `Organ`, `Secretary`, `WagePayment` and
+// `wage_payment` are package-level symbols already declared in
+// `01-fica-tax.law` (one namespace across this package's files); not
+// redeclared here to avoid a duplicate-symbol error.
+
+use self::{
+    IRC_S3201_A,
+    IRC_S3201_B,
+    IRC_S3202_A,
+    IRC_S3202_B,
+    IRC_S3202_C,
+    IRC_S3202_D,
+    IRC_S3211_A,
+    IRC_S3211_B,
+    IRC_S3221_A,
+    IRC_S3221_B,
+    IRC_S3231_A,
+    IRC_S3231_B,
+    IRC_S3231_C,
+    IRC_S3231_E,
+    IRC_S3231_H,
+    IRC_S3231_I,
+    IRC_S3241_C,
+    Person,
+    Secretary,
+    TaxableYear,
+    WagePayment,
+    contribution_and_benefit_base,
+    prior_remuneration_paid,
+    regulations_provide_otherwise_for_third_party_employer,
+    remuneration_disbursed_by,
+    rrta_group_term_life_deduction_duty_displaced,
+    rrta_tip_payment,
+    wage_payment,
+};
+
+// --- Section 3231(a): employer -----------------------------------------------
+//
+// Two alternative qualifying tests (rail carrier itself, or a company
+// controlled by/under common control with one or more carriers performing a
+// qualifying rail-transportation-connected service) plus the railway-labor-
+// organization limb; the electric-railway carve-out and the coal-mining
+// carve-out are each a positive exception predicate under `unless` (section
+// 3231(a)'s own "except that" and "shall not include" clauses), not a
+// silent qualifier folded into the main test.
+pub enum RrtaEmployerBasis {
+    Carrier;                    // the carrier itself, section 3231(g)
+    ControlledRailroadCompany;  // company owned/controlled by/with a carrier, performing a qualifying service
+    RailwayLaborOrganization;   // national railway labor organization and its named subordinate bodies
+    RailroadAssociationOrBureau; // association/traffic bureau/etc. controlled by two or more section 3231(a) employers
+}
+
+relation carrier_3231g(p: Person) kind empirical {
+    label en unofficial "this person is a rail carrier subject to 49 U.S.C. part A, subtitle IV (section 3231(g), case fact)";
+}
+relation controlled_railroad_company_service(p: Person) kind empirical {
+    label en unofficial "this company is owned or controlled by, or under common control with, one or more carriers, and performs a service in connection with rail transportation (or the receipt, delivery, elevation, transfer, refrigeration, storage or handling of property transported by railroad) other than trucking service, casual service, or casual equipment operation (case fact)";
+}
+relation railway_labor_organization_national(p: Person) kind empirical {
+    label en unofficial "national railway labor organization (or its State/national legislative committee, general committee, insurance department, local lodge or division) organized under the Railway Labor Act (case fact)";
+}
+relation railroad_association_or_bureau(p: Person) kind empirical {
+    label en unofficial "railroad association, traffic association, tariff bureau, demurrage bureau, weighing/inspection bureau, collection agency or similar body controlled and maintained wholly or principally by two or more section 3231(a) employers (case fact)";
+}
+relation electric_railway_not_general_system(p: Person) kind empirical {
+    label en unofficial "street, interurban, or suburban electric railway NOT operating as part of a general steam-railroad system of transportation — section 3231(a) exception (case fact)";
+}
+relation coal_mining_only_activity(p: Person) kind empirical {
+    label en unofficial "this company's only qualifying activity is coal mining, supplying coal to an employer with delivery not beyond the mine tipple, or operating equipment/facilities for those activities — section 3231(a) exception (case fact)";
+}
+
+@source(IRC_S3231_A, relation = formalizes, coverage = partial, quote = "the term \"employer\" means any carrier (as defined in subsection (g)), and any company which is directly or indirectly owned or controlled by one or more such carriers or under common control therewith, and which operates any equipment or facility or performs any service")
+pub relation rrta_employer(p: Person, basis: RrtaEmployerBasis) kind institutional {
+    label en official "this person is an \"employer\" for RRTA purposes under section 3231(a), and under which basis";
+}
+rule RrtaEmployerCarrier(p: Person) defeasible {
+    when carrier_3231g(p);
+    then rrta_employer(p, Carrier);
+    unless electric_railway_not_general_system(p) and carrier_3231g(p);
+}
+rule RrtaEmployerControlledCompany(p: Person) defeasible {
+    when controlled_railroad_company_service(p);
+    then rrta_employer(p, ControlledRailroadCompany);
+    unless electric_railway_not_general_system(p) and controlled_railroad_company_service(p);
+    unless coal_mining_only_activity(p) and controlled_railroad_company_service(p);
+}
+rule RrtaEmployerLaborOrganization(p: Person) strict {
+    when railway_labor_organization_national(p);
+    then rrta_employer(p, RailwayLaborOrganization);
+}
+rule RrtaEmployerAssociationOrBureau(p: Person) strict {
+    when railroad_association_or_bureau(p);
+    then rrta_employer(p, RailroadAssociationOrBureau);
+}
+
+// --- Section 3231(b): employee -----------------------------------------------
+
+relation individual_in_service_of_employer_for_compensation(p: Person, employer: Person) kind empirical {
+    label en unofficial "this individual is in the service of a section 3231(a) employer for compensation (section 3231(d)'s own control/integration test is not separately re-derived here: TECH_GAP, see coverage note on section 3231(d))";
+}
+relation coal_mine_physical_operations_only(p: Person) kind empirical {
+    label en unofficial "this individual, while performing the service at issue, is engaged in the physical operations of coal mining, coal preparation, non-rail handling of coal not beyond the tipple, or loading coal at the tipple — section 3231(b) exception (case fact)";
+}
+
+@source(IRC_S3231_B, relation = formalizes, coverage = partial, quote = "the term \"employee\" means any individual in the service of one or more employers for compensation. The term \"employee\" includes an officer of an employer.")
+pub relation rrta_employee(p: Person, employer: Person) kind institutional {
+    label en official "this individual is an \"employee\" of this employer within the meaning of section 3231(b)";
+}
+rule RrtaEmployee(p: Person, employer: Person) defeasible {
+    when individual_in_service_of_employer_for_compensation(p, employer);
+    then rrta_employee(p, employer);
+    unless coal_mine_physical_operations_only(p) and individual_in_service_of_employer_for_compensation(p, employer);
+}
+
+// --- Section 3231(c): employee representative -------------------------------
+
+relation railway_labor_org_officer_or_representative(p: Person, org: Person) kind empirical {
+    label en unofficial "this individual is an officer or official representative of a railway labor organization (other than one itself included in the section 3231(a) \"employer\" definition), duly authorized and designated under the Railway Labor Act to represent employees, or is regularly assigned to or employed by such an officer in connection with the duties of that office (case fact)";
+}
+
+@source(IRC_S3231_C, relation = formalizes, coverage = partial, quote = "the term \"employee representative\" means any officer or official representative of a railway labor organization")
+pub relation rrta_employee_representative(p: Person, org: Person) kind institutional {
+    label en official "this individual is an \"employee representative\" within the meaning of section 3231(c)";
+}
+rule RrtaEmployeeRepresentative(p: Person, org: Person) strict {
+    when railway_labor_org_officer_or_representative(p, org);
+    then rrta_employee_representative(p, org);
+}
+
+// --- Section 3231(e)(1): compensation, and its exclusion list --------------
+//
+// The general rule (money remuneration for services rendered as an employee)
+// with the exclusions the pinned text states explicitly enough to formalize
+// without inventing a sub-test: (i) an employer plan/system sickness-
+// accident-disability/medical/death payment (mirrors section 3121(a)(2));
+// (iii) a separately identified travel/business expense advance,
+// reimbursement or allowance; the nonresident-alien F/J/M/Q visa carve-out
+// (mirrors section 3121(b)(19)); and clause (iv)'s cross-reference to
+// section 3121(a)(5) (retirement/disability trust payments). Clause (ii)
+// (tips) is handled by the separate paragraph (3)/(h) tip rules below, not
+// duplicated here. Paragraphs (2)(land tie to the wage base, below),
+// (4)-(6), (8)-(12) (workmen's-comp/RUIA sickness substitution, fringe-
+// benefit and deferred-compensation carve-outs) are TECH_GAP: each tracks
+// an already-formalized section 3121 exclusion closely enough to reuse, but
+// this module does not wire that reuse (see coverage note on section
+// 3231(e)(1) paragraphs 4-12) — a narrower scope than section 3306(b)'s
+// reuse of section 3121(a) in `08-futa.law`, recorded honestly rather than
+// silently assumed identical.
+pub enum RrtaCompensationExclusionKind {
+    SicknessOrDeathPlanPayment;      // (1)(i)
+    IdentifiedTravelOrBusinessExpense; // (1)(iii)
+    NonresidentAlienFJMQVisa;        // (1) second sentence
+    RetirementOrDisabilityTrustPayment; // (1)(iv) — section 3121(a)(5) cross-reference
+    WorkersCompensationPayment;      // (4)(A)(i) — narrows the sickness-payment exclusion to workmen's-comp payments
+    RailroadRetirementAct1974Benefit; // (4)(A)(ii) — narrows the sickness-payment exclusion to RRA 1974 benefits
+    FringeBenefitExclusion;          // (5) — mirrors section 3121(a)(20): section 74(c)/108(f)(4)/117/132
+    CafeteriaPlanExclusion;          // (6) — mirrors section 3121(a)(18): section 127
+    MealsOrLodgingExclusion;         // (9) — mirrors section 3121(a)(19): section 119
+    ArcherMsaExclusion;              // (10) — section 106(b)
+    HsaExclusion;                    // (11) — section 106(d)
+    QualifiedStockOptionExclusion;   // (12) — incentive stock options / ESPP stock, and its disposition
+    DeferredCompensationExclusion;   // (8) — cross-reference to section 3121(v), beyond paragraph (2)'s own base cap
+}
+pub relation rrta_compensation_exclusion_item(pay: WagePayment, kind: RrtaCompensationExclusionKind, amount: Money) kind empirical {
+    label en official "an item excluded from compensation under section 3231(e)(1), asserted by the case with the excluded amount";
+}
+relation rrta_compensation_partly_excluded(pay: WagePayment) kind institutional;
+rule RrtaCompensationPartlyExcluded(pay: WagePayment, kind: RrtaCompensationExclusionKind, amount: Money) strict {
+    when rrta_compensation_exclusion_item(pay, kind, amount);
+    then rrta_compensation_partly_excluded(pay);
+}
+pub relation rrta_compensation_exclusion_total(pay: WagePayment, amount: Money) kind institutional;
+rule RrtaCompensationExclusionTotal(pay0: WagePayment, kind0: RrtaCompensationExclusionKind, amount0: Money) strict {
+    when rrta_compensation_exclusion_item(pay0, kind0, amount0);
+    then rrta_compensation_exclusion_total(pay0,
+        sum all amount: Money for kind: RrtaCompensationExclusionKind where rrta_compensation_exclusion_item(pay0, kind, amount));
+}
+
+@source(IRC_S3231_E, relation = formalizes, coverage = partial, quote = "The term \"compensation\" means any form of money remuneration paid to an individual for services rendered as an employee to one or more employers.")
+pub relation rrta_compensation(pay: WagePayment, amount: Money) kind institutional {
+    label en official "the amount of a payment that is \"compensation\" within the meaning of section 3231(e)(1), before the section 3231(e)(2) applicable-base cap";
+}
+rule RrtaCompensationNoExclusion(pay: WagePayment, employer: Person, employee: Person, y: TaxableYear, amount: Money) strict {
+    when wage_payment(pay, employer, employee, y, amount, _) and not_known(rrta_compensation_partly_excluded(pay));
+    then rrta_compensation(pay, amount);
+}
+rule RrtaCompensationWithExclusion(pay: WagePayment, employer: Person, employee: Person, y: TaxableYear, gross: Money, excluded: Money) strict {
+    when wage_payment(pay, employer, employee, y, gross, _) and rrta_compensation_exclusion_total(pay, excluded) and gross > excluded;
+    then rrta_compensation(pay, gross - excluded);
+}
+
+// (e)(3)/(h): cash tips are compensation only if $20 or more in the month,
+// and are deemed paid at the section 6053(a) statement date (mirrors
+// section 3121(q)/3202(c), a $20 threshold rather than the FICA tip rule's
+// unconditional inclusion — a DIFFERENT test, not reused wholesale).
+pub relation rrta_tip_reported(pay: WagePayment, amount: Money, monthAmount: Money, on: Date) kind empirical {
+    label en official "cash tips reported by the employee for a calendar month under section 6053(a), with the total tips reported for that month (case fact, feeding the section 3231(e)(3) $20 floor)";
+}
+@source(IRC_S3231_E, relation = formalizes, coverage = partial, quote = "the term \"compensation\" also includes cash tips received by an employee in any calendar month in the course of his employment by an employer unless the amount of such cash tips is less than $20")
+rule RrtaTipsAreCompensation(pay: WagePayment, amount: Money, monthAmount: Money, on: Date) strict {
+    when rrta_tip_reported(pay, amount, monthAmount, on) and monthAmount >= 20.00 USD;
+    then rrta_compensation_tip_addition(pay, amount);
+}
+pub relation rrta_compensation_tip_addition(pay: WagePayment, amount: Money) kind institutional {
+    label en official "cash tips added to compensation under section 3231(e)(3) because the calendar month's reported total was not less than $20";
+}
+// tips under $20 for the month: no rule fires — absence of a derivation,
+// not an asserted negative (section 67 reading), matching the "closed
+// exclusion list" convention used throughout this package.
+
+// (4)(B)/(D): RUIA section 2(a) sickness-day benefits are INCLUDED in
+// compensation (not excluded) except to the extent the sickness is the
+// result of an on-the-job injury; the third party paying them (typically
+// the Railroad Retirement Board) is treated as the employer for this
+// compensation, not re-derived beyond the case-asserted classification.
+pub relation ruia_sickness_benefit_payment(pay: WagePayment, amount: Money, onTheJobInjury: Boolean) kind empirical {
+    label en official "a Railroad Unemployment Insurance Act section 2(a) sickness-day benefit payment, and whether the sickness is the result of an on-the-job injury (case fact)";
+}
+pub relation rrta_compensation_ruia_sickness_addition(pay: WagePayment, amount: Money) kind institutional {
+    label en official "section 3231(e)(4)(B): RUIA section 2(a) sickness-day benefits are INCLUDED in compensation, except where the sickness results from an on-the-job injury";
+}
+@source(IRC_S3231_E, relation = formalizes, coverage = partial, quote = "the term \"compensation\" shall include benefits paid under section 2(a) of the Railroad Unemployment Insurance Act for days of sickness")
+rule RuiaSicknessBenefitsAreCompensation(pay: WagePayment, amount: Money) strict {
+    when ruia_sickness_benefit_payment(pay, amount, false);
+    then rrta_compensation_ruia_sickness_addition(pay, amount);
+}
+// on-the-job-injury RUIA sickness benefits: no rule fires (absence of
+// derivation), consistent with the closed-list convention above.
+pub relation ruia_sickness_third_party_treated_as_employer(thirdParty: Person, employee: Person, pay: WagePayment) kind institutional {
+    label en official "section 3231(e)(4)(D): the third party making a RUIA-sickness-benefit payment included in compensation solely by (4)(A)/(B) is treated as the employer with respect to that compensation";
+}
+relation ruia_sickness_paid_by_third_party(thirdParty: Person, employee: Person, pay: WagePayment) kind empirical {
+    label en unofficial "case fact: this third party (not the railroad employer) made the section 3231(e)(4) RUIA-sickness-benefit payment";
+}
+rule RuiaSicknessThirdPartyTreatedAsEmployer(thirdParty: Person, employee: Person, pay: WagePayment, amount: Money) defeasible {
+    when ruia_sickness_paid_by_third_party(thirdParty, employee, pay) and rrta_compensation_ruia_sickness_addition(pay, amount);
+    then ruia_sickness_third_party_treated_as_employer(thirdParty, employee, pay);
+    // stage 3: "except as otherwise provided in regulations prescribed by the Secretary" (section 3231(e)(4)(D))
+    unless regulations_provide_otherwise_for_third_party_employer(thirdParty) and ruia_sickness_paid_by_third_party(thirdParty, employee, pay) and rrta_compensation_ruia_sickness_addition(pay, amount);
+}
+// (4)(C): the section 3121(a)(4)-style 6-month regs cutoff on when (A)/(B)
+// stop applying is TECH_GAP (this package does not derive the 6-month
+// window here, only reuses it descriptively — see the equivalent section
+// 3121(a)(4) cutoff already modelled in `02-fica-definitions.law`).
+
+// (8): deferred compensation cross-reference to section 3121(v) — this
+// package's `NonqualifiedDeferredCompensationTakenIntoAccount` rules in
+// `02-fica-definitions.law` already compute the "later of services performed
+// or no substantial risk of forfeiture" date for FICA; for RRTA compensation
+// the SAME timing rule applies (section 3231(e)(8)(B)), but is not
+// separately re-run over `WagePayment`s asserted as RRTA compensation in
+// this stage — TECH_GAP, recorded via the `DeferredCompensationExclusion`
+// enum member rather than silently reusing the FICA-keyed relation.
+
+// --- Section 3231(e)(2): applicable base (tier 1 / tier 2) -----------------
+//
+// Tier 1 reuses this package's `contribution_and_benefit_base` (already a
+// SOURCE_GAP relation in `01-fica-tax.law`, section 230 Social Security
+// Act) per (e)(2)(B)(i). Tier 2 has its OWN, separately published base
+// (RRB-determined; (e)(2)(B)(ii) disregards the SSA base's own second-
+// sentence adjustment for tier 2): a distinct SOURCE_GAP relation, never
+// defaulted to the tier 1 figure.
+pub relation rrta_tier2_compensation_base(y: TaxableYear, base: Money) kind empirical {
+    label en unofficial "the section 3231(e)(2)(B)(ii) tier 2 compensation base for this calendar year — SOURCE_GAP: published by the Railroad Retirement Board / IRS, not stated in the pinned Title 26 text; never defaulted to the tier 1 contribution-and-benefit base";
+}
+
+pub relation rrta_tier1_taxable_compensation(pay: WagePayment, amount: Money) kind institutional {
+    label en official "compensation subject to RRTA tier 1 tax after the section 3231(e)(2)(B)(i) applicable-base cap (the section 230 Social Security Act contribution and benefit base)";
+}
+rule RrtaTier1TaxableBelowBase(pay: WagePayment, employer: Person, employee: Person, y: TaxableYear, amount: Money, prior: Money, base: Money) strict {
+    when rrta_compensation(pay, amount)
+        and wage_payment(pay, employer, employee, y, amount, _)
+        and prior_remuneration_paid(pay, employer, employee, y, prior)
+        and contribution_and_benefit_base(y, base)
+        and prior + amount <= base;
+    then rrta_tier1_taxable_compensation(pay, amount);
+}
+rule RrtaTier1TaxableCrossingBase(pay: WagePayment, employer: Person, employee: Person, y: TaxableYear, amount: Money, prior: Money, base: Money) strict {
+    when rrta_compensation(pay, amount)
+        and wage_payment(pay, employer, employee, y, amount, _)
+        and prior_remuneration_paid(pay, employer, employee, y, prior)
+        and contribution_and_benefit_base(y, base)
+        and prior < base and prior + amount > base;
+    then rrta_tier1_taxable_compensation(pay, base - prior);
+}
+
+pub relation rrta_tier2_taxable_compensation(pay: WagePayment, amount: Money) kind institutional {
+    label en official "compensation subject to RRTA tier 2 tax after the section 3231(e)(2)(B)(ii) tier 2 base cap";
+}
+rule RrtaTier2TaxableBelowBase(pay: WagePayment, employer: Person, employee: Person, y: TaxableYear, amount: Money, prior: Money, base: Money) strict {
+    when rrta_compensation(pay, amount)
+        and wage_payment(pay, employer, employee, y, amount, _)
+        and prior_remuneration_paid(pay, employer, employee, y, prior)
+        and rrta_tier2_compensation_base(y, base)
+        and prior + amount <= base;
+    then rrta_tier2_taxable_compensation(pay, amount);
+}
+rule RrtaTier2TaxableCrossingBase(pay: WagePayment, employer: Person, employee: Person, y: TaxableYear, amount: Money, prior: Money, base: Money) strict {
+    when rrta_compensation(pay, amount)
+        and wage_payment(pay, employer, employee, y, amount, _)
+        and prior_remuneration_paid(pay, employer, employee, y, prior)
+        and rrta_tier2_compensation_base(y, base)
+        and prior < base and prior + amount > base;
+    then rrta_tier2_taxable_compensation(pay, base - prior);
+}
+
+// --- Section 3241: tier 2 tax rate schedule ---------------------------------
+//
+// The rate itself is a REAL statutory table (section 3241(b), transcribed
+// verbatim into `rrta-tier2-rate-employee.lawtable.json` and
+// `rrta-tier2-rate-employer-and-representative.lawtable.json`), not
+// invented; the INPUT to that table — the average account benefits ratio
+// for a given calendar year — is the SOURCE_GAP (Railroad Retirement Board
+// determination under (c)(1)/(2), published by the Secretary under (d)).
+@source(IRC_S3241_C, relation = formalizes, coverage = partial, quote = "the term \"average account benefits ratio\" means, with respect to any calendar year, the average determined by the Secretary of the account benefits ratios for the 10 most recent fiscal years ending before such calendar year")
+pub relation rrta_average_account_benefits_ratio(y: TaxableYear, ratio: Decimal) kind empirical {
+    label en unofficial "the section 3241(c)(1) average account benefits ratio for this calendar year — SOURCE_GAP: a Railroad Retirement Board/Secretary determination published under section 3241(d), not stated in the pinned Title 26 text";
+}
+
+// §3241(c)(1) arithmetic, as far as it goes: the average of the 10 most
+// recent fiscal-year account-benefits-ratios, rounded UP to the next
+// highest multiple of 0.1 if not already one. The underlying per-fiscal-
+// year ratio itself (fair market value of RRB/NRRIT assets over benefits
+// plus administrative expenses paid, section 3241(c)(2)) remains a
+// SOURCE_GAP case fact — this package does not derive IT from raw asset/
+// expense figures — but GIVEN 10 such case-asserted ratios, the averaging
+// and ceiling-rounding IS real arithmetic, not a further gap.
+pub relation account_benefits_ratio_fiscal_year(y: TaxableYear, yearsBeforeCalendarYear: Integer, ratio: Decimal) kind empirical {
+    label en official "section 3241(c)(2): the account benefits ratio for the fiscal year `yearsBeforeCalendarYear` years before this calendar year (1 = the most recent of the 10) — case fact, SOURCE_GAP for the underlying RRB asset/expense figures";
+}
+pub relation rrta_average_account_benefits_ratio_derived(y: TaxableYear, ratio: Decimal) kind institutional {
+    label en official "section 3241(c)(1): the average of the 10 most recent fiscal-year account benefits ratios, rounded up to the next highest multiple of 0.1 — derived, not case-asserted, whenever all 10 years are given";
+}
+@source(IRC_S3241_C, relation = formalizes, coverage = partial, quote = "If the amount determined under the preceding sentence is not a multiple of 0.1, such amount shall be increased to the next highest multiple of 0.1.")
+rule Section3241CAverageAccountBenefitsRatio(
+    y: TaxableYear,
+    r1: Decimal, r2: Decimal, r3: Decimal, r4: Decimal, r5: Decimal,
+    r6: Decimal, r7: Decimal, r8: Decimal, r9: Decimal, r10: Decimal
+) strict {
+    when account_benefits_ratio_fiscal_year(y, 1, r1)
+        and account_benefits_ratio_fiscal_year(y, 2, r2)
+        and account_benefits_ratio_fiscal_year(y, 3, r3)
+        and account_benefits_ratio_fiscal_year(y, 4, r4)
+        and account_benefits_ratio_fiscal_year(y, 5, r5)
+        and account_benefits_ratio_fiscal_year(y, 6, r6)
+        and account_benefits_ratio_fiscal_year(y, 7, r7)
+        and account_benefits_ratio_fiscal_year(y, 8, r8)
+        and account_benefits_ratio_fiscal_year(y, 9, r9)
+        and account_benefits_ratio_fiscal_year(y, 10, r10);
+    then rrta_average_account_benefits_ratio_derived(y,
+        div_round(r1 + r2 + r3 + r4 + r5 + r6 + r7 + r8 + r9 + r10, 10.0, 1, "CEILING"));
+}
+
+// Bridge: the tier 2 tax rules read ONE resolved ratio, whichever path
+// supplied it — a direct case assertion (the SOURCE_GAP shortcut most
+// scenarios will use) takes priority; the derived 10-year average is used
+// only when no direct assertion is present, so the two paths cannot
+// silently disagree for the same calendar year.
+pub relation rrta_average_account_benefits_ratio_resolved(y: TaxableYear, ratio: Decimal) kind institutional {
+    label en unofficial "the average account benefits ratio actually used for the section 3241(b) table lookup: the direct case assertion if present, else the section 3241(c)(1) 10-year-average derivation";
+}
+relation rrta_average_account_benefits_ratio_asserted_exists(y: TaxableYear) kind institutional;
+rule RrtaAverageAccountBenefitsRatioAssertedExists(y: TaxableYear, ratio: Decimal) strict {
+    when rrta_average_account_benefits_ratio(y, ratio);
+    then rrta_average_account_benefits_ratio_asserted_exists(y);
+}
+rule ResolveRatioFromDirectAssertion(y: TaxableYear, ratio: Decimal) strict {
+    when rrta_average_account_benefits_ratio(y, ratio);
+    then rrta_average_account_benefits_ratio_resolved(y, ratio);
+}
+rule ResolveRatioFromDerivation(y: TaxableYear, ratio: Decimal) strict {
+    when rrta_average_account_benefits_ratio_derived(y, ratio) and not_known(rrta_average_account_benefits_ratio_asserted_exists(y));
+    then rrta_average_account_benefits_ratio_resolved(y, ratio);
+}
+relation rrta_tier2_rate_3201b(ratio: Decimal, rate: Decimal) kind institutional {
+    label en official "section 3241(b) table row for the tax imposed by section 3201(b) (tier 2 employee tax)";
+}
+relation rrta_tier2_rate_3211_3221(ratio: Decimal, rate: Decimal) kind institutional {
+    label en official "section 3241(b) table row for the taxes imposed by sections 3211(b) and 3221(b) (tier 2 employee-representative and employer tax)";
+}
+
+// --- Section 3201: employee tax ---------------------------------------------
+
+pub relation rrta_tier1_tax(payer: Person, pay: WagePayment, amount: Money) kind institutional {
+    label en official "the RRTA tier 1 tax on this compensation payment (section 3201(a) employee, section 3211(a) employee representative, or section 3221(a) employer)";
+}
+pub relation rrta_tier2_tax(payer: Person, pay: WagePayment, amount: Money) kind institutional {
+    label en official "the RRTA tier 2 tax on this compensation payment (section 3201(b) employee, section 3211(b) employee representative, or section 3221(b) employer)";
+}
+
+@source(IRC_S3201_A, relation = formalizes, coverage = exact, quote = "there is hereby imposed on the income of each employee a tax equal to the applicable percentage of the compensation received during any calendar year by such employee")
+rule Section3201Tier1EmployeeTax(employee: Person, pay: WagePayment, amount: Money) defeasible {
+    when rrta_tier1_taxable_compensation(pay, amount) and rrta_employee(employee, _) and wage_payment(pay, _, employee, _, _, _);
+    then rrta_tier1_tax(employee, pay, round(amount * (OasdiEmployeeRate + HiEmployeeRate), 2, "HALF_UP"));
+}
+@source(IRC_S3201_B, relation = formalizes, coverage = exact, quote = "there is hereby imposed on the income of each employee a tax equal to the percentage determined under section 3241 for any calendar year of the compensation received during such calendar year by such employee")
+rule Section3201Tier2EmployeeTax(employee: Person, pay: WagePayment, y: TaxableYear, amount: Money, ratio: Decimal, rate: Decimal) defeasible {
+    when rrta_tier2_taxable_compensation(pay, amount) and rrta_employee(employee, _) and wage_payment(pay, _, employee, y, _, _)
+        and rrta_average_account_benefits_ratio_resolved(y, ratio)
+        and rrta_tier2_rate_3201b(ratio, rate);
+    then rrta_tier2_tax(employee, pay, round(amount * rate, 2, "HALF_UP"));
+}
+
+// --- Section 3211: employee representative tax ------------------------------
+
+@source(IRC_S3211_A, relation = formalizes, coverage = exact, quote = "there is hereby imposed on the income of each employee representative a tax equal to the applicable percentage of the compensation received during any calendar year by such employee representative")
+rule Section3211Tier1RepresentativeTax(rep: Person, org: Person, pay: WagePayment, amount: Money) strict {
+    when rrta_tier1_taxable_compensation(pay, amount) and rrta_employee_representative(rep, org) and wage_payment(pay, _, rep, _, _, _);
+    then rrta_tier1_tax(rep, pay, round(amount * (OasdiEmployeeRate + HiEmployeeRate + OasdiEmployerRate + HiEmployerRate), 2, "HALF_UP"));
+}
+@source(IRC_S3211_B, relation = formalizes, coverage = exact, quote = "there is hereby imposed on the income of each employee representative a tax equal to the percentage determined under section 3241 for any calendar year of the compensation received during such calendar year by such employee representative")
+rule Section3211Tier2RepresentativeTax(rep: Person, org: Person, pay: WagePayment, y: TaxableYear, amount: Money, ratio: Decimal, rate: Decimal) strict {
+    when rrta_tier2_taxable_compensation(pay, amount) and rrta_employee_representative(rep, org) and wage_payment(pay, _, rep, y, _, _)
+        and rrta_average_account_benefits_ratio_resolved(y, ratio)
+        and rrta_tier2_rate_3211_3221(ratio, rate);
+    then rrta_tier2_tax(rep, pay, round(amount * rate, 2, "HALF_UP"));
+}
+
+// --- Section 3221: employer tax ---------------------------------------------
+
+@source(IRC_S3221_A, relation = formalizes, coverage = exact, quote = "there is hereby imposed on every employer an excise tax, with respect to having individuals in his employ, equal to the applicable percentage of compensation paid during any calendar year by such employer for services rendered to such employer")
+rule Section3221Tier1EmployerTax(employer: Person, pay: WagePayment, amount: Money) defeasible {
+    when rrta_tier1_taxable_compensation(pay, amount) and rrta_employer(employer, _) and wage_payment(pay, employer, _, _, _, _);
+    then rrta_tier1_tax(employer, pay, round(amount * (OasdiEmployerRate + HiEmployerRate), 2, "HALF_UP"));
+}
+@source(IRC_S3221_B, relation = formalizes, coverage = exact, quote = "there is hereby imposed on every employer an excise tax, with respect to having individuals in his employ, equal to the percentage determined under section 3241 for any calendar year of the compensation paid during such calendar year by such employer for services rendered to such employer")
+rule Section3221Tier2EmployerTax(employer: Person, pay: WagePayment, y: TaxableYear, amount: Money, ratio: Decimal, rate: Decimal) defeasible {
+    when rrta_tier2_taxable_compensation(pay, amount) and rrta_employer(employer, _) and wage_payment(pay, employer, _, y, _, _)
+        and rrta_average_account_benefits_ratio_resolved(y, ratio)
+        and rrta_tier2_rate_3211_3221(ratio, rate);
+    then rrta_tier2_tax(employer, pay, round(amount * rate, 2, "HALF_UP"));
+}
+
+// --- Section 3202: deduction of tier 1/2 tax from compensation --------------
+//
+// Mirrors section 3403's collection/indemnification pair in
+// `04-income-tax-withholding.law` (same shape: the employer deducts and is
+// liable, and is immune from any claim by the employee for having done so).
+// The section 3202(c) special tip-collection timing and section 3202(d)
+// group-term life insurance carve-out are TECH_GAP (not separately
+// re-derived; see coverage note on section 3202(c)/(d)).
+pub relation rrta_tax_deducted_by_employer(employer: Person, pay: WagePayment, amount: Money) kind empirical {
+    label en unofficial "the employer in fact deducted this amount from this compensation payment (section 3202(a) performance fact)";
+}
+@source(IRC_S3202_A, relation = formalizes, coverage = partial, quote = "The taxes imposed by section 3201 shall be collected by the employer of the taxpayer by deducting the amount of the taxes from the compensation of the employee as and when paid.")
+rule Section3202DutyToDeduct(employer: Person, employee: Person, pay: WagePayment, on: Date, amount: Money) defeasible {
+    when wage_payment(pay, employer, employee, _, _, on) and rrta_tier1_tax(employee, pay, amount);
+    then duty Section3202DeductDuty {
+        bearer employer;
+        beneficiary Secretary;
+        goal achievement {
+            condition rrta_tax_deducted_by_employer(employer, pay, amount);
+            window [on, on];
+        }
+    };
+    // stage 3: section 3202(d)(1)(A) and section 3202(c)(1) (13-fica-rrta-special-rules.law)
+    unless rrta_group_term_life_deduction_duty_displaced(pay) and wage_payment(pay, employer, employee, _, _, on) and rrta_tier1_tax(employee, pay, amount);
+    unless rrta_tip_payment(pay) and wage_payment(pay, employer, employee, _, _, on) and rrta_tier1_tax(employee, pay, amount);
+}
+@source(IRC_S3202_B, relation = formalizes, coverage = exact, quote = "Every employer required under subsection (a) to deduct the tax shall be liable for the payment of such tax and shall not be liable to any person for the amount of any such payment.")
+rule Section3202IndemnificationImmunity(employer: Person, employee: Person, pay: WagePayment, on: Date, amount: Money) strict {
+    when wage_payment(pay, employer, employee, _, _, on) and rrta_tax_deducted_by_employer(employer, pay, amount);
+    then immunity Section3202EmployerIndemnifiedImmunity {
+        holder employer;
+        protected_effect rrta_owes_employee_deducted_amount(employer, employee, pay);
+        window [on, infinity);
+    };
+}
+relation rrta_owes_employee_deducted_amount(employer: Person, employee: Person, pay: WagePayment) kind institutional {
+    label en unofficial "would-be claim of the employee against the employer for the amount lawfully deducted under section 3202(a) — the immunity's protected effect, never itself asserted true by a rule in this package";
+}
+
+// --- Remaining subsections not separately re-derived in this stage ---------
+//
+// Section 3212 (railroad supplemental annuity tax, a fixed cents-per-
+// employee levy): not in this stage's priority list, TECH_GAP/stage 3.
+// Section 3231(f) "company", (g) "carrier" (used above as case-fact
+// predicates rather than a further derived classification), (i) concurrent
+// employment via a common paymaster (mirrors section 3121(s) below): see
+// coverage notes. Section 3232/3233 (further RRTA definitions/regulatory
+// authority): NON_NORMATIVE/institutional, not separately modelled.
+
+// --- Section 3202(c): special rule for tips ----------------------------------
+//
+// Collection of the section 3201 tax on tips is limited to what can be
+// collected from the employee's OTHER (non-tip) compensation under the
+// employer's control, within a 10-day (or 30-day, if the (3) quarterly-
+// estimation election is used) window; any shortfall the employee must
+// remit themselves (paragraph 2), and any tax that still cannot be
+// collected is paid by the employee directly (paragraph 4).
+pub relation rrta_tip_tax_collectible_from_other_compensation(pay: WagePayment, amount: Money) kind empirical {
+    label en official "case fact: the amount of section 3201 tip tax the employer can actually collect from the employee's non-tip compensation under its control within the section 3202(c)(1) window";
+}
+pub relation rrta_tip_tax_owed(pay: WagePayment, amount: Money) kind institutional {
+    label en official "the section 3201 tax attributable to tips for this payment (reuses `rrta_tier1_tax`/`rrta_tier2_tax` computed on the tip-derived compensation addition)";
+}
+pub relation rrta_tip_tax_shortfall(pay: WagePayment, amount: Money) kind institutional {
+    label en official "section 3202(c)(2)/(4): the portion of section 3201 tip tax the employer could not collect from other compensation — the employee may furnish it (c)(2), and if not furnished, the employee pays it directly (c)(4)";
+}
+@source(IRC_S3202_C, relation = formalizes, coverage = partial, quote = "an amount of money equal to the amount of the excess")
+rule Section3202CTipTaxShortfall(pay: WagePayment, owed: Money, collectible: Money) strict {
+    when rrta_tip_tax_owed(pay, owed) and rrta_tip_tax_collectible_from_other_compensation(pay, collectible) and owed > collectible;
+    then rrta_tip_tax_shortfall(pay, owed - collectible);
+}
+// (c)(3) the Secretary's quarterly-estimation-and-adjustment authorization
+// (estimate future tips, deduct as if reported, true up within 30 days) is
+// TECH_GAP: an administrative alternative-timing procedure this package
+// does not derive, only the (c)(1)/(2)/(4) default timing above.
+
+// --- Section 3202(d): special rule for certain taxable group-term life
+//     insurance benefits ------------------------------------------------------
+//
+// For RRTA group-term life insurance coverage provided AFTER the
+// employment relationship ends: section 3202(a) collection does NOT apply;
+// instead the employer separately states the compensation/tax on the
+// section 6051-equivalent statement, and the EMPLOYEE pays the section 3201
+// tax on it directly.
+pub relation rrta_group_term_life_insurance_payment(pay: WagePayment, coverageAfterEmploymentEnds: Boolean) kind empirical {
+    label en official "case fact: this payment is for group-term life insurance compensation, and whether the coverage is for a period after the employment relationship ended (section 3202(d)(2))";
+}
+pub relation rrta_group_term_life_employee_pays_tax(pay: WagePayment, employee: Person) kind institutional {
+    label en official "section 3202(d)(1)(C): the section 3201 tax on this post-employment group-term life insurance compensation is paid by the employee, not collected by the employer under section 3202(a)";
+}
+@source(IRC_S3202_D, relation = formalizes, coverage = partial, quote = "the tax imposed by section 3201 on such payments shall be paid by the employee")
+rule Section3202DGroupTermLifeEmployeePaysTax(pay: WagePayment, employer: Person, employee: Person, on: Date, coverageAfterEmploymentEnds: Boolean) strict {
+    when rrta_group_term_life_insurance_payment(pay, true) and wage_payment(pay, employer, employee, _, _, on);
+    then rrta_group_term_life_employee_pays_tax(pay, employee);
+}
+// the employer's separate-statement duty under (d)(1)(B) (mirrors section
+// 6051) is TECH_GAP — this package does not have a statement/return entity
+// to attach that duty to.
+
+// --- Section 3231(h): tips constituting compensation, time deemed paid -----
+
+pub relation rrta_tip_statement_furnished(pay: WagePayment, on: Date) kind empirical {
+    label en official "case fact: a written statement including these tips was furnished to the employer under section 6053(a) on this date";
+}
+pub relation rrta_tip_deemed_paid_on(pay: WagePayment, on: Date) kind institutional {
+    label en official "section 3231(h): tips constituting section 3201 compensation are deemed paid at the section 6053(a) statement date, or (absent a statement) when actually received";
+}
+@source(IRC_S3231_H, relation = formalizes, coverage = partial, quote = "tips which constitute compensation for purposes of the taxes imposed by section 3201 shall be deemed to be paid at the time a written statement including such tips is furnished to the employer pursuant to section 6053(a)")
+rule Section3231HTipDeemedPaidAtStatementDate(pay: WagePayment, on: Date) strict {
+    when rrta_tip_statement_furnished(pay, on);
+    then rrta_tip_deemed_paid_on(pay, on);
+}
+@source(IRC_S3231_H, relation = formalizes, coverage = partial, quote = "or (if no statement including such tips is so furnished) at the time received")
+rule Section3231HTipDeemedPaidWhenReceivedNoStatement(pay: WagePayment, on: Date) strict {
+    when rrta_tip_reported(pay, _, _, on) and not_known(rrta_tip_statement_furnished_exists(pay));
+    then rrta_tip_deemed_paid_on(pay, on);
+}
+relation rrta_tip_statement_furnished_exists(pay: WagePayment) kind institutional;
+rule RrtaTipStatementFurnishedExists(pay: WagePayment, on: Date) strict {
+    when rrta_tip_statement_furnished(pay, on);
+    then rrta_tip_statement_furnished_exists(pay);
+}
+
+// --- Section 3231(i): concurrent employment by two or more employers,
+//     common paymaster (RRTA) -------------------------------------------------
+//
+// Same shape as section 3121(s) in `02-fica-definitions.law`, but named for
+// its OWN chapter (this subsection affects sections 3201, 3211, and 3221,
+// not sections 3102/3111/3121(a)(1)) — kept as a separate relation per this
+// package's convention of not conflating FICA and RRTA classifications on
+// the same underlying fact (see the note on section 3121(s) above).
+pub relation rrta_related_corporations(a: Person, b: Person) kind empirical {
+    label en unofficial "case fact: these two corporations are \"related\" for section 3231(i) purposes";
+}
+pub relation rrta_common_paymaster(paymaster: Person, employers: Person, employee: Person) kind empirical {
+    label en official "case fact: these related corporations (one of which, `paymaster`, is `employers`' common paymaster) compensate this individual through the common paymaster — section 3231(i)";
+}
+pub relation rrta_corporation_deemed_remuneration(corporation: Person, employee: Person, amount: Money, on: Date) kind institutional {
+    label en official "section 3231(i): for sections 3201/3211/3221 purposes, this related corporation is considered to have paid as remuneration to this individual ONLY the amount it actually disbursed";
+}
+@source(IRC_S3231_I, relation = formalizes, coverage = exact, quote = "each such corporation shall be considered to have paid as remuneration to such individual only the amounts actually disbursed by it to such individual and shall not be considered to have paid as remuneration to such individual amounts actually disbursed to such individual by another of such corporations")
+rule Section3231ICommonPaymasterAttribution(paymaster: Person, employers: Person, employee: Person, disburser: Person, amount: Money, on: Date) strict {
+    when rrta_common_paymaster(paymaster, employers, employee) and remuneration_disbursed_by(disburser, employee, amount, on);
+    then rrta_corporation_deemed_remuneration(disburser, employee, amount, on);
+}
+// Same TECH_GAP as section 3121(s): this attribution rule does not itself
+// feed back into `prior_remuneration_paid`/the tier 1/2 taxable-compensation
+// cap rules above, which still aggregate by the single `employer` field of
+// `wage_payment`.

@@ -1,0 +1,267 @@
+// Chapter 32: sections 4051(a)-(c) (retail tax on trucks/trailers/tractors),
+// 4064 (gas guzzler tax), 4071(a)-(d) (tires). Priority list, IRC-13 stage 1.
+
+// =====================================================================
+// Section 4051 — retail tax on trucks, truck trailers, and tractors
+// =====================================================================
+
+use self::{
+    ExciseEvent,
+    IRC_S4051_A,
+    IRC_S4051_B,
+    IRC_S4051_C,
+    IRC_S4064_A,
+    IRC_S4064_B,
+    IRC_S4071_A,
+    IRC_S4071_C,
+    IRC_S4071_D,
+    Person,
+    excise_tax_due,
+    liable_for_excise,
+    tax_free_sale,
+};
+
+pub enum RetailTruckArticleKind {
+    AutomobileTruckChassis;
+    AutomobileTruckBody;
+    TruckTrailerOrSemitrailerChassis;
+    TruckTrailerOrSemitrailerBody;
+    HighwayTractor;
+}
+
+pub entity RetailTruckSaleEvent : ExciseEvent;
+
+pub relation retail_truck_sale(
+    e: RetailTruckSaleEvent,
+    article: RetailTruckArticleKind,
+    price: Money,
+    on: Date,
+    seller: Person,
+) kind empirical {
+    label en unofficial "the first retail sale of a taxable truck/trailer/tractor article (including parts or accessories sold with it), asserted by the case (section 4051(a)(1)); a sale of a whole truck or trailer is treated as a sale of its chassis and body per (a)(5), so the case asserts the chassis/body components directly rather than this package deriving them";
+}
+
+pub relation truck_gross_vehicle_weight_pounds(e: RetailTruckSaleEvent, weight: Decimal) kind empirical {
+    label en unofficial "the gross vehicle weight (or, for a tractor, the gross COMBINED weight in combination with a trailer/semitrailer) the Secretary's regulations use for the section 4051(a)(2)-(4) exclusions";
+}
+pub relation tractor_gross_vehicle_weight_pounds(e: RetailTruckSaleEvent, weight: Decimal) kind empirical {
+    label en unofficial "section 4051(a)(4)(A): the tractor's OWN gross vehicle weight (distinct from the combined weight above)";
+}
+
+@source(IRC_S4051_A, relation = formalizes, coverage = exact, quote = "The tax imposed by paragraph (1) shall not apply to automobile truck chassis and automobile truck bodies, suitable for use with a vehicle which has a gross vehicle weight of 33,000 pounds or less")
+rule TruckWeightExcluded(e: RetailTruckSaleEvent, article: RetailTruckArticleKind, weight: Decimal) strict {
+    when (article == AutomobileTruckChassis or article == AutomobileTruckBody)
+        and retail_truck_sale(e, article, _, _, _)
+        and truck_gross_vehicle_weight_pounds(e, weight)
+        and weight <= S4051TruckWeightExclusionPounds;
+    then tax_free_sale(e);
+}
+
+@source(IRC_S4051_A, relation = formalizes, coverage = exact, quote = "The tax imposed by paragraph (1) shall not apply to truck trailer and semitrailer chassis and bodies, suitable for use with a trailer or semitrailer which has a gross vehicle weight of 26,000 pounds or less")
+rule TrailerWeightExcluded(e: RetailTruckSaleEvent, article: RetailTruckArticleKind, weight: Decimal) strict {
+    when (article == TruckTrailerOrSemitrailerChassis or article == TruckTrailerOrSemitrailerBody)
+        and retail_truck_sale(e, article, _, _, _)
+        and truck_gross_vehicle_weight_pounds(e, weight)
+        and weight <= S4051TrailerWeightExclusionPounds;
+    then tax_free_sale(e);
+}
+
+@source(IRC_S4051_A, relation = formalizes, coverage = exact, quote = "such tractor has a gross vehicle weight of 19,500 pounds or less")
+rule TractorWeightExcluded(e: RetailTruckSaleEvent, ownWeight: Decimal, combinedWeight: Decimal) strict {
+    when retail_truck_sale(e, HighwayTractor, _, _, _)
+        and tractor_gross_vehicle_weight_pounds(e, ownWeight)
+        and truck_gross_vehicle_weight_pounds(e, combinedWeight)
+        and ownWeight <= S4051TractorWeightExclusionPounds
+        and combinedWeight <= S4051TractorCombinedWeightExclusionPounds;
+    then tax_free_sale(e);
+}
+
+@source(IRC_S4051_A, relation = formalizes, coverage = exact, quote = "There is hereby imposed on the first retail sale of the following articles (including in each case parts or accessories sold on or in connection therewith or with the sale thereof) a tax of 12 percent of the amount for which the article is so sold")
+rule RetailTruckTax(e: RetailTruckSaleEvent, price: Money) strict {
+    when retail_truck_sale(e, _, price, _, _);
+    then excise_tax_due(e, round(price * S4051RetailTaxRatePercent, 2, "HALF_UP"));
+}
+
+@source(IRC_S4051_A, relation = formalizes, coverage = exact, quote = "There is hereby imposed on the first retail sale of the following articles (including in each case parts or accessories sold on or in connection therewith or with the sale thereof) a tax of 12 percent of the amount for which the article is so sold")
+rule RetailTruckLiability(e: RetailTruckSaleEvent, seller: Person, amount: Money) defeasible {
+    when retail_truck_sale(e, _, _, _, seller) and excise_tax_due(e, amount) and not_known(tax_free_sale(e));
+    then liable_for_excise(seller, e, amount);
+}
+
+// --- section 4051(b): separate purchase of parts/accessories ---------------
+
+pub entity TruckPartsInstallationEvent : ExciseEvent;
+
+pub relation truck_parts_installed(
+    e: TruckPartsInstallationEvent,
+    vehicle_first_in_service: Date,
+    installed_on: Date,
+    price: Money,
+    installer: Person,
+) kind empirical {
+    label en unofficial "section 4051(b)(1): a part or accessory is installed (or caused to be installed) by the owner/lessee/operator of a vehicle containing a section 4051(a) article, with the price of the part and its installation";
+}
+pub relation truck_parts_is_replacement(e: TruckPartsInstallationEvent) kind empirical {
+    label en unofficial "section 4051(b)(2)(A): the part or accessory installed is a replacement part or accessory";
+}
+
+@source(IRC_S4051_B, relation = formalizes, coverage = exact, quote = "such installation is not later than the date 6 months after the date such vehicle (as it contains such article) was first placed in service")
+rule PartsInstallationWithinWindow(e: TruckPartsInstallationEvent, first: Date, installed: Date) defeasible {
+    when truck_parts_installed(e, first, installed, _, _)
+        and installed <= add_calendar_period(first, 6 calendar_month);
+    then truck_parts_installation_in_window(e);
+}
+pub relation truck_parts_installation_in_window(e: TruckPartsInstallationEvent) kind institutional {
+    label en official "section 4051(b)(1)(B): the installation occurred within the 6-month window after the vehicle was first placed in service";
+}
+
+@source(IRC_S4051_B, relation = formalizes, coverage = exact, quote = "Paragraph (1) shall not apply if—\n(A) the part or accessory installed is a replacement part or accessory, or\n(B) the aggregate price of the parts and accessories (and their installation) described in paragraph (1) with respect to any vehicle does not exceed $1,000")
+rule PartsInstallationExempt(e: TruckPartsInstallationEvent, price: Money) strict {
+    when truck_parts_installed(e, _, _, price, _)
+        and (truck_parts_is_replacement(e) or price <= S4051PartsInstallationThresholdAmount);
+    then tax_free_sale(e);
+}
+
+@source(IRC_S4051_B, relation = formalizes, coverage = exact, quote = "then there is hereby imposed on such installation a tax equal to 12 percent of the price of such part or accessory and its installation")
+rule PartsInstallationTax(e: TruckPartsInstallationEvent, price: Money) defeasible {
+    when truck_parts_installed(e, _, _, price, _)
+        and truck_parts_installation_in_window(e)
+        and not_known(tax_free_sale(e));
+    then excise_tax_due(e, round(price * S4051RetailTaxRatePercent, 2, "HALF_UP"));
+}
+
+@source(IRC_S4051_B, relation = formalizes, coverage = exact, quote = "The owners of the trade or business installing the parts or accessories shall be secondarily liable for the tax imposed by paragraph (1).")
+rule PartsInstallationLiability(e: TruckPartsInstallationEvent, installer: Person, amount: Money) defeasible {
+    when truck_parts_installed(e, _, _, _, installer) and excise_tax_due(e, amount);
+    then liable_for_excise(installer, e, amount);
+}
+
+// section 4051(c): termination. Modelled as a validity guard on the taxing
+// rules above rather than a separate relation, per the package-wide 2028
+// boundary convention (see 01-motor-fuels.law header note) — JUDGMENT CALL:
+// section 4051(c) reads as a blanket "the taxes imposed by this section
+// shall not apply" rather than a rate change, so it is expressed as an
+// additional `tax_free_sale`-shaped guard instead of zeroing a rate.
+@source(IRC_S4051_C, relation = formalizes, coverage = exact, quote = "On and after October 1, 2028, the taxes imposed by this section shall not apply.")
+rule RetailTruckTerminated(e: RetailTruckSaleEvent, on: Date) strict {
+    when retail_truck_sale(e, _, _, on, _) and on >= @2028-10-01;
+    then tax_free_sale(e);
+}
+@source(IRC_S4051_C, relation = formalizes, coverage = exact, quote = "On and after October 1, 2028, the taxes imposed by this section shall not apply.")
+rule PartsInstallationTerminated(e: TruckPartsInstallationEvent, installed: Date) strict {
+    when truck_parts_installed(e, _, installed, _, _) and installed >= @2028-10-01;
+    then tax_free_sale(e);
+}
+
+// =====================================================================
+// Section 4064 — gas guzzler tax
+// =====================================================================
+
+pub entity GasGuzzlerSaleEvent : ExciseEvent;
+
+pub relation gas_guzzler_sale(e: GasGuzzlerSaleEvent, fuel_economy_mpg: Decimal, manufacturer: Person) kind empirical {
+    label en unofficial "section 4064(a): the sale by the manufacturer of an automobile, with its EPA-determined fuel economy in miles per gallon (section 4064(c))";
+}
+pub relation automobile_is_emergency_or_exempt_vehicle(e: GasGuzzlerSaleEvent) kind empirical {
+    label en unofficial "section 4064(b)(1)(B)/(C): the vehicle is treated as a nonpassenger automobile under 49 U.S.C. 32901 rules, or is sold for use and used as an ambulance/police/other emergency vehicle";
+}
+
+// Rate lookup by mpg: `gas_guzzler_tax_by_mpg` is populated by
+// gas-guzzler-tax-by-mpg.lawtable.json (twelve-band table of section
+// 4064(a), current 1990-amendment text).
+pub relation gas_guzzler_tax_by_mpg(mpg: Decimal, tax: Money) kind institutional {
+    label en official "section 4064(a): the tax amount for the fuel-economy band this automobile falls in";
+}
+
+@source(IRC_S4064_A, relation = formalizes, coverage = exact, quote = "There is hereby imposed on the sale by the manufacturer of each automobile a tax determined in accordance with the following table")
+rule GasGuzzlerTax(e: GasGuzzlerSaleEvent, mpg: Decimal, tax: Money) strict {
+    when gas_guzzler_sale(e, mpg, _) and gas_guzzler_tax_by_mpg(mpg, tax) and not_known(automobile_is_emergency_or_exempt_vehicle(e));
+    then excise_tax_due(e, tax);
+}
+
+@source(IRC_S4064_B, relation = formalizes, coverage = partial, quote = "The term \"automobile\" does not include any vehicle sold for use and used—\n(i) as an ambulance or combination ambulance-hearse,\n(ii) by the United States or by a State or local government for police or other law enforcement purposes, or\n(iii) for other emergency uses prescribed by the Secretary by regulations.")
+rule GasGuzzlerExemptVehicleNoTax(e: GasGuzzlerSaleEvent) strict {
+    when gas_guzzler_sale(e, _, _) and automobile_is_emergency_or_exempt_vehicle(e);
+    then tax_free_sale(e);
+}
+
+@source(IRC_S4064_A, relation = formalizes, coverage = exact, quote = "There is hereby imposed on the sale by the manufacturer of each automobile a tax determined in accordance with the following table")
+rule GasGuzzlerLiability(e: GasGuzzlerSaleEvent, manufacturer: Person, amount: Money) defeasible {
+    when gas_guzzler_sale(e, _, manufacturer) and excise_tax_due(e, amount) and not_known(tax_free_sale(e));
+    then liable_for_excise(manufacturer, e, amount);
+}
+
+// =====================================================================
+// Section 4071 — tires
+// =====================================================================
+
+pub enum TireKind {
+    OrdinaryTire;
+    BiasplyOrSuperSingleTire;
+}
+
+pub entity TireSaleEvent : ExciseEvent;
+
+pub relation tire_sale(
+    e: TireSaleEvent,
+    kind: TireKind,
+    max_rated_load_capacity_pounds: Decimal,
+    seller: Person,
+) kind empirical {
+    label en unofficial "section 4071(a): the sale by the manufacturer, producer, or importer of a taxable tire, with its maximum rated load capacity";
+}
+// section 4071(b): a manufacturer's own retail delivery is treated as a sale
+// at the time of delivery, and the manufacturer is liable in the same manner.
+pub relation tire_delivered_to_own_retail_outlet(e: TireSaleEvent) kind empirical {
+    label en unofficial "section 4071(b): the manufacturer, producer, or importer delivered the tire to its own retail store or outlet, and tax has not already been imposed under subsection (a) on this tire";
+}
+// section 4071(c): tires on an imported article; the importer of the article
+// is treated as importer of the tires, EXCEPT for automobile bus chassis or
+// bodies.
+pub relation tire_equips_imported_article(e: TireSaleEvent, article_is_bus_chassis_or_body: Boolean) kind empirical {
+    label en unofficial "section 4071(c): the tire equips an article imported into the United States; `article_is_bus_chassis_or_body` marks the carve-out for an automobile bus chassis or body";
+}
+
+pub relation tire_load_capacity_over_threshold(e: TireSaleEvent, excess: Decimal) kind institutional {
+    label en official "section 4071(a): so much of the maximum rated load capacity as exceeds 3,500 pounds, rounded up to whole units of 10 pounds";
+}
+@source(IRC_S4071_A, relation = formalizes, coverage = exact, quote = "for each 10 pounds so much of the maximum rated load capacity thereof as exceeds 3,500 pounds")
+rule TireExcessLoadCapacity(e: TireSaleEvent, capacity: Decimal) strict {
+    when tire_sale(e, _, capacity, _) and capacity > S4071LoadCapacityThresholdPounds;
+    then tire_load_capacity_over_threshold(e, div_round(capacity - S4071LoadCapacityThresholdPounds, 10.0, 0, "CEILING"));
+}
+
+@source(IRC_S4071_A, relation = formalizes, coverage = exact, quote = "There is hereby imposed on taxable tires sold by the manufacturer, producer, or importer thereof a tax at the rate of 9.45 cents")
+rule OrdinaryTireTax(e: TireSaleEvent, units: Decimal) strict {
+    when tire_sale(e, OrdinaryTire, _, _) and tire_load_capacity_over_threshold(e, units);
+    then excise_tax_due(e, round(S4071FullRatePer10PoundsOverThreshold * units, 2, "HALF_UP"));
+}
+@source(IRC_S4071_A, relation = formalizes, coverage = exact, quote = "4.725 cents in the case of a biasply tire or super single tire")
+rule BiasplyTireTax(e: TireSaleEvent, units: Decimal) strict {
+    when tire_sale(e, BiasplyOrSuperSingleTire, _, _) and tire_load_capacity_over_threshold(e, units);
+    then excise_tax_due(e, round(S4071BiasplyRatePer10PoundsOverThreshold * units, 2, "HALF_UP"));
+}
+
+@source(IRC_S4071_C, relation = formalizes, coverage = exact, quote = "This subsection shall not apply with respect to the sale of an automobile bus chassis or an automobile bus body.")
+rule TireOnImportedBusChassisNotRetreated(e: TireSaleEvent) strict {
+    when tire_equips_imported_article(e, true);
+    then tire_import_carveout_applies(e);
+}
+pub relation tire_import_carveout_applies(e: TireSaleEvent) kind institutional {
+    label en official "section 4071(c) does not treat the importer of a bus chassis/body as the importer of its tires; the ordinary section 4071(a) analysis (own sale of the tires, if any) applies instead";
+}
+
+@source(IRC_S4071_A, relation = formalizes, coverage = exact, quote = "There is hereby imposed on taxable tires sold by the manufacturer, producer, or importer thereof a tax at the rate of 9.45 cents")
+rule TireLiability(e: TireSaleEvent, seller: Person, amount: Money) defeasible {
+    when tire_sale(e, _, _, seller) and excise_tax_due(e, amount) and not_known(tax_free_sale(e));
+    then liable_for_excise(seller, e, amount);
+}
+
+pub relation tire_sold_on(e: TireSaleEvent, on: Date) kind empirical {
+    label en unofficial "the date of the tire sale, asserted only when the section 4071(d) termination date needs to be tested (kept separate from `tire_sale` so a scenario that does not care about the boundary need not assert a date)";
+}
+@source(IRC_S4071_D, relation = formalizes, coverage = exact, quote = "On and after October 1, 2028, the taxes imposed by subsection (a) shall not apply.")
+rule TireTerminated(e: TireSaleEvent, on: Date) strict {
+    when tire_sold_on(e, on) and on >= @2028-10-01;
+    then tax_free_sale(e);
+}

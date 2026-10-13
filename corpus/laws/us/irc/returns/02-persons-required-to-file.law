@@ -1,0 +1,630 @@
+// §6012 — Persons required to make returns of income.
+//
+// JUDGMENT CALLS AND GAPS (see report):
+//  - §6012(a)(1)'s thresholds are built from `exemption_amount_for_year` and
+//    `basic_standard_deduction_amount`/`additional_standard_deduction_total`
+//    — all pending institutional dependency contracts from
+//    `us.irc.income_individual` (§§63, 151); this package computes the SUM
+//    the text prescribes but never invents the underlying dollar amounts
+//    (§151(d)(5) fixes the exemption amount at $0 for 2018-2025, but that is
+//    the producer's fact, not this package's).
+//  - §6012(a)(1)(C)'s "exception to the exception" (dependents with excess
+//    unearned income, or a zero standard deduction) is modeled as an
+//    `unless not` defeater on the (A) exception itself, matching the
+//    text's own double negative: the (A) exception does not apply, so the
+//    base duty is restored.
+//  - §6012(a)(6)/(7) (political organizations, homeowners associations) and
+//    (a)(2) (corporations) key off classification tests (`political_
+//    organization_taxable_income`, `homeowners_association_taxable_income`,
+//    corporate status already in `us.irc.core::Corporation`) that this
+//    package treats as pending institutional facts from the owning
+//    packages (`election-funding`, and a homeowners-association owner not
+//    yet identified in OWNERSHIP-RULES.json).
+//  - §6012(a)(9) (exemption for nonresident aliens/foreign corporations
+//    "subject to such conditions... as may be prescribed by the Secretary")
+//    is modeled as a defeater (`unless secretary_exempts_from_filing`) on
+//    the nonresident-alien/foreign-corporation duty branches, since the
+//    Secretary's own regulatory conditions are outside Title 26's text.
+//  - §6012(b)(6) (IRA share of partnership income) restates a computation
+//    rule for a package this one does not own (partnership distributive
+//    share under subchapters C/D of chapter 63) — EXTERNAL_DEPENDENCY,
+//    no rule stated here beyond the classification hook `ira_trust`.
+//  - §6012(c) (excluding §121/§911 exclusions from the gross-income
+//    computation used by THIS section) is folded directly into the
+//    `gross_income_amount` reading: this package does not recompute gross
+//    income; it notes the exclusion-of-exclusions as an instruction to the
+//    producer of `gross_income_amount`, not a separate testable rule here —
+//    EXTERNAL_DEPENDENCY / NON_NORMATIVE from this package's vantage.
+//  - §6012(e) (consolidated returns) is a pure cross-reference to chapter 6
+//    — NON_NORMATIVE.
+//  - §6012(f) (the 2018-2025 simplified standard) is a `revision` of (a)(1)
+//    for that temporal window; modeled as a competing rule set with its own
+//    `effective` window rather than a patch to (a)(1)'s own rules, per the
+//    amendments method (§32).
+
+language "law.core" version "0.2";
+package us.irc.returns version "0.1.1";
+namespace "urn:us:irc:returns:clir";
+
+use self::{
+    Corporation,
+    Estate,
+    FilingStatusKind,
+    IRC_S6012_A,
+    IRC_S6012_B,
+    IRC_S6012_D,
+    IRC_S6012_F,
+    Individual,
+    Person,
+    Return,
+    Secretary,
+    TaxableYear,
+    Trust,
+    additional_standard_deduction_total,
+    basic_standard_deduction_amount,
+    dependent_unearned_income_excess,
+    exemption_amount_for_year,
+    filing_status,
+    gross_income_amount,
+    other_taxpayer_claims_spouse_exemption,
+    standard_deduction_is_zero,
+    statutory_due_date,
+};
+
+// --- shared: filing performance and the umbrella duty -----------------------
+
+relation income_tax_return_filed(p: Person, y: TaxableYear) kind institutional {
+    label en unofficial "an income tax return of the person for the taxable year has been filed (derived from us.irc.core::return_of/filed_on)";
+}
+@source(IRC_S6012_A, relation = formalizes, coverage = contextual, quote = "Returns with respect to income taxes under subtitle A shall be made by the following:")
+rule DeriveIncomeTaxReturnFiled strict {
+    for r: Return;
+    for p: Person;
+    for y: TaxableYear;
+    for d: Date;
+    when us.irc.core::return_of(r, p, y, us.irc.core::IncomeCh1) and us.irc.core::filed_on(r, d);
+    then income_tax_return_filed(p, y);
+}
+
+pub relation required_to_file_income_tax_return(p: Person, y: TaxableYear) kind institutional {
+    label en unofficial "the person is required by §6012(a) to make a return of income taxes under subtitle A for the taxable year";
+}
+@source(IRC_S6012_A, relation = formalizes, coverage = contextual, quote = "Returns with respect to income taxes under subtitle A shall be made by the following:")
+rule S6012FileIncomeTaxReturn defeasible {
+    for p: Person;
+    for y: TaxableYear;
+    for d1: Date;
+    for d2: Date;
+    when required_to_file_income_tax_return(p, y)
+        and us.irc.core::ends(y, d1)
+        and statutory_due_date(p, y, us.irc.core::IncomeCh1, d2);
+    then duty FileIncomeTaxReturn {
+        bearer p;
+        beneficiary Secretary;
+        goal achievement {
+            condition income_tax_return_filed(p, y);
+            window [d1, d2];
+        }
+    };
+}
+
+// ============================================================================
+// (a)(1) Individuals
+// ============================================================================
+
+relation individual_return_threshold_single_hoh_ss(y: TaxableYear, status: FilingStatusKind, amount: Money) kind institutional {
+    label en unofficial "the sum of the exemption amount plus the basic standard deduction (plus any additional standard deduction) applicable to the status, per §6012(a)(1)(A)(i)-(iii) and (B)";
+}
+@source(IRC_S6012_A, relation = formalizes, coverage = partial, quote = "has gross income of less than the sum of the exemption amount plus the basic standard deduction applicable to such an individual")
+rule S6012ThresholdSingleHohSs strict {
+    for y: TaxableYear;
+    for status: FilingStatusKind;
+    for ex: Money;
+    for basic: Money;
+    when exemption_amount_for_year(y, ex) and basic_standard_deduction_amount(y, status, basic);
+    then individual_return_threshold_single_hoh_ss(y, status, ex + basic);
+}
+
+relation individual_return_threshold_joint(y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "twice the exemption amount plus the basic standard deduction applicable to a joint return, per §6012(a)(1)(A)(iv)";
+}
+@source(IRC_S6012_A, relation = formalizes, coverage = partial, quote = "whose gross income, when combined with the gross income of his spouse, is, for the taxable year, less than the sum of twice the exemption amount plus the basic standard deduction applicable to a joint return")
+rule S6012ThresholdJoint strict {
+    for y: TaxableYear;
+    for ex: Money;
+    for basic: Money;
+    when exemption_amount_for_year(y, ex) and basic_standard_deduction_amount(y, MarriedFilingJointly, basic);
+    then individual_return_threshold_joint(y, ex + ex + basic);
+}
+
+relation not_married_not_surviving_spouse_not_hoh(p: Individual, y: TaxableYear) kind institutional;
+@source(IRC_S6012_A, relation = formalizes, coverage = partial, quote = "who is not married (determined by applying section 7703), is not a surviving spouse (as defined in section 2(a)), is not a head of a household (as defined in section 2(b))")
+rule S6012NotMarriedNotSsNotHoh strict {
+    for p: Individual;
+    for y: TaxableYear;
+    when filing_status(p, y, Single);
+    then not_married_not_surviving_spouse_not_hoh(p, y);
+}
+
+relation below_individual_filing_threshold(p: Individual, y: TaxableYear) kind institutional {
+    label en unofficial "the individual's gross income (or, for a joint-eligible individual, combined gross income) is below the §6012(a)(1)(A) threshold applicable to the individual's status";
+}
+@source(IRC_S6012_A, relation = formalizes, coverage = partial, quote = "for the taxable year has gross income of less than the sum of the exemption amount plus the basic standard deduction applicable to such an individual")
+rule S6012BelowThresholdSingle strict {
+    for p: Individual;
+    for y: TaxableYear;
+    for gi: Money;
+    for thr: Money;
+    for add: Money;
+    when not_married_not_surviving_spouse_not_hoh(p, y)
+        and gross_income_amount(p, y, gi)
+        and individual_return_threshold_single_hoh_ss(y, Single, thr)
+        and additional_standard_deduction_total(p, y, add)
+        and gi < thr + add;
+    then below_individual_filing_threshold(p, y);
+}
+@source(IRC_S6012_A, relation = formalizes, coverage = partial, quote = "who is a head of a household (as so defined) and for the taxable year has gross income of less than the sum of the exemption amount plus the basic standard deduction applicable to such an individual")
+rule S6012BelowThresholdHoh strict {
+    for p: Individual;
+    for y: TaxableYear;
+    for gi: Money;
+    for thr: Money;
+    for add: Money;
+    when filing_status(p, y, HeadOfHousehold)
+        and gross_income_amount(p, y, gi)
+        and individual_return_threshold_single_hoh_ss(y, HeadOfHousehold, thr)
+        and additional_standard_deduction_total(p, y, add)
+        and gi < thr + add;
+    then below_individual_filing_threshold(p, y);
+}
+@source(IRC_S6012_A, relation = formalizes, coverage = partial, quote = "who is a surviving spouse (as so defined) and for the taxable year has gross income of less than the sum of the exemption amount plus the basic standard deduction applicable to such an individual")
+rule S6012BelowThresholdSurvivingSpouse strict {
+    for p: Individual;
+    for y: TaxableYear;
+    for gi: Money;
+    for thr: Money;
+    for add: Money;
+    when filing_status(p, y, SurvivingSpouse)
+        and gross_income_amount(p, y, gi)
+        and individual_return_threshold_single_hoh_ss(y, SurvivingSpouse, thr)
+        and additional_standard_deduction_total(p, y, add)
+        and gi < thr + add;
+    then below_individual_filing_threshold(p, y);
+}
+
+relation entitled_to_joint_return(p: Individual, s: Individual, y: TaxableYear) kind institutional {
+    label en unofficial "the individual and spouse are entitled to make a joint return under §6013(a) for the taxable year";
+}
+relation same_household_as_spouse(p: Individual, y: TaxableYear) kind empirical {
+    label en unofficial "the individual and spouse had the same household as their home at the close of the taxable year (§6012(a)(1)(A)(iv))";
+}
+@source(IRC_S6012_A, relation = formalizes, coverage = partial, quote = "who is entitled to make a joint return and whose gross income, when combined with the gross income of his spouse, is, for the taxable year, less than the sum of twice the exemption amount plus the basic standard deduction applicable to a joint return, but only if such individual and his spouse, at the close of the taxable year, had the same household as their home")
+rule S6012BelowThresholdJoint strict {
+    for p: Individual;
+    for s: Individual;
+    for y: TaxableYear;
+    for gp: Money;
+    for gs: Money;
+    for thr: Money;
+    for add: Money;
+    when entitled_to_joint_return(p, s, y)
+        and gross_income_amount(p, y, gp)
+        and gross_income_amount(s, y, gs)
+        and individual_return_threshold_joint(y, thr)
+        and additional_standard_deduction_total(p, y, add)
+        and same_household_as_spouse(p, y)
+        and gp + gs < thr + add;
+    then below_individual_filing_threshold(p, y);
+}
+relation spouse_makes_separate_return(p: Individual, y: TaxableYear) kind empirical;
+@source(IRC_S6012_A, relation = formalizes, coverage = exact, quote = "Clause (iv) shall not apply if for the taxable year such spouse makes a separate return or any other taxpayer is entitled to an exemption for such spouse under section 151(c).")
+rule S6012JointExceptionDoesNotApply strict {
+    for p: Individual;
+    for y: TaxableYear;
+    when spouse_makes_separate_return(p, y) or other_taxpayer_claims_spouse_exemption(p, y);
+    then below_individual_filing_threshold_joint_defeated(p, y);
+}
+relation below_individual_filing_threshold_joint_defeated(p: Individual, y: TaxableYear) kind institutional;
+
+relation dependent_exception_to_exception_applies(p: Individual, y: TaxableYear) kind institutional {
+    label en unofficial "§6012(a)(1)(C): the individual is a §63(c)(5) dependent-type with excess income, or has a zero standard deduction under §63(c)(6), so the (A) low-income exception does not apply";
+}
+@source(IRC_S6012_A, relation = formalizes, coverage = partial, quote = "income (other than earned income) in excess of the sum of the amount in effect under section 63(c)(5)(A) plus the additional standard deduction (if any) to which the individual is entitled, or")
+rule S6012DependentExceptionUnearnedIncome strict {
+    for p: Individual;
+    for y: TaxableYear;
+    when dependent_unearned_income_excess(p, y);
+    then dependent_exception_to_exception_applies(p, y);
+}
+@source(IRC_S6012_A, relation = formalizes, coverage = exact, quote = "for whom the standard deduction is zero under section 63(c)(6).")
+rule S6012DependentExceptionZeroStandardDeduction strict {
+    for p: Individual;
+    for y: TaxableYear;
+    when standard_deduction_is_zero(p, y);
+    then dependent_exception_to_exception_applies(p, y);
+}
+
+relation exempt_from_individual_filing(p: Individual, y: TaxableYear) kind institutional;
+@source(IRC_S6012_A, relation = formalizes, coverage = contextual, quote = "except that a return shall not be required of an individual")
+rule S6012ExemptFromIndividualFiling defeasible {
+    for p: Individual;
+    for y: TaxableYear;
+    when below_individual_filing_threshold(p, y);
+    then exempt_from_individual_filing(p, y);
+    unless dependent_exception_to_exception_applies(p, y) or below_individual_filing_threshold_joint_defeated(p, y);
+}
+
+relation taxable_year_begins_in_tcja_window(y: TaxableYear) kind institutional {
+    label en unofficial "the taxable year begins after December 31, 2017, and before January 1, 2026 — §6012(f)'s own window, during which (a)(1) does not apply";
+}
+@source(IRC_S6012_F, relation = formalizes, coverage = partial, quote = "In the case of a taxable year beginning after December 31, 2017, and before January 1, 2026, subsection (a)(1) shall not apply")
+rule S6012TaxableYearBeginsInTcjaWindow strict {
+    for y: TaxableYear;
+    for d: Date;
+    when us.irc.core::begins(y, d) and d > @2017-12-31 and d < @2026-01-01;
+    then taxable_year_begins_in_tcja_window(y);
+}
+
+@source(IRC_S6012_A, relation = formalizes, coverage = exact, quote = "Every individual having for the taxable year gross income which equals or exceeds the exemption amount, except that a return shall not be required of an individual")
+rule S6012IndividualRequiredToFile defeasible {
+    for p: Individual;
+    for y: TaxableYear;
+    for gi: Money;
+    for ex: Money;
+    when gross_income_amount(p, y, gi) and exemption_amount_for_year(y, ex) and gi >= ex;
+    then required_to_file_income_tax_return(p, y);
+    // Each `unless` alternative is a defeater of the head and must bind every
+    // head variable itself (§190, LDC-E4101): the §6012(f) window alternative
+    // names the individual through the same gross-income fact as the body.
+    unless exempt_from_individual_filing(p, y) or (taxable_year_begins_in_tcja_window(y) and gross_income_amount(p, y, gi));
+}
+
+// ============================================================================
+// (a)(2)-(9) — Corporations, estates, trusts, and named organizations
+// ============================================================================
+
+@source(IRC_S6012_A, relation = formalizes, coverage = exact, quote = "Every corporation subject to taxation under subtitle A;")
+rule S6012CorporationRequiredToFile strict {
+    for p: Corporation;
+    for y: TaxableYear;
+    for k: us.irc.core::TaxKind;
+    for amt: Money;
+    when us.irc.core::liability(p, y, k, amt) and k == us.irc.core::IncomeCh1;
+    then required_to_file_income_tax_return(p, y);
+}
+
+relation estate_gross_income_at_least_600(e: Estate, y: TaxableYear) kind institutional;
+@source(IRC_S6012_A, relation = formalizes, coverage = exact, quote = "Every estate the gross income of which for the taxable year is $600 or more;")
+rule S6012EstateGrossIncomeThreshold strict {
+    for e: Estate;
+    for y: TaxableYear;
+    for gi: Money;
+    when gross_income_amount(e, y, gi) and gi >= 600.00 USD;
+    then estate_gross_income_at_least_600(e, y);
+}
+@source(IRC_S6012_A, relation = formalizes, coverage = exact, quote = "Every estate the gross income of which for the taxable year is $600 or more;")
+rule S6012EstateRequiredToFile strict {
+    for e: Estate;
+    for y: TaxableYear;
+    when estate_gross_income_at_least_600(e, y);
+    then required_to_file_income_tax_return(e, y);
+}
+
+relation trust_has_taxable_income(t: Trust, y: TaxableYear) kind institutional;
+relation trust_gross_income_at_least_600(t: Trust, y: TaxableYear) kind institutional;
+@source(IRC_S6012_A, relation = formalizes, coverage = exact, quote = "Every trust having for the taxable year any taxable income, or having gross income of $600 or over, regardless of the amount of taxable income;")
+rule S6012TrustGrossIncomeThreshold strict {
+    for t: Trust;
+    for y: TaxableYear;
+    for gi: Money;
+    when gross_income_amount(t, y, gi) and gi >= 600.00 USD;
+    then trust_gross_income_at_least_600(t, y);
+}
+@source(IRC_S6012_A, relation = formalizes, coverage = exact, quote = "Every trust having for the taxable year any taxable income, or having gross income of $600 or over, regardless of the amount of taxable income;")
+rule S6012TrustRequiredToFile strict {
+    for t: Trust;
+    for y: TaxableYear;
+    when trust_has_taxable_income(t, y) or trust_gross_income_at_least_600(t, y);
+    then required_to_file_income_tax_return(t, y);
+}
+
+relation estate_or_trust_has_nonresident_alien_beneficiary(et: Person, y: TaxableYear) kind empirical {
+    label en unofficial "a beneficiary of the estate or trust is a nonresident alien";
+}
+@source(IRC_S6012_A, relation = formalizes, coverage = exact, quote = "Every estate or trust of which any beneficiary is a nonresident alien;")
+rule S6012EstateOrTrustNonresidentAlienBeneficiary strict {
+    for et: Person;
+    for y: TaxableYear;
+    when estate_or_trust_has_nonresident_alien_beneficiary(et, y);
+    then required_to_file_income_tax_return(et, y);
+}
+
+// Political organizations, homeowners associations, cooperative
+// associations and §501(a) exempt organizations are typed `Person`
+// (specifically an unincorporated `us.irc.core::Association` in the real
+// world), never `Organ`: `Organ` is reserved in `us.irc.core` for
+// institutional/government actors (Secretary, courts, Congress), and every
+// §6012(a) filer must be a `Person` to carry the `required_to_file_income_
+// tax_return(p: Person, y)` duty this package already defines.
+relation political_organization_taxable_income(o: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "the political organization's (§527(e)(1)) or §527(g) fund's political organization taxable income for the year (pending: election-funding, §527(c)(1))";
+}
+@source(IRC_S6012_A, relation = formalizes, coverage = exact, quote = "Every political organization (within the meaning of section 527(e)(1)), and every fund treated under section 527(g) as if it constituted a political organization, which has political organization taxable income (within the meaning of section 527(c)(1)) for the taxable year;")
+rule S6012PoliticalOrganizationRequiredToFile strict {
+    for o: Person;
+    for y: TaxableYear;
+    for amt: Money;
+    when political_organization_taxable_income(o, y, amt) and amt > 0.00 USD;
+    then required_to_file_income_tax_return(o, y);
+}
+
+relation homeowners_association_taxable_income(o: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "the homeowners association's (§528(c)(1)) homeowners association taxable income for the year (pending: owner package not yet assigned, §528(d))";
+}
+@source(IRC_S6012_A, relation = formalizes, coverage = exact, quote = "Every homeowners association (within the meaning of section 528(c)(1)) which has homeowners association taxable income (within the meaning of section 528(d)) for the taxable year; and")
+rule S6012HomeownersAssociationRequiredToFile strict {
+    for o: Person;
+    for y: TaxableYear;
+    for amt: Money;
+    when homeowners_association_taxable_income(o, y, amt) and amt > 0.00 USD;
+    then required_to_file_income_tax_return(o, y);
+}
+
+relation bankruptcy_estate_gross_income_threshold(e: Estate, y: TaxableYear) kind institutional;
+@source(IRC_S6012_A, relation = formalizes, coverage = exact, quote = "Every estate of an individual under chapter 7 or 11 of title 11 of the United States Code (relating to bankruptcy) the gross income of which for the taxable year is not less than the sum of the exemption amount plus the basic standard deduction under section 63(c)(2)(C);")
+rule S6012BankruptcyEstateThreshold strict {
+    for e: Estate;
+    for y: TaxableYear;
+    for gi: Money;
+    for ex: Money;
+    for basic: Money;
+    when gross_income_amount(e, y, gi)
+        and exemption_amount_for_year(y, ex)
+        and basic_standard_deduction_amount(y, Single, basic)
+        and gi >= ex + basic;
+    then bankruptcy_estate_gross_income_threshold(e, y);
+}
+@source(IRC_S6012_A, relation = formalizes, coverage = exact, quote = "Every estate of an individual under chapter 7 or 11 of title 11 of the United States Code (relating to bankruptcy) the gross income of which for the taxable year is not less than the sum of the exemption amount plus the basic standard deduction under section 63(c)(2)(C);")
+rule S6012BankruptcyEstateRequiredToFile strict {
+    for e: Estate;
+    for y: TaxableYear;
+    when bankruptcy_estate_gross_income_threshold(e, y);
+    then required_to_file_income_tax_return(e, y);
+}
+
+relation secretary_exempts_from_filing(p: Person, y: TaxableYear) kind institutional {
+    label en unofficial "the Secretary, by regulation, exempts the nonresident alien individual (§871) or foreign corporation (§881) from the requirement of making a §6012 return, subject to conditions and limitations outside Title 26's text";
+}
+relation nonresident_alien_individual_subject_to_871(p: Individual, y: TaxableYear) kind institutional {
+    label en unofficial "the nonresident alien individual is subject to tax under §871 (pending: international, not this package's norm)";
+}
+relation foreign_corporation_subject_to_881(c: Corporation, y: TaxableYear) kind institutional {
+    label en unofficial "the foreign corporation is subject to tax under §881 (pending: international, not this package's norm)";
+}
+@source(IRC_S6012_A, relation = formalizes, coverage = exact, quote = "except that subject to such conditions, limitations, and exceptions and under such regulations as may be prescribed by the Secretary, nonresident alien individuals subject to the tax imposed by section 871 and foreign corporations subject to the tax imposed by section 881 may be exempted from the requirement of making returns under this section.")
+rule S6012NonresidentAlienIndividualExemption defeasible {
+    for p: Individual;
+    for y: TaxableYear;
+    when nonresident_alien_individual_subject_to_871(p, y);
+    then required_to_file_income_tax_return(p, y);
+    unless secretary_exempts_from_filing(p, y);
+}
+@source(IRC_S6012_A, relation = formalizes, coverage = exact, quote = "except that subject to such conditions, limitations, and exceptions and under such regulations as may be prescribed by the Secretary, nonresident alien individuals subject to the tax imposed by section 871 and foreign corporations subject to the tax imposed by section 881 may be exempted from the requirement of making returns under this section.")
+rule S6012ForeignCorporationExemption defeasible {
+    for c: Corporation;
+    for y: TaxableYear;
+    when foreign_corporation_subject_to_881(c, y);
+    then required_to_file_income_tax_return(c, y);
+    unless secretary_exempts_from_filing(c, y);
+}
+
+// ============================================================================
+// (b) Returns made by fiduciaries and receivers
+// ============================================================================
+
+relation is_deceased(p: Individual) kind empirical;
+relation executor_or_administrator_of(e: Person, decedent: Individual) kind institutional {
+    label en unofficial "the person is the executor, administrator, or other person charged with the property of the deceased individual";
+}
+@source(IRC_S6012_B, relation = formalizes, coverage = exact, quote = "If an individual is deceased, the return of such individual required under subsection (a) shall be made by his executor, administrator, or other person charged with the property of such decedent.")
+rule S6012DecedentReturnMadeByExecutor strict {
+    for decedent: Individual;
+    for e: Person;
+    for y: TaxableYear;
+    when is_deceased(decedent) and executor_or_administrator_of(e, decedent) and required_to_file_income_tax_return(decedent, y);
+    then duty MakeDecedentReturn {
+        bearer e;
+        beneficiary Secretary;
+        goal achievement {
+            condition income_tax_return_filed(decedent, y);
+            window [-infinity, infinity];
+        }
+    };
+}
+
+relation unable_to_make_return(p: Individual) kind empirical;
+relation charged_with_care_of(agent: Person, p: Individual) kind institutional {
+    label en unofficial "the person is the duly authorized agent, committee, guardian, fiduciary, or other person charged with the care of the individual's person or property";
+}
+relation is_partial_receiver(agent: Person, p: Individual) kind empirical {
+    label en unofficial "the agent is a receiver appointed by authority of law in possession of only a part of the individual's property (excluded by the last sentence of §6012(b)(2))";
+}
+relation agent_charged_with_disabled_individuals_return(agent: Person, p: Individual) kind institutional {
+    label en unofficial "the agent is validly charged, under §6012(b)(2), with making the disabled individual's return (net of the last-sentence exclusion for a partial receiver)";
+}
+@source(IRC_S6012_B, relation = formalizes, coverage = partial, quote = "The preceding sentence shall not apply in the case of a receiver appointed by authority of law in possession of only a part of the property of an individual.")
+rule S6012AgentChargedWithDisabledIndividualsReturn defeasible {
+    for agent: Person;
+    for p: Individual;
+    when unable_to_make_return(p) and charged_with_care_of(agent, p);
+    then agent_charged_with_disabled_individuals_return(agent, p);
+    unless is_partial_receiver(agent, p);
+}
+@source(IRC_S6012_B, relation = formalizes, coverage = exact, quote = "If an individual is unable to make a return required under subsection (a), the return of such individual shall be made by a duly authorized agent, his committee, guardian, fiduciary or other person charged with the care of the person or property of such individual.")
+rule S6012DisabledIndividualReturnMadeByAgent strict {
+    for agent: Person;
+    for p: Individual;
+    for y: TaxableYear;
+    when agent_charged_with_disabled_individuals_return(agent, p) and required_to_file_income_tax_return(p, y);
+    then duty MakeReturnForDisabledIndividual {
+        bearer agent;
+        beneficiary Secretary;
+        goal achievement {
+            condition income_tax_return_filed(p, y);
+            window [-infinity, infinity];
+        }
+    };
+}
+
+relation has_possession_or_title_to_corporation_property(r: Person, c: Corporation) kind empirical {
+    label en unofficial "the receiver, trustee in a title 11 case, or assignee has possession of or holds title to all or substantially all the property or business of the corporation";
+}
+@source(IRC_S6012_B, relation = formalizes, coverage = exact, quote = "such receiver, trustee, or assignee shall make the return of income for such corporation in the same manner and form as corporations are required to make such returns.")
+rule S6012ReceiverMakesCorporationReturn defeasible {
+    for r: Person;
+    for c: Corporation;
+    for y: TaxableYear;
+    when has_possession_or_title_to_corporation_property(r, c) and required_to_file_income_tax_return(c, y);
+    then duty MakeReturnForCorporationInReceivership {
+        bearer r;
+        beneficiary Secretary;
+        goal achievement {
+            condition income_tax_return_filed(c, y);
+            window [-infinity, infinity];
+        }
+    };
+}
+
+relation fiduciary_of(f: Person, et: Person) kind institutional {
+    label en unofficial "the person is the fiduciary of the estate, trust, or bankruptcy estate of an individual";
+}
+@source(IRC_S6012_B, relation = formalizes, coverage = exact, quote = "Returns of an estate, a trust, or an estate of an individual under chapter 7 or 11 of title 11 of the United States Code shall be made by the fiduciary thereof.")
+rule S6012FiduciaryMakesEstateOrTrustReturn defeasible {
+    for f: Person;
+    for et: Person;
+    for y: TaxableYear;
+    when fiduciary_of(f, et) and required_to_file_income_tax_return(et, y);
+    then duty MakeEstateOrTrustReturn {
+        bearer f;
+        beneficiary Secretary;
+        goal achievement {
+            condition income_tax_return_filed(et, y);
+            window [-infinity, infinity];
+        }
+    };
+}
+
+relation joint_fiduciary_of(f: Person, et: Person) kind institutional;
+relation joint_fiduciary_return_states_sufficient_knowledge(f: Person, et: Person, y: TaxableYear) kind empirical {
+    label en unofficial "the joint fiduciary's return states the fiduciary has sufficient knowledge of the person's affairs to make the return, and that it is true and correct to the best of the fiduciary's knowledge and belief";
+}
+relation joint_fiduciary_return_sufficient(f: Person, et: Person, y: TaxableYear) kind institutional;
+@source(IRC_S6012_B, relation = formalizes, coverage = exact, quote = "a return made by one of two or more joint fiduciaries shall be sufficient compliance with the requirements of this section. A return made pursuant to this paragraph shall contain a statement that the fiduciary has sufficient knowledge of the affairs of the person for whom the return is made to enable him to make the return, and that the return is, to the best of his knowledge and belief, true and correct.")
+rule S6012JointFiduciaryReturnSufficient strict {
+    for f: Person;
+    for et: Person;
+    for y: TaxableYear;
+    when joint_fiduciary_of(f, et) and joint_fiduciary_return_states_sufficient_knowledge(f, et, y) and income_tax_return_filed(et, y);
+    then joint_fiduciary_return_sufficient(f, et, y);
+}
+
+// (b)(6) IRA share of partnership income: a computation rule over a
+// partnership's distributive share owned by `partnerships`/`trusts-estates`
+// — EXTERNAL_DEPENDENCY, classification hook only.
+relation ira_trust(t: Trust) kind institutional {
+    label en unofficial "the trust is exempt from taxation under §408(e) (pending: not this package's norm)";
+}
+
+// ============================================================================
+// (d) Tax-exempt interest required to be shown on return
+// ============================================================================
+
+relation received_or_accrued_tax_exempt_interest(p: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "interest received or accrued during the taxable year that is exempt from the chapter 1 tax";
+}
+relation tax_exempt_interest_shown_on_return(p: Person, y: TaxableYear) kind empirical;
+@source(IRC_S6012_D, relation = formalizes, coverage = exact, quote = "Every person required to file a return under this section for the taxable year shall include on such return the amount of interest received or accrued during the taxable year which is exempt from the tax imposed by chapter 1.")
+rule S6012ShowTaxExemptInterest defeasible {
+    for p: Person;
+    for y: TaxableYear;
+    for amt: Money;
+    when required_to_file_income_tax_return(p, y) and received_or_accrued_tax_exempt_interest(p, y, amt);
+    then duty ShowTaxExemptInterestOnReturn {
+        bearer p;
+        beneficiary Secretary;
+        goal achievement {
+            condition tax_exempt_interest_shown_on_return(p, y);
+            window [-infinity, infinity];
+        }
+    };
+}
+
+// ============================================================================
+// (f) Special rule for taxable years 2018 through 2025
+// ============================================================================
+// Replaces (a)(1) for this window; modeled as a competing threshold rule
+// set with its own `effective` window (§32 amendments method) rather than a
+// patch to the (a)(1) rules above, which remain the general-law baseline
+// for years outside the window.
+
+relation tcja_simplified_threshold_single(y: TaxableYear, amount: Money) kind institutional;
+@source(IRC_S6012_F, relation = formalizes, coverage = partial, quote = "an individual who is not married (determined by applying section 7703) and who has gross income for the taxable year which does not exceed the standard deduction applicable to such individual for such taxable year under section 63, or")
+rule S6012TcjaThresholdSingle strict {
+    effective [@2018-01-01, @2026-01-01);
+    for y: TaxableYear;
+    for sd: Money;
+    when basic_standard_deduction_amount(y, Single, sd);
+    then tcja_simplified_threshold_single(y, sd);
+}
+
+relation tcja_exempt_from_filing_single(p: Individual, y: TaxableYear) kind institutional;
+@source(IRC_S6012_F, relation = formalizes, coverage = exact, quote = "an individual who is not married (determined by applying section 7703) and who has gross income for the taxable year which does not exceed the standard deduction applicable to such individual for such taxable year under section 63")
+rule S6012TcjaExemptSingle strict {
+    effective [@2018-01-01, @2026-01-01);
+    for p: Individual;
+    for y: TaxableYear;
+    for gi: Money;
+    for thr: Money;
+    when filing_status(p, y, Single) and gross_income_amount(p, y, gi) and tcja_simplified_threshold_single(y, thr) and gi <= thr;
+    then tcja_exempt_from_filing_single(p, y);
+}
+
+relation tcja_joint_gross_income_within_standard_deduction(p: Individual, s: Individual, y: TaxableYear) kind institutional;
+@source(IRC_S6012_F, relation = formalizes, coverage = exact, quote = "the gross income of such individual, when combined with the gross income of such individual's spouse, for the taxable year does not exceed the standard deduction which would be applicable to the taxpayer for such taxable year under section 63 if such individual and such individual's spouse made a joint return,")
+rule S6012TcjaJointWithinStandardDeduction strict {
+    effective [@2018-01-01, @2026-01-01);
+    for p: Individual;
+    for s: Individual;
+    for y: TaxableYear;
+    for gp: Money;
+    for gs: Money;
+    for sd: Money;
+    when gross_income_amount(p, y, gp) and gross_income_amount(s, y, gs) and basic_standard_deduction_amount(y, MarriedFilingJointly, sd) and gp + gs <= sd;
+    then tcja_joint_gross_income_within_standard_deduction(p, s, y);
+}
+relation tcja_dependent_unearned_income_excess(p: Individual, y: TaxableYear) kind institutional {
+    label en unofficial "neither the individual nor the spouse is a §63(c)(5)-described dependent with income (other than earned income) in excess of the §63(c)(5)(A) amount (§6012(f)(2)(D)) — pending, not this package's norm";
+}
+@source(IRC_S6012_F, relation = formalizes, coverage = partial, quote = "(2) an individual entitled to make a joint return if—")
+rule S6012TcjaExemptJoint strict {
+    effective [@2018-01-01, @2026-01-01);
+    for p: Individual;
+    for s: Individual;
+    for y: TaxableYear;
+    when entitled_to_joint_return(p, s, y)
+        and tcja_joint_gross_income_within_standard_deduction(p, s, y)
+        and same_household_as_spouse(p, y)
+        and not spouse_makes_separate_return(p, y)
+        and tcja_dependent_unearned_income_excess(p, y);
+    then tcja_exempt_from_filing_single(p, y);
+}
+
+@source(IRC_S6012_F, relation = formalizes, coverage = exact, quote = "In the case of a taxable year beginning after December 31, 2017, and before January 1, 2026, subsection (a)(1) shall not apply, and every individual who has gross income for the taxable year shall be required to make returns with respect to income taxes under subtitle A, except that a return shall not be required of—")
+rule S6012TcjaIndividualRequiredToFile defeasible {
+    for p: Individual;
+    for y: TaxableYear;
+    for gi: Money;
+    when taxable_year_begins_in_tcja_window(y) and gross_income_amount(p, y, gi) and gi > 0.00 USD;
+    then required_to_file_income_tax_return(p, y);
+    unless tcja_exempt_from_filing_single(p, y);
+}

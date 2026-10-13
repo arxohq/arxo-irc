@@ -1,0 +1,367 @@
+language "law.core" version "0.2";
+package us.irc.penalties version "0.1.1";
+namespace "urn:us:irc:penalties:clir";
+
+use self::{
+    AccuracyGround,
+    IRC_S6662_D,
+    IRC_S6662_E,
+    IRC_S6662_H,
+    Person,
+    TaxKind,
+    TaxableYear,
+    gross_valuation_misstatement,
+    substantial_valuation_misstatement,
+    underpayment_attributable_to_ground,
+    understatement_reduction_amount,
+};
+
+// 26 U.S.C. §6662(e)(1)(B), (e)(3), (h)(2)(A)(ii)-(iii), (d)(2)(C) — IRC-16 stage 3 (TECH_GAP reduction,
+// 26.09.2026). The stage-2 register named these G3113 and G3114.
+//
+// TRANSFER PRICING. Each transaction between persons described in section 482 is an entity with the price claimed
+// and the correct price under section 482 (facts: the correct price is what the adjustment determines) and the
+// net increase in taxable income that the section 482 adjustment produced (signed). (e)(1)(B)(i): the claimed
+// price is 200 percent or more, or 50 percent or less, of the correct price (gross: 400 and 25 percent).
+// (e)(1)(B)(ii): the NET section 482 transfer price adjustment exceeds the lesser of $5,000,000 or 10 percent of the
+// taxpayer's gross receipts (gross: $20,000,000 or 20 percent). (e)(3)(A) is the net increase; (e)(3)(B) excludes
+// from the threshold test the portions that meet one of three exceptions. The two documentation exceptions turn on
+// the reasonableness of the method (external judgments, DECISION-0194, authority the Secretary) and on
+// documentation facts (in existence at filing, provided within 30 days of a request). The (D) rule (no reasonable
+// cause for a portion of the underpayment unless an exception is met) is stated as a relation per transaction and
+// is NOT wired into section 6664(c) (the defense relation is keyed by taxpayer, year and kind, not by portion): G5550.
+// The (e)(2) limitation ($5,000, $10,000 for a corporation) is the underpayment-floor of module 07, which the two
+// added feeding rules also test.
+//
+// SHELTER (d)(2)(C). The reduction of the understatement for items with substantial authority or adequate
+// disclosure does not apply to an item attributable to a tax shelter (an arrangement a significant purpose of
+// which is the avoidance or evasion of Federal income tax: an external judgment of the Tax Court). The reduction
+// is derived item by item; `understatement_reduction_amount` (module 07) is now a derived relation, so a case
+// that asserts it directly (stage-1 scenarios) is unaffected.
+
+entity TransferPriceTransaction {
+    label en unofficial "a transaction between persons described in section 482 in which a price for property, services or the use of property is claimed on a return";
+}
+entity ReductionItem {
+    label en unofficial "an item of the understatement for which the section 6662(d)(2)(B) reduction is claimed";
+}
+entity TaxShelterArrangement {
+    label en unofficial "a partnership or other entity, investment plan or arrangement, or other plan or arrangement";
+}
+
+// --- (e)(1)(B)(i): the price test -------------------------------------------------------------------------
+relation transfer_price_of(t: TransferPriceTransaction, p: Person, y: TaxableYear) kind empirical {
+    label en unofficial "the transaction is the taxpayer's for the taxable year";
+}
+relation price_claimed_on_return(t: TransferPriceTransaction, amount: Money) kind empirical {
+    label en official "the price for any property or services (or for the use of property) claimed on the return in connection with a transaction between persons described in section 482";
+}
+relation correct_price_under_482(t: TransferPriceTransaction, amount: Money) kind empirical {
+    label en official "the amount determined under section 482 to be the correct amount of such price";
+}
+pub relation transfer_price_substantial_misstatement(t: TransferPriceTransaction) kind institutional {
+    label en official "the price claimed is 200 percent or more (or 50 percent or less) of the correct amount under section 482";
+}
+pub relation transfer_price_gross_misstatement(t: TransferPriceTransaction) kind institutional {
+    label en official "the price claimed is 400 percent or more (or 25 percent or less) of the correct amount under section 482";
+}
+@source(IRC_S6662_E, relation = formalizes, coverage = exact, quote = "the price for any property or services (or for the use of property) claimed on any such return in connection with any transaction between persons described in section 482 is 200 percent or more (or 50 percent or less) of the amount determined under section 482 to be the correct amount of such price")
+rule TransferPriceSubstantialHigh strict {
+    for t: TransferPriceTransaction;
+    for claimed: Money;
+    for correct: Money;
+    when price_claimed_on_return(t, claimed) and correct_price_under_482(t, correct)
+        and claimed >= round(correct * TransferPriceSubstantialHighRatio, 2, "HALF_UP");
+    then transfer_price_substantial_misstatement(t);
+}
+@source(IRC_S6662_E, relation = formalizes, coverage = exact, quote = "the price for any property or services (or for the use of property) claimed on any such return in connection with any transaction between persons described in section 482 is 200 percent or more (or 50 percent or less) of the amount determined under section 482 to be the correct amount of such price")
+rule TransferPriceSubstantialLow strict {
+    for t: TransferPriceTransaction;
+    for claimed: Money;
+    for correct: Money;
+    when price_claimed_on_return(t, claimed) and correct_price_under_482(t, correct)
+        and claimed <= round(correct * TransferPriceSubstantialLowRatio, 2, "HALF_UP");
+    then transfer_price_substantial_misstatement(t);
+}
+@source(IRC_S6662_H, relation = formalizes, coverage = exact, quote = "(I) \"400 percent\" for \"200 percent\", and")
+rule TransferPriceGrossHigh strict {
+    for t: TransferPriceTransaction;
+    for claimed: Money;
+    for correct: Money;
+    when price_claimed_on_return(t, claimed) and correct_price_under_482(t, correct)
+        and claimed >= round(correct * TransferPriceGrossHighRatio, 2, "HALF_UP");
+    then transfer_price_gross_misstatement(t);
+}
+@source(IRC_S6662_H, relation = formalizes, coverage = exact, quote = "(II) \"25 percent\" for \"50 percent\", and")
+rule TransferPriceGrossLow strict {
+    for t: TransferPriceTransaction;
+    for claimed: Money;
+    for correct: Money;
+    when price_claimed_on_return(t, claimed) and correct_price_under_482(t, correct)
+        and claimed <= round(correct * TransferPriceGrossLowRatio, 2, "HALF_UP");
+    then transfer_price_gross_misstatement(t);
+}
+
+// --- (e)(3): the net section 482 transfer price adjustment ---------------------------------------------------
+relation transfer_price_adjustment_482(t: TransferPriceTransaction, amount: Money) kind empirical {
+    label en official "the increase in taxable income for the taxable year resulting from the adjustment under section 482 of the price for the transaction, signed (determined without regard to any amount carried from another taxable year)";
+}
+pub relation net_482_transfer_price_adjustment(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the net increase in taxable income for the taxable year resulting from adjustments under section 482 in the price for any property or services (or for the use of property)";
+}
+@source(IRC_S6662_E, relation = formalizes, coverage = exact, quote = "The term \"net section 482 transfer price adjustment\" means, with respect to any taxable year, the net increase in taxable income for the taxable year (determined without regard to any amount carried to such taxable year from another taxable year) resulting from adjustments under section 482 in the price for any property or services (or for the use of property).")
+rule Net482TransferPriceAdjustmentRule strict {
+    for p: Person;
+    for y: TaxableYear;
+    for t: TransferPriceTransaction;
+    when transfer_price_of(t, p, y) and transfer_price_adjustment_482(t, _);
+    then net_482_transfer_price_adjustment(p, y, sum(collect all a: Money, t2: TransferPriceTransaction where transfer_price_of(t2, p, y) and transfer_price_adjustment_482(t2, a), empty: 0.00 USD));
+}
+
+pub external judgment relation specific_method_use_established_reasonable(t: TransferPriceTransaction) {
+    authority Secretary;
+    label en official "it is established that the taxpayer determined such price in accordance with a specific pricing method set forth in the regulations prescribed under section 482 and that the taxpayer's use of such method was reasonable";
+}
+pub external judgment relation no_specific_method_likely_clearly_reflects_income(t: TransferPriceTransaction) {
+    authority Secretary;
+    label en official "the taxpayer establishes that none of such pricing methods was likely to result in a price that would clearly reflect income, the taxpayer used another pricing method, and that other method was likely to result in a price that would clearly reflect income";
+}
+relation price_determined_by_specific_method(t: TransferPriceTransaction) kind empirical {
+    label en official "the price was determined in accordance with a specific pricing method set forth in the regulations under section 482";
+}
+relation documentation_in_existence_at_filing(t: TransferPriceTransaction) kind empirical {
+    label en official "the taxpayer has documentation (which was in existence as of the time of filing the return) which sets forth the determination of the price and establishes the reasonableness of the method";
+}
+relation documentation_provided_within_30_days(t: TransferPriceTransaction) kind empirical {
+    label en official "the taxpayer provides such documentation to the Secretary within 30 days of a request for such documentation";
+}
+relation transaction_solely_between_foreign_corporations(t: TransferPriceTransaction) kind empirical {
+    label en official "the transaction is solely between foreign corporations";
+}
+relation foreign_transaction_affects_us_income(t: TransferPriceTransaction) kind empirical {
+    label en official "the treatment of the transaction affects the determination of income from sources within the United States or taxable income effectively connected with a United States trade or business";
+}
+pub relation excluded_specific_method_482(t: TransferPriceTransaction) kind institutional {
+    label en official "the portion attributable to the redetermination of a price determined under a specific method is excluded: (B)(i)";
+}
+pub relation excluded_other_method_482(t: TransferPriceTransaction) kind institutional {
+    label en official "the portion attributable to the redetermination of a price not determined under a specific method is excluded: (B)(ii)";
+}
+pub relation excluded_foreign_only_482(t: TransferPriceTransaction) kind institutional {
+    label en official "the portion attributable to a transaction solely between foreign corporations is excluded unless the treatment affects United States income: (B)(iii)";
+}
+pub relation excluded_from_482_threshold(t: TransferPriceTransaction) kind institutional {
+    label en official "the portion of the net increase is excluded in determining whether the threshold requirements of paragraph (1)(B)(ii) are met";
+}
+@source(IRC_S6662_E, relation = formalizes, coverage = exact, quote = "(III) the taxpayer provides such documentation to the Secretary within 30 days of a request for such documentation.")
+rule ExcludedSpecificMethod482 strict {
+    for t: TransferPriceTransaction;
+    when price_determined_by_specific_method(t) and specific_method_use_established_reasonable(t)
+        and documentation_in_existence_at_filing(t) and documentation_provided_within_30_days(t);
+    then excluded_specific_method_482(t);
+}
+@source(IRC_S6662_E, relation = formalizes, coverage = exact, quote = "(III) the taxpayer provides such documentation to the Secretary within 30 days of request for such documentation.")
+rule ExcludedOtherMethod482 strict {
+    for t: TransferPriceTransaction;
+    when not_known(price_determined_by_specific_method(t)) and no_specific_method_likely_clearly_reflects_income(t)
+        and documentation_in_existence_at_filing(t) and documentation_provided_within_30_days(t);
+    then excluded_other_method_482(t);
+}
+@source(IRC_S6662_E, relation = formalizes, coverage = exact, quote = "Any portion of such net increase which is attributable to any transaction solely between foreign corporations unless, in the case of any such corporations, the treatment of such transaction affects the determination of income from sources within the United States or taxable income effectively connected with the conduct of a trade or business within the United States.")
+rule ExcludedForeignOnly482 strict {
+    for t: TransferPriceTransaction;
+    when transaction_solely_between_foreign_corporations(t) and not_known(foreign_transaction_affects_us_income(t));
+    then excluded_foreign_only_482(t);
+}
+rule ExcludedFrom482ThresholdBySpecificMethod strict {
+    for t: TransferPriceTransaction;
+    when excluded_specific_method_482(t);
+    then excluded_from_482_threshold(t);
+}
+rule ExcludedFrom482ThresholdByOtherMethod strict {
+    for t: TransferPriceTransaction;
+    when excluded_other_method_482(t);
+    then excluded_from_482_threshold(t);
+}
+rule ExcludedFrom482ThresholdByForeignOnly strict {
+    for t: TransferPriceTransaction;
+    when excluded_foreign_only_482(t);
+    then excluded_from_482_threshold(t);
+}
+pub relation net_482_adjustment_for_threshold(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the net section 482 transfer price adjustment after the (B) exclusions, for the threshold requirements of paragraph (1)(B)(ii)";
+}
+@source(IRC_S6662_E, relation = formalizes, coverage = exact, quote = "For purposes of determining whether the threshold requirements of paragraph (1)(B)(ii) are met, the following shall be excluded:")
+rule Net482AdjustmentForThreshold strict {
+    for p: Person;
+    for y: TaxableYear;
+    for t: TransferPriceTransaction;
+    when transfer_price_of(t, p, y) and transfer_price_adjustment_482(t, _);
+    then net_482_adjustment_for_threshold(p, y, sum(collect all a: Money, t2: TransferPriceTransaction where transfer_price_of(t2, p, y) and transfer_price_adjustment_482(t2, a) and not_known(excluded_from_482_threshold(t2)), empty: 0.00 USD));
+}
+relation gross_receipts_for_482(p: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the taxpayer's gross receipts for the taxable year";
+}
+pub relation net_482_adjustment_substantial(p: Person, y: TaxableYear) kind institutional {
+    label en official "the net section 482 transfer price adjustment for the taxable year exceeds the lesser of $5,000,000 or 10 percent of the taxpayer's gross receipts";
+}
+pub relation net_482_adjustment_gross(p: Person, y: TaxableYear) kind institutional {
+    label en official "the net section 482 transfer price adjustment for the taxable year exceeds the lesser of $20,000,000 or 20 percent of the taxpayer's gross receipts";
+}
+@source(IRC_S6662_E, relation = formalizes, coverage = exact, quote = "the net section 482 transfer price adjustment for the taxable year exceeds the lesser of $5,000,000 or 10 percent of the taxpayer's gross receipts.")
+rule Net482AdjustmentSubstantialRule strict {
+    for p: Person;
+    for y: TaxableYear;
+    for net: Money;
+    for receipts: Money;
+    when net_482_adjustment_for_threshold(p, y, net) and gross_receipts_for_482(p, y, receipts)
+        and net > min(round(NetTransferPriceAdjustmentSubstantialAmount, 2, "HALF_UP"), round(receipts * NetTransferPriceAdjustmentSubstantialReceiptsPercent, 2, "HALF_UP"));
+    then net_482_adjustment_substantial(p, y);
+}
+@source(IRC_S6662_H, relation = formalizes, coverage = exact, quote = "(I) \"$20,000,000\" for \"$5,000,000\", and")
+rule Net482AdjustmentGrossRule strict {
+    for p: Person;
+    for y: TaxableYear;
+    for net: Money;
+    for receipts: Money;
+    when net_482_adjustment_for_threshold(p, y, net) and gross_receipts_for_482(p, y, receipts)
+        and net > min(round(NetTransferPriceAdjustmentGrossAmount, 2, "HALF_UP"), round(receipts * NetTransferPriceAdjustmentGrossReceiptsPercent, 2, "HALF_UP"));
+    then net_482_adjustment_gross(p, y);
+}
+// Feeding the substantial and gross valuation misstatement relations of module 07 ((e)(2): the underpayment floor).
+@source(IRC_S6662_E, relation = formalizes, coverage = partial, quote = "the price for any property or services (or for the use of property) claimed on any such return in connection with any transaction between persons described in section 482 is 200 percent or more (or 50 percent or less) of the amount determined under section 482 to be the correct amount of such price")
+rule TransferPriceFeedsSubstantialMisstatement strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for t: TransferPriceTransaction;
+    for portion: Money;
+    when transfer_price_of(t, p, y) and transfer_price_substantial_misstatement(t)
+        and underpayment_attributable_to_ground(p, y, kind, SubstantialValuationMisstatement, portion)
+        and portion > round(ValuationMisstatementUnderpaymentFloor, 2, "HALF_UP");
+    then substantial_valuation_misstatement(p, y, kind);
+}
+@source(IRC_S6662_E, relation = formalizes, coverage = partial, quote = "the net section 482 transfer price adjustment for the taxable year exceeds the lesser of $5,000,000 or 10 percent of the taxpayer's gross receipts.")
+rule NetAdjustmentFeedsSubstantialMisstatement strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for portion: Money;
+    when net_482_adjustment_substantial(p, y)
+        and underpayment_attributable_to_ground(p, y, kind, SubstantialValuationMisstatement, portion)
+        and portion > round(ValuationMisstatementUnderpaymentFloor, 2, "HALF_UP");
+    then substantial_valuation_misstatement(p, y, kind);
+}
+@source(IRC_S6662_H, relation = formalizes, coverage = partial, quote = "any substantial valuation misstatement under chapter 1 as determined under subsection (e) by substituting—")
+rule TransferPriceFeedsGrossMisstatement strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for t: TransferPriceTransaction;
+    for portion: Money;
+    when transfer_price_of(t, p, y) and transfer_price_gross_misstatement(t)
+        and underpayment_attributable_to_ground(p, y, kind, SubstantialValuationMisstatement, portion);
+    then gross_valuation_misstatement(p, y, kind);
+}
+@source(IRC_S6662_H, relation = formalizes, coverage = partial, quote = "any substantial valuation misstatement under chapter 1 as determined under subsection (e) by substituting—")
+rule NetAdjustmentFeedsGrossMisstatement strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for portion: Money;
+    when net_482_adjustment_gross(p, y) and underpayment_attributable_to_ground(p, y, kind, SubstantialValuationMisstatement, portion);
+    then gross_valuation_misstatement(p, y, kind);
+}
+relation regular_tax_determined_by_other_amount(p: Person, y: TaxableYear) kind empirical {
+    label en official "the regular tax (as defined in section 55(c)) imposed by chapter 1 is determined by reference to an amount other than taxable income";
+}
+relation other_amount_for_regular_tax(p: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the amount by reference to which the regular tax is determined";
+}
+relation taxable_income_of_taxpayer(p: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the taxable income of the taxpayer";
+}
+pub relation taxable_income_for_482_purposes(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the amount treated as the taxable income of the taxpayer for purposes of paragraph (3): the amount by reference to which the regular tax is determined, if any";
+}
+@source(IRC_S6662_E, relation = formalizes, coverage = exact, quote = "If the regular tax (as defined in section 55(c)) imposed by chapter 1 on the taxpayer is determined by reference to an amount other than taxable income, such amount shall be treated as the taxable income of such taxpayer for purposes of this paragraph.")
+rule TaxableIncomeFor482OtherAmount strict {
+    for p: Person;
+    for y: TaxableYear;
+    for a: Money;
+    when regular_tax_determined_by_other_amount(p, y) and other_amount_for_regular_tax(p, y, a);
+    then taxable_income_for_482_purposes(p, y, a);
+}
+@source(IRC_S6662_E, relation = formalizes, coverage = exact, quote = "If the regular tax (as defined in section 55(c)) imposed by chapter 1 on the taxpayer is determined by reference to an amount other than taxable income, such amount shall be treated as the taxable income of such taxpayer for purposes of this paragraph.")
+rule TaxableIncomeFor482Ordinary strict {
+    for p: Person;
+    for y: TaxableYear;
+    for a: Money;
+    when taxable_income_of_taxpayer(p, y, a) and not_known(regular_tax_determined_by_other_amount(p, y));
+    then taxable_income_for_482_purposes(p, y, a);
+}
+pub relation reasonable_cause_requirement_met_for_482_portion(t: TransferPriceTransaction) kind institutional {
+    label en official "the taxpayer meets the requirements of clause (i), (ii) or (iii) of subparagraph (B) with respect to the portion, so that section 6664(c) may treat it as having reasonable cause (not wired into the section 6664(c) relation, G5550)";
+}
+@source(IRC_S6662_E, relation = formalizes, coverage = partial, quote = "the taxpayer shall not be treated as having reasonable cause for any portion of an underpayment attributable to a net section 482 transfer price adjustment unless such taxpayer meets the requirements of clause (i), (ii), or (iii) of subparagraph (B) with respect to such portion.")
+rule ReasonableCauseRequirementMetFor482Portion strict {
+    for t: TransferPriceTransaction;
+    when excluded_from_482_threshold(t);
+    then reasonable_cause_requirement_met_for_482_portion(t);
+}
+
+// --- (d)(2)(C): items attributable to a tax shelter ------------------------------------------------------------------
+relation reduction_item_of(i: ReductionItem, p: Person, y: TaxableYear, kind: TaxKind) kind empirical {
+    label en unofficial "the item belongs to the taxpayer's understatement for the year and kind";
+}
+relation reduction_item_amount(i: ReductionItem, amount: Money) kind empirical {
+    label en official "the portion of the understatement attributable to the item with substantial authority, or adequately disclosed with a reasonable basis (the amount of the section 6662(d)(2)(B) reduction for the item)";
+}
+relation item_attributable_to_arrangement(i: ReductionItem, s: TaxShelterArrangement) kind empirical {
+    label en official "the item is attributable to the arrangement";
+}
+relation arrangement_is_partnership_entity_plan_or_arrangement(s: TaxShelterArrangement) kind empirical {
+    label en official "a partnership or other entity, any investment plan or arrangement, or any other plan or arrangement";
+}
+pub external judgment relation significant_purpose_is_tax_avoidance_or_evasion(s: TaxShelterArrangement) {
+    authority TaxCourt;
+    label en official "a significant purpose of such partnership, entity, plan, or arrangement is the avoidance or evasion of Federal income tax";
+}
+pub relation tax_shelter(s: TaxShelterArrangement) kind institutional {
+    label en official "tax shelter: a partnership or other entity, investment plan or arrangement, or other plan or arrangement a significant purpose of which is the avoidance or evasion of Federal income tax";
+}
+@source(IRC_S6662_D, relation = formalizes, coverage = exact, quote = "if a significant purpose of such partnership, entity, plan, or arrangement is the avoidance or evasion of Federal income tax.")
+rule TaxShelterRule strict {
+    for s: TaxShelterArrangement;
+    when arrangement_is_partnership_entity_plan_or_arrangement(s) and significant_purpose_is_tax_avoidance_or_evasion(s);
+    then tax_shelter(s);
+}
+pub relation item_attributable_to_tax_shelter(i: ReductionItem) kind institutional {
+    label en official "the item is attributable to a tax shelter";
+}
+@source(IRC_S6662_D, relation = formalizes, coverage = exact, quote = "Subparagraph (B) shall not apply to any item attributable to a tax shelter.")
+rule ItemAttributableToTaxShelter strict {
+    for i: ReductionItem;
+    for s: TaxShelterArrangement;
+    when item_attributable_to_arrangement(i, s) and tax_shelter(s);
+    then item_attributable_to_tax_shelter(i);
+}
+relation has_reduction_item(p: Person, y: TaxableYear, kind: TaxKind) kind institutional {
+    label en unofficial "the taxpayer has at least one item for the reduction";
+}
+rule HasReductionItem strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for i: ReductionItem;
+    when reduction_item_of(i, p, y, kind) and reduction_item_amount(i, _);
+    then has_reduction_item(p, y, kind);
+}
+@source(IRC_S6662_D, relation = formalizes, coverage = exact, quote = "Subparagraph (B) shall not apply to any item attributable to a tax shelter.")
+rule UnderstatementReductionFromItems defeasible {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    when has_reduction_item(p, y, kind);
+    then understatement_reduction_amount(p, y, kind, sum(collect all a: Money, i: ReductionItem where reduction_item_of(i, p, y, kind) and reduction_item_amount(i, a) and not_known(item_attributable_to_tax_shelter(i)), empty: 0.00 USD));
+}

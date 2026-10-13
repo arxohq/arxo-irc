@@ -1,0 +1,816 @@
+// Stage 3 (26.09.2026). Section 4943(a)(2) (the tax on the last day of the
+// year, valued at the day of greatest excess holdings), (c)(2)(A) last sentence
+// (nonvoting stock), (c)(4) present holdings (the percentage held on the
+// reference date, decreases, the 20/15/10-year periods, suspension, the second
+// phase and the election), (c)(5) (trust or will), (c)(6)(B) and last sentence,
+// (c)(7) (the Secretary's 5-year extension as a power), (d)(1) (proportionate
+// ownership through an entity), (d)(3) (business enterprise exclusions),
+// (d)(4) (the ESOP carve-out), (e) (donor advised funds) and (f)(7)
+// (supporting organizations).
+//
+// Design. The reference date of paragraph (4) is May 26, 1969 for a private
+// foundation and August 17, 2006 (the enactment date of Pub. L. 109-280, pinned
+// in the statutory notes under section 4943) for a donor advised fund or a
+// supporting organization ((e)(3), (f)(7)); the election date is January 1, 1971
+// or January 1, 2007. `substituted_percentage_for_20` and `..._for_35` replace
+// the constants of module 08 (`PermittedHoldingsPercentage*`).
+//
+// JUDGMENT CALLS. (1) The substituted percentage is clamped: not below 20 percent
+// ((c)(4)(A)(ii)) and not above the cap ((A)(i) 50 percent; (D)(ii) 35 percent
+// after the second phase). (2) If (D)(i) applied immediately before the close of
+// the second phase, it is read as continuing afterwards (the text is silent).
+// (3) The value test of (A)(iii) reuses the same substituted percentage. (4) The
+// (c)(6)(A) five-year grace of module 08 is unchanged; (B) is added below.
+// (5) Extensions of the (B) periods for a pending judicial proceeding ((C)) are
+// supplied as the resulting end date. The 1969 transition periods are long
+// expired for a present-day test; they stay executable for any legal_time.
+// Status: implemented_unverified; scenarios not executed; no legal review.
+
+// --- (a)(2): value of the excess holdings on the day of greatest holdings ---
+
+use self::{
+    ExciseAct,
+    IRC_S4943_A,
+    IRC_S4943_C,
+    IRC_S4943_D,
+    Person,
+    TaxableYear,
+    act_uses_special_4943_transition,
+    c6_grace_period_ends,
+    esop_4975e7_requirements_met,
+    excess_business_holdings_de_minimis_2_percent,
+    excess_business_holdings_disqualified_persons_voting_percentage,
+    excess_business_holdings_exist,
+    excess_business_holdings_foundation_voting_percentage,
+    excess_business_holdings_value,
+    excess_holdings_are_outside_4943,
+    foundation_and_disqualified_combined_voting_percentage,
+    involuntary_change_in_holdings_on,
+    member_of_family,
+    treated_as_private_foundation_4943f1,
+};
+
+@source(IRC_S4943_A, coverage = partial, quote = "shall be imposed on the last day of the taxable year")
+pub relation taxable_year_last_day(y: TaxableYear, on: Date) kind empirical {
+    label en unofficial "the last day of the taxable year";
+}
+pub relation excess_holdings_taxable_year(a: ExciseAct, y: TaxableYear) kind empirical {
+    label en unofficial "section 4943(a)(2): the taxable year for which the initial tax on the excess holdings is computed";
+}
+@source(IRC_S4943_A, coverage = partial, quote = "shall be determined as of that day during the taxable year when the foundation's excess holdings in such enterprise were the greatest")
+pub relation excess_holdings_daily_value(a: ExciseAct, day: Date, value: Money) kind empirical {
+    label en unofficial "section 4943(a)(2)(B): the value of the foundation's excess holdings on a day of the taxable year";
+}
+pub relation greater_excess_holdings_value_exists(a: ExciseAct, v: Money) kind institutional {
+    label en official "helper: some day of the year has an excess-holdings value larger than v (no max-over-derived; TECH-GAPS G136 idiom)";
+}
+rule GreaterExcessHoldingsValueExists(a: ExciseAct, v: Money, d1: Date, d2: Date, w: Money) defeasible {
+    label en official "helper for the greatest value";
+    when excess_holdings_daily_value(a, d1, v);
+    when excess_holdings_daily_value(a, d2, w);
+    when w > v;
+    then greater_excess_holdings_value_exists(a, v);
+}
+pub relation excess_holdings_greatest_value(a: ExciseAct, v: Money) kind institutional {
+    label en official "section 4943(a)(2)(B): the value of the excess holdings on the day of the year when they were the greatest";
+}
+rule ExcessHoldingsGreatestValue(a: ExciseAct, v: Money, d: Date) defeasible {
+    label en official "section 4943(a)(2)(B): a day value that no other day exceeds";
+    when excess_holdings_daily_value(a, d, v);
+    unless greater_excess_holdings_value_exists(a, v);
+    then excess_holdings_greatest_value(a, v);
+}
+pub relation excess_holdings_initial_tax_imposed_on(a: ExciseAct, on: Date) kind institutional {
+    label en official "section 4943(a)(2)(A): the initial tax is imposed on the last day of the taxable year";
+}
+rule ExcessHoldingsInitialTaxImposedOnLastDay(a: ExciseAct, y: TaxableYear, on: Date) defeasible {
+    label en official "section 4943(a)(2)(A)";
+    when excess_holdings_taxable_year(a, y);
+    when taxable_year_last_day(y, on);
+    then excess_holdings_initial_tax_imposed_on(a, on);
+}
+pub relation excess_holdings_value_for_initial_tax(a: ExciseAct, v: Money) kind institutional {
+    label en official "section 4943(a)(2)(B): the value used for the initial tax: the greatest daily value when daily values are supplied, otherwise the asserted value of module 08";
+}
+rule InitialTaxValueFromGreatestDay(a: ExciseAct, v: Money) defeasible {
+    label en official "section 4943(a)(2)(B): greatest daily value";
+    when excess_holdings_greatest_value(a, v);
+    then excess_holdings_value_for_initial_tax(a, v);
+}
+rule InitialTaxValueAsserted(a: ExciseAct, v: Money) defeasible {
+    label en official "module 08 input when no daily values are supplied";
+    when excess_business_holdings_value(a, v);
+    unless excess_holdings_daily_value(a, _, _) and excess_business_holdings_value(a, v);
+    then excess_holdings_value_for_initial_tax(a, v);
+}
+
+// --- (c)(2)(A): nonvoting stock ---
+
+@source(IRC_S4943_C, coverage = partial, quote = "nonvoting stock held by the private foundation shall also be treated as permitted holdings")
+pub relation foundation_nonvoting_value_percentage(a: ExciseAct, pct: Decimal) kind empirical {
+    label en unofficial "section 4943(c)(2)(A): the percentage of the value of all outstanding shares that consists of nonvoting stock held by the foundation";
+}
+pub relation nonvoting_stock_treated_as_permitted(a: ExciseAct) kind institutional {
+    label en official "section 4943(c)(2)(A): all disqualified persons together do not own more than 20 percent of the voting stock, so nonvoting stock held by the foundation is permitted holdings";
+}
+rule NonvotingStockTreatedAsPermitted(a: ExciseAct, dq: Decimal) defeasible {
+    label en official "section 4943(c)(2)(A), last sentence";
+    when excess_business_holdings_disqualified_persons_voting_percentage(a, dq);
+    when dq <= 0.20;
+    when foundation_nonvoting_value_percentage(a, _);
+    then nonvoting_stock_treated_as_permitted(a);
+}
+
+// --- (c)(4)-(5): present holdings ---
+
+enum PresentHoldingsRegime {
+    PrivateFoundation1969;
+    DonorAdvisedFund2006;
+    SupportingOrganization2006;
+}
+pub relation present_holdings_regime(a: ExciseAct, r: PresentHoldingsRegime) kind empirical {
+    label en unofficial "which present-holdings regime applies: paragraph (4) (May 26, 1969), or its (e)(3) and (f)(7) counterparts for donor advised funds and supporting organizations (August 17, 2006)";
+}
+pub relation present_holdings_reference_date(a: ExciseAct, on: Date) kind institutional {
+    label en official "section 4943(c)(4), (e)(3)(A), (f)(7)(A): May 26, 1969, or the date of the enactment of subsection (e) or (f) (Aug. 17, 2006)";
+}
+rule ReferenceDatePrivateFoundation(a: ExciseAct) defeasible {
+    label en official "section 4943(c)(4): May 26, 1969";
+    when present_holdings_regime(a, PrivateFoundation1969);
+    then present_holdings_reference_date(a, @1969-05-26);
+}
+rule ReferenceDateDonorAdvisedFund(a: ExciseAct) defeasible {
+    label en official "section 4943(e)(3)(A): the date of the enactment of the subsection (Pub. L. 109-280, Aug. 17, 2006, per the notes under section 4943)";
+    when present_holdings_regime(a, DonorAdvisedFund2006);
+    then present_holdings_reference_date(a, @2006-08-17);
+}
+rule ReferenceDateSupportingOrganization(a: ExciseAct) defeasible {
+    label en official "section 4943(f)(7)(A): the date of the enactment of the subsection (Aug. 17, 2006)";
+    when present_holdings_regime(a, SupportingOrganization2006);
+    then present_holdings_reference_date(a, @2006-08-17);
+}
+pub relation present_holdings_election_deadline(a: ExciseAct, on: Date) kind institutional {
+    label en official "section 4943(c)(4)(E), (e)(3)(B), (f)(7)(B): before January 1, 1971 (or, for donor advised funds and supporting organizations, January 1, 2007)";
+}
+rule ElectionDeadlinePrivateFoundation(a: ExciseAct) defeasible {
+    label en official "section 4943(c)(4)(E): January 1, 1971";
+    when present_holdings_regime(a, PrivateFoundation1969);
+    then present_holdings_election_deadline(a, @1971-01-01);
+}
+rule ElectionDeadlineDonorAdvisedFund(a: ExciseAct) defeasible {
+    label en official "section 4943(e)(3)(B): January 1, 2007";
+    when present_holdings_regime(a, DonorAdvisedFund2006);
+    then present_holdings_election_deadline(a, @2007-01-01);
+}
+rule ElectionDeadlineSupportingOrganization(a: ExciseAct) defeasible {
+    label en official "section 4943(f)(7)(B): January 1, 2007";
+    when present_holdings_regime(a, SupportingOrganization2006);
+    then present_holdings_election_deadline(a, @2007-01-01);
+}
+
+@source(IRC_S4943_C, coverage = partial, quote = "if such foundation and all disqualified persons together have holdings in such enterprise in excess of 20 percent of the voting stock on May 26, 1969")
+pub relation reference_date_combined_voting_percentage(a: ExciseAct, pct: Decimal) kind empirical {
+    label en unofficial "section 4943(c)(4)(A)(i): the voting stock percentage held by the foundation and all disqualified persons together on the reference date";
+}
+pub relation reference_date_combined_value_percentage(a: ExciseAct, pct: Decimal) kind empirical {
+    label en unofficial "section 4943(c)(4)(A)(iii), (B)(ii): the percentage of the value of all outstanding shares held by the foundation and all disqualified persons together on the reference date";
+}
+pub relation lowest_combined_voting_percentage_since_reference(a: ExciseAct, pct: Decimal) kind empirical {
+    label en unofficial "section 4943(c)(4)(A)(ii): the lowest combined holdings percentage reached after the reference date, before disregarding issuance decreases";
+}
+pub relation decrease_from_issuances_percentage(a: ExciseAct, pct: Decimal) kind empirical {
+    label en unofficial "section 4943(c)(4)(A)(ii): the net percentage decrease attributable to issuances of stock (or issuances coupled with redemptions)";
+}
+pub relation foundation_share_count_unaffected_by_issuances(a: ExciseAct) kind empirical {
+    label en unofficial "section 4943(c)(4)(A)(ii)(II): the number of shares held by the foundation is not affected by any such issuance or redemption";
+}
+pub relation present_holdings_substitution_applies(a: ExciseAct) kind institutional {
+    label en official "section 4943(c)(4)(A)(i): the foundation and all disqualified persons together held more than 20 percent of the voting stock on the reference date";
+}
+rule PresentHoldingsSubstitutionApplies(a: ExciseAct, pct: Decimal) defeasible {
+    label en official "section 4943(c)(4)(A)(i): more than 20 percent";
+    when reference_date_combined_voting_percentage(a, pct);
+    when pct > 0.20;
+    then present_holdings_substitution_applies(a);
+}
+pub relation decrease_disregarded_4943c4Aii(a: ExciseAct) kind institutional {
+    label en official "section 4943(c)(4)(A)(ii): a decrease attributable to issuances is disregarded when the net decrease is not more than 2 percent and the foundation's share count is unaffected";
+}
+rule DecreaseDisregarded(a: ExciseAct, dec: Decimal) defeasible {
+    label en official "section 4943(c)(4)(A)(ii)(I)-(II)";
+    when decrease_from_issuances_percentage(a, dec);
+    when dec <= 0.02;
+    when foundation_share_count_unaffected_by_issuances(a);
+    then decrease_disregarded_4943c4Aii(a);
+}
+pub relation effective_lowest_combined_percentage(a: ExciseAct, pct: Decimal) kind institutional {
+    label en official "section 4943(c)(4)(A)(ii): the lowest percentage counted, adding back a disregarded issuance decrease";
+}
+rule EffectiveLowestWithDisregardedDecrease(a: ExciseAct, low: Decimal, dec: Decimal) defeasible {
+    label en official "section 4943(c)(4)(A)(ii), second sentence";
+    when lowest_combined_voting_percentage_since_reference(a, low);
+    when decrease_from_issuances_percentage(a, dec);
+    when decrease_disregarded_4943c4Aii(a);
+    then effective_lowest_combined_percentage(a, low + dec);
+}
+rule EffectiveLowestWithoutDisregard(a: ExciseAct, low: Decimal) defeasible {
+    label en official "section 4943(c)(4)(A)(ii): no disregarded decrease";
+    when lowest_combined_voting_percentage_since_reference(a, low);
+    unless decrease_disregarded_4943c4Aii(a) and lowest_combined_voting_percentage_since_reference(a, low);
+    then effective_lowest_combined_percentage(a, low);
+}
+rule EffectiveLowestNoDecreaseAsserted(a: ExciseAct, p: Decimal) defeasible {
+    label en official "section 4943(c)(4)(A)(ii): no later decrease is asserted, so the reference date percentage stands";
+    when reference_date_combined_voting_percentage(a, p);
+    unless lowest_combined_voting_percentage_since_reference(a, _) and reference_date_combined_voting_percentage(a, p);
+    then effective_lowest_combined_percentage(a, p);
+}
+
+// (B): the 20/15/10-year periods.
+
+@source(IRC_S4943_C, coverage = partial, quote = "if the private foundation on such date has excess business holdings")
+pub relation had_excess_holdings_on_reference_date(a: ExciseAct) kind empirical {
+    label en unofficial "section 4943(c)(4)(B): the private foundation had excess business holdings on the reference date";
+}
+pub relation acquired_under_trust_or_will_before_reference(a: ExciseAct) kind empirical {
+    label en unofficial "section 4943(c)(5): the interest was acquired under the terms of a trust irrevocable on the reference date or a will executed on or before it, in effect at all times thereafter";
+}
+pub relation trust_or_will_distribution_date(a: ExciseAct, on: Date) kind empirical {
+    label en unofficial "section 4943(c)(5): the date of distribution of the interest under the trust or will";
+}
+pub relation present_holdings_period_start(a: ExciseAct, on: Date) kind institutional {
+    label en official "section 4943(c)(4)(B), (5): the reference date, or for a trust or will interest in the 15-year or 10-year cases the date of distribution";
+}
+pub relation b_period_over_95_percent(a: ExciseAct) kind institutional {
+    label en official "section 4943(c)(4)(B)(i): more than a 95 percent voting stock interest on the reference date (not for a trust or will interest, (c)(5))";
+}
+rule BPeriodOver95(a: ExciseAct, p: Decimal) defeasible {
+    label en official "section 4943(c)(4)(B)(i)";
+    when had_excess_holdings_on_reference_date(a);
+    when reference_date_combined_voting_percentage(a, p);
+    when p > 0.95;
+    unless acquired_under_trust_or_will_before_reference(a) and reference_date_combined_voting_percentage(a, p);
+    then b_period_over_95_percent(a);
+}
+pub relation b_ii_election_effective(a: ExciseAct) kind institutional {
+    label en official "section 4943(c)(4)(E): substantial contributors (or family) holding more than 15 percent elected before the deadline not to have clause (B)(ii) apply";
+}
+pub relation elected_not_to_apply_b_ii_on(a: ExciseAct, on: Date) kind empirical {
+    label en unofficial "section 4943(c)(4)(E): the date the individuals elected, in the manner the Secretary prescribes, not to have clause (B)(ii) apply";
+}
+pub relation electing_individuals_held_over_15_percent_on_reference_date(a: ExciseAct) kind empirical {
+    label en unofficial "section 4943(c)(4)(E): the electing individuals are substantial contributors (or family members) who held more than 15 percent of the voting stock on the reference date";
+}
+rule BIiElectionEffective(a: ExciseAct, on: Date, deadline: Date) defeasible {
+    label en official "section 4943(c)(4)(E): election made before the deadline by qualifying holders";
+    when elected_not_to_apply_b_ii_on(a, on);
+    when electing_individuals_held_over_15_percent_on_reference_date(a);
+    when present_holdings_election_deadline(a, deadline);
+    when on < deadline;
+    then b_ii_election_effective(a);
+}
+pub relation b_period_over_75_percent(a: ExciseAct) kind institutional {
+    label en official "section 4943(c)(4)(B)(ii): more than 75 percent of the voting stock (or of the profits or beneficial interest) or more than 75 percent of the value of all outstanding shares (or capital interest) on the reference date, and clause (i) does not apply";
+}
+rule BPeriodOver75Voting(a: ExciseAct, p: Decimal) defeasible {
+    label en official "section 4943(c)(4)(B)(ii): voting stock (profits or beneficial interest)";
+    when had_excess_holdings_on_reference_date(a);
+    when reference_date_combined_voting_percentage(a, p);
+    when p > 0.75;
+    unless b_period_over_95_percent(a) and reference_date_combined_voting_percentage(a, p);
+    unless b_ii_election_effective(a) and reference_date_combined_voting_percentage(a, p);
+    then b_period_over_75_percent(a);
+}
+rule BPeriodOver75Value(a: ExciseAct, v: Decimal) defeasible {
+    label en official "section 4943(c)(4)(B)(ii): value of all outstanding shares (capital interest)";
+    when had_excess_holdings_on_reference_date(a);
+    when reference_date_combined_value_percentage(a, v);
+    when v > 0.75;
+    unless b_period_over_95_percent(a) and reference_date_combined_value_percentage(a, v);
+    unless b_ii_election_effective(a) and reference_date_combined_value_percentage(a, v);
+    then b_period_over_75_percent(a);
+}
+rule PeriodStartReferenceDate(a: ExciseAct, ref: Date) defeasible {
+    label en official "section 4943(c)(4)(B): the period begins on the reference date";
+    when present_holdings_reference_date(a, ref);
+    unless acquired_under_trust_or_will_before_reference(a) and present_holdings_reference_date(a, ref);
+    then present_holdings_period_start(a, ref);
+}
+rule PeriodStartTrustOrWillDistribution(a: ExciseAct, dist: Date) defeasible {
+    label en official "section 4943(c)(5): the 15-year and 10-year periods commence on the date of distribution under the trust or will";
+    when acquired_under_trust_or_will_before_reference(a);
+    when trust_or_will_distribution_date(a, dist);
+    then present_holdings_period_start(a, dist);
+}
+pub relation present_holdings_period_computed_end(a: ExciseAct, on: Date) kind institutional {
+    label en official "section 4943(c)(4)(B): 20 years (over 95 percent), 15 years (over 75 percent) or 10 years from the start";
+}
+rule PeriodEnd20Years(a: ExciseAct, s: Date) defeasible {
+    label en official "section 4943(c)(4)(B)(i): 20-year period";
+    when b_period_over_95_percent(a);
+    when present_holdings_period_start(a, s);
+    then present_holdings_period_computed_end(a, add_calendar_period(s, 20 calendar_year));
+}
+rule PeriodEnd15Years(a: ExciseAct, s: Date) defeasible {
+    label en official "section 4943(c)(4)(B)(ii): 15-year period";
+    when b_period_over_75_percent(a);
+    when present_holdings_period_start(a, s);
+    then present_holdings_period_computed_end(a, add_calendar_period(s, 15 calendar_year));
+}
+rule PeriodEnd10Years(a: ExciseAct, s: Date) defeasible {
+    label en official "section 4943(c)(4)(B)(iii): 10-year period in any other case";
+    when had_excess_holdings_on_reference_date(a);
+    when present_holdings_period_start(a, s);
+    unless b_period_over_95_percent(a) and present_holdings_period_start(a, s);
+    unless b_period_over_75_percent(a) and present_holdings_period_start(a, s);
+    then present_holdings_period_computed_end(a, add_calendar_period(s, 10 calendar_year));
+}
+@source(IRC_S4943_C, coverage = partial, quote = "shall be suspended during the pendency of any judicial proceeding by the private foundation which is necessary to reform")
+pub relation period_end_after_judicial_suspension(a: ExciseAct, on: Date) kind empirical {
+    label en unofficial "section 4943(c)(4)(C): the end of the 20-, 15- or 10-year period after suspension for the pendency of a judicial proceeding by the foundation necessary to reform, or excuse it from compliance with, its governing instrument (computed by the case)";
+}
+pub relation present_holdings_period_end(a: ExciseAct, on: Date) kind institutional {
+    label en official "section 4943(c)(4)(B)-(C): the end of the period, as suspended";
+}
+rule PeriodEndSuspended(a: ExciseAct, on: Date) defeasible {
+    label en official "section 4943(c)(4)(C): the suspended end date";
+    when period_end_after_judicial_suspension(a, on);
+    then present_holdings_period_end(a, on);
+}
+rule PeriodEndUnsuspended(a: ExciseAct, on: Date) defeasible {
+    label en official "section 4943(c)(4)(B): the computed end when no suspension is asserted";
+    when present_holdings_period_computed_end(a, on);
+    unless period_end_after_judicial_suspension(a, _) and present_holdings_period_computed_end(a, on);
+    then present_holdings_period_end(a, on);
+}
+pub relation second_phase_ends(a: ExciseAct, on: Date) kind institutional {
+    label en official "section 4943(c)(4)(D)(iii): the second phase is the 15-year period immediately following the (B) period, as modified by (C)";
+}
+rule SecondPhaseEnds(a: ExciseAct, e: Date) defeasible {
+    label en official "section 4943(c)(4)(D)(iii)";
+    when present_holdings_period_end(a, e);
+    then second_phase_ends(a, add_calendar_period(e, 15 calendar_year));
+}
+
+// (D): the cap and the 25-percent limit.
+
+pub relation disqualified_persons_over_2_percent_during_second_phase(a: ExciseAct) kind empirical {
+    label en unofficial "section 4943(c)(4)(D)(i): at some time during the second phase all disqualified persons together held more than 2 percent of the voting stock";
+}
+pub relation disqualified_persons_over_2_percent_after_second_phase(a: ExciseAct) kind empirical {
+    label en unofficial "section 4943(c)(4)(D)(ii): at some time after the close of the second phase all disqualified persons together held more than 2 percent of the voting stock";
+}
+pub relation holdings_test_date(a: ExciseAct, on: Date) kind empirical {
+    label en unofficial "the date as of which the holdings are tested";
+}
+pub relation present_holdings_cap(a: ExciseAct, cap: Decimal) kind institutional {
+    label en official "section 4943(c)(4)(A)(i), (D): the largest percentage that may be substituted: 50 percent, or 35 percent after the second phase when (D)(i) did not apply";
+}
+rule CapFiftyDuringPeriodOrSecondPhase(a: ExciseAct, t: Date, e2: Date) defeasible {
+    label en official "section 4943(c)(4)(A)(i): 50 percent until the close of the second phase";
+    when holdings_test_date(a, t);
+    when second_phase_ends(a, e2);
+    when t <= e2;
+    unless act_uses_special_4943_transition(a);  // Stage 3: note 7(4) special transition foundation (37-*.law)
+    then present_holdings_cap(a, 0.50);
+}
+rule CapThirtyFiveAfterSecondPhase(a: ExciseAct, t: Date, e2: Date) defeasible {
+    label en official "section 4943(c)(4)(D)(ii): 35 percent after the close of the second phase when clause (i) did not apply immediately before its close";
+    when holdings_test_date(a, t);
+    when second_phase_ends(a, e2);
+    when t > e2;
+    unless disqualified_persons_over_2_percent_during_second_phase(a) and second_phase_ends(a, e2);
+    unless act_uses_special_4943_transition(a);  // Stage 3: note 7(4) special transition foundation (37-*.law)
+    then present_holdings_cap(a, 0.35);
+}
+rule CapFiftyAfterSecondPhaseWhenDiApplied(a: ExciseAct, t: Date, e2: Date) defeasible {
+    label en official "section 4943(c)(4)(D)(i): clause (i) applied during the second phase (read as continuing afterwards)";
+    when holdings_test_date(a, t);
+    when second_phase_ends(a, e2);
+    when t > e2;
+    when disqualified_persons_over_2_percent_during_second_phase(a);
+    unless act_uses_special_4943_transition(a);  // Stage 3: note 7(4) special transition foundation (37-*.law)
+    then present_holdings_cap(a, 0.50);
+}
+pub relation foundation_voting_limit_25_percent_applies(a: ExciseAct) kind institutional {
+    label en official "section 4943(c)(4)(D)(i)-(ii): of the substituted percentage not more than 25 percent may be voting stock held by the foundation";
+}
+rule VotingLimit25DuringSecondPhase(a: ExciseAct, t: Date, s2: Date, e2: Date) defeasible {
+    label en official "section 4943(c)(4)(D)(i): disqualified persons held more than 2 percent at a time during the second phase";
+    when holdings_test_date(a, t);
+    when present_holdings_period_end(a, s2);
+    when second_phase_ends(a, e2);
+    when t > s2;
+    when disqualified_persons_over_2_percent_during_second_phase(a);
+    unless act_uses_special_4943_transition(a);  // Stage 3: note 7(4) special transition foundation (37-*.law)
+    then foundation_voting_limit_25_percent_applies(a);
+}
+rule VotingLimit25AfterSecondPhase(a: ExciseAct, t: Date, e2: Date) defeasible {
+    label en official "section 4943(c)(4)(D)(ii): disqualified persons held more than 2 percent after the second phase";
+    when holdings_test_date(a, t);
+    when second_phase_ends(a, e2);
+    when t > e2;
+    when disqualified_persons_over_2_percent_after_second_phase(a);
+    unless act_uses_special_4943_transition(a);  // Stage 3: note 7(4) special transition foundation (37-*.law)
+    then foundation_voting_limit_25_percent_applies(a);
+}
+
+// (A)(i)-(ii): the substituted percentages.
+
+pub relation substituted_raw_percentage(a: ExciseAct, pct: Decimal) kind institutional {
+    label en official "section 4943(c)(4)(A)(i)-(ii): the reference date percentage, replaced by any lower counted percentage";
+}
+rule SubstitutedRawPercentage(a: ExciseAct, p: Decimal, low: Decimal) defeasible {
+    label en official "min(reference date percentage, lowest effective percentage)";
+    when present_holdings_substitution_applies(a);
+    when reference_date_combined_voting_percentage(a, p);
+    when effective_lowest_combined_percentage(a, low);
+    when low < p;
+    then substituted_raw_percentage(a, low);
+}
+rule SubstitutedRawPercentageNoDecrease(a: ExciseAct, p: Decimal, low: Decimal) defeasible {
+    label en official "no decrease below the reference date percentage";
+    when present_holdings_substitution_applies(a);
+    when reference_date_combined_voting_percentage(a, p);
+    when effective_lowest_combined_percentage(a, low);
+    when low >= p;
+    then substituted_raw_percentage(a, p);
+}
+pub relation substituted_percentage_for_20(a: ExciseAct, pct: Decimal) kind institutional {
+    label en official "section 4943(c)(4)(A): the percentage that stands in place of '20 percent' in paragraph (2): 20 percent, or the substituted holdings percentage between 20 percent and the cap";
+}
+rule SubstitutedFor20Standard(a: ExciseAct) defeasible {
+    label en official "section 4943(c)(2)(A): no present-holdings substitution, 20 percent";
+    when excess_business_holdings_disqualified_persons_voting_percentage(a, _);
+    unless present_holdings_substitution_applies(a) and excess_business_holdings_disqualified_persons_voting_percentage(a, _);
+    then substituted_percentage_for_20(a, 0.20);
+}
+rule SubstitutedFor20StandardViaCombinedPercentage(a: ExciseAct) defeasible {
+    label en official "section 4943(c)(2)(B): no present-holdings substitution, 20 percent (bound through the combined percentage of the 35 percent test)";
+    when foundation_and_disqualified_combined_voting_percentage(a, _);
+    unless present_holdings_substitution_applies(a) and foundation_and_disqualified_combined_voting_percentage(a, _);
+    then substituted_percentage_for_20(a, 0.20);
+}
+rule SubstitutedFor20BelowFloor(a: ExciseAct, raw: Decimal) defeasible {
+    label en official "section 4943(c)(4)(A)(ii): not less than 20 percent";
+    when substituted_raw_percentage(a, raw);
+    when raw <= 0.20;
+    then substituted_percentage_for_20(a, 0.20);
+}
+rule SubstitutedFor20WithinCap(a: ExciseAct, raw: Decimal, cap: Decimal) defeasible {
+    label en official "section 4943(c)(4)(A)(i): the substituted percentage";
+    when substituted_raw_percentage(a, raw);
+    when present_holdings_cap(a, cap);
+    when raw > 0.20;
+    when raw <= cap;
+    then substituted_percentage_for_20(a, raw);
+}
+rule SubstitutedFor20AboveCap(a: ExciseAct, raw: Decimal, cap: Decimal) defeasible {
+    label en official "section 4943(c)(4)(A)(i), (D): in no event more than the cap";
+    when substituted_raw_percentage(a, raw);
+    when present_holdings_cap(a, cap);
+    when raw > cap;
+    when cap > 0.20;
+    then substituted_percentage_for_20(a, cap);
+}
+pub relation substituted_percentage_for_35(a: ExciseAct, pct: Decimal) kind institutional {
+    label en official "section 4943(c)(4)(A)(i): the percentage that stands in place of '35 percent' in paragraph (2)(B): the substituted percentage if it is greater than 35 percent, otherwise 35 percent";
+}
+rule SubstitutedFor35Greater(a: ExciseAct, s: Decimal) defeasible {
+    label en official "section 4943(c)(4)(A)(i): greater than 35 percent";
+    when substituted_percentage_for_20(a, s);
+    when s > 0.35;
+    then substituted_percentage_for_35(a, s);
+}
+rule SubstitutedFor35Standard(a: ExciseAct, s: Decimal) defeasible {
+    label en official "section 4943(c)(2)(B): 35 percent";
+    when substituted_percentage_for_20(a, s);
+    when s <= 0.35;
+    then substituted_percentage_for_35(a, 0.35);
+}
+
+// (A)(iii): the value test with the same substituted percentage.
+
+@source(IRC_S4943_C, coverage = partial, quote = "shall be applied both with respect to the voting stock and, separately, with respect to the value of all outstanding shares of all classes of stock")
+pub relation foundation_value_percentage(a: ExciseAct, pct: Decimal) kind empirical {
+    label en unofficial "section 4943(c)(4)(A)(iii): the percentage of the value of all outstanding shares of all classes held by the foundation";
+}
+pub relation disqualified_persons_value_percentage(a: ExciseAct, pct: Decimal) kind empirical {
+    label en unofficial "section 4943(c)(4)(A)(iii): the percentage of the value of all outstanding shares of all classes owned by all disqualified persons";
+}
+pub relation permitted_holdings_value_percentage(a: ExciseAct, pct: Decimal) kind institutional {
+    label en official "section 4943(c)(4)(A)(iii): the substituted percentage (or 20 percent) less the disqualified persons' value percentage, applied to value";
+}
+rule PermittedValuePercentage(a: ExciseAct, s: Decimal, dq: Decimal) defeasible {
+    label en official "section 4943(c)(2)(A), (4)(A)(iii) applied to value";
+    when substituted_percentage_for_20(a, s);
+    when disqualified_persons_value_percentage(a, dq);
+    then permitted_holdings_value_percentage(a, s - dq);
+}
+pub relation excess_business_holdings_by_value_exist(a: ExciseAct) kind institutional {
+    label en official "section 4943(c)(4)(A)(iii): the foundation's value percentage exceeds the permitted value percentage (nonvoting stock permitted under (c)(2)(A) is not counted)";
+}
+rule ExcessHoldingsByValue(a: ExciseAct, v: Decimal, permitted: Decimal) defeasible {
+    label en official "section 4943(c)(4)(A)(iii): value test";
+    when foundation_value_percentage(a, v);
+    when permitted_holdings_value_percentage(a, permitted);
+    when v > permitted;
+    unless excess_business_holdings_de_minimis_2_percent(a) and foundation_value_percentage(a, v);
+    unless excess_holdings_are_outside_4943(a) and foundation_value_percentage(a, v);
+    unless nonvoting_stock_treated_as_permitted(a) and foundation_value_percentage(a, v) and foundation_nonvoting_value_percentage(a, v);
+    then excess_business_holdings_by_value_exist(a);
+}
+rule ExcessHoldingsByValueNonvotingPermitted(a: ExciseAct, v: Decimal, nv: Decimal, permitted: Decimal) defeasible {
+    label en official "section 4943(c)(2)(A), (4)(A)(iii): nonvoting stock held by the foundation is permitted, so only the remaining value percentage is tested";
+    when foundation_value_percentage(a, v);
+    when foundation_nonvoting_value_percentage(a, nv);
+    when nonvoting_stock_treated_as_permitted(a);
+    when permitted_holdings_value_percentage(a, permitted);
+    when v - nv > permitted;
+    unless excess_business_holdings_de_minimis_2_percent(a) and foundation_value_percentage(a, v);
+    unless excess_holdings_are_outside_4943(a) and foundation_value_percentage(a, v);
+    then excess_business_holdings_by_value_exist(a);
+}
+rule ExcessHoldingsOverVotingLimit25(a: ExciseAct, fpct: Decimal) defeasible {
+    label en official "section 4943(c)(4)(D): the foundation's voting stock exceeds the 25 percent limit that applies in the second phase";
+    when foundation_voting_limit_25_percent_applies(a);
+    when excess_business_holdings_foundation_voting_percentage(a, fpct);
+    when fpct > 0.25;
+    unless excess_business_holdings_de_minimis_2_percent(a) and excess_business_holdings_foundation_voting_percentage(a, fpct);
+    unless excess_holdings_are_outside_4943(a) and excess_business_holdings_foundation_voting_percentage(a, fpct);
+    then excess_business_holdings_exist(a);
+}
+
+// --- (c)(6)(B) and last sentence ---
+
+pub relation change_by_purchase_by_foundation(a: ExciseAct) kind empirical {
+    label en unofficial "section 4943(c)(6): the change in holdings was by purchase by the private foundation";
+}
+pub relation change_by_purchase_by_disqualified_person(a: ExciseAct) kind empirical {
+    label en unofficial "section 4943(c)(6): the change in holdings was by purchase by a disqualified person";
+}
+pub relation dq_acquisition_results_in_substitution_under_4943c4D(a: ExciseAct) kind empirical {
+    label en unofficial "section 4943(c)(6) last sentence: an acquisition by a disqualified person would result in a substitution under clause (i) or (ii) of paragraph (4)(D)";
+}
+pub relation change_in_holdings_eligible_for_c6(a: ExciseAct) kind institutional {
+    label en official "section 4943(c)(6): a change other than by purchase by the foundation or by a disqualified person (a disqualified person's purchase is not excluded when it would cause a (4)(D) substitution)";
+}
+rule ChangeEligibleNotPurchase(a: ExciseAct, on: Date) defeasible {
+    label en official "section 4943(c)(6): change in holdings not by purchase";
+    when involuntary_change_in_holdings_on(a, on);
+    unless change_by_purchase_by_foundation(a) and involuntary_change_in_holdings_on(a, on);
+    unless change_by_purchase_by_disqualified_person(a) and involuntary_change_in_holdings_on(a, on);
+    then change_in_holdings_eligible_for_c6(a);
+}
+rule ChangeEligibleDisqualifiedPurchaseCausingSubstitution(a: ExciseAct, on: Date) defeasible {
+    label en official "section 4943(c)(6), last sentence: 'or by a disqualified person' is disregarded when the DQ acquisition would result in a (4)(D) substitution";
+    when involuntary_change_in_holdings_on(a, on);
+    when change_by_purchase_by_disqualified_person(a);
+    when dq_acquisition_results_in_substitution_under_4943c4D(a);
+    unless change_by_purchase_by_foundation(a) and involuntary_change_in_holdings_on(a, on);
+    then change_in_holdings_eligible_for_c6(a);
+}
+pub relation excess_holdings_percentage_before_increase(a: ExciseAct, pct: Decimal) kind empirical {
+    label en unofficial "section 4943(c)(6)(B): the foundation's excess holdings immediately preceding the increase, determined without regard to (A)";
+}
+pub relation increase_in_excess_holdings_on(a: ExciseAct, on: Date) kind empirical {
+    label en unofficial "section 4943(c)(6)(B): the date of a change (not by purchase) that increases the foundation's excess business holdings";
+}
+pub relation c6b_grace_period_ends(a: ExciseAct, on: Date) kind institutional {
+    label en official "section 4943(c)(6)(B): the 5-year period beginning on the date of the increase";
+}
+rule C6bGracePeriodEnds(a: ExciseAct, on: Date) defeasible {
+    label en official "section 4943(c)(6)(B) with (A): 5 calendar years from the increase";
+    when increase_in_excess_holdings_on(a, on);
+    when change_in_holdings_eligible_for_c6(a);
+    then c6b_grace_period_ends(a, add_calendar_period(on, 5 calendar_year));
+}
+pub relation excess_holdings_kept_by_foundation_during_c6b_grace(a: ExciseAct, pct: Decimal) kind institutional {
+    label en official "section 4943(c)(6)(B): the excess holdings immediately preceding the increase are not treated, solely because of the increase, as held by a disqualified person";
+}
+rule ExcessBeforeIncreaseStaysWithFoundation(a: ExciseAct, pct: Decimal) defeasible {
+    label en official "section 4943(c)(6)(B)";
+    when excess_holdings_percentage_before_increase(a, pct);
+    when increase_in_excess_holdings_on(a, _);
+    then excess_holdings_kept_by_foundation_during_c6b_grace(a, pct);
+}
+
+// --- (c)(7): the Secretary's 5-year extension ---
+
+pub relation c7_diligent_efforts_and_no_disposition_possible(a: ExciseAct) kind empirical {
+    label en unofficial "section 4943(c)(7)(A): the foundation establishes that diligent efforts to dispose of the holdings were made within the initial 5-year period and that disposition has not been possible except substantially below fair market value by reason of size, complexity or diversity";
+}
+@source(IRC_S4943_C, coverage = partial, quote = "in the case of an unusually large gift or bequest of diverse business holdings or holdings with complex corporate structures")
+external judgment relation c7_unusually_large_gift_of_diverse_or_complex_holdings(a: ExciseAct) {
+    authority Secretary;
+    label en official "section 4943(c)(7): the gift or bequest is unusually large, of diverse business holdings or holdings with complex corporate structures";
+}
+pub relation c7_plan_submitted_to_secretary_on(a: ExciseAct, on: Date) kind empirical {
+    label en unofficial "section 4943(c)(7)(B)(i): the date the foundation submitted to the Secretary a plan for disposing of all the excess business holdings involved";
+}
+pub relation c7_plan_submitted_to_attorney_general_on(a: ExciseAct, on: Date) kind empirical {
+    label en unofficial "section 4943(c)(7)(B)(ii): the date the foundation submitted the plan to the Attorney General or other appropriate State official";
+}
+pub relation c7_attorney_general_response_forwarded_or_none(a: ExciseAct) kind empirical {
+    label en unofficial "section 4943(c)(7)(B)(ii): any response received from the Attorney General during the 5-year period was submitted to the Secretary (or none was received)";
+}
+@source(IRC_S4943_C, coverage = partial, quote = "the Secretary determines that such plan can reasonably be expected to be carried out before the close of the extension period")
+external judgment relation c7_plan_reasonably_expected_to_be_carried_out(a: ExciseAct) {
+    authority Secretary;
+    label en official "section 4943(c)(7)(C): the Secretary determines that the plan can reasonably be expected to be carried out before the close of the extension period";
+}
+pub relation c7_extension_conditions_met(a: ExciseAct) kind institutional {
+    label en official "section 4943(c)(7)(A)-(C): all conditions for the additional 5-year period";
+}
+rule C7ExtensionConditionsMet(a: ExciseAct, t1: Date, t2: Date, ends: Date) defeasible {
+    label en official "section 4943(c)(7)(A)-(C): efforts shown, plans submitted before the close of the initial period, response forwarded, plan reasonable";
+    when c7_unusually_large_gift_of_diverse_or_complex_holdings(a);
+    when c7_diligent_efforts_and_no_disposition_possible(a);
+    when c6_grace_period_ends(a, ends);
+    when c7_plan_submitted_to_secretary_on(a, t1);
+    when t1 < ends;
+    when c7_plan_submitted_to_attorney_general_on(a, t2);
+    when t2 < ends;
+    when c7_attorney_general_response_forwarded_or_none(a);
+    when c7_plan_reasonably_expected_to_be_carried_out(a);
+    then c7_extension_conditions_met(a);
+}
+pub relation secretary_extends_c6_period_on(a: ExciseAct, on: Date) kind empirical {
+    label en unofficial "section 4943(c)(7): the date the Secretary extends the paragraph (6) period by an additional 5 years";
+}
+pub relation c6_period_extended_5_years(a: ExciseAct) kind institutional {
+    label en official "section 4943(c)(7): the period under paragraph (6) is extended for an additional 5 years";
+}
+rule C7ExtensionPowerRule(a: ExciseAct, on: Date) defeasible {
+    label en official "section 4943(c)(7): the Secretary may extend the paragraph (6) period for an additional 5 years if (A)-(C) are met";
+    when secretary_extends_c6_period_on(a, on);
+    then power S4943C7Extension {
+        holder us.irc.core::Secretary;
+        over a;
+        exercise secretary_extends_c6_period_on(a, on);
+        valid_when c7_extension_conditions_met(a);
+        effect create(c6_period_extended_5_years(a));
+        window [-infinity, infinity];
+    };
+}
+pub relation c6_extended_grace_period_ends(a: ExciseAct, on: Date) kind institutional {
+    label en official "section 4943(c)(6)-(7): the end of the grace period after the additional 5 years";
+}
+rule C6ExtendedGracePeriodEnds(a: ExciseAct, base: Date) defeasible {
+    label en official "section 4943(c)(7): 5 calendar years after the end of the initial period";
+    when c6_grace_period_ends(a, base);
+    when c6_period_extended_5_years(a);
+    then c6_extended_grace_period_ends(a, add_calendar_period(base, 5 calendar_year));
+}
+
+// --- (d)(1): proportionate ownership through an entity ---
+
+@source(IRC_S4943_D, coverage = partial, quote = "any stock or other interest owned, directly or indirectly, by or for a corporation, partnership, estate, or trust shall be considered as being owned proportionately by or for its shareholders, partners, or beneficiaries")
+pub relation holder_share_in_entity(h: Person, ent: Person, share: Decimal) kind empirical {
+    label en unofficial "section 4943(d)(1): the holder's proportion of the intermediary (its shareholders', partners' or beneficiaries' share)";
+}
+pub relation entity_holdings_in_enterprise(ent: Person, a: ExciseAct, share: Decimal) kind empirical {
+    label en unofficial "section 4943(d)(1): the intermediary's directly owned percentage of the business enterprise";
+}
+pub relation holder_direct_holdings_in_enterprise(h: Person, a: ExciseAct, share: Decimal) kind empirical {
+    label en unofficial "section 4943(d)(1): the holder's directly owned percentage of the business enterprise";
+}
+pub relation trust_income_or_remainder_only_interest_excluded(h: Person, ent: Person) kind empirical {
+    label en unofficial "section 4943(d)(1), last sentence: the foundation's income or remainder interest in a section 4947(a)(2) trust, for property transferred after May 26, 1969 when the foundation holds only an income interest or only a remainder interest";
+}
+pub relation indirect_holdings_through_entity(h: Person, ent: Person, a: ExciseAct, share: Decimal) kind institutional {
+    label en official "section 4943(d)(1): the holder's proportionate part of the holdings owned by the entity";
+}
+rule IndirectHoldingsThroughEntity(h: Person, ent: Person, a: ExciseAct, s1: Decimal, s2: Decimal) defeasible {
+    label en official "section 4943(d)(1): the holder's proportion of the entity times the entity's percentage of the enterprise (one intermediary; multi-path attribution is TECH-GAPS G5905)";
+    when holder_share_in_entity(h, ent, s1);
+    when entity_holdings_in_enterprise(ent, a, s2);
+    unless trust_income_or_remainder_only_interest_excluded(h, ent) and holder_share_in_entity(h, ent, s1) and entity_holdings_in_enterprise(ent, a, s2);
+    then indirect_holdings_through_entity(h, ent, a, s1 * s2);
+}
+pub relation holdings_direct_plus_one_entity(h: Person, ent: Person, a: ExciseAct, total: Decimal) kind institutional {
+    label en official "section 4943(d)(1): the holder's direct holdings plus its proportionate part through one entity";
+}
+rule HoldingsDirectPlusOneEntity(h: Person, ent: Person, a: ExciseAct, direct: Decimal, via: Decimal) defeasible {
+    label en official "section 4943(d)(1)";
+    when holder_direct_holdings_in_enterprise(h, a, direct);
+    when indirect_holdings_through_entity(h, ent, a, via);
+    then holdings_direct_plus_one_entity(h, ent, a, direct + via);
+}
+
+// --- (d)(3): business enterprise exclusions ---
+
+pub relation functionally_related_business_4942j4(a: ExciseAct) kind empirical {
+    label en unofficial "section 4943(d)(3)(A): the enterprise is a functionally related business as defined in section 4942(j)(4) (the test is not modelled; case input)";
+}
+pub relation enterprise_gross_income_total(a: ExciseAct, amount: Money) kind empirical {
+    label en unofficial "section 4943(d)(3)(B): the gross income of the trade or business";
+}
+pub relation enterprise_income_excluded_by_512b(a: ExciseAct, amount: Money) kind empirical {
+    label en unofficial "section 4943(d)(3)(B): gross income of the items excluded by section 512(b)(1), (2), (3) and (5)";
+}
+pub relation enterprise_other_passive_income(a: ExciseAct, amount: Money) kind empirical {
+    label en unofficial "section 4943(d)(3)(B): other gross income derived from passive sources";
+}
+pub relation enterprise_goods_sale_income(a: ExciseAct, amount: Money) kind empirical {
+    label en unofficial "section 4943(d)(3)(B): income from the sale of goods (including costs passed on at cost or income in settlement of a dispute over the right to sell)";
+}
+pub relation seller_does_not_handle_goods(a: ExciseAct) kind empirical {
+    label en unofficial "section 4943(d)(3)(B): the seller does not manufacture, produce, physically receive or deliver, negotiate sales of, or maintain inventories in such goods";
+}
+pub relation enterprise_passive_source_income(a: ExciseAct, amount: Money) kind institutional {
+    label en official "section 4943(d)(3)(B): gross income from passive sources: 512(b) items, other passive income and goods-sale income of a seller that does not handle the goods";
+}
+rule PassiveSourceIncomeWithGoods(a: ExciseAct, x: Money, y: Money, g: Money) defeasible {
+    label en official "section 4943(d)(3)(B), last sentence: goods-sale income counts as passive when the seller does not handle the goods";
+    when enterprise_income_excluded_by_512b(a, x);
+    when enterprise_other_passive_income(a, y);
+    when enterprise_goods_sale_income(a, g);
+    when seller_does_not_handle_goods(a);
+    then enterprise_passive_source_income(a, x + y + g);
+}
+rule PassiveSourceIncomeWithoutGoods(a: ExciseAct, x: Money, y: Money) defeasible {
+    label en official "section 4943(d)(3)(B): goods-sale income does not count as passive";
+    when enterprise_income_excluded_by_512b(a, x);
+    when enterprise_other_passive_income(a, y);
+    unless seller_does_not_handle_goods(a) and enterprise_income_excluded_by_512b(a, x) and enterprise_other_passive_income(a, y) and enterprise_goods_sale_income(a, _);
+    then enterprise_passive_source_income(a, x + y);
+}
+pub relation outside_business_enterprise_4943d3(a: ExciseAct) kind institutional {
+    label en official "section 4943(d)(3): the holding is not in a 'business enterprise': a functionally related business or a trade or business at least 95 percent of whose gross income is from passive sources";
+}
+rule OutsideBusinessEnterpriseFunctionallyRelated(a: ExciseAct) defeasible {
+    label en official "section 4943(d)(3)(A)";
+    when functionally_related_business_4942j4(a);
+    then outside_business_enterprise_4943d3(a);
+}
+rule OutsideBusinessEnterprisePassive95(a: ExciseAct, total: Money, passive: Money) defeasible {
+    label en official "section 4943(d)(3)(B): passive-source income at least 95 percent of gross income";
+    when enterprise_gross_income_total(a, total);
+    when enterprise_passive_source_income(a, passive);
+    when total > 0.00 USD;
+    when passive >= total * 0.95;
+    then outside_business_enterprise_4943d3(a);
+}
+rule OutsideBy4943d3(a: ExciseAct) defeasible {
+    label en official "section 4943(d)(3): the holdings are outside the tax because the enterprise is not a business enterprise";
+    when outside_business_enterprise_4943d3(a);
+    then excess_holdings_are_outside_4943(a);
+}
+
+// --- (d)(4): an ESOP is not a disqualified person for present holdings ---
+
+pub relation esop_excluded_from_disqualified_persons_4943d4(plan: Person, a: ExciseAct) kind institutional {
+    label en official "section 4943(d)(4): a plan described in section 4975(e)(7) is not a disqualified person with respect to the holdings of a private foundation described in paragraphs (4) and (5) of subsection (c)";
+}
+rule EsopExcludedFromDisqualifiedPersons(plan: Person, a: ExciseAct) defeasible {
+    label en official "section 4943(d)(4)";
+    when esop_4975e7_requirements_met(plan);
+    when present_holdings_substitution_applies(a);
+    then esop_excluded_from_disqualified_persons_4943d4(plan, a);
+}
+
+// --- (e)(1)-(2): donor advised funds ---
+
+pub relation donor_advised_fund_4943e(fund: Person) kind empirical {
+    label en unofficial "section 4943(e)(1): the fund is a donor advised fund as defined in section 4966(d)(2)";
+}
+pub relation treated_as_private_foundation_for_4943(f: Person) kind institutional {
+    label en official "section 4943(e)(1), (f)(1): a donor advised fund, or a supporting organization described in (f)(3), is treated as a private foundation for section 4943";
+}
+rule DonorAdvisedFundTreatedAsPrivateFoundation(fund: Person) defeasible {
+    label en official "section 4943(e)(1)";
+    when donor_advised_fund_4943e(fund);
+    then treated_as_private_foundation_for_4943(fund);
+}
+rule SupportingOrganizationTreatedAsPrivateFoundation(o: Person) defeasible {
+    label en official "section 4943(f)(1)";
+    when treated_as_private_foundation_4943f1(o);
+    then treated_as_private_foundation_for_4943(o);
+}
+pub relation daf_advisory_person_4966d2Aiii(p: Person, fund: Person) kind empirical {
+    label en unofficial "section 4943(e)(2)(A): a person described in section 4966(d)(2)(A)(iii): a donor (or person appointed or designated by the donor) with advisory privileges";
+}
+pub relation daf_persons_share_of_entity(ent: Person, fund: Person, share: Decimal) kind empirical {
+    label en unofficial "section 4943(e)(2)(C), 4958(f)(3)(A)(i): the combined share of persons described in (e)(2)(A) or (B) in the entity's voting power, profits interest or beneficial interest";
+}
+pub relation disqualified_person_of_daf_4943e2(p: Person, fund: Person) kind institutional {
+    label en official "section 4943(e)(2): a disqualified person of the donor advised fund";
+}
+rule DafDisqualifiedPersonAdvisor(p: Person, fund: Person) defeasible {
+    label en official "section 4943(e)(2)(A)";
+    when daf_advisory_person_4966d2Aiii(p, fund);
+    then disqualified_person_of_daf_4943e2(p, fund);
+}
+rule DafDisqualifiedPersonFamily(p: Person, fund: Person, q: Person) defeasible {
+    label en official "section 4943(e)(2)(B): a member of the family of an individual described in (A)";
+    when member_of_family(p, q);
+    when daf_advisory_person_4966d2Aiii(q, fund);
+    then disqualified_person_of_daf_4943e2(p, fund);
+}
+rule DafDisqualifiedPerson35PercentEntity(ent: Person, fund: Person, share: Decimal) defeasible {
+    label en official "section 4943(e)(2)(C): a 35-percent controlled entity (4958(f)(3), with the substituted reference)";
+    when daf_persons_share_of_entity(ent, fund, share);
+    when share > 0.35;
+    then disqualified_person_of_daf_4943e2(ent, fund);
+}

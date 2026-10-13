@@ -1,0 +1,655 @@
+// Stage 3 (TECH_GAP reduction): fuel taxes (section 4041(a)(2)-(3), (b); 4042(e); 4081(a)(1)(B), (a)(3), (c)),
+// vehicle and tire taxes (4064(b)(5)(B), 4071(b), (c)) and the section 4481(c) month count.
+//
+// Traps met: `_` may not be an argument under `not_known` (use a marker relation); a duty with a bare constant
+// holder needs `when true`.
+
+// =====================================================================
+// Section 4041(a)(2)(B)(i): the catch-all rate of alternative fuels
+// =====================================================================
+
+use self::{
+    AlcoholFuelEvent,
+    AlcoholSource,
+    AlternativeFuelEvent,
+    AlternativeFuelKind,
+    ExciseEvent,
+    GasGuzzlerSaleEvent,
+    HighwayVehicleUseEvent,
+    IRC_S4041_A,
+    IRC_S4041_B,
+    IRC_S4042_E,
+    IRC_S4064_B,
+    IRC_S4071_B,
+    IRC_S4071_C,
+    IRC_S4081_A,
+    IRC_S4081_C,
+    IRC_S4481_C,
+    Organ,
+    Person,
+    Secretary,
+    TaxableFuelEvent,
+    TaxableFuelKind,
+    TaxableFuelTrigger,
+    TireSaleEvent,
+    WaterwayFuelEvent,
+    alcohol_fuel_event,
+    alternative_fuel_bus_use,
+    alternative_fuel_event,
+    excise_tax_due,
+    excise_tax_due_full_year,
+    highway_use_prorated,
+    liable_for_excise,
+    off_highway_business_use,
+    qualified_alcohol_fuel_rate_reduction,
+    tax_free_sale,
+    taxable_fuel_event,
+    tire_delivered_to_own_retail_outlet,
+    tire_equips_imported_article,
+    waterway_fuel_use,
+};
+
+// The tax on an alternative liquid fuel not covered by clauses (ii)-(iv) is "the rate of tax specified in section
+// 4081(a)(2)(A)(i) which is in effect at the time of such sale or use", i.e. the gasoline rate. The kind is added to
+// `AlternativeFuelKind` of 01-motor-fuels.law (`OtherAlternativeLiquidFuel`).
+@source(IRC_S4041_A, relation = formalizes, coverage = exact, quote = "(i) except as otherwise provided in this subparagraph, the rate of tax specified in section 4081(a)(2)(A)(i) which is in effect at the time of such sale or use,")
+rule OtherAlternativeLiquidFuelTax(e: AlternativeFuelEvent, qty: Decimal) strict {
+    when alternative_fuel_event(e, OtherAlternativeLiquidFuel, qty, _, _);
+    then excise_tax_due(e, round(GasolineRatePerGallon * qty, 2, "HALF_UP"));
+}
+
+// --- the Btu / pound conversions of (a)(2)(C), (D) and (a)(3)(D) ------------------------------------
+
+pub relation alternative_fuel_mass_event(
+    e: AlternativeFuelEvent,
+    kind: AlternativeFuelKind,
+    pounds: Decimal,
+    on: Date,
+    responsible: Person,
+) kind empirical {
+    label en official "a sale or use of liquefied petroleum gas, liquefied natural gas or compressed natural gas as fuel in a motor vehicle or motorboat, with the quantity in pounds (the statutory equivalence of a Btu content and a weight, section 4041(a)(2)(C), (D), (a)(3)(D))";
+}
+pub relation alternative_fuel_btu_event(
+    e: AlternativeFuelEvent,
+    kind: AlternativeFuelKind,
+    btu_lower_heating_value: Decimal,
+    on: Date,
+    responsible: Person,
+) kind empirical {
+    label en official "a sale or use of liquefied petroleum gas or liquefied natural gas as fuel, with the quantity as a Btu content (lower heating value): 115,400 Btu is one energy equivalent of a gallon of gasoline, 128,700 Btu one of a gallon of diesel";
+}
+// 18.3 cents x pounds / 5.75 with one rounding (AGENT-BRIEF "Money forms").
+@source(IRC_S4041_A, relation = formalizes, coverage = exact, quote = "a Btu content of 115,400 (lower heating value) is equal to 5.75 pounds of liquefied petroleum gas.")
+rule LpgTaxFromPounds(e: AlternativeFuelEvent, lb: Decimal) strict {
+    when alternative_fuel_mass_event(e, LiquefiedPetroleumGas, lb, _, _);
+    then excise_tax_due(e, div_round(S4041LpgRatePerEnergyEquivalentGallon * lb, 5.75, 2, "HALF_UP"));
+}
+@source(IRC_S4041_A, relation = formalizes, coverage = exact, quote = "a Btu content of 128,700 (lower heating value) is equal to 6.06 pounds of liquefied natural gas.")
+rule LngTaxFromPounds(e: AlternativeFuelEvent, lb: Decimal) strict {
+    when alternative_fuel_mass_event(e, LiquefiedNaturalGas, lb, _, _);
+    then excise_tax_due(e, div_round(S4041LngRatePerEnergyEquivalentGallonOfDiesel * lb, 6.06, 2, "HALF_UP"));
+}
+@source(IRC_S4041_A, relation = formalizes, coverage = exact, quote = "For purposes of this paragraph, the term \"energy equivalent of a gallon of gasoline\" means 5.66 pounds of compressed natural gas.")
+rule CngTaxFromPounds(e: AlternativeFuelEvent, lb: Decimal) strict {
+    when alternative_fuel_mass_event(e, CompressedNaturalGas, lb, _, _) and not_known(alternative_fuel_bus_use(e));
+    then excise_tax_due(e, div_round(S4041CngRatePerEnergyEquivalentGallon * lb, 5.66, 2, "HALF_UP"));
+}
+@source(IRC_S4041_A, relation = formalizes, coverage = exact, quote = "the amount of such fuel having a Btu content of 115,400 (lower heating value).")
+rule LpgTaxFromBtu(e: AlternativeFuelEvent, btu: Decimal) strict {
+    when alternative_fuel_btu_event(e, LiquefiedPetroleumGas, btu, _, _);
+    then excise_tax_due(e, div_round(S4041LpgRatePerEnergyEquivalentGallon * btu, 115400.0, 2, "HALF_UP"));
+}
+@source(IRC_S4041_A, relation = formalizes, coverage = exact, quote = "the amount of such fuel having a Btu content of 128,700 (lower heating value).")
+rule LngTaxFromBtu(e: AlternativeFuelEvent, btu: Decimal) strict {
+    when alternative_fuel_btu_event(e, LiquefiedNaturalGas, btu, _, _);
+    then excise_tax_due(e, div_round(S4041LngRatePerEnergyEquivalentGallonOfDiesel * btu, 128700.0, 2, "HALF_UP"));
+}
+@source(IRC_S4041_A, relation = formalizes, coverage = exact, quote = "No tax shall be imposed by this paragraph on any sale for use, or use, described in subparagraph (B) or (C) of section 6427(b)(2) (relating to school bus and intracity transportation).")
+rule NoTaxOnCngBusUseByMass(e: AlternativeFuelEvent) strict {
+    when alternative_fuel_mass_event(e, CompressedNaturalGas, _, _, _) and alternative_fuel_bus_use(e);
+    then tax_free_sale(e);
+}
+@source(IRC_S4041_A, relation = formalizes, coverage = partial, quote = "There is hereby imposed a tax on any liquid (other than gas oil, fuel oil, or any product taxable under section 4081")
+rule AlternativeFuelLiabilityFromMass(e: AlternativeFuelEvent, responsible: Person, amount: Money) defeasible {
+    when alternative_fuel_mass_event(e, _, _, _, responsible) and excise_tax_due(e, amount) and not_known(tax_free_sale(e));
+    then liable_for_excise(responsible, e, amount);
+}
+@source(IRC_S4041_A, relation = formalizes, coverage = partial, quote = "There is hereby imposed a tax on any liquid (other than gas oil, fuel oil, or any product taxable under section 4081")
+rule AlternativeFuelLiabilityFromBtu(e: AlternativeFuelEvent, responsible: Person, amount: Money) defeasible {
+    when alternative_fuel_btu_event(e, _, _, _, responsible) and excise_tax_due(e, amount) and not_known(tax_free_sale(e));
+    then liable_for_excise(responsible, e, amount);
+}
+
+// --- qualified methanol or ethanol fuel: the reduced (a)(2) rate of (b)(2)(A)(i) --------------------
+
+pub relation qualified_alcohol_fuel_reduced_rate(e: AlcoholFuelEvent, rate: Money) kind institutional {
+    label en official "section 4041(b)(2)(A)(i): the applicable blender rate per gallon less than the otherwise applicable rate of subsection (a)(2), which for a liquid outside clauses (ii)-(iv) is the section 4081(a)(2)(A)(i) rate (JUDGMENT CALL: the otherwise applicable rate is read as the pinned gasoline rate GasolineRatePerGallon)";
+}
+@source(IRC_S4041_B, relation = formalizes, coverage = exact, quote = "(i) the rate applicable under subsection (a)(2) shall be the applicable blender rate per gallon less than the otherwise applicable rate (6 cents per gallon in the case of a mixture none of the alcohol in which consists of ethanol), and")
+rule QualifiedAlcoholFuelReducedRate(e: AlcoholFuelEvent, reduction: Money) strict {
+    when qualified_alcohol_fuel_rate_reduction(e, reduction) and GasolineRatePerGallon >= reduction;
+    then qualified_alcohol_fuel_reduced_rate(e, GasolineRatePerGallon - reduction);
+}
+@source(IRC_S4041_B, relation = formalizes, coverage = exact, quote = "(i) the rate applicable under subsection (a)(2) shall be the applicable blender rate per gallon less than the otherwise applicable rate (6 cents per gallon in the case of a mixture none of the alcohol in which consists of ethanol), and")
+rule QualifiedAlcoholFuelTax(e: AlcoholFuelEvent, gallons: Decimal, rate: Money) strict {
+    when alcohol_fuel_event(e, _, _, gallons, _, _) and qualified_alcohol_fuel_reduced_rate(e, rate);
+    then excise_tax_due(e, round(rate * gallons, 2, "HALF_UP"));
+}
+
+// =====================================================================
+// Section 4041(b)(1)(B): tax on a later use of a liquid exempted as an off-highway business use
+// =====================================================================
+
+pub relation liquid_used_after_earlier_off_highway_exempt_event(later: ExciseEvent, earlier: ExciseEvent) kind empirical {
+    label en official "section 4041(b)(1)(B): the later use is a use of a liquid on which no tax was imposed by reason of subparagraph (A) at the earlier sale or use (the link between the two events is asserted; the language has no event-history relation, G1600)";
+}
+pub relation tax_imposed_on_use_of_liquid_exempted_as_off_highway_use(later: ExciseEvent) kind institutional {
+    label en official "section 4041(b)(1)(B): a tax is imposed by paragraph (1)(B), (2)(B) or (3)(A)(ii) of subsection (a) (whichever is appropriate) and by the corresponding provision of subsection (d)(1) on this later use; the amount comes from the ordinary taxing rules of the event";
+}
+@source(IRC_S4041_B, relation = formalizes, coverage = exact, quote = "If a liquid on which no tax was imposed by reason of subparagraph (A) is used otherwise than in an off-highway business use, a tax shall be imposed by paragraph (1)(B), (2)(B), or (3)(A)(ii) of subsection (a) (whichever is appropriate) and by the corresponding provision of subsection (d)(1) (if any).")
+rule TaxOnUseOfPreviouslyExemptOffHighwayLiquid(later: ExciseEvent, earlier: ExciseEvent) strict {
+    when liquid_used_after_earlier_off_highway_exempt_event(later, earlier)
+        and off_highway_business_use(earlier)
+        and not_known(off_highway_business_use(later));
+    then tax_imposed_on_use_of_liquid_exempted_as_off_highway_use(later);
+}
+
+// =====================================================================
+// Section 4042(e): the return date is the last day of the first month following the quarter
+// =====================================================================
+
+pub relation waterway_quarter_ends(e: WaterwayFuelEvent, quarter_end: Date) kind empirical {
+    label en official "section 4042(e): the last day of the calendar quarter in which the liquid was used";
+}
+pub relation waterway_return_due_date(e: WaterwayFuelEvent, due: Date) kind institutional {
+    label en official "section 4042(e): the last day of the first month following the calendar quarter (quarter end + 1 day = first day of the next month; + 1 month; - 1 day; so June 30 gives July 31)";
+}
+@source(IRC_S4042_E, relation = formalizes, coverage = exact, quote = "The date for filing the return of the tax imposed by this section for any calendar quarter shall be the last day of the first month following such quarter.")
+rule WaterwayReturnDueDate(e: WaterwayFuelEvent, qend: Date, calendar_before_1: Date) strict {
+    when waterway_quarter_ends(e, qend)
+        and us.irc.core::civil_calendar_boundary_before(add_calendar_period(add_calendar_period(qend, 1 calendar_day), 1 calendar_month), 1, us.irc.core::CalendarDay, calendar_before_1);
+    then waterway_return_due_date(e, calendar_before_1);
+}
+pub relation waterway_tax_return_filed(p: Person, e: WaterwayFuelEvent) kind empirical {
+    label en official "the user filed the return of the section 4042 tax for the quarter";
+}
+@source(IRC_S4042_E, relation = formalizes, coverage = exact, quote = "The date for filing the return of the tax imposed by this section for any calendar quarter shall be the last day of the first month following such quarter.")
+rule WaterwayReturnFilingDutyRule(e: WaterwayFuelEvent, user: Person, qend: Date, due: Date) defeasible {
+    when waterway_fuel_use(e, _, _, user) and waterway_quarter_ends(e, qend) and waterway_return_due_date(e, due) and excise_tax_due(e, _);
+    then duty FileWaterwayFuelTaxReturnByDueDate {
+        bearer user;
+        goal achievement {
+            condition waterway_tax_return_filed(user, e);
+            window [qend, due];
+        }
+    };
+}
+
+// =====================================================================
+// Section 4064(b)(5)(B): lengthening of an automobile is manufacture
+// =====================================================================
+
+pub relation automobile_lengthened_by(e: GasGuzzlerSaleEvent, lengthener: Person) kind empirical {
+    label en official "section 4064(b)(5)(B): the person lengthened the automobile";
+}
+pub relation treated_as_manufacturer_of_automobile(p: Person, e: GasGuzzlerSaleEvent) kind institutional {
+    label en official "section 4064(b)(5)(B): for purposes of section 4064, subchapter G and section 6416(b)(3), the lengthening of an automobile is the manufacture of an automobile by the lengthener";
+}
+@source(IRC_S4064_B, relation = formalizes, coverage = exact, quote = "the lengthening of an automobile by any person shall be treated as the manufacture of an automobile by such person.")
+rule LengtheningTreatedAsManufacture(e: GasGuzzlerSaleEvent, p: Person) strict {
+    when automobile_lengthened_by(e, p);
+    then treated_as_manufacturer_of_automobile(p, e);
+}
+@source(IRC_S4064_B, relation = formalizes, coverage = exact, quote = "the lengthening of an automobile by any person shall be treated as the manufacture of an automobile by such person.")
+rule GasGuzzlerLengthenerLiability(e: GasGuzzlerSaleEvent, p: Person, amount: Money) defeasible {
+    when treated_as_manufacturer_of_automobile(p, e) and excise_tax_due(e, amount) and not_known(tax_free_sale(e));
+    then liable_for_excise(p, e, amount);
+}
+
+// =====================================================================
+// Section 4071(b), (c): tires delivered to the manufacturer's retail outlet; tires on imported articles
+// =====================================================================
+
+pub relation tire_tax_already_imposed_under_4071a(e: TireSaleEvent) kind empirical {
+    label en official "section 4071(b): tax has already been imposed by subsection (a) on this tire (article)";
+}
+pub relation tire_treated_as_sold_on_delivery_to_own_retail_outlet(e: TireSaleEvent) kind institutional {
+    label en official "section 4071(b): the manufacturer, producer, or importer is liable for the section 4071(a) tax as if the tire had been sold at the time it was delivered to its own retail store or outlet";
+}
+@source(IRC_S4071_B, relation = formalizes, coverage = exact, quote = "if the manufacturer, producer, or importer of any tire delivers such tire to a retail store or retail outlet of such manufacturer, producer, or importer, he shall be liable for tax under subsection (a) in respect of such tire in the same manner as if it had been sold at the time it was delivered to such retail store or outlet.")
+rule TireDeliveryToOwnRetailOutletTreatedAsSale(e: TireSaleEvent) strict {
+    when tire_delivered_to_own_retail_outlet(e) and not_known(tire_tax_already_imposed_under_4071a(e));
+    then tire_treated_as_sold_on_delivery_to_own_retail_outlet(e);
+}
+@source(IRC_S4071_B, relation = formalizes, coverage = exact, quote = "This subsection shall not apply to an article in respect to which tax has been imposed by subsection (a).")
+rule TireDeliveryAlreadyTaxedNoSecondTax(e: TireSaleEvent) strict {
+    when tire_delivered_to_own_retail_outlet(e) and tire_tax_already_imposed_under_4071a(e);
+    then tax_free_sale(e);
+}
+pub relation tire_sold_after_tax_imposed_on_delivery_to_retail_outlet(e: TireSaleEvent) kind empirical {
+    label en official "section 4071(b): the later sale is of a tire in respect of which tax has been imposed by subsection (b) on delivery to the retail outlet";
+}
+@source(IRC_S4071_B, relation = formalizes, coverage = exact, quote = "Subsection (a) shall not apply to an article in respect of which tax has been imposed by this subsection.")
+rule TireLaterSaleAfterDeliveryTaxNotTaxedAgain(e: TireSaleEvent) strict {
+    when tire_sold_after_tax_imposed_on_delivery_to_retail_outlet(e);
+    then tax_free_sale(e);
+}
+
+pub relation importer_of_article_equipped_with_tires(e: TireSaleEvent, importer: Person) kind empirical {
+    label en official "section 4071(c): the importer of the article imported into the United States that is equipped with the tires";
+}
+pub relation imported_article_sold_by_importer(e: TireSaleEvent) kind empirical {
+    label en official "section 4071(c)(2): the importer sells the article equipped with the tires";
+}
+pub relation treated_as_importer_of_tires(p: Person, e: TireSaleEvent) kind institutional {
+    label en official "section 4071(c)(1): the importer of the article is treated as the importer of the tires with which it is equipped";
+}
+pub relation sale_of_article_treated_as_sale_of_tires(e: TireSaleEvent) kind institutional {
+    label en official "section 4071(c)(2): the sale of the article by the importer is treated as the sale of the tires with which it is equipped";
+}
+@source(IRC_S4071_C, relation = formalizes, coverage = exact, quote = "(1) the importer of the article shall be treated as the importer of the tires with which such article is equipped, and")
+rule ImporterOfArticleIsImporterOfTires(e: TireSaleEvent, p: Person) strict {
+    when tire_equips_imported_article(e, false) and importer_of_article_equipped_with_tires(e, p);
+    then treated_as_importer_of_tires(p, e);
+}
+@source(IRC_S4071_C, relation = formalizes, coverage = exact, quote = "(2) the sale of the article by the importer thereof shall be treated as the sale of the tires with which such article is equipped.")
+rule SaleOfArticleIsSaleOfTires(e: TireSaleEvent) strict {
+    when tire_equips_imported_article(e, false) and imported_article_sold_by_importer(e);
+    then sale_of_article_treated_as_sale_of_tires(e);
+}
+@source(IRC_S4071_C, relation = formalizes, coverage = exact, quote = "For the purposes of subsection (a), if an article imported into the United States is equipped with tires—")
+rule ImportedArticleTireLiability(e: TireSaleEvent, p: Person, amount: Money) defeasible {
+    when treated_as_importer_of_tires(p, e) and sale_of_article_treated_as_sale_of_tires(e) and excise_tax_due(e, amount) and not_known(tax_free_sale(e));
+    then liable_for_excise(p, e, amount);
+}
+
+// =====================================================================
+// Section 4081(a)(1)(B): bulk transfers to registered terminals or refineries (clause (ii): vessel operators)
+// =====================================================================
+
+pub relation bulk_transfer_by_pipeline_or_vessel(e: TaxableFuelEvent) kind empirical {
+    label en official "section 4081(a)(1)(B)(i): the taxable fuel is transferred in bulk by pipeline or vessel to a terminal or refinery";
+}
+pub relation remover_or_enterer_registered_under_4101(e: TaxableFuelEvent) kind empirical {
+    label en official "section 4081(a)(1)(B)(i): the person removing or entering the taxable fuel is registered under section 4101";
+}
+pub relation pipeline_or_vessel_operator_registered_under_4101(e: TaxableFuelEvent) kind empirical {
+    label en official "section 4081(a)(1)(B)(i): the operator of the pipeline or vessel is registered under section 4101";
+}
+pub relation terminal_or_refinery_operator_registered_under_4101(e: TaxableFuelEvent) kind empirical {
+    label en official "section 4081(a)(1)(B)(i): the operator of the terminal or refinery is registered under section 4101";
+}
+pub relation entry_by_vessel_described_in_4042c1(e: TaxableFuelEvent) kind empirical {
+    label en official "section 4081(a)(1)(B)(ii): the entry is of a taxable fuel transferred in bulk by a vessel described in section 4042(c)(1) (designed primarily for the high seas, draft of more than 12 feet)";
+}
+pub relation bulk_transfer_registered_4081a1B(e: TaxableFuelEvent) kind institutional {
+    label en official "section 4081(a)(1)(B): the bulk transfer satisfies the registration conditions, so the tax of paragraph (1) does not apply; a vessel operator need not be registered for an entry by a deep-draft vessel";
+}
+@source(IRC_S4081_A, relation = formalizes, coverage = exact, quote = "The tax imposed by this paragraph shall not apply to any removal or entry of a taxable fuel transferred in bulk by pipeline or vessel to a terminal or refinery if the person removing or entering the taxable fuel, the operator of such pipeline or vessel (except as provided in clause (ii)), and the operator of such terminal or refinery are registered under section 4101.")
+rule BulkTransferRegisteredAllParties(e: TaxableFuelEvent) strict {
+    when bulk_transfer_by_pipeline_or_vessel(e)
+        and remover_or_enterer_registered_under_4101(e)
+        and pipeline_or_vessel_operator_registered_under_4101(e)
+        and terminal_or_refinery_operator_registered_under_4101(e);
+    then bulk_transfer_registered_4081a1B(e);
+}
+@source(IRC_S4081_A, relation = formalizes, coverage = exact, quote = "For purposes of clause (i), a vessel operator is not required to be registered with respect to the entry of a taxable fuel transferred in bulk by a vessel described in section 4042(c)(1).")
+rule BulkTransferRegisteredDeepDraftVesselEntry(e: TaxableFuelEvent) strict {
+    when bulk_transfer_by_pipeline_or_vessel(e)
+        and taxable_fuel_event(e, _, EntryForConsumptionUseOrWarehousing, _, _, _)
+        and entry_by_vessel_described_in_4042c1(e)
+        and remover_or_enterer_registered_under_4101(e)
+        and terminal_or_refinery_operator_registered_under_4101(e);
+    then bulk_transfer_registered_4081a1B(e);
+}
+@source(IRC_S4081_A, relation = formalizes, coverage = exact, quote = "The tax imposed by this paragraph shall not apply to any removal or entry of a taxable fuel transferred in bulk by pipeline or vessel to a terminal or refinery")
+rule NoTaxOnBulkTransferRegisteredRefinery(e: TaxableFuelEvent) strict {
+    when taxable_fuel_event(e, _, RemovalFromRefinery, _, _, _) and bulk_transfer_registered_4081a1B(e);
+    then tax_free_sale(e);
+}
+@source(IRC_S4081_A, relation = formalizes, coverage = exact, quote = "The tax imposed by this paragraph shall not apply to any removal or entry of a taxable fuel transferred in bulk by pipeline or vessel to a terminal or refinery")
+rule NoTaxOnBulkTransferRegisteredTerminal(e: TaxableFuelEvent) strict {
+    when taxable_fuel_event(e, _, RemovalFromTerminal, _, _, _) and bulk_transfer_registered_4081a1B(e);
+    then tax_free_sale(e);
+}
+@source(IRC_S4081_A, relation = formalizes, coverage = exact, quote = "The tax imposed by this paragraph shall not apply to any removal or entry of a taxable fuel transferred in bulk by pipeline or vessel to a terminal or refinery")
+rule NoTaxOnBulkTransferRegisteredEntry(e: TaxableFuelEvent) strict {
+    when taxable_fuel_event(e, _, EntryForConsumptionUseOrWarehousing, _, _, _) and bulk_transfer_registered_4081a1B(e);
+    then tax_free_sale(e);
+}
+
+// =====================================================================
+// Section 4081(a)(3): refueler trucks, tankers and tank wagons treated as part of a terminal
+// =====================================================================
+
+pub entity RefuelerVehicle;
+
+pub relation refueler_terminal_within_airport(v: RefuelerVehicle) kind empirical {
+    label en official "section 4081(a)(3)(A)(i): the terminal is located within an airport";
+}
+pub relation refueler_kerosene_for_delivery_only_into_aircraft_at_that_airport(v: RefuelerVehicle) kind empirical {
+    label en official "section 4081(a)(3)(A)(ii): any kerosene loaded in the truck, tanker, or wagon at the terminal is for delivery only into aircraft at the airport in which the terminal is located";
+}
+pub relation refueler_designed_and_used_for_fueling_aircraft(v: RefuelerVehicle) kind empirical {
+    label en official "section 4081(a)(3)(B)(i): the vehicle has storage tanks, hose, and coupling equipment designed and used for the purposes of fueling aircraft";
+}
+pub relation refueler_registered_for_highway_use(v: RefuelerVehicle) kind empirical {
+    label en official "the vehicle is registered for highway use (section 4081(a)(3)(B)(ii))";
+}
+pub relation refueler_operated_by_terminal_operator(v: RefuelerVehicle) kind empirical {
+    label en official "section 4081(a)(3)(B)(iii)(I): the vehicle is operated by the terminal operator of the terminal";
+}
+pub relation refueler_operator_makes_daily_accounting_to_terminal_operator(v: RefuelerVehicle) kind empirical {
+    label en official "section 4081(a)(3)(B)(iii)(II): the vehicle is operated by a person that makes a daily accounting to the terminal operator of each delivery of fuel from the vehicle";
+}
+pub relation highway_registered_vehicle_loaded_with_kerosene_at_terminal(v: RefuelerVehicle) kind empirical {
+    label en official "section 4081(a)(3)(A)(iv): a vehicle registered for highway use is loaded with kerosene at the terminal";
+}
+pub external judgment relation secretary_identified_exigent_circumstances_for_highway_loading(v: RefuelerVehicle) {
+    authority Secretary;
+    label en official "section 4081(a)(3)(A)(iv): exigent circumstances identified by the Secretary in regulations (DECISION-0194: the text commits the identification to the Secretary)";
+}
+pub relation refueler_meets_requirements_of_4081a3B(v: RefuelerVehicle) kind institutional {
+    label en official "section 4081(a)(3)(B): the vehicle has aircraft-fueling equipment, is not registered for highway use, and is operated by the terminal operator or by a person making a daily accounting to it";
+}
+pub relation refueler_treated_as_part_of_terminal(v: RefuelerVehicle) kind institutional {
+    label en official "section 4081(a)(3)(A): the refueler truck, tanker, or tank wagon is treated as part of a terminal for purposes of paragraph (2)(C)";
+}
+pub relation highway_vehicle_kerosene_loading_bar_satisfied(v: RefuelerVehicle) kind institutional {
+    label en official "section 4081(a)(3)(A)(iv): no vehicle registered for highway use is loaded with kerosene at the terminal, except in exigent circumstances identified by the Secretary";
+}
+@source(IRC_S4081_A, relation = formalizes, coverage = exact, quote = "(iii) is operated by—")
+rule RefuelerMeetsRequirementsTerminalOperator(v: RefuelerVehicle) strict {
+    when refueler_designed_and_used_for_fueling_aircraft(v)
+        and not_known(refueler_registered_for_highway_use(v))
+        and refueler_operated_by_terminal_operator(v);
+    then refueler_meets_requirements_of_4081a3B(v);
+}
+@source(IRC_S4081_A, relation = formalizes, coverage = exact, quote = "(II) a person that makes a daily accounting to such terminal operator of each delivery of fuel from such truck, tanker, or wagon.")
+rule RefuelerMeetsRequirementsDailyAccounting(v: RefuelerVehicle) strict {
+    when refueler_designed_and_used_for_fueling_aircraft(v)
+        and not_known(refueler_registered_for_highway_use(v))
+        and refueler_operator_makes_daily_accounting_to_terminal_operator(v);
+    then refueler_meets_requirements_of_4081a3B(v);
+}
+@source(IRC_S4081_A, relation = formalizes, coverage = exact, quote = "(iv) except in the case of exigent circumstances identified by the Secretary in regulations, no vehicle registered for highway use is loaded with kerosene at such terminal.")
+rule HighwayLoadingBarSatisfiedNoLoading(v: RefuelerVehicle) strict {
+    when refueler_terminal_within_airport(v) and not_known(highway_registered_vehicle_loaded_with_kerosene_at_terminal(v));
+    then highway_vehicle_kerosene_loading_bar_satisfied(v);
+}
+@source(IRC_S4081_A, relation = formalizes, coverage = exact, quote = "(iv) except in the case of exigent circumstances identified by the Secretary in regulations, no vehicle registered for highway use is loaded with kerosene at such terminal.")
+rule HighwayLoadingBarSatisfiedExigent(v: RefuelerVehicle) strict {
+    when highway_registered_vehicle_loaded_with_kerosene_at_terminal(v) and secretary_identified_exigent_circumstances_for_highway_loading(v);
+    then highway_vehicle_kerosene_loading_bar_satisfied(v);
+}
+@source(IRC_S4081_A, relation = formalizes, coverage = exact, quote = "For purposes of paragraph (2)(C), a refueler truck, tanker, or tank wagon shall be treated as part of a terminal if—")
+rule RefuelerTreatedAsPartOfTerminal(v: RefuelerVehicle) strict {
+    when refueler_terminal_within_airport(v)
+        and refueler_kerosene_for_delivery_only_into_aircraft_at_that_airport(v)
+        and refueler_meets_requirements_of_4081a3B(v)
+        and highway_vehicle_kerosene_loading_bar_satisfied(v);
+    then refueler_treated_as_part_of_terminal(v);
+}
+
+pub relation refueler_terminal_in_secured_area_of_airport(v: RefuelerVehicle) kind empirical {
+    label en official "section 4081(a)(3)(D)(i): the terminal is located within a secured area of an airport";
+}
+pub relation refueler_kerosene_use_is_commercial_aviation_by_registered_person(v: RefuelerVehicle) kind empirical {
+    label en official "section 4081(a)(2)(C)(i): the kerosene is used for commercial aviation by a person registered for such use under section 4101";
+}
+pub relation refueler_kerosene_rate(v: RefuelerVehicle, rate: Money) kind institutional {
+    label en official "section 4081(a)(3)(D): the rate for kerosene treated as removed from a terminal by reason of paragraph (3): the (2)(C)(i) rate if the terminal is in a secured area and the use is described in that clause, the (2)(C)(ii) rate in all other cases";
+}
+@source(IRC_S4081_A, relation = formalizes, coverage = exact, quote = "(i) the rate of tax specified in paragraph (2)(C)(i) in the case of use described in such paragraph shall apply if such terminal is located within a secured area of an airport, and")
+rule RefuelerKeroseneRateCommercialSecured(v: RefuelerVehicle) strict {
+    when refueler_treated_as_part_of_terminal(v)
+        and refueler_terminal_in_secured_area_of_airport(v)
+        and refueler_kerosene_use_is_commercial_aviation_by_registered_person(v);
+    then refueler_kerosene_rate(v, AviationKeroseneCommercialRatePerGallon);
+}
+@source(IRC_S4081_A, relation = formalizes, coverage = exact, quote = "(ii) the rate of tax specified in paragraph (2)(C)(ii) shall apply in all other cases.")
+rule RefuelerKeroseneRateOtherNotSecured(v: RefuelerVehicle) strict {
+    when refueler_treated_as_part_of_terminal(v) and not_known(refueler_terminal_in_secured_area_of_airport(v));
+    then refueler_kerosene_rate(v, AviationKeroseneOtherRatePerGallon);
+}
+@source(IRC_S4081_A, relation = formalizes, coverage = exact, quote = "(ii) the rate of tax specified in paragraph (2)(C)(ii) shall apply in all other cases.")
+rule RefuelerKeroseneRateOtherNotCommercial(v: RefuelerVehicle) strict {
+    when refueler_treated_as_part_of_terminal(v) and refueler_terminal_in_secured_area_of_airport(v) and not_known(refueler_kerosene_use_is_commercial_aviation_by_registered_person(v));
+    then refueler_kerosene_rate(v, AviationKeroseneOtherRatePerGallon);
+}
+
+pub relation secretary_requires_terminal_operator_reporting_under_4101d(x: Organ) kind institutional {
+    label en official "section 4081(a)(3)(C): the Secretary requires under section 4101(d) reporting by the terminal operator of the information obtained under subparagraph (B)(iii)(II) and of similar information on deliveries by the operator's own trucks, tankers, or wagons";
+}
+@source(IRC_S4081_A, relation = formalizes, coverage = exact, quote = "The Secretary shall require under section 4101(d) reporting by such terminal operator of—")
+rule Section4081a3CReportingDutyRule strict {
+    when true;
+    then duty Section4081a3CReportingDuty {
+        bearer Secretary;
+        goal achievement {
+            condition secretary_requires_terminal_operator_reporting_under_4101d(Secretary);
+            window [-infinity, infinity];
+        }
+    };
+}
+
+// =====================================================================
+// Section 4081(c): later separation of fuel from a diesel-water fuel emulsion
+// =====================================================================
+
+pub relation fuel_separated_from_diesel_water_emulsion_by(e: TaxableFuelEvent, separator: Person) kind empirical {
+    label en official "section 4081(c): the person separates the taxable fuel from a diesel-water fuel emulsion";
+}
+pub relation emulsion_taxed_at_4081a2D_rate_or_credited_under_6427(e: TaxableFuelEvent) kind empirical {
+    label en official "section 4081(c): tax was imposed on the emulsion under subsection (a) at a rate determined under subsection (a)(2)(D), or a credit or payment was allowed or made by reason of section 6427";
+}
+pub relation prior_removal_or_entry_tax_not_credited_or_refunded(e: TaxableFuelEvent, amount: Money) kind empirical {
+    label en official "section 4081(c): the amount of tax imposed (and not credited or refunded) on any prior removal or entry of the fuel";
+}
+pub relation treated_as_refiner_of_separated_fuel(p: Person, e: TaxableFuelEvent) kind institutional {
+    label en official "section 4081(c): the person separating the fuel is treated as the refiner of the taxable fuel";
+}
+@source(IRC_S4081_C, relation = formalizes, coverage = exact, quote = "such person shall be treated as the refiner of such taxable fuel.")
+rule SeparatorTreatedAsRefiner(e: TaxableFuelEvent, p: Person) strict {
+    when fuel_separated_from_diesel_water_emulsion_by(e, p) and emulsion_taxed_at_4081a2D_rate_or_credited_under_6427(e);
+    then treated_as_refiner_of_separated_fuel(p, e);
+}
+@source(IRC_S4081_C, relation = formalizes, coverage = exact, quote = "The amount of tax imposed on any removal of such fuel by such person shall be reduced by the amount of tax imposed (and not credited or refunded) on any prior removal or entry of such fuel.")
+rule SeparatorLiabilityNetOfPriorTax(e: TaxableFuelEvent, p: Person, due: Money, prior: Money) defeasible {
+    when treated_as_refiner_of_separated_fuel(p, e)
+        and excise_tax_due(e, due)
+        and prior_removal_or_entry_tax_not_credited_or_refunded(e, prior)
+        and due > prior;
+    then liable_for_excise(p, e, due - prior);
+}
+
+// =====================================================================
+// Section 4481(c): the month count of the proration from two dates
+// =====================================================================
+
+pub enum HighwayDatedEventKind {
+    FirstUseInPeriod;
+    SaleDestructionOrTheft;
+}
+pub relation highway_taxable_period_begins(e: HighwayVehicleUseEvent, start: Date) kind empirical {
+    label en official "section 4482(c): the first day (July 1) of the taxable period, a 12-month period, in which the use occurs";
+}
+pub relation highway_dated_event(e: HighwayVehicleUseEvent, kind: HighwayDatedEventKind, on: Date) kind empirical {
+    label en official "section 4481(c): the date of the first use of the vehicle in the taxable period, or the date it is sold, destroyed, or stolen";
+}
+pub relation highway_month_index(e: HighwayVehicleUseEvent, kind: HighwayDatedEventKind, month_index: Integer) kind institutional {
+    label en official "section 4481(c): the zero-based month of the taxable period (0 = the first month) containing the event date; the month boundaries are start + k calendar months";
+}
+@source(IRC_S4481_C, relation = formalizes, coverage = exact, quote = "to and including the last day in such taxable period")
+rule HighwayMonthIndex00(e: HighwayVehicleUseEvent, kind: HighwayDatedEventKind, start: Date, on: Date) strict {
+    when highway_taxable_period_begins(e, start)
+        and highway_dated_event(e, kind, on)
+        and on >= add_calendar_period(start, 0 calendar_month)
+        and on < add_calendar_period(start, 1 calendar_month);
+    then highway_month_index(e, kind, 0);
+}
+@source(IRC_S4481_C, relation = formalizes, coverage = exact, quote = "to and including the last day in such taxable period")
+rule HighwayMonthIndex01(e: HighwayVehicleUseEvent, kind: HighwayDatedEventKind, start: Date, on: Date) strict {
+    when highway_taxable_period_begins(e, start)
+        and highway_dated_event(e, kind, on)
+        and on >= add_calendar_period(start, 1 calendar_month)
+        and on < add_calendar_period(start, 2 calendar_month);
+    then highway_month_index(e, kind, 1);
+}
+@source(IRC_S4481_C, relation = formalizes, coverage = exact, quote = "to and including the last day in such taxable period")
+rule HighwayMonthIndex02(e: HighwayVehicleUseEvent, kind: HighwayDatedEventKind, start: Date, on: Date) strict {
+    when highway_taxable_period_begins(e, start)
+        and highway_dated_event(e, kind, on)
+        and on >= add_calendar_period(start, 2 calendar_month)
+        and on < add_calendar_period(start, 3 calendar_month);
+    then highway_month_index(e, kind, 2);
+}
+@source(IRC_S4481_C, relation = formalizes, coverage = exact, quote = "to and including the last day in such taxable period")
+rule HighwayMonthIndex03(e: HighwayVehicleUseEvent, kind: HighwayDatedEventKind, start: Date, on: Date) strict {
+    when highway_taxable_period_begins(e, start)
+        and highway_dated_event(e, kind, on)
+        and on >= add_calendar_period(start, 3 calendar_month)
+        and on < add_calendar_period(start, 4 calendar_month);
+    then highway_month_index(e, kind, 3);
+}
+@source(IRC_S4481_C, relation = formalizes, coverage = exact, quote = "to and including the last day in such taxable period")
+rule HighwayMonthIndex04(e: HighwayVehicleUseEvent, kind: HighwayDatedEventKind, start: Date, on: Date) strict {
+    when highway_taxable_period_begins(e, start)
+        and highway_dated_event(e, kind, on)
+        and on >= add_calendar_period(start, 4 calendar_month)
+        and on < add_calendar_period(start, 5 calendar_month);
+    then highway_month_index(e, kind, 4);
+}
+@source(IRC_S4481_C, relation = formalizes, coverage = exact, quote = "to and including the last day in such taxable period")
+rule HighwayMonthIndex05(e: HighwayVehicleUseEvent, kind: HighwayDatedEventKind, start: Date, on: Date) strict {
+    when highway_taxable_period_begins(e, start)
+        and highway_dated_event(e, kind, on)
+        and on >= add_calendar_period(start, 5 calendar_month)
+        and on < add_calendar_period(start, 6 calendar_month);
+    then highway_month_index(e, kind, 5);
+}
+@source(IRC_S4481_C, relation = formalizes, coverage = exact, quote = "to and including the last day in such taxable period")
+rule HighwayMonthIndex06(e: HighwayVehicleUseEvent, kind: HighwayDatedEventKind, start: Date, on: Date) strict {
+    when highway_taxable_period_begins(e, start)
+        and highway_dated_event(e, kind, on)
+        and on >= add_calendar_period(start, 6 calendar_month)
+        and on < add_calendar_period(start, 7 calendar_month);
+    then highway_month_index(e, kind, 6);
+}
+@source(IRC_S4481_C, relation = formalizes, coverage = exact, quote = "to and including the last day in such taxable period")
+rule HighwayMonthIndex07(e: HighwayVehicleUseEvent, kind: HighwayDatedEventKind, start: Date, on: Date) strict {
+    when highway_taxable_period_begins(e, start)
+        and highway_dated_event(e, kind, on)
+        and on >= add_calendar_period(start, 7 calendar_month)
+        and on < add_calendar_period(start, 8 calendar_month);
+    then highway_month_index(e, kind, 7);
+}
+@source(IRC_S4481_C, relation = formalizes, coverage = exact, quote = "to and including the last day in such taxable period")
+rule HighwayMonthIndex08(e: HighwayVehicleUseEvent, kind: HighwayDatedEventKind, start: Date, on: Date) strict {
+    when highway_taxable_period_begins(e, start)
+        and highway_dated_event(e, kind, on)
+        and on >= add_calendar_period(start, 8 calendar_month)
+        and on < add_calendar_period(start, 9 calendar_month);
+    then highway_month_index(e, kind, 8);
+}
+@source(IRC_S4481_C, relation = formalizes, coverage = exact, quote = "to and including the last day in such taxable period")
+rule HighwayMonthIndex09(e: HighwayVehicleUseEvent, kind: HighwayDatedEventKind, start: Date, on: Date) strict {
+    when highway_taxable_period_begins(e, start)
+        and highway_dated_event(e, kind, on)
+        and on >= add_calendar_period(start, 9 calendar_month)
+        and on < add_calendar_period(start, 10 calendar_month);
+    then highway_month_index(e, kind, 9);
+}
+@source(IRC_S4481_C, relation = formalizes, coverage = exact, quote = "to and including the last day in such taxable period")
+rule HighwayMonthIndex10(e: HighwayVehicleUseEvent, kind: HighwayDatedEventKind, start: Date, on: Date) strict {
+    when highway_taxable_period_begins(e, start)
+        and highway_dated_event(e, kind, on)
+        and on >= add_calendar_period(start, 10 calendar_month)
+        and on < add_calendar_period(start, 11 calendar_month);
+    then highway_month_index(e, kind, 10);
+}
+@source(IRC_S4481_C, relation = formalizes, coverage = exact, quote = "to and including the last day in such taxable period")
+rule HighwayMonthIndex11(e: HighwayVehicleUseEvent, kind: HighwayDatedEventKind, start: Date, on: Date) strict {
+    when highway_taxable_period_begins(e, start)
+        and highway_dated_event(e, kind, on)
+        and on >= add_calendar_period(start, 11 calendar_month)
+        and on < add_calendar_period(start, 12 calendar_month);
+    then highway_month_index(e, kind, 11);
+}
+
+pub relation highway_vehicle_not_subsequently_used_in_period(e: HighwayVehicleUseEvent) kind empirical {
+    label en official "section 4481(c)(2)(A): the vehicle is not subsequently used during the taxable period";
+}
+pub relation highway_vehicle_damaged_by_accident_or_casualty(e: HighwayVehicleUseEvent) kind empirical {
+    label en official "section 4481(c)(2)(B): the vehicle is damaged by reason of an accident or other casualty";
+}
+// Evaluative element (DECISION-0194, channel "adjudicated fact"): "not economic to rebuild" has no named
+// authority; the case supplies it with `origin adjudicated`.
+pub relation highway_vehicle_damage_makes_rebuilding_uneconomic(e: HighwayVehicleUseEvent) kind empirical {
+    label en official "section 4481(c)(2)(B): the damage is to such an extent that it is not economic to rebuild the vehicle (an evaluative element, carried as an adjudicated fact)";
+}
+pub relation highway_vehicle_destroyed_4481c2B(e: HighwayVehicleUseEvent) kind institutional {
+    label en official "section 4481(c)(2)(B): a highway motor vehicle is destroyed if it is damaged by an accident or other casualty to such an extent that it is not economic to rebuild";
+}
+@source(IRC_S4481_C, relation = formalizes, coverage = exact, quote = "For purposes of subparagraph (A), a highway motor vehicle is destroyed if such vehicle is damaged by reason of an accident or other casualty to such an extent that it is not economic to rebuild.")
+rule HighwayVehicleDestroyed(e: HighwayVehicleUseEvent) strict {
+    when highway_vehicle_damaged_by_accident_or_casualty(e) and highway_vehicle_damage_makes_rebuilding_uneconomic(e);
+    then highway_vehicle_destroyed_4481c2B(e);
+}
+pub relation highway_vehicle_sold_destroyed_or_stolen(e: HighwayVehicleUseEvent) kind institutional {
+    label en official "section 4481(c)(2)(A): the vehicle is sold, destroyed, or stolen (the sale or theft date is the dated event; destruction is the definition of (B))";
+}
+pub relation highway_vehicle_sold_or_stolen(e: HighwayVehicleUseEvent) kind empirical {
+    label en official "section 4481(c)(2)(A): the vehicle is sold or stolen in the taxable period";
+}
+@source(IRC_S4481_C, relation = formalizes, coverage = exact, quote = "If in any taxable period a highway motor vehicle is sold, destroyed, or stolen before the first day of the last month in such period and not subsequently used during such taxable period")
+rule HighwayVehicleSoldOrStolenClassification(e: HighwayVehicleUseEvent) strict {
+    when highway_vehicle_sold_or_stolen(e);
+    then highway_vehicle_sold_destroyed_or_stolen(e);
+}
+@source(IRC_S4481_C, relation = formalizes, coverage = exact, quote = "If in any taxable period a highway motor vehicle is sold, destroyed, or stolen before the first day of the last month in such period and not subsequently used during such taxable period")
+rule HighwayVehicleDestroyedClassification(e: HighwayVehicleUseEvent) strict {
+    when highway_vehicle_destroyed_4481c2B(e);
+    then highway_vehicle_sold_destroyed_or_stolen(e);
+}
+pub relation highway_disposal_proration_applies(e: HighwayVehicleUseEvent) kind institutional {
+    label en official "section 4481(c)(2)(A): the vehicle is sold, destroyed, or stolen before the first day of the last month (month index 10 or earlier) and is not subsequently used in the taxable period";
+}
+@source(IRC_S4481_C, relation = formalizes, coverage = exact, quote = "before the first day of the last month in such period and not subsequently used during such taxable period")
+rule HighwayDisposalProrationApplies(e: HighwayVehicleUseEvent, k: Integer) strict {
+    when highway_vehicle_sold_destroyed_or_stolen(e)
+        and highway_vehicle_not_subsequently_used_in_period(e)
+        and highway_month_index(e, SaleDestructionOrTheft, k)
+        and k <= 10;
+    then highway_disposal_proration_applies(e);
+}
+pub relation highway_use_months_derived(e: HighwayVehicleUseEvent, months: Decimal) kind institutional {
+    label en official "section 4481(c): the number of months over which the tax is reckoned proportionately, derived from the dates";
+}
+// (c)(2)(A): from the first day of the month of first use to and including the last day of the month of sale, destruction or theft.
+@source(IRC_S4481_C, relation = formalizes, coverage = exact, quote = "the tax shall be reckoned proportionately from the first day of the month in such period in which the first use of such highway motor vehicle occurs to and including the last day of the month in which such highway motor vehicle was sold, destroyed, or stolen.")
+rule HighwayMonthsFirstUseThroughDisposal(e: HighwayVehicleUseEvent, kf: Integer, kd: Integer) strict {
+    when highway_disposal_proration_applies(e)
+        and highway_month_index(e, FirstUseInPeriod, kf)
+        and highway_month_index(e, SaleDestructionOrTheft, kd)
+        and kd >= kf;
+    then highway_use_months_derived(e, (kd - kf + 1) * 1.0);
+}
+// (c)(1): first use after the first month, no earlier disposal: from the month of first use to the end of the taxable period.
+@source(IRC_S4481_C, relation = formalizes, coverage = exact, quote = "the tax shall be reckoned proportionately from the first day of the month in which such use occurs to and including the last day in such taxable period.")
+rule HighwayMonthsFirstUseThroughPeriodEnd(e: HighwayVehicleUseEvent, kf: Integer) strict {
+    when highway_month_index(e, FirstUseInPeriod, kf)
+        and kf >= 1
+        and not_known(highway_disposal_proration_applies(e));
+    then highway_use_months_derived(e, (12 - kf) * 1.0);
+}
+@source(IRC_S4481_C, relation = formalizes, coverage = exact, quote = "the tax shall be reckoned proportionately from the first day of the month in which such use occurs to and including the last day in such taxable period.")
+rule HighwayUseProratedMarkerDerived(e: HighwayVehicleUseEvent, months: Decimal) strict {
+    when highway_use_months_derived(e, months);
+    then highway_use_prorated(e);
+}
+@source(IRC_S4481_C, relation = formalizes, coverage = exact, quote = "the tax shall be reckoned proportionately from the first day of the month in which such use occurs to and including the last day in such taxable period.")
+rule ProratedTaxAmountFromDates(e: HighwayVehicleUseEvent, fullYearTax: Money, months: Decimal) strict {
+    when excise_tax_due_full_year(e, fullYearTax) and highway_use_months_derived(e, months);
+    then excise_tax_due(e, div_round(fullYearTax * months, 12.0, 2, "HALF_UP"));
+}

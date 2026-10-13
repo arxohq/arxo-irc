@@ -1,0 +1,241 @@
+// Stage 2b (IRC-07, A05). Section 1400Z-2: qualified opportunity zone
+// deferral election, the 180-day investment window, the 5-/7-year basis
+// step-ups as exact date tests, and the 10-year fair-market-value election.
+// Pinned text is the 2024 Edition (current through Pub. L. 118-334). Stage 2c
+// found that Pub. L. 119-21 SEC. 70421(c) DOES amend section 1400Z-2 (the
+// permanent rolling deferral for amounts invested after December 31, 2026;
+// WIRE-3 added the fragment PL119_21_S70421 to us.irc.temporal): the rules
+// below are the 2024-text regime and are switched off for investments after
+// that date by `investment_governed_by_pl119_21` (module 22 carries the
+// amended regime).
+
+use self::{
+    Asset,
+    IRC_S1400Z_2_A,
+    IRC_S1400Z_2_B,
+    IRC_S1400Z_2_C,
+    Person,
+    Transaction,
+    gain_recognized,
+    investment_governed_by_pl119_21,
+};
+
+pub entity QualifiedOpportunityFundInvestment : Asset {
+    label en unofficial "an investment in a qualified opportunity fund (section 1400Z-2(a)(1)(A))";
+}
+
+// =============================================================================
+// (a): deferral election
+// =============================================================================
+
+pub relation sale_or_exchange_with_unrelated_person(t: Transaction, taxpayer: Person, sold_property: Asset, on: Date) kind empirical {
+    label en official "section 1400Z-2(a)(1): a sale to, or exchange with, an unrelated person of property held by the taxpayer";
+}
+pub relation invests_in_qualified_opportunity_fund(taxpayer: Person, t: Transaction, fund_investment: QualifiedOpportunityFundInvestment, invested_on: Date, amount: Money) kind empirical {
+    label en official "section 1400Z-2(a)(1)(A): the taxpayer invests in a qualified opportunity fund, within the 180-day period beginning on the date of the sale or exchange";
+}
+pub relation elects_section_1400z2_deferral(taxpayer: Person, t: Transaction) kind empirical {
+    label en official "section 1400Z-2(a)(1): the taxpayer elects deferral treatment with respect to the sale or exchange";
+}
+pub relation prior_election_in_effect_for_sale(t: Transaction) kind empirical {
+    label en official "section 1400Z-2(a)(2)(A): an election previously made with respect to this sale or exchange is already in effect — bars a further election";
+}
+pub relation election_valid_1400z2a(taxpayer: Person, t: Transaction, invested_on: Date, sold_on: Date) kind institutional {
+    label en unofficial "section 1400Z-2(a)(1)(A)/(a)(2): the 180-day investment window is met, no prior election is in effect, and the sale is not after December 31, 2026 — a single-atom helper for the power's valid_when";
+}
+@source(IRC_S1400Z_2_A, quote = "the aggregate amount invested by the taxpayer in a qualified opportunity fund during the 180-day period beginning on the date of such sale or exchange,")
+rule Section1400z2ElectionValidRule(taxpayer: Person, t: Transaction, sold_property: Asset, sold_on: Date, fund_investment: QualifiedOpportunityFundInvestment, invested_on: Date, invested_amount: Money) defeasible {
+    label en official "section 1400Z-2(a)(1)(A)/(a)(2): the election is valid when invested within 180 days of the sale, no prior election is in effect, and the sale is on or before December 31, 2026";
+    when sale_or_exchange_with_unrelated_person(t, taxpayer, sold_property, sold_on);
+    when invests_in_qualified_opportunity_fund(taxpayer, t, fund_investment, invested_on, invested_amount);
+    when invested_on >= sold_on;
+    when invested_on <= add_calendar_period(sold_on, 180 calendar_day);
+    when not_known(prior_election_in_effect_for_sale(t));
+    when sold_on <= @2026-12-31;
+    then election_valid_1400z2a(taxpayer, t, invested_on, sold_on);
+}
+pub relation gain_excluded_under_1400z2a1a(taxpayer: Person, t: Transaction, amount: Money) kind institutional {
+    label en official "section 1400Z-2(a)(1)(A): gross income excludes gain up to the amount invested in the qualified opportunity fund during the 180-day window";
+}
+pub relation excludable_amount_1400z2a1a(taxpayer: Person, t: Transaction, amount: Money) kind institutional {
+    label en unofficial "section 1400Z-2(a)(1)(A): the lesser of the recognized gain or the amount invested — precomputed so the power's `effect` slot references a single bound atom, not an inline min(...) call";
+}
+@source(IRC_S1400Z_2_A, quote = "gross income for the taxable year shall not include so much of such gain as does not exceed the aggregate amount invested by the taxpayer in a qualified opportunity fund during the 180-day period beginning on the date of such sale or exchange,")
+rule ExcludableAmount1400z2a1aRule(taxpayer: Person, t: Transaction, fund_investment: QualifiedOpportunityFundInvestment, invested_on: Date, invested_amount: Money, gain: Money) defeasible {
+    label en official "section 1400Z-2(a)(1)(A): the excludable amount is the lesser of the recognized gain or the amount invested";
+    when invests_in_qualified_opportunity_fund(taxpayer, t, fund_investment, invested_on, invested_amount);
+    when gain_recognized(taxpayer, t, gain);
+    then excludable_amount_1400z2a1a(taxpayer, t, min(gain, invested_amount));
+}
+rule Section1400z2DeferralElectionPower(taxpayer: Person, t: Transaction, sold_property: Asset, sold_on: Date, fund_investment: QualifiedOpportunityFundInvestment, invested_on: Date, invested_amount: Money, gain: Money, excludable: Money) strict {
+    label en official "section 1400Z-2(a)(1): a taxpayer may elect to exclude gain from gross income up to the amount reinvested in a qualified opportunity fund within 180 days";
+    when sale_or_exchange_with_unrelated_person(t, taxpayer, sold_property, sold_on);
+    when invests_in_qualified_opportunity_fund(taxpayer, t, fund_investment, invested_on, invested_amount);
+    when elects_section_1400z2_deferral(taxpayer, t);
+    when gain_recognized(taxpayer, t, gain);
+    when excludable_amount_1400z2a1a(taxpayer, t, excludable);
+    then power Section1400z2DeferralElection {
+        holder taxpayer;
+        over t;
+        exercise elects_section_1400z2_deferral(taxpayer, t);
+        valid_when election_valid_1400z2a(taxpayer, t, invested_on, sold_on);
+        effect create(gain_excluded_under_1400z2a1a(taxpayer, t, excludable));
+        window [@2017-12-22, infinity);
+    };
+}
+
+// =============================================================================
+// (b): deferral — year of inclusion, amount includible, basis step-ups
+// =============================================================================
+
+pub relation investment_sold_or_exchanged_on(fund_investment: QualifiedOpportunityFundInvestment, on: Date) kind empirical;
+pub const Section1400z2InclusionOutsideDate: Date = @2026-12-31 {
+    label en official "December 31, 2026 (section 1400Z-2(b)(1)(B))";
+};
+pub relation deferred_gain_inclusion_date(fund_investment: QualifiedOpportunityFundInvestment, taxpayer: Person, on: Date) kind institutional {
+    label en official "section 1400Z-2(b)(1): the earlier of the date the investment is sold/exchanged, or December 31, 2026";
+}
+@source(IRC_S1400Z_2_B, quote = "the date on which such investment is sold or exchanged, or")
+rule DeferredGainInclusionDateFromSaleRule(fund_investment: QualifiedOpportunityFundInvestment, taxpayer: Person, acquired_on: Date, sold_on: Date) defeasible {
+    label en official "section 1400Z-2(b)(1)(A): inclusion date is the sale/exchange date, when earlier than 2026-12-31";
+    when not_known(investment_governed_by_pl119_21(fund_investment, taxpayer));
+    when investment_acquired_on(fund_investment, taxpayer, acquired_on);
+    when investment_sold_or_exchanged_on(fund_investment, sold_on);
+    when sold_on < Section1400z2InclusionOutsideDate;
+    then deferred_gain_inclusion_date(fund_investment, taxpayer, sold_on);
+}
+relation has_sale_or_exchange_date(fund_investment: QualifiedOpportunityFundInvestment) kind institutional {
+    label en unofficial "guard: at least one sale/exchange date is asserted for the investment";
+}
+rule HasSaleOrExchangeDateRule(fund_investment: QualifiedOpportunityFundInvestment, sold_on: Date) defeasible {
+    when investment_sold_or_exchanged_on(fund_investment, sold_on);
+    then has_sale_or_exchange_date(fund_investment);
+}
+rule DeferredGainInclusionDateDefaultRule(fund_investment: QualifiedOpportunityFundInvestment, taxpayer: Person, acquired_on: Date) defeasible {
+    label en official "section 1400Z-2(b)(1)(B): absent an earlier sale/exchange, inclusion date is December 31, 2026";
+    when not_known(investment_governed_by_pl119_21(fund_investment, taxpayer));
+    when investment_acquired_on(fund_investment, taxpayer, acquired_on);
+    when not_known(has_sale_or_exchange_date(fund_investment));
+    then deferred_gain_inclusion_date(fund_investment, taxpayer, Section1400z2InclusionOutsideDate);
+}
+
+pub relation fair_market_value_of_investment_on(fund_investment: QualifiedOpportunityFundInvestment, on: Date, amount: Money) kind empirical;
+pub relation basis_in_investment(taxpayer: Person, fund_investment: QualifiedOpportunityFundInvestment, amount: Money) kind institutional {
+    label en official "section 1400Z-2(b)(2)(B): the taxpayer's basis in the qualified opportunity fund investment (zero by default, increased for recognized gain and the 5-/7-year step-ups)";
+}
+pub relation basis_increase_for_recognized_gain(taxpayer: Person, t: Transaction, fund_investment: QualifiedOpportunityFundInvestment, amount: Money) kind empirical {
+    label en unofficial "section 1400Z-2(b)(2)(B)(ii): basis increase for gain recognized under (a)(1)(B) with respect to the investment";
+}
+relation has_recognized_gain_basis_increase(taxpayer: Person, fund_investment: QualifiedOpportunityFundInvestment) kind institutional {
+    label en unofficial "guard: a basis_increase_for_recognized_gain fact exists for this (taxpayer, fund_investment) pair";
+}
+rule HasRecognizedGainBasisIncreaseRule(taxpayer: Person, t: Transaction, fund_investment: QualifiedOpportunityFundInvestment, amount: Money) defeasible {
+    when basis_increase_for_recognized_gain(taxpayer, t, fund_investment, amount);
+    then has_recognized_gain_basis_increase(taxpayer, fund_investment);
+}
+@source(IRC_S1400Z_2_B, relation = formalizes, coverage = partial, quote = "the taxpayer's basis in the investment shall be zero.")
+rule BasisInInvestmentBaseRule(taxpayer: Person, fund_investment: QualifiedOpportunityFundInvestment, acquired_on: Date) defeasible {
+    label en official "section 1400Z-2(b)(2)(B)(i): basis in the investment is zero by default";
+    when investment_acquired_on(fund_investment, taxpayer, acquired_on);
+    when not_known(has_recognized_gain_basis_increase(taxpayer, fund_investment));
+    then basis_in_investment(taxpayer, fund_investment, 0.00 USD);
+}
+@source(IRC_S1400Z_2_B, relation = formalizes, coverage = partial, quote = "The basis in the investment shall be increased by the amount of gain recognized by reason of subsection (a)(1)(B) with respect to such property.")
+rule BasisInInvestmentWithRecognizedGainRule(taxpayer: Person, t: Transaction, fund_investment: QualifiedOpportunityFundInvestment, amount: Money) defeasible {
+    label en official "section 1400Z-2(b)(2)(B)(ii): basis in the investment equals gain recognized under (a)(1)(B), absent the 5-/7-year step-ups";
+    when basis_increase_for_recognized_gain(taxpayer, t, fund_investment, amount);
+    then basis_in_investment(taxpayer, fund_investment, amount);
+}
+
+pub const Section1400z2FiveYearStepUpFraction: Decimal = 0.10 {
+    label en official "10 percent (section 1400Z-2(b)(2)(B)(iii))";
+};
+pub const Section1400z2SevenYearStepUpFraction: Decimal = 0.05 {
+    label en official "5 percent (section 1400Z-2(b)(2)(B)(iv), IN ADDITION to the 5-year step-up)";
+};
+pub relation investment_acquired_on(fund_investment: QualifiedOpportunityFundInvestment, taxpayer: Person, acquired_on: Date) kind empirical;
+pub relation held_at_least_5_years(fund_investment: QualifiedOpportunityFundInvestment, taxpayer: Person, as_of: Date) kind institutional {
+    label en official "section 1400Z-2(b)(2)(B)(iii): the investment has been held for at least 5 years as of the given date";
+}
+@source(IRC_S1400Z_2_B, quote = "Investments held for 5 years")
+pub relation holding_period_measured_as_of(fund_investment: QualifiedOpportunityFundInvestment, taxpayer: Person, as_of: Date) kind empirical {
+    label en unofficial "the date as of which the investment's holding period is being tested (typically the deferred-gain inclusion date or a disposition date)";
+}
+rule HeldAtLeast5YearsRule(fund_investment: QualifiedOpportunityFundInvestment, taxpayer: Person, acquired_on: Date, as_of: Date) strict {
+    label en official "section 1400Z-2(b)(2)(B)(iii): 5-year holding-period test, by exact date";
+    when investment_acquired_on(fund_investment, taxpayer, acquired_on);
+    when holding_period_measured_as_of(fund_investment, taxpayer, as_of);
+    when as_of >= add_calendar_period(acquired_on, 5 calendar_year);
+    then held_at_least_5_years(fund_investment, taxpayer, as_of);
+}
+pub relation held_at_least_7_years(fund_investment: QualifiedOpportunityFundInvestment, taxpayer: Person, as_of: Date) kind institutional {
+    label en official "section 1400Z-2(b)(2)(B)(iv): the investment has been held for at least 7 years as of the given date";
+}
+@source(IRC_S1400Z_2_B, quote = "Investments held for 7 years")
+rule HeldAtLeast7YearsRule(fund_investment: QualifiedOpportunityFundInvestment, taxpayer: Person, acquired_on: Date, as_of: Date) strict {
+    label en official "section 1400Z-2(b)(2)(B)(iv): 7-year holding-period test, by exact date";
+    when investment_acquired_on(fund_investment, taxpayer, acquired_on);
+    when holding_period_measured_as_of(fund_investment, taxpayer, as_of);
+    when as_of >= add_calendar_period(acquired_on, 7 calendar_year);
+    then held_at_least_7_years(fund_investment, taxpayer, as_of);
+}
+pub relation deferred_gain_amount(taxpayer: Person, fund_investment: QualifiedOpportunityFundInvestment, amount: Money) kind empirical {
+    label en unofficial "the amount of gain deferred by reason of section 1400Z-2(a)(1)(A) with respect to this investment";
+}
+pub relation basis_step_up_5_year(taxpayer: Person, fund_investment: QualifiedOpportunityFundInvestment, deferred_gain: Money, amount: Money) kind institutional {
+    label en official "section 1400Z-2(b)(2)(B)(iii): basis increased by 10 percent of the gain deferred under (a)(1)(A), for an investment held at least 5 years";
+}
+@source(IRC_S1400Z_2_B, quote = "the basis of such investment shall be increased by an amount equal to 10 percent of the amount of gain deferred by reason of subsection (a)(1)(A).")
+rule BasisStepUp5YearRule(taxpayer: Person, fund_investment: QualifiedOpportunityFundInvestment, as_of: Date, deferred_gain: Money) defeasible {
+    label en official "section 1400Z-2(b)(2)(B)(iii): 10% basis step-up at 5 years";
+    when not_known(investment_governed_by_pl119_21(fund_investment, taxpayer));
+    when held_at_least_5_years(fund_investment, taxpayer, as_of);
+    when deferred_gain_amount(taxpayer, fund_investment, deferred_gain);
+    then basis_step_up_5_year(taxpayer, fund_investment, deferred_gain, deferred_gain * Section1400z2FiveYearStepUpFraction);
+}
+pub relation basis_step_up_7_year(taxpayer: Person, fund_investment: QualifiedOpportunityFundInvestment, deferred_gain: Money, amount: Money) kind institutional {
+    label en official "section 1400Z-2(b)(2)(B)(iv): a FURTHER basis increase of 5 percent of the gain deferred, for an investment held at least 7 years (in addition to the 5-year step-up)";
+}
+@source(IRC_S1400Z_2_B, quote = "in addition to any adjustment made under clause (iii), the basis of such property shall be increased by an amount equal to 5 percent of the amount of gain deferred by reason of subsection (a)(1)(A).")
+rule BasisStepUp7YearRule(taxpayer: Person, fund_investment: QualifiedOpportunityFundInvestment, as_of: Date, deferred_gain: Money) defeasible {
+    label en official "section 1400Z-2(b)(2)(B)(iv): additional 5% basis step-up at 7 years";
+    when not_known(investment_governed_by_pl119_21(fund_investment, taxpayer));
+    when held_at_least_7_years(fund_investment, taxpayer, as_of);
+    when deferred_gain_amount(taxpayer, fund_investment, deferred_gain);
+    then basis_step_up_7_year(taxpayer, fund_investment, deferred_gain, deferred_gain * Section1400z2SevenYearStepUpFraction);
+}
+
+// =============================================================================
+// (c): the 10-year fair-market-value election
+// =============================================================================
+
+pub relation held_at_least_10_years(fund_investment: QualifiedOpportunityFundInvestment, taxpayer: Person, as_of: Date) kind institutional {
+    label en official "section 1400Z-2(c): the investment has been held for at least 10 years as of the given date";
+}
+rule HeldAtLeast10YearsRule(fund_investment: QualifiedOpportunityFundInvestment, taxpayer: Person, acquired_on: Date, as_of: Date) strict {
+    label en official "section 1400Z-2(c): 10-year holding-period test, by exact date";
+    when investment_acquired_on(fund_investment, taxpayer, acquired_on);
+    when investment_sold_or_exchanged_on(fund_investment, as_of);
+    when as_of >= add_calendar_period(acquired_on, 10 calendar_year);
+    then held_at_least_10_years(fund_investment, taxpayer, as_of);
+}
+pub relation elects_10_year_fmv_basis(taxpayer: Person, fund_investment: QualifiedOpportunityFundInvestment, sold_on: Date) kind empirical {
+    label en official "section 1400Z-2(c): the taxpayer elects to have the investment's basis equal its fair market value on the date sold or exchanged";
+}
+pub relation basis_equals_fmv_on_sale_1400z2c(taxpayer: Person, fund_investment: QualifiedOpportunityFundInvestment, sold_on: Date, amount: Money) kind institutional {
+    label en official "section 1400Z-2(c): the investment's basis equals its fair market value on the date sold or exchanged, for an investment held at least 10 years";
+}
+@source(IRC_S1400Z_2_C, quote = "the basis of such property shall be equal to the fair market value of such investment on the date that the investment is sold or exchanged.")
+rule Section1400z2TenYearElectionPower(taxpayer: Person, fund_investment: QualifiedOpportunityFundInvestment, sold_on: Date, fmv: Money) strict {
+    label en official "section 1400Z-2(c): a taxpayer holding an investment at least 10 years may elect FMV basis on sale/exchange";
+    when elects_10_year_fmv_basis(taxpayer, fund_investment, sold_on);
+    when fair_market_value_of_investment_on(fund_investment, sold_on, fmv);
+    then power Section1400z2TenYearFmvElection {
+        holder taxpayer;
+        over fund_investment;
+        exercise elects_10_year_fmv_basis(taxpayer, fund_investment, sold_on);
+        valid_when held_at_least_10_years(fund_investment, taxpayer, sold_on);
+        effect create(basis_equals_fmv_on_sale_1400z2c(taxpayer, fund_investment, sold_on, fmv));
+        window [@2017-12-22, infinity);
+    };
+}

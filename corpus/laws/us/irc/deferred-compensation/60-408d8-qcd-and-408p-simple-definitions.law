@@ -1,0 +1,1006 @@
+// Sections 408(d)(8) and 408(p)(1)-(4) — STAGE 3 (deferred-compensation,
+// TECH_GAP reduction, 26.09.2026). Module 07 modelled the qualified charitable
+// distribution exclusion up to the dollar cap and the age 70 1/2 gate; module
+// 20 the SIMPLE administrative requirements (paragraphs (5)-(11)). Left as
+// TECH_GAP and modelled here:
+//   (d)(8): the reduction for section 219 deductions after age 70 1/2, the
+//   qualified charitable distribution definition, the deductibility
+//   condition, the section 72 aggregate rule, the denial of deduction, the
+//   one-time split-interest election with its entities and special rules, and
+//   the inflation adjustment mechanism (nearest $1,000);
+//   (p)(1)-(4): the simple retirement account, the qualified salary
+//   reduction arrangement (clauses (i)-(v)), the 2 percent election, eligible
+//   employer with grace periods, applicable percentage and its lower-percentage
+//   election, the only-plan rule, the applicable dollar amount (adjusted
+//   dollar amount = 110 percent), student loan matching, the inflation
+//   adjustment of the $5,000 cap (nearest $100), the 25-employee grace period,
+//   vesting and participation.
+//
+// Method. The section 1(f)(3) cost-of-living adjustments and the indexed
+// dollar amounts are NOT pinned (SOURCE_GAP): the mechanism is computed from a
+// case-supplied adjustment percentage (`cost_of_living_adjustment_*`), never
+// from an invented value. Exact roundings: nearest $1,000 (QCD), nearest $100
+// ((p)(2)(G)), next lower $500 ((p)(2)(E)(iii)), by `round(x / unit, 0, mode)
+// * unit`. Counts of employees are exact integer comparisons; percentages are
+// exact decimals (0.03, 0.04, 0.02, 0.10, 1.10).
+
+// =====================================================================
+// (d)(8)(A) Reduction for section 219 deductions after age 70 1/2
+// =====================================================================
+
+use self::{
+    IRC_S408_D,
+    IRC_S408_P,
+    Individual,
+    IndividualRetirementAccount,
+    Person,
+    Plan,
+    TaxableYear,
+    employer_maintains_simple_arrangement,
+    qcd_excluded_from_gross_income,
+    simple_employee_eligible,
+    taxable_year_begin_date_secure2,
+};
+
+pub relation aggregate_219_deductions_after_age_70half_408d8Ai(individual: Individual, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the aggregate amount of deductions allowed under section 219 for all taxable years ending on or after the date the taxpayer attains age 70 1/2, case-asserted";
+}
+
+pub relation aggregate_prior_reductions_408d8Aii(individual: Individual, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the aggregate amount of reductions under the sentence for all taxable years preceding the current taxable year, case-asserted";
+}
+
+pub relation qcd_reduction_for_219_deductions_408d8A(individual: Individual, y: TaxableYear, reduction: Money) kind institutional {
+    label en official "section 408(d)(8)(A): the excess of the aggregate section 219 deductions after age 70 1/2 over the aggregate of prior reductions, not below zero";
+}
+
+@source(IRC_S408_D, relation = formalizes, coverage = exact, quote = "shall be reduced (but not below zero) by an amount equal to the excess of")
+rule QcdReductionFor219Deductions408d8A(individual: Individual, y: TaxableYear, deductions: Money, prior: Money) strict {
+    label en official "max(deductions - prior reductions, 0)";
+    when aggregate_219_deductions_after_age_70half_408d8Ai(individual, y, deductions)
+        and aggregate_prior_reductions_408d8Aii(individual, y, prior);
+    then qcd_reduction_for_219_deductions_408d8A(individual, y, max(deductions - prior, 0.00 USD));
+}
+
+pub relation qcd_excluded_net_of_219_reduction_408d8A(individual: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 408(d)(8)(A): the amount not includible by reason of the first sentence, reduced (not below zero) by the section 219 reduction";
+}
+
+@source(IRC_S408_D, relation = formalizes, coverage = exact, quote = "The amount of distributions not includible in gross income by reason of the preceding sentence for a taxable year (determined without regard to this sentence) shall be reduced (but not below zero)")
+rule QcdExcludedNetOf219Reduction408d8A(individual: Individual, y: TaxableYear, excluded: Money, reduction: Money) strict {
+    label en official "exact: max(excluded - reduction, 0); the dollar cap itself is the existing A3 parameter of module 07";
+    when qcd_excluded_from_gross_income(individual, y, excluded)
+        and qcd_reduction_for_219_deductions_408d8A(individual, y, reduction);
+    then qcd_excluded_net_of_219_reduction_408d8A(individual, y, max(excluded - reduction, 0.00 USD));
+}
+
+pub relation qcd_excluded_no_219_reduction_408d8A(individual: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 408(d)(8)(A): without any section 219 deduction on record the excluded amount is not reduced";
+}
+
+@source(IRC_S408_D, relation = formalizes, coverage = exact, quote = "So much of the aggregate amount of qualified charitable distributions with respect to a taxpayer made during any taxable year which does not exceed $100,000 shall not be includible in gross income")
+rule QcdExcludedNoReduction408d8A(individual: Individual, y: TaxableYear, excluded: Money) strict {
+    label en official "no section 219 deduction after age 70 1/2 on record";
+    when qcd_excluded_from_gross_income(individual, y, excluded)
+        and not_known(qcd_reduction_recorded_408d8A(individual, y));
+    then qcd_excluded_no_219_reduction_408d8A(individual, y, excluded);
+}
+
+pub relation qcd_reduction_recorded_408d8A(individual: Individual, y: TaxableYear) kind institutional {
+    label en official "helper: a section 219 reduction computation is on record";
+}
+
+rule QcdReductionRecorded408d8A(individual: Individual, y: TaxableYear, reduction: Money) strict {
+    label en official "helper for the not_known guard";
+    when qcd_reduction_for_219_deductions_408d8A(individual, y, reduction);
+    then qcd_reduction_recorded_408d8A(individual, y);
+}
+
+// =====================================================================
+// (d)(8)(B) Qualified charitable distribution; (C) deductibility; (D) section 72; (E)
+// =====================================================================
+
+pub relation distribution_from_sep_or_simple_408d8B(ira: IndividualRetirementAccount) kind empirical {
+    label en unofficial "the plan is described in subsection (k) or (p), case-asserted";
+}
+
+pub relation distribution_paid_directly_by_trustee_to_recipient_408d8Bi(ira: IndividualRetirementAccount, individual: Individual, amount: Money) kind empirical {
+    label en unofficial "the distribution is made directly by the trustee to the recipient, case-asserted";
+}
+
+pub relation recipient_described_in_170b1A_408d8Bi(ira: IndividualRetirementAccount, individual: Individual) kind empirical {
+    label en unofficial "the recipient is an organization described in section 170(b)(1)(A), case-asserted";
+}
+
+pub relation recipient_is_509a3_organization_or_4966d2_fund_408d8Bi(ira: IndividualRetirementAccount, individual: Individual) kind empirical {
+    label en unofficial "the recipient is an organization described in section 509(a)(3) or a fund or account described in section 4966(d)(2), case-asserted";
+}
+
+pub relation distribution_at_or_after_age_70half_408d8Bii(ira: IndividualRetirementAccount, individual: Individual, on: Date) kind empirical {
+    label en unofficial "the distribution is made on or after the date the individual attains age 70 1/2, case-asserted";
+}
+
+pub relation distribution_amount_and_includible_408d8B(ira: IndividualRetirementAccount, individual: Individual, amount: Money, includible: Money) kind empirical {
+    label en unofficial "the amount of the distribution and the part that would be includible in gross income without regard to subparagraph (A), case-asserted";
+}
+
+pub relation entire_distribution_deductible_under_170_408d8C(ira: IndividualRetirementAccount, individual: Individual) kind empirical {
+    label en unofficial "a deduction for the entire distribution would be allowable under section 170, determined without regard to subsection (b) and this paragraph, case-asserted";
+}
+
+pub relation qualified_charitable_distribution_amount_408d8B(ira: IndividualRetirementAccount, individual: Individual, amount: Money) kind institutional {
+    label en official "section 408(d)(8)(B), (C): a direct trustee distribution to a section 170(b)(1)(A) organization (other than 509(a)(3) or 4966(d)(2)) on or after age 70 1/2, only to the extent includible without regard to (A), and only if the entire distribution is otherwise deductible";
+}
+
+@source(IRC_S408_D, relation = formalizes, coverage = exact, quote = "A distribution shall be treated as a qualified charitable distribution only to the extent that the distribution would be includible in gross income without regard to subparagraph (A)")
+rule QualifiedCharitableDistributionAmount408d8B(ira: IndividualRetirementAccount, individual: Individual, amount: Money, includible: Money, on: Date) strict {
+    label en official "the qualified amount is the includible part (min of the distribution and the includible amount); (k) and (p) plans, 509(a)(3) recipients and 4966(d)(2) funds are excluded";
+    when distribution_amount_and_includible_408d8B(ira, individual, amount, includible)
+        and distribution_paid_directly_by_trustee_to_recipient_408d8Bi(ira, individual, amount)
+        and recipient_described_in_170b1A_408d8Bi(ira, individual)
+        and distribution_at_or_after_age_70half_408d8Bii(ira, individual, on)
+        and entire_distribution_deductible_under_170_408d8C(ira, individual)
+        and not_known(recipient_is_509a3_organization_or_4966d2_fund_408d8Bi(ira, individual))
+        and not_known(distribution_from_sep_or_simple_408d8B(ira));
+    then qualified_charitable_distribution_amount_408d8B(ira, individual, min(amount, includible));
+}
+
+pub relation aggregate_includible_if_all_iras_distributed_408d8D(individual: Individual, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the aggregate amount that would have been includible if all amounts in all the individual's individual retirement plans were distributed during the taxable year and all such plans were treated as 1 contract under section 72, case-asserted (a computation of section 72)";
+}
+
+pub relation distribution_amount_for_year_408d8D(individual: Individual, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the amount of the distribution, case-asserted";
+}
+
+pub relation distribution_treated_as_includible_without_408d8A_408d8D(individual: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 408(d)(8)(D): notwithstanding section 72, the entire distribution is treated as includible without regard to (A) to the extent it does not exceed the all-plans aggregate";
+}
+
+@source(IRC_S408_D, relation = formalizes, coverage = exact, quote = "the entire amount of the distribution shall be treated as includible in gross income without regard to subparagraph (A) to the extent that such amount does not exceed the aggregate amount")
+rule DistributionTreatedAsIncludible408d8D(individual: Individual, y: TaxableYear, distribution: Money, aggregate: Money) strict {
+    label en official "min(distribution, aggregate); the proper adjustments to other distributions are not computed";
+    when distribution_amount_for_year_408d8D(individual, y, distribution)
+        and aggregate_includible_if_all_iras_distributed_408d8D(individual, y, aggregate);
+    then distribution_treated_as_includible_without_408d8A_408d8D(individual, y, min(distribution, aggregate));
+}
+
+pub relation qcd_excluded_amount_for_170_408d8E(individual: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 408(d)(8)(E): qualified charitable distributions not includible under (A) are not taken into account in determining the section 170 deduction";
+}
+
+@source(IRC_S408_D, relation = formalizes, coverage = exact, quote = "shall not be taken into account in determining the deduction under section 170")
+rule QcdNotTakenIntoAccountFor170408d8E(individual: Individual, y: TaxableYear, amount: Money) strict {
+    label en official "the excluded amount carries no section 170 deduction (the section 170 module reads the relation only when a case asserts it)";
+    when qcd_excluded_no_219_reduction_408d8A(individual, y, amount);
+    then qcd_excluded_amount_for_170_408d8E(individual, y, amount);
+}
+
+@source(IRC_S408_D, relation = formalizes, coverage = exact, quote = "shall not be taken into account in determining the deduction under section 170")
+rule QcdNotTakenIntoAccountFor170AfterReduction408d8E(individual: Individual, y: TaxableYear, amount: Money) strict {
+    label en official "the same for the amount net of the section 219 reduction";
+    when qcd_excluded_net_of_219_reduction_408d8A(individual, y, amount);
+    then qcd_excluded_amount_for_170_408d8E(individual, y, amount);
+}
+
+// =====================================================================
+// (d)(8)(F) One-time election for a split-interest entity
+// =====================================================================
+
+pub enum SplitInterestEntityKind408d8F {
+    CharitableRemainderAnnuityTrust;
+    CharitableRemainderUnitrust;
+    CharitableGiftAnnuity;
+}
+
+pub relation split_interest_entity_kind_408d8Fii(vehicle: Person, kind: SplitInterestEntityKind408d8F) kind empirical {
+    label en unofficial "the entity is a charitable remainder annuity trust (section 664(d)(1)), a charitable remainder unitrust (section 664(d)(2)) or a charitable gift annuity (section 501(m)(5)), case-asserted";
+}
+
+pub relation entity_funded_exclusively_by_qcds_408d8Fii(vehicle: Person) kind empirical {
+    label en unofficial "the entity is funded exclusively by qualified charitable distributions, case-asserted";
+}
+
+pub relation gift_annuity_commences_fixed_payments_of_5_percent_or_more_within_1_year_408d8FiiIII(vehicle: Person) kind empirical {
+    label en unofficial "the charitable gift annuity commences fixed payments of 5 percent or greater not later than 1 year from the date of funding, case-asserted";
+}
+
+pub relation split_interest_entity_408d8Fii(vehicle: Person) kind institutional {
+    label en official "section 408(d)(8)(F)(ii): a charitable remainder annuity trust or unitrust funded exclusively by qualified charitable distributions, or a charitable gift annuity so funded that commences fixed payments of 5 percent or more within a year";
+}
+
+@source(IRC_S408_D, relation = formalizes, coverage = exact, quote = "but only if such trust is funded exclusively by qualified charitable distributions")
+rule SplitInterestEntityTrust408d8Fii(vehicle: Person, kind: SplitInterestEntityKind408d8F) strict {
+    label en official "(I) and (II): a trust kind funded exclusively by qualified charitable distributions";
+    when split_interest_entity_kind_408d8Fii(vehicle, kind)
+        and entity_funded_exclusively_by_qcds_408d8Fii(vehicle)
+        and kind != CharitableGiftAnnuity;
+    then split_interest_entity_408d8Fii(vehicle);
+}
+
+@source(IRC_S408_D, relation = formalizes, coverage = exact, quote = "but only if such annuity is funded exclusively by qualified charitable distributions and commences fixed payments of 5 percent or greater not later than 1 year from the date of funding")
+rule SplitInterestEntityGiftAnnuity408d8Fii(vehicle: Person) strict {
+    label en official "(III): funded exclusively and fixed payments of at least 5 percent within a year";
+    when split_interest_entity_kind_408d8Fii(vehicle, CharitableGiftAnnuity)
+        and entity_funded_exclusively_by_qcds_408d8Fii(vehicle)
+        and gift_annuity_commences_fixed_payments_of_5_percent_or_more_within_1_year_408d8FiiIII(vehicle);
+    then split_interest_entity_408d8Fii(vehicle);
+}
+
+pub relation remainder_interest_deduction_allowable_170_408d8Fiii(vehicle: Person) kind empirical {
+    label en unofficial "for a charitable remainder trust, a deduction for the entire value of the remainder interest in the distribution for a specified charitable organization would be allowable under section 170 (without regard to subsection (b) and this paragraph); for a charitable gift annuity, a deduction equal to the distribution reduced by the value of the annuity would be allowable, case-asserted";
+}
+
+pub relation no_other_income_interest_holder_408d8FivI(vehicle: Person) kind empirical {
+    label en unofficial "no person holds an income interest in the entity other than the individual, the individual's spouse, or both, case-asserted";
+}
+
+pub relation income_interest_nonassignable_408d8FivII(vehicle: Person) kind empirical {
+    label en unofficial "the income interest in the entity is nonassignable, case-asserted";
+}
+
+pub relation split_interest_distribution_requirements_met_408d8Fiiiiv(vehicle: Person) kind institutional {
+    label en official "section 408(d)(8)(F)(iii), (iv): the deduction requirement and the income interest limits are met";
+}
+
+@source(IRC_S408_D, relation = formalizes, coverage = exact, quote = "A distribution meets the requirements of this clause only if")
+rule SplitInterestDistributionRequirementsMet408d8Fiiiiv(vehicle: Person) strict {
+    label en official "clauses (iii), (iv)(I) and (iv)(II) together";
+    when remainder_interest_deduction_allowable_170_408d8Fiii(vehicle)
+        and no_other_income_interest_holder_408d8FivI(vehicle)
+        and income_interest_nonassignable_408d8FivII(vehicle);
+    then split_interest_distribution_requirements_met_408d8Fiiiiv(vehicle);
+}
+
+pub relation split_interest_election_408d8Fi(individual: Individual, y: TaxableYear, vehicle: Person, amount: Money) kind empirical {
+    label en unofficial "the taxpayer elects for the taxable year to treat a distribution from an individual retirement account made directly by the trustee to the split-interest entity as meeting subparagraph (B)(i), case-asserted (exercise atom)";
+}
+
+pub relation election_in_effect_for_preceding_year_408d8FiI(individual: Individual, y: TaxableYear) kind empirical {
+    label en unofficial "an election under this subparagraph is in effect for a preceding taxable year, case-asserted";
+}
+
+pub relation aggregate_election_distributions_408d8FiII(individual: Individual, y: TaxableYear, total: Money) kind empirical {
+    label en unofficial "the aggregate amount of the taxpayer's distributions with respect to which an election under this subparagraph is made, case-asserted";
+}
+
+pub relation split_interest_dollar_limit_408d8FiII(y: TaxableYear, limit: Money) kind institutional {
+    label en official "section 408(d)(8)(F)(i)(II): the $50,000 amount (increased for taxable years beginning after 2023 by the (G) adjustment)";
+}
+
+pub relation split_interest_election_valid_408d8Fi(individual: Individual, y: TaxableYear, vehicle: Person) kind institutional {
+    label en official "section 408(d)(8)(F)(i): no election for a preceding year, the aggregate not above the dollar limit, and the distribution meets clauses (iii) and (iv), for a split-interest entity";
+}
+
+@source(IRC_S408_D, relation = formalizes, coverage = exact, quote = "the aggregate amount of distributions of the taxpayer with respect to which an election under this subparagraph is made does not exceed $50,000")
+rule SplitInterestDollarLimitBase408d8FiII(y: TaxableYear, start: Date) strict {
+    label en official "the statutory base $50,000 for a taxable year beginning on or before December 31, 2023";
+    when taxable_year_begin_date_secure2(y, start) and start <= @2023-12-31;
+    then split_interest_dollar_limit_408d8FiII(y, 50000.00 USD);
+}
+
+@source(IRC_S408_D, relation = formalizes, coverage = partial, quote = "In the case of any taxable year beginning after 2023, each of the dollar amounts in subparagraphs (A) and (F) shall be increased by an amount equal to")
+rule SplitInterestDollarLimitIndexed408d8FiII(y: TaxableYear, start: Date, cola: Decimal) strict {
+    label en official "PARTIAL: base $50,000 increased by the case-supplied adjustment percentage (SOURCE_GAP: not pinned) and rounded to the nearest $1,000 (HALF_UP)";
+    when taxable_year_begin_date_secure2(y, start)
+        and start > @2023-12-31
+        and cost_of_living_adjustment_408d8G(y, cola);
+    then split_interest_dollar_limit_408d8FiII(y, round((50000.00 USD + 50000.00 USD * cola) / 1000.00 USD, 0, "HALF_UP") * 1000.00 USD);
+}
+
+@source(IRC_S408_D, relation = formalizes, coverage = exact, quote = "A taxpayer may for a taxable year elect under this subparagraph to treat as meeting the requirement of subparagraph (B)(i) any distribution from an individual retirement account which is made directly by the trustee to a split-interest entity")
+rule SplitInterestElectionValid408d8Fi(individual: Individual, y: TaxableYear, vehicle: Person, total: Money, limit: Money) strict {
+    label en official "exact boundary: an aggregate equal to the limit is allowed";
+    when split_interest_election_408d8Fi(individual, y, vehicle, _)
+        and split_interest_entity_408d8Fii(vehicle)
+        and split_interest_distribution_requirements_met_408d8Fiiiiv(vehicle)
+        and aggregate_election_distributions_408d8FiII(individual, y, total)
+        and split_interest_dollar_limit_408d8FiII(y, limit)
+        and total <= limit
+        and not_known(election_in_effect_for_preceding_year_408d8FiI(individual, y));
+    then split_interest_election_valid_408d8Fi(individual, y, vehicle);
+}
+
+pub relation split_interest_distribution_treated_as_qcd_408d8Fi(individual: Individual, y: TaxableYear, vehicle: Person, amount: Money) kind institutional {
+    label en official "the electing taxpayer's distribution to the split-interest entity is treated as meeting the requirement of subparagraph (B)(i)";
+}
+
+@source(IRC_S408_D, relation = formalizes, coverage = exact, quote = "A taxpayer may for a taxable year elect under this subparagraph")
+rule SplitInterestElectionPower408d8Fi(individual: Individual, y: TaxableYear, vehicle: Person, amount: Money) strict {
+    label en official "a power of the taxpayer, valid only when the conditions of clause (i) are met";
+    when split_interest_election_408d8Fi(individual, y, vehicle, amount);
+    then power ElectSplitInterestQcdPower {
+        holder individual;
+        over vehicle;
+        exercise split_interest_election_408d8Fi(individual, y, vehicle, amount);
+        valid_when split_interest_election_valid_408d8Fi(individual, y, vehicle);
+        effect split_interest_distribution_treated_as_qcd_408d8Fi(individual, y, vehicle, amount);
+    };
+}
+
+pub relation crt_distribution_paid_to_beneficiary_408d8Fv(beneficiary: Person, vehicle: Person, amount: Money) kind empirical {
+    label en unofficial "a distribution paid to the beneficiary from a charitable remainder annuity trust or unitrust funded as described in clause (ii), case-asserted";
+}
+
+pub relation crt_distribution_ordinary_income_408d8FvI(beneficiary: Person, amount: Money) kind institutional {
+    label en official "section 408(d)(8)(F)(v)(I): notwithstanding section 664(b), the distributions are treated as ordinary income in the beneficiary's hands";
+}
+
+@source(IRC_S408_D, relation = formalizes, coverage = exact, quote = "shall be treated as ordinary income in the hands of the beneficiary")
+rule CrtDistributionOrdinaryIncome408d8FvI(beneficiary: Person, vehicle: Person, amount: Money) strict {
+    label en official "for a trust that is a split-interest entity of clause (ii)(I) or (II)";
+    when crt_distribution_paid_to_beneficiary_408d8Fv(beneficiary, vehicle, amount)
+        and split_interest_entity_408d8Fii(vehicle)
+        and not_known(split_interest_entity_kind_408d8Fii(vehicle, CharitableGiftAnnuity));
+    then crt_distribution_ordinary_income_408d8FvI(beneficiary, amount);
+}
+
+pub relation qcd_funds_charitable_gift_annuity_408d8FvII(vehicle: Person) kind empirical {
+    label en unofficial "qualified charitable distributions are made to fund a charitable gift annuity, case-asserted";
+}
+
+pub relation gift_annuity_funding_not_investment_in_contract_408d8FvII(vehicle: Person) kind institutional {
+    label en official "section 408(d)(8)(F)(v)(II): qualified charitable distributions that fund a charitable gift annuity are not an investment in the contract for section 72(c)";
+}
+
+@source(IRC_S408_D, relation = formalizes, coverage = exact, quote = "shall not be treated as an investment in the contract for purposes of section 72(c)")
+rule GiftAnnuityFundingNotInvestmentInContract408d8FvII(vehicle: Person) strict {
+    label en official "for a charitable gift annuity";
+    when qcd_funds_charitable_gift_annuity_408d8FvII(vehicle);
+    then gift_annuity_funding_not_investment_in_contract_408d8FvII(vehicle);
+}
+
+// =====================================================================
+// (d)(8)(G) Inflation adjustment
+// =====================================================================
+
+pub relation cost_of_living_adjustment_408d8G(y: TaxableYear, cola: Decimal) kind empirical {
+    label en unofficial "the cost-of-living adjustment determined under section 1(f)(3) for the calendar year in which the taxable year begins, with 2022 substituted for 2016, as a fraction (0.05 for 5 percent), case-asserted (SOURCE_GAP: the adjustment is not pinned)";
+}
+
+pub relation dollar_amount_before_indexing_408d8G(y: TaxableYear, base: Money) kind empirical {
+    label en unofficial "the dollar amount of subparagraph (A) or (F) before the adjustment, case-asserted";
+}
+
+pub relation indexed_dollar_amount_408d8G(y: TaxableYear, base: Money, indexed: Money) kind institutional {
+    label en official "section 408(d)(8)(G): each dollar amount of subparagraphs (A) and (F) increased by the amount times the adjustment, rounded to the nearest multiple of $1,000";
+}
+
+@source(IRC_S408_D, relation = formalizes, coverage = exact, quote = "If any dollar amount increased under clause (i) is not a multiple of $1,000, such dollar amount shall be rounded to the nearest multiple of $1,000")
+rule IndexedDollarAmount408d8G(y: TaxableYear, base: Money, cola: Decimal) strict {
+    label en official "exact: base x (1 + adjustment) rounded HALF_UP to a multiple of $1,000";
+    when dollar_amount_before_indexing_408d8G(y, base) and cost_of_living_adjustment_408d8G(y, cola);
+    then indexed_dollar_amount_408d8G(y, base, round((base + base * cola) / 1000.00 USD, 0, "HALF_UP") * 1000.00 USD);
+}
+
+// =====================================================================
+// (p)(1) Simple retirement account
+// =====================================================================
+
+pub relation account_meets_vesting_participation_and_administrative_requirements_408p1A(account: Plan) kind empirical {
+    label en unofficial "the requirements of paragraphs (3), (4) and (5) are met with respect to the individual retirement plan, case-asserted";
+}
+
+pub relation only_qsra_contributions_or_permitted_rollovers_408p1B(account: Plan) kind empirical {
+    label en unofficial "the only contributions allowed are contributions under a qualified salary reduction arrangement, except a rollover contribution described in the statute made after the 2-year period of section 72(t)(6), case-asserted";
+}
+
+pub relation individual_retirement_plan_7701a37_408p1(account: Plan) kind empirical {
+    label en unofficial "the plan is an individual retirement plan as defined in section 7701(a)(37), case-asserted";
+}
+
+pub relation simple_retirement_account_408p1(account: Plan) kind institutional {
+    label en official "section 408(p)(1): an individual retirement plan meeting paragraphs (3)-(5) and allowing only qualified salary reduction arrangement contributions (with the rollover exception)";
+}
+
+@source(IRC_S408_P, relation = formalizes, coverage = exact, quote = "the term \"simple retirement account\" means an individual retirement plan (as defined in section 7701(a)(37))")
+rule SimpleRetirementAccount408p1(account: Plan) strict {
+    label en official "(A) and (B) together";
+    when individual_retirement_plan_7701a37_408p1(account)
+        and account_meets_vesting_participation_and_administrative_requirements_408p1A(account)
+        and only_qsra_contributions_or_permitted_rollovers_408p1B(account);
+    then simple_retirement_account_408p1(account);
+}
+
+// =====================================================================
+// (p)(2)(C) Eligible employer, applicable percentage
+// =====================================================================
+
+pub relation employees_with_5000_compensation_preceding_year_408p(employer: Person, y: TaxableYear, count: Integer) kind empirical {
+    label en unofficial "the number of the employer's employees who received at least $5,000 of compensation from the employer for the preceding year, case-asserted";
+}
+
+pub relation eligible_employer_by_size_408pCiI(employer: Person, y: TaxableYear) kind institutional {
+    label en official "section 408(p)(2)(C)(i)(I): an employer with no more than 100 employees who received at least $5,000 of compensation for the preceding year";
+}
+
+@source(IRC_S408_P, relation = formalizes, coverage = exact, quote = "an employer which had no more than 100 employees who received at least $5,000 of compensation from the employer for the preceding year")
+rule EligibleEmployerBySize408pCiI(employer: Person, y: TaxableYear, count: Integer) strict {
+    label en official "exact boundary: 100 is included, 101 is not";
+    when employees_with_5000_compensation_preceding_year_408p(employer, y, count) and count <= 100;
+    then eligible_employer_by_size_408pCiI(employer, y);
+}
+
+pub relation employer_maintained_plan_and_was_eligible_last_in_calendar_year_408pCiII(employer: Person, last_year: Integer) kind empirical {
+    label en unofficial "the employer established and maintained a plan under the subsection for 1 or more years and last met the eligible employer test in this calendar year, case-asserted";
+}
+
+pub relation calendar_year_of_taxable_year_408p(y: TaxableYear, calendar_year: Integer) kind empirical {
+    label en unofficial "the calendar year (the subsection's \"year\") of the taxable year, case-asserted (section 408(p)(6)(C))";
+}
+
+pub relation failure_due_to_acquisition_disposition_408pCiII(employer: Person) kind empirical {
+    label en unofficial "the failure to be an eligible employer is due to an acquisition, disposition or similar transaction, case-asserted";
+}
+
+pub relation eligible_employer_408pCi(employer: Person, y: TaxableYear) kind institutional {
+    label en official "section 408(p)(2)(C)(i): an employer of no more than 100 employees, or within the 2-year grace period after the last year it qualified";
+}
+
+@source(IRC_S408_P, relation = formalizes, coverage = exact, quote = "The term \"eligible employer\" means, with respect to any year, an employer which had no more than 100 employees")
+rule EligibleEmployer408pCiBySize(employer: Person, y: TaxableYear) strict {
+    label en official "size branch";
+    when eligible_employer_by_size_408pCiI(employer, y);
+    then eligible_employer_408pCi(employer, y);
+}
+
+@source(IRC_S408_P, relation = formalizes, coverage = exact, quote = "shall be treated as an eligible employer for the 2 years following the last year the employer was an eligible employer")
+rule EligibleEmployerGraceFirstYear408pCiII(employer: Person, y: TaxableYear, last: Integer, cal: Integer) strict {
+    label en official "exact: the first year after the last eligible year; not when the failure is due to an acquisition, disposition or similar transaction";
+    when employer_maintained_plan_and_was_eligible_last_in_calendar_year_408pCiII(employer, last)
+        and calendar_year_of_taxable_year_408p(y, cal)
+        and cal == last + 1
+        and not_known(failure_due_to_acquisition_disposition_408pCiII(employer));
+    then eligible_employer_408pCi(employer, y);
+}
+
+@source(IRC_S408_P, relation = formalizes, coverage = exact, quote = "shall be treated as an eligible employer for the 2 years following the last year the employer was an eligible employer")
+rule EligibleEmployerGraceSecondYear408pCiII(employer: Person, y: TaxableYear, last: Integer, cal: Integer) strict {
+    label en official "exact: the second year after the last eligible year; the third year is outside";
+    when employer_maintained_plan_and_was_eligible_last_in_calendar_year_408pCiII(employer, last)
+        and calendar_year_of_taxable_year_408p(y, cal)
+        and cal == last + 2
+        and not_known(failure_due_to_acquisition_disposition_408pCiII(employer));
+    then eligible_employer_408pCi(employer, y);
+}
+
+pub relation employer_elects_larger_employer_contribution_408pEiII(employer: Person, y: TaxableYear) kind empirical {
+    label en unofficial "the employer makes the election under subparagraph (E)(i)(II) for the year, case-asserted";
+}
+
+pub relation employer_had_more_than_25_such_employees_408p(employer: Person, y: TaxableYear) kind empirical {
+    label en unofficial "the employer had more than 25 employees who received at least $5,000 of compensation from the employer for the preceding year, case-asserted";
+}
+
+pub relation larger_employer_electing_408pCiiIV(employer: Person, y: TaxableYear) kind institutional {
+    label en official "section 408(p)(2)(C)(ii)(IV), (B)(iii): an employer with more than 25 such employees that makes the (E)(i)(II) election";
+}
+
+@source(IRC_S408_P, relation = formalizes, coverage = exact, quote = "In the case of an employer which had more than 25 employees who received at least $5,000 of compensation from the employer for the preceding year, and which makes the election under subparagraph (E)(i)(II) for any year, subclause (I) shall be applied for such year by substituting \"4 percent\" for \"3 percent\"")
+rule LargerEmployerElecting408pCiiIV(employer: Person, y: TaxableYear) strict {
+    label en official "more than 25 and the election";
+    when employer_had_more_than_25_such_employees_408p(employer, y) and employer_elects_larger_employer_contribution_408pEiII(employer, y);
+    then larger_employer_electing_408pCiiIV(employer, y);
+}
+
+pub relation lower_percentage_election_408pCiiII(employer: Person, y: TaxableYear, pct: Decimal) kind empirical {
+    label en unofficial "the lower applicable percentage the employer elects for the year (not less than 1 percent), case-asserted (exercise atom)";
+}
+
+pub relation employees_notified_of_lower_percentage_in_time_408pCiiII(employer: Person, y: TaxableYear) kind empirical {
+    label en unofficial "the employer notifies the employees of the lower percentage within a reasonable period before the 60-day election period, case-asserted (evaluative \"reasonable\")";
+}
+
+pub relation years_with_lower_percentage_in_five_year_period_408pCiiII(employer: Person, y: TaxableYear, count: Integer) kind empirical {
+    label en unofficial "the number of years in the 5-year period ending with the year (including the year, after the election) in which the applicable percentage would be lower than 3 percent, case-asserted; prior years before the first arrangement year count as 3 percent (subclause (III))";
+}
+
+pub relation lower_percentage_election_permitted_408pCiiII(employer: Person, y: TaxableYear) kind institutional {
+    label en official "section 408(p)(2)(C)(ii)(II): a lower percentage of at least 1 percent, notice given, and not lower in more than 2 of the 5 years ending with the year";
+}
+
+@source(IRC_S408_P, relation = formalizes, coverage = exact, quote = "An employer may not elect a lower percentage under this subclause for any year if that election would result in the applicable percentage being lower than the applicable percentage in more than 2 of the years in the 5-year period ending with such year")
+rule LowerPercentageElectionPermitted408pCiiII(employer: Person, y: TaxableYear, pct: Decimal, count: Integer) strict {
+    label en official "exact boundaries: 1 percent is allowed, 0.99 is not; at most 2 lower years in the period";
+    when lower_percentage_election_408pCiiII(employer, y, pct)
+        and pct >= 0.01
+        and pct < 0.03
+        and employees_notified_of_lower_percentage_in_time_408pCiiII(employer, y)
+        and years_with_lower_percentage_in_five_year_period_408pCiiII(employer, y, count)
+        and count <= 2;
+    then lower_percentage_election_permitted_408pCiiII(employer, y);
+}
+
+pub relation lower_percentage_election_effective_408pCiiII(employer: Person, y: TaxableYear) kind institutional {
+    label en official "the employer's election of a lower applicable percentage takes effect for the year";
+}
+
+@source(IRC_S408_P, relation = formalizes, coverage = exact, quote = "An employer may elect to apply a lower percentage (not less than 1 percent) for any year for all employees eligible to participate in the plan for such year")
+rule LowerPercentageElectionPower408pCiiII(employer: Person, y: TaxableYear, pct: Decimal) strict {
+    label en official "a power of the employer valid only when the statutory conditions hold";
+    when lower_percentage_election_408pCiiII(employer, y, pct);
+    then power ElectLowerApplicablePercentagePower {
+        holder employer;
+        over employer;
+        exercise lower_percentage_election_408pCiiII(employer, y, pct);
+        valid_when lower_percentage_election_permitted_408pCiiII(employer, y);
+        effect lower_percentage_election_effective_408pCiiII(employer, y);
+    };
+}
+
+pub relation applicable_percentage_408pCii(employer: Person, y: TaxableYear, pct: Decimal) kind institutional {
+    label en official "section 408(p)(2)(C)(ii): 3 percent, 4 percent for a larger employer making the (E)(i)(II) election, or the validly elected lower percentage";
+}
+
+@source(IRC_S408_P, relation = formalizes, coverage = exact, quote = "Except as provided in subclause (IV), the term \"applicable percentage\" means 3 percent")
+rule ApplicablePercentageThree408pCiiI(employer: Person, y: TaxableYear) strict {
+    label en official "exact 0.03 unless a larger-employer election or a valid lower election applies";
+    when eligible_employer_408pCi(employer, y)
+        and not_known(larger_employer_electing_408pCiiIV(employer, y))
+        and not_known(lower_percentage_election_permitted_408pCiiII(employer, y));
+    then applicable_percentage_408pCii(employer, y, 0.03);
+}
+
+@source(IRC_S408_P, relation = formalizes, coverage = exact, quote = "subclause (I) shall be applied for such year by substituting \"4 percent\" for \"3 percent\"")
+rule ApplicablePercentageFour408pCiiIV(employer: Person, y: TaxableYear) strict {
+    label en official "exact 0.04";
+    when larger_employer_electing_408pCiiIV(employer, y);
+    then applicable_percentage_408pCii(employer, y, 0.04);
+}
+
+@source(IRC_S408_P, relation = formalizes, coverage = exact, quote = "An employer may elect to apply a lower percentage (not less than 1 percent) for any year")
+rule ApplicablePercentageLower408pCiiII(employer: Person, y: TaxableYear, pct: Decimal) strict {
+    label en official "the elected lower percentage when the election is valid";
+    when lower_percentage_election_permitted_408pCiiII(employer, y) and lower_percentage_election_408pCiiII(employer, y, pct);
+    then applicable_percentage_408pCii(employer, y, pct);
+}
+
+pub relation two_percent_election_percentage_408pB(employer: Person, y: TaxableYear, pct: Decimal) kind institutional {
+    label en official "section 408(p)(2)(B)(i), (iii): the 2 percent nonelective contribution in lieu of the match, 3 percent for a larger employer making the (E)(i)(II) election";
+}
+
+pub relation employer_elects_two_percent_nonelective_408pBi(employer: Person, y: TaxableYear) kind empirical {
+    label en unofficial "the employer elects to make nonelective contributions of 2 percent of compensation in lieu of the matching contributions, case-asserted (exercise atom)";
+}
+
+@source(IRC_S408_P, relation = formalizes, coverage = exact, quote = "the employer elects to make nonelective contributions of 2 percent of compensation for each employee who is eligible to participate in the arrangement")
+rule TwoPercentElection408pBi(employer: Person, y: TaxableYear) strict {
+    label en official "exact 0.02 unless the larger-employer substitution applies";
+    when employer_elects_two_percent_nonelective_408pBi(employer, y) and not_known(larger_employer_electing_408pCiiIV(employer, y));
+    then two_percent_election_percentage_408pB(employer, y, 0.02);
+}
+
+@source(IRC_S408_P, relation = formalizes, coverage = exact, quote = "clause (i) shall be applied for such year by substituting \"3 percent\" for \"2 percent\"")
+rule TwoPercentElectionLarger408pBiii(employer: Person, y: TaxableYear) strict {
+    label en official "exact 0.03 for a larger employer making the (E)(i)(II) election";
+    when employer_elects_two_percent_nonelective_408pBi(employer, y) and larger_employer_electing_408pCiiIV(employer, y);
+    then two_percent_election_percentage_408pB(employer, y, 0.03);
+}
+
+pub relation compensation_and_limit_408pBii(employee: Person, employer: Person, y: TaxableYear, compensation: Money, limit: Money) kind empirical {
+    label en unofficial "the employee's compensation and the limitation in effect for the year under section 401(a)(17), case-asserted";
+}
+
+pub relation compensation_taken_into_account_408pBii(employee: Person, employer: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 408(p)(2)(A) last sentence, (B)(ii): the compensation taken into account does not exceed the section 401(a)(17) limitation";
+}
+
+@source(IRC_S408_P, relation = formalizes, coverage = exact, quote = "The compensation taken into account under clause (i) for any year shall not exceed the limitation in effect for such year under section 401(a)(17)")
+rule CompensationTakenIntoAccount408pBii(employee: Person, employer: Person, y: TaxableYear, comp: Money, limit: Money) strict {
+    label en official "min(compensation, limit)";
+    when compensation_and_limit_408pBii(employee, employer, y, comp, limit);
+    then compensation_taken_into_account_408pBii(employee, employer, y, min(comp, limit));
+}
+
+// =====================================================================
+// (p)(2)(A) Qualified salary reduction arrangement; (iv) nonelective cap
+// =====================================================================
+
+pub relation cap_before_indexing_408pAiv(y: TaxableYear, cap: Money) kind institutional {
+    label en official "section 408(p)(2)(A)(iv): the $5,000 cap on nonelective contributions before the (G) adjustment";
+}
+
+@source(IRC_S408_P, relation = formalizes, coverage = exact, quote = "but such contributions with respect to any employee shall not exceed $5,000 for the year")
+rule CapBeforeIndexing408pAiv(y: TaxableYear, start: Date) strict {
+    label en official "$5,000 for a taxable year beginning on or before December 31, 2024";
+    when taxable_year_begin_date_secure2(y, start) and start <= @2024-12-31;
+    then cap_before_indexing_408pAiv(y, 5000.00 USD);
+}
+
+pub relation cost_of_living_adjustment_408pG(y: TaxableYear, cola: Decimal) kind empirical {
+    label en unofficial "the cost-of-living adjustment determined under section 1(f)(3) for the calendar year in which the taxable year begins, with 2023 substituted for 2016, as a fraction, case-asserted (SOURCE_GAP: not pinned)";
+}
+
+@source(IRC_S408_P, relation = formalizes, coverage = partial, quote = "the $5,000 amount in subparagraph (A)(iv)(II) shall be increased by an amount equal to")
+rule CapIndexed408pG(y: TaxableYear, start: Date, cola: Decimal) strict {
+    label en official "PARTIAL: taxable years beginning after December 31, 2024: 5,000 x (1 + adjustment) rounded HALF_UP to a multiple of $100; the adjustment is a case input";
+    when taxable_year_begin_date_secure2(y, start)
+        and start > @2024-12-31
+        and cost_of_living_adjustment_408pG(y, cola);
+    then cap_before_indexing_408pAiv(y, round((5000.00 USD + 5000.00 USD * cola) / 100.00 USD, 0, "HALF_UP") * 100.00 USD);
+}
+
+pub relation nonelective_percentage_408pAiv(employee: Person, employer: Person, y: TaxableYear, pct: Decimal) kind empirical {
+    label en unofficial "the uniform percentage of compensation of the nonelective contribution the employer makes (up to 10 percent), case-asserted";
+}
+
+pub relation nonelective_contribution_ceiling_408pAiv(employee: Person, employer: Person, y: TaxableYear, ceiling: Money) kind institutional {
+    label en official "section 408(p)(2)(A)(iv): the uniform percentage of compensation (capped by the 401(a)(17) limit and 10 percent), not above the dollar cap";
+}
+
+@source(IRC_S408_P, relation = formalizes, coverage = exact, quote = "the employer may make nonelective contributions of a uniform percentage (up to 10 percent) of compensation")
+rule NonelectiveContributionCeiling408pAiv(employee: Person, employer: Person, y: TaxableYear, comp: Money, pct: Decimal, cap: Money) strict {
+    label en official "min(pct x compensation taken into account, cap) with pct up to 0.10; cents HALF_UP (JUDGMENT CALL)";
+    when compensation_taken_into_account_408pBii(employee, employer, y, comp)
+        and nonelective_percentage_408pAiv(employee, employer, y, pct)
+        and pct <= 0.10
+        and cap_before_indexing_408pAiv(y, cap);
+    then nonelective_contribution_ceiling_408pAiv(employee, employer, y, min(round(comp * pct, 2, "HALF_UP"), cap));
+}
+
+pub relation arrangement_is_written_408pA(arrangement: Integer) kind empirical {
+    label en unofficial "the arrangement is a written arrangement of an eligible employer, case-asserted";
+}
+
+pub relation election_between_contributions_and_cash_408pAi(arrangement: Integer) kind empirical {
+    label en unofficial "an eligible employee may elect to have the employer make payments as elective employer contributions to a simple retirement account or to the employee directly in cash, case-asserted (clause (i)(I), (II))";
+}
+
+pub relation election_expressed_as_percentage_within_dollar_amount_408pAii(arrangement: Integer) kind empirical {
+    label en unofficial "the amount an employee may elect is required to be expressed as a percentage of compensation and may not exceed the applicable dollar amount, case-asserted (clause (ii))";
+}
+
+pub relation matching_contribution_required_408pAiii(arrangement: Integer) kind empirical {
+    label en unofficial "the employer is required to make a matching contribution (or the 2 percent election applies), case-asserted (clause (iii))";
+}
+
+pub relation nonelective_contributions_within_limits_408pAiv(arrangement: Integer) kind empirical {
+    label en unofficial "any nonelective contributions are of a uniform percentage up to 10 percent, only for employees with at least $5,000 of compensation, and within the ceiling, case-asserted (clause (iv))";
+}
+
+pub relation no_other_contributions_408pAv(arrangement: Integer) kind empirical {
+    label en unofficial "no contributions are made other than those described in clauses (i), (iii) or (iv), case-asserted (clause (v))";
+}
+
+pub relation arrangement_of_eligible_employer_408pA(arrangement: Integer, employer: Person, y: TaxableYear) kind empirical {
+    label en unofficial "the arrangement is that of this employer for the year, case-asserted";
+}
+
+pub relation qualified_salary_reduction_arrangement_408p2A(arrangement: Integer) kind institutional {
+    label en official "section 408(p)(2)(A): a written arrangement of an eligible employer meeting clauses (i)-(v)";
+}
+
+@source(IRC_S408_P, relation = formalizes, coverage = exact, quote = "the term \"qualified salary reduction arrangement\" means a written arrangement of an eligible employer under which")
+rule QualifiedSalaryReductionArrangement408p2A(arrangement: Integer, employer: Person, y: TaxableYear) strict {
+    label en official "clauses (i)-(v) with an eligible employer";
+    when arrangement_is_written_408pA(arrangement)
+        and arrangement_of_eligible_employer_408pA(arrangement, employer, y)
+        and eligible_employer_408pCi(employer, y)
+        and election_between_contributions_and_cash_408pAi(arrangement)
+        and election_expressed_as_percentage_within_dollar_amount_408pAii(arrangement)
+        and matching_contribution_required_408pAiii(arrangement)
+        and nonelective_contributions_within_limits_408pAiv(arrangement)
+        and no_other_contributions_408pAv(arrangement);
+    then qualified_salary_reduction_arrangement_408p2A(arrangement);
+}
+
+// =====================================================================
+// (p)(2)(D) Only plan of the employer
+// =====================================================================
+
+pub relation qualified_plan_contributions_or_accruals_since_arrangement_effective_408pDi(employer: Person) kind empirical {
+    label en unofficial "the employer (or a predecessor) maintained a qualified plan with respect to which contributions were made, or benefits accrued, for service in any year from the year the arrangement became effective through the year of determination, case-asserted";
+}
+
+pub relation only_employees_410b3A_eligible_in_that_qualified_plan_408pDi(employer: Person) kind empirical {
+    label en unofficial "in the qualified plan only employees described in section 410(b)(3)(A) are eligible to participate, case-asserted";
+}
+
+pub relation only_employees_other_than_410b3A_eligible_in_arrangement_408pDi(employer: Person) kind empirical {
+    label en unofficial "only individuals other than employees described in section 410(b)(3)(A) are eligible to participate in the arrangement, case-asserted";
+}
+
+pub relation arrangement_is_only_plan_of_employer_408pD(employer: Person) kind institutional {
+    label en official "section 408(p)(2)(D): no other qualified plan with contributions or accruals since the arrangement became effective (a plan in which only 410(b)(3)(A) employees are eligible is disregarded when only other employees are eligible in the arrangement)";
+}
+
+@source(IRC_S408_P, relation = formalizes, coverage = exact, quote = "An arrangement shall not be treated as a qualified salary reduction arrangement for any year if the employer (or any predecessor employer) maintained a qualified plan")
+rule ArrangementOnlyPlanNoOtherPlan408pD(employer: Person) strict {
+    label en official "no other qualified plan on record";
+    when employer_maintains_simple_arrangement(employer, _)
+        and not_known(qualified_plan_contributions_or_accruals_since_arrangement_effective_408pDi(employer));
+    then arrangement_is_only_plan_of_employer_408pD(employer);
+}
+
+@source(IRC_S408_P, relation = formalizes, coverage = exact, quote = "If only individuals other than employees described in subparagraph (A) of section 410(b)(3) are eligible to participate in such arrangement, then the preceding sentence shall be applied without regard to any qualified plan in which only employees so described are eligible to participate")
+rule ArrangementOnlyPlanExceptionTenBThreeA408pD(employer: Person) strict {
+    label en official "the exception: the other plan covers only 410(b)(3)(A) employees and the arrangement covers only others";
+    when employer_maintains_simple_arrangement(employer, _)
+        and qualified_plan_contributions_or_accruals_since_arrangement_effective_408pDi(employer)
+        and only_employees_410b3A_eligible_in_that_qualified_plan_408pDi(employer)
+        and only_employees_other_than_410b3A_eligible_in_arrangement_408pDi(employer);
+    then arrangement_is_only_plan_of_employer_408pD(employer);
+}
+
+pub relation plan_is_described_in_219g5_408pDii(plan: Plan) kind empirical {
+    label en unofficial "the plan, contract, pension or trust is described in subparagraph (A) or (B) of section 219(g)(5), case-asserted";
+}
+
+pub relation qualified_plan_408pDii(plan: Plan) kind institutional {
+    label en official "section 408(p)(2)(D)(ii): a plan, contract, pension or trust described in section 219(g)(5)(A) or (B)";
+}
+
+@source(IRC_S408_P, relation = formalizes, coverage = exact, quote = "the term \"qualified plan\" means a plan, contract, pension, or trust described in subparagraph (A) or (B) of section 219(g)(5)")
+rule QualifiedPlan408pDii(plan: Plan) strict {
+    label en official "section 219(g)(5) status is a case fact";
+    when plan_is_described_in_219g5_408pDii(plan);
+    then qualified_plan_408pDii(plan);
+}
+
+// =====================================================================
+// (p)(2)(E), (F), (H) Applicable dollar amount, student loans, grace period
+// =====================================================================
+
+pub relation dollar_amount_in_effect_2024_408pEii(amount: Money) kind empirical {
+    label en unofficial "the dollar amount in effect under clause (i)(III) for calendar year 2024, case-asserted (SOURCE_GAP: the indexed $10,000 amount is not pinned)";
+}
+
+pub relation adjusted_dollar_amount_408pEii(amount: Money) kind institutional {
+    label en official "section 408(p)(2)(E)(ii): 110 percent of the dollar amount in effect under clause (i)(III) for calendar year 2024";
+}
+
+@source(IRC_S408_P, relation = formalizes, coverage = exact, quote = "the adjusted dollar amount is an amount equal to 110 percent of the dollar amount in effect under clause (i)(III) for calendar year 2024")
+rule AdjustedDollarAmount408pEii(base: Money) strict {
+    label en official "exact 1.10 x the 2024 amount";
+    when dollar_amount_in_effect_2024_408pEii(base);
+    then adjusted_dollar_amount_408pEii(base * 1.10);
+}
+
+pub relation employer_had_not_more_than_25_such_employees_408pEiI(employer: Person, y: TaxableYear) kind empirical {
+    label en unofficial "the employer had not more than 25 employees who received at least $5,000 of compensation for the preceding year, case-asserted";
+}
+
+pub relation employer_no_other_plan_within_3_years_408pEiv(employer: Person) kind empirical {
+    label en unofficial "during the 3-taxable-year period immediately preceding the first year of the arrangement neither the employer nor any controlled group member (or predecessor) maintained a plan described in section 219(g)(5)(A)(i), (ii) or (iv) for substantially the same employees, case-asserted";
+}
+
+pub relation eligible_employer_of_clause_iii_408pEiii(employer: Person, y: TaxableYear) kind institutional {
+    label en official "section 408(p)(2)(E)(iv): an eligible employer with no other plan within the 3 preceding years for substantially the same employees";
+}
+
+@source(IRC_S408_P, relation = formalizes, coverage = exact, quote = "An eligible employer is described in this clause only if, during the 3-taxable-year period immediately preceding the 1st year the employer maintains the qualified salary reduction arrangement")
+rule EligibleEmployerOfClauseIii408pEiv(employer: Person, y: TaxableYear) strict {
+    label en official "an eligible employer with no other plan within 3 years";
+    when eligible_employer_408pCi(employer, y) and employer_no_other_plan_within_3_years_408pEiv(employer);
+    then eligible_employer_of_clause_iii_408pEiii(employer, y);
+}
+
+pub relation standard_dollar_amount_408pEiiiI(y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the $10,000 amount of clause (i)(III) as adjusted for the year under (iii)(I), case-asserted (SOURCE_GAP: not pinned)";
+}
+
+pub relation applicable_dollar_amount_408pEi(employer: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 408(p)(2)(E)(i): the adjusted dollar amount for an eligible clause (iii) employer with not more than 25 such employees or that elects, and $10,000 (as adjusted) in any other case";
+}
+
+@source(IRC_S408_P, relation = formalizes, coverage = exact, quote = "the adjusted dollar amount in the case of an eligible employer described in clause (iii) which had not more than 25 employees who received at least $5,000 of compensation from the employer for the preceding year")
+rule ApplicableDollarAmountSmall408pEiI(employer: Person, y: TaxableYear, adjusted: Money) strict {
+    label en official "(I): a small clause (iii) employer";
+    when eligible_employer_of_clause_iii_408pEiii(employer, y)
+        and employer_had_not_more_than_25_such_employees_408pEiI(employer, y)
+        and adjusted_dollar_amount_408pEii(adjusted);
+    then applicable_dollar_amount_408pEi(employer, y, adjusted);
+}
+
+@source(IRC_S408_P, relation = formalizes, coverage = exact, quote = "the adjusted dollar amount in the case of an eligible employer described in clause (iii) which is not described in subclause (I) and which elects")
+rule ApplicableDollarAmountElecting408pEiII(employer: Person, y: TaxableYear, adjusted: Money) strict {
+    label en official "(II): a larger clause (iii) employer that elects";
+    when eligible_employer_of_clause_iii_408pEiii(employer, y)
+        and not_known(employer_had_not_more_than_25_such_employees_408pEiI(employer, y))
+        and employer_elects_larger_employer_contribution_408pEiII(employer, y)
+        and adjusted_dollar_amount_408pEii(adjusted);
+    then applicable_dollar_amount_408pEi(employer, y, adjusted);
+}
+
+@source(IRC_S408_P, relation = formalizes, coverage = exact, quote = "$10,000 in any other case")
+rule ApplicableDollarAmountOther408pEiIII(employer: Person, y: TaxableYear, amount: Money) strict {
+    label en official "(III): any other case";
+    when eligible_employer_408pCi(employer, y)
+        and standard_dollar_amount_408pEiiiI(y, amount)
+        and not_known(qualifies_for_adjusted_dollar_amount_408pE(employer, y));
+    then applicable_dollar_amount_408pEi(employer, y, amount);
+}
+
+pub relation qualifies_for_adjusted_dollar_amount_408pE(employer: Person, y: TaxableYear) kind institutional {
+    label en official "helper: subclause (I) or (II) applies";
+}
+
+rule QualifiesForAdjustedSmall408pE(employer: Person, y: TaxableYear) strict {
+    label en official "helper for the not_known guard: (I)";
+    when eligible_employer_of_clause_iii_408pEiii(employer, y) and employer_had_not_more_than_25_such_employees_408pEiI(employer, y);
+    then qualifies_for_adjusted_dollar_amount_408pE(employer, y);
+}
+
+rule QualifiesForAdjustedElecting408pE(employer: Person, y: TaxableYear) strict {
+    label en official "helper for the not_known guard: (II)";
+    when eligible_employer_of_clause_iii_408pEiii(employer, y) and employer_elects_larger_employer_contribution_408pEiII(employer, y);
+    then qualifies_for_adjusted_dollar_amount_408pE(employer, y);
+}
+
+pub relation cola_405_408pEiii(y: TaxableYear, cola: Decimal) kind empirical {
+    label en unofficial "the increase under section 415(d)-style adjustment with base period July 1, 2004 (large employers) or July 1, 2023, as a fraction, case-asserted (SOURCE_GAP: not pinned)";
+}
+
+pub relation amount_before_rounding_408pEiii(y: TaxableYear, base: Money, cola: Decimal) kind empirical {
+    label en unofficial "the base dollar amount of clause (i)(III) or (ii) and the fractional adjustment, case-asserted";
+}
+
+pub relation adjusted_amount_rounded_down_408pEiii(y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 408(p)(2)(E)(iii): the adjusted amount, any increase not a multiple of $500 being rounded to the next lower multiple of $500";
+}
+
+@source(IRC_S408_P, relation = formalizes, coverage = partial, quote = "any increase under this subparagraph which is not a multiple of $500 shall be rounded to the next lower multiple of $500")
+rule AdjustedAmountRoundedDown408pEiii(y: TaxableYear, base: Money, cola: Decimal) strict {
+    label en official "PARTIAL: base + (increase rounded DOWN to a multiple of $500); the fractional adjustment is a case input";
+    when amount_before_rounding_408pEiii(y, base, cola);
+    then adjusted_amount_rounded_down_408pEiii(y, base + round((base * cola) / 500.00 USD, 0, "FLOOR") * 500.00 USD);
+}
+
+pub relation qualified_student_loan_payment_408pFii(employee: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "a payment by the employee in repayment of a qualified education loan (section 221(d)(1)) incurred to pay qualified higher education expenses (section 401(m)(4)(D)), with the employee's certification to the employer that the payment was made, case-asserted";
+}
+
+pub relation employee_certified_student_loan_payment_408pFii(employee: Person, y: TaxableYear) kind empirical {
+    label en unofficial "the employee certifies to the employer making the matching contribution that the payment has been made on such a loan, case-asserted";
+}
+
+pub relation student_loan_matching_only_for_eligible_employees_408pFiiiI(plan: Plan) kind empirical {
+    label en unofficial "matching contributions on account of qualified student loan payments are provided only on behalf of employees otherwise eligible to elect contributions, case-asserted";
+}
+
+pub relation all_eligible_employees_eligible_for_student_loan_match_408pFiiiII(plan: Plan) kind empirical {
+    label en unofficial "all employees otherwise eligible to participate are eligible to receive matching contributions on account of qualified student loan payments, case-asserted";
+}
+
+pub relation student_loan_treatment_rules_met_408pFiii(plan: Plan) kind institutional {
+    label en official "section 408(p)(2)(F)(iii): both applicable rules of clause (iii) are met";
+}
+
+@source(IRC_S408_P, relation = formalizes, coverage = exact, quote = "Clause (i) shall apply to an arrangement only if, under the arrangement")
+rule StudentLoanTreatmentRulesMet408pFiii(plan: Plan) strict {
+    label en official "(I) and (II) together";
+    when student_loan_matching_only_for_eligible_employees_408pFiiiI(plan)
+        and all_eligible_employees_eligible_for_student_loan_match_408pFiiiII(plan);
+    then student_loan_treatment_rules_met_408pFiii(plan);
+}
+
+pub relation applicable_dollar_amount_and_compensation_408pFi(employee: Person, plan: Plan, y: TaxableYear, dollar: Money, compensation: Money, other_elective: Money) kind empirical {
+    label en unofficial "the applicable dollar amount under (E) (after section 414(v)), the employee's compensation under section 415(c)(3), and the other amounts elected by the employee under (A)(i)(I), case-asserted";
+}
+
+pub relation student_loan_payment_amount_for_match_408pFi(employee: Person, plan: Plan, y: TaxableYear, payment: Money) kind empirical {
+    label en unofficial "the amount of the employee's qualified student loan payments for the year, case-asserted";
+}
+
+pub relation student_loan_payments_treated_as_elective_408pFi(employee: Person, plan: Plan, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 408(p)(2)(F)(i): qualified student loan payments treated as elective amounts only to the extent they do not exceed the lesser of the applicable dollar amount and compensation, reduced by other elective amounts";
+}
+
+@source(IRC_S408_P, relation = formalizes, coverage = exact, quote = "qualified student loan payments are treated as amounts elected by the employee under subparagraph (A)(i)(I) to the extent such payments do not exceed")
+rule StudentLoanPaymentsTreatedAsElective408pFi(employee: Person, plan: Plan, y: TaxableYear, dollar: Money, comp: Money, other: Money, payment: Money) strict {
+    label en official "min(payment, max(min(dollar, compensation) - other elective, 0)); only when the certification and the clause (iii) rules hold";
+    when applicable_dollar_amount_and_compensation_408pFi(employee, plan, y, dollar, comp, other)
+        and student_loan_payment_amount_for_match_408pFi(employee, plan, y, payment)
+        and employee_certified_student_loan_payment_408pFii(employee, y)
+        and student_loan_treatment_rules_met_408pFiii(plan);
+    then student_loan_payments_treated_as_elective_408pFi(employee, plan, y, min(payment, max(min(dollar, comp) - other, 0.00 USD)));
+}
+
+pub relation employer_had_not_more_than_25_in_one_or_more_years_and_last_year_408pH(employer: Person, last_year: Integer) kind empirical {
+    label en unofficial "the employer had not more than 25 such employees in one or more years and last had such a count in this calendar year, case-asserted";
+}
+
+pub relation employer_treated_as_having_25_employees_408pH(employer: Person, y: TaxableYear) kind institutional {
+    label en official "section 408(p)(2)(H): for the 2 years following the last year with not more than 25 such employees, the employer is treated for (E)(i) as having 25, and not as having made the (E)(i)(II) election";
+}
+
+@source(IRC_S408_P, relation = formalizes, coverage = exact, quote = "shall be treated for purposes of subparagraph (E)(i) as having 25 such employees for the 2 years following the last year the employer had not more than 25 such employees")
+rule EmployerTreatedAs25FirstYear408pH(employer: Person, y: TaxableYear, last: Integer, cal: Integer) strict {
+    label en official "exact: the first year after the last small-employer year; not when due to an acquisition, disposition or similar transaction";
+    when employer_had_not_more_than_25_in_one_or_more_years_and_last_year_408pH(employer, last)
+        and calendar_year_of_taxable_year_408p(y, cal)
+        and cal == last + 1
+        and employer_had_more_than_25_such_employees_408p(employer, y)
+        and not_known(failure_due_to_acquisition_disposition_408pCiII(employer));
+    then employer_treated_as_having_25_employees_408pH(employer, y);
+}
+
+@source(IRC_S408_P, relation = formalizes, coverage = exact, quote = "shall be treated for purposes of subparagraph (E)(i) as having 25 such employees for the 2 years following the last year the employer had not more than 25 such employees")
+rule EmployerTreatedAs25SecondYear408pH(employer: Person, y: TaxableYear, last: Integer, cal: Integer) strict {
+    label en official "exact: the second year after; the third year is outside";
+    when employer_had_not_more_than_25_in_one_or_more_years_and_last_year_408pH(employer, last)
+        and calendar_year_of_taxable_year_408p(y, cal)
+        and cal == last + 2
+        and employer_had_more_than_25_such_employees_408p(employer, y)
+        and not_known(failure_due_to_acquisition_disposition_408pCiII(employer));
+    then employer_treated_as_having_25_employees_408pH(employer, y);
+}
+
+// =====================================================================
+// (p)(3), (p)(4) Vesting and participation
+// =====================================================================
+
+pub relation employee_rights_to_contribution_nonforfeitable_408p3(account: Plan) kind empirical {
+    label en unofficial "the employee's rights to any contribution to the simple retirement account are nonforfeitable, with rules similar to subsection (k)(4), case-asserted";
+}
+
+pub relation vesting_requirements_met_408p3(account: Plan) kind institutional {
+    label en official "section 408(p)(3): the employee's rights to any contribution are nonforfeitable";
+}
+
+@source(IRC_S408_P, relation = formalizes, coverage = exact, quote = "if the employee's rights to any contribution to the simple retirement account are nonforfeitable")
+rule VestingRequirementsMet408p3(account: Plan) strict {
+    label en official "nonforfeitable rights";
+    when employee_rights_to_contribution_nonforfeitable_408p3(account);
+    then vesting_requirements_met_408p3(account);
+}
+
+pub relation employee_compensation_two_preceding_years_408p4Ai(employee: Person, employer: Person, y: TaxableYear, first: Money, second: Money) kind empirical {
+    label en unofficial "the employee's compensation from the employer in each of the two preceding years, case-asserted (clause (i): at least $5,000 during any 2 preceding years)";
+}
+
+pub relation employee_expected_compensation_408p4Aii(employee: Person, employer: Person, y: TaxableYear, expected: Money) kind empirical {
+    label en unofficial "the compensation the employee is reasonably expected to receive during the year, case-asserted (clause (ii))";
+}
+
+pub relation employee_must_be_eligible_408p4A(employee: Person, employer: Person, y: TaxableYear) kind institutional {
+    label en official "section 408(p)(4)(A): an employee who received at least $5,000 in each of any 2 preceding years and is reasonably expected to receive at least $5,000 during the year must be eligible";
+}
+
+@source(IRC_S408_P, relation = formalizes, coverage = exact, quote = "received at least $5,000 in compensation from the employer during any 2 preceding years")
+rule EmployeeMustBeEligible408p4A(employee: Person, employer: Person, y: TaxableYear, first: Money, second: Money, expected: Money) strict {
+    label en official "exact boundary: $5,000 is enough in each year and in the expectation";
+    when employee_compensation_two_preceding_years_408p4Ai(employee, employer, y, first, second)
+        and employee_expected_compensation_408p4Aii(employee, employer, y, expected)
+        and first >= 5000.00 USD
+        and second >= 5000.00 USD
+        and expected >= 5000.00 USD;
+    then employee_must_be_eligible_408p4A(employee, employer, y);
+}
+
+pub relation employer_elects_to_exclude_410b3_employees_408p4B(employer: Person, y: TaxableYear) kind empirical {
+    label en unofficial "the employer elects to exclude from the requirement under subparagraph (A) employees described in section 410(b)(3), case-asserted (exercise atom)";
+}
+
+pub relation employee_described_in_410b3_408p4B(employee: Person) kind empirical {
+    label en unofficial "the employee is described in section 410(b)(3), case-asserted";
+}
+
+pub relation employee_excluded_from_participation_requirement_408p4B(employee: Person, employer: Person, y: TaxableYear) kind institutional {
+    label en official "section 408(p)(4)(B): an employee described in section 410(b)(3) excluded by the employer's election";
+}
+
+@source(IRC_S408_P, relation = formalizes, coverage = exact, quote = "An employer may elect to exclude from the requirement under subparagraph (A) employees described in section 410(b)(3)")
+rule EmployeeExcludedFromParticipationRequirement408p4B(employee: Person, employer: Person, y: TaxableYear) strict {
+    label en official "the election together with the employee's 410(b)(3) status";
+    when employer_elects_to_exclude_410b3_employees_408p4B(employer, y) and employee_described_in_410b3_408p4B(employee);
+    then employee_excluded_from_participation_requirement_408p4B(employee, employer, y);
+}
+
+pub relation participation_requirements_met_408p4(employee: Person, employer: Person, y: TaxableYear) kind institutional {
+    label en official "section 408(p)(4): the employee who must be eligible is eligible (simple_employee_eligible) or excluded by the election";
+}
+
+@source(IRC_S408_P, relation = formalizes, coverage = exact, quote = "are eligible to make the election under paragraph (2)(A)(i) or receive the nonelective contribution described in paragraph (2)(B)")
+rule ParticipationRequirementsMetEligible408p4(employee: Person, employer: Person, y: TaxableYear) strict {
+    label en official "an employee who must be eligible and is";
+    when employee_must_be_eligible_408p4A(employee, employer, y) and simple_employee_eligible(employee, employer, y);
+    then participation_requirements_met_408p4(employee, employer, y);
+}
+
+@source(IRC_S408_P, relation = formalizes, coverage = exact, quote = "An employer may elect to exclude from the requirement under subparagraph (A) employees described in section 410(b)(3)")
+rule ParticipationRequirementsMetExcluded408p4(employee: Person, employer: Person, y: TaxableYear) strict {
+    label en official "an employee excluded by the election";
+    when employee_must_be_eligible_408p4A(employee, employer, y) and employee_excluded_from_participation_requirement_408p4B(employee, employer, y);
+    then participation_requirements_met_408p4(employee, employer, y);
+}

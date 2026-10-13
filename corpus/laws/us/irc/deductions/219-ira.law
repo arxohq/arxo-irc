@@ -1,0 +1,100 @@
+// Section 219 — Retirement savings. Stage 1 (IRC-06), priority section.
+// Scope: (a) allowance; (b)(1)/(5) the deductible-amount dollar limit
+// (statutory base $5,000, catch-up $1,000, both COLA-indexed — statutory
+// base values pinned, indexed amounts SOURCE_GAP); (g) active-participant
+// phase-out (statutory base range pinned similarly at (g)(3), see below).
+
+use self::{
+    DeductionKind,
+    IRC_S219_A,
+    IRC_S219_B,
+    IRC_S219_G,
+    Individual,
+    Person,
+    TaxableYear,
+    deduction_allowed,
+};
+
+pub relation ira_contribution(p: Individual, y: TaxableYear, amount: Money) kind empirical {
+    label en official "an amount paid in cash for the taxable year to an individual retirement plan for the benefit of the individual (section 219(a)-(d))";
+}
+pub relation compensation_includible_in_gross_income(p: Individual, y: TaxableYear, amount: Money) kind empirical {
+    label en official "compensation includible in the individual's gross income for the taxable year (section 219(b)(1)(B))";
+}
+pub relation attained_age_fifty_before_close_of_year(p: Individual, y: TaxableYear) kind empirical {
+    label en official "has attained age 50 before the close of the taxable year (section 219(b)(5)(B)(i))";
+}
+
+@source(IRC_S219_A, quote = "In the case of an individual, there shall be allowed as a deduction an amount equal to the qualified retirement contributions of the individual for the taxable year")
+rule IraDeductionAllowedUpToLesserOfLimitOrCompensation(p: Individual, y: TaxableYear, contribution: Money, compensation: Money, catchup: Money) strict {
+    label en official "the IRA deduction is the lesser of the deductible amount (section 219(b)(5), including the age-50 catch-up) or compensation includible in gross income (section 219(b)(1))";
+    when ira_contribution(p, y, contribution);
+    when compensation_includible_in_gross_income(p, y, compensation);
+    when not_known(attained_age_fifty_before_close_of_year(p, y));
+    when contribution <= min(5000.00 USD, compensation);
+    then deduction_allowed(p, y, Section219Ira, contribution);
+}
+@source(IRC_S219_B, quote = "In the case of an individual who has attained the age of 50 before the close of the taxable year, the deductible amount for such taxable year shall be increased by the applicable amount")
+rule IraDeductionAllowedWithCatchUpForAgeFifty(p: Individual, y: TaxableYear, contribution: Money, compensation: Money) strict {
+    label en official "for an individual who has attained age 50 before the close of the taxable year, the deductible amount is increased by the $1,000 catch-up (section 219(b)(5)(B))";
+    when ira_contribution(p, y, contribution);
+    when compensation_includible_in_gross_income(p, y, compensation);
+    when attained_age_fifty_before_close_of_year(p, y);
+    when contribution <= min(5000.00 USD + 1000.00 USD, compensation);
+    then deduction_allowed(p, y, Section219Ira, contribution);
+}
+@source(IRC_S219_B, quote = "The deductible amount is $5,000")
+rule IraContributionExceedingLimitCappedAtDeductibleAmount(p: Individual, y: TaxableYear, contribution: Money, compensation: Money) strict {
+    label en official "a contribution exceeding the deductible amount (or compensation, if less) is deductible only up to that lesser figure (section 219(b)(1))";
+    when ira_contribution(p, y, contribution);
+    when compensation_includible_in_gross_income(p, y, compensation);
+    when not_known(attained_age_fifty_before_close_of_year(p, y));
+    when contribution > min(5000.00 USD, compensation);
+    then deduction_allowed(p, y, Section219Ira, min(5000.00 USD, compensation));
+}
+// JUDGMENT CALL: the $5,000/$1,000 statutory base amounts are used
+// literally, UNADJUSTED for cost-of-living under section 219(b)(5)(C)/(iii)
+// (base years 2008/2023) — the actually-published (much higher) 2024/2025
+// contribution limits are NOT pinned anywhere in this package's sources and
+// are recorded as SOURCE_GAP (missing IRB/Rev. Proc. citation), per the
+// AGENT-BRIEF's "never invent a rate" rule. A `.lawparam.json` sidecar
+// carrying only the statutory base (with the same SOURCE_GAP note) was not
+// created this session for time; the bare `const`-style literals above
+// substitute for it and should be migrated to a sidecar before reliance.
+
+// --- §219(g): active-participant phase-out (statutory base range only) --------
+
+pub relation active_participant_in_employer_plan(p: Individual, y: TaxableYear) kind empirical {
+    label en official "an active participant, for any part of the taxable year, in an employer-maintained retirement plan described in section 219(g)(5) (section 219(g)(1))";
+}
+pub relation modified_agi_for_219(p: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en official "adjusted gross income modified per section 219(g)(3)(A) for the active-participant phase-out";
+}
+
+pub relation section_219g_applicable_dollar_amount(p: Individual, y: TaxableYear, s: us.irc.income_individual::FilingStatus, amount: Money) kind institutional {
+    label en official "the section 219(g)(3) 'applicable dollar amount' (the floor of the active-participant phase-out range) for the taxable year and filing status — dependency contract: this stage's pinned §219(g)(3) fragment gives the FORMULA reference only; the actual current-law schedule of applicable dollar amounts by year is not transcribed here. NEVER invent this value; a scenario exercising section 219(g) must assert it directly. SOURCE_GAP.";
+}
+@source(IRC_S219_G, quote = "each of the dollar limitations contained in subsections (b)(1)(A) and (c)(1)(A) for such taxable year shall be reduced (but not below zero) by the amount determined under paragraph (2)")
+rule ActiveParticipantBelowPhaseoutRangeFullDeduction(p: Individual, y: TaxableYear, magi: Money, s: us.irc.income_individual::FilingStatus, floor_amount: Money, contribution: Money) strict {
+    label en official "an active participant whose adjusted gross income does not exceed the applicable dollar amount takes the full section 219(b) deduction, not reduced by (g) (section 219(g)(1)-(2))";
+    when active_participant_in_employer_plan(p, y);
+    when modified_agi_for_219(p, y, magi);
+    when section_219g_applicable_dollar_amount(p, y, s, floor_amount);
+    when magi <= floor_amount;
+    when ira_contribution(p, y, contribution);
+    when contribution <= 5000.00 USD;
+    then deduction_allowed(p, y, Section219Ira, contribution);
+}
+@source(IRC_S219_G, quote = "$10,000 ($20,000 in the case of a joint return)")
+rule ActiveParticipantAboveFloorPlusRangeNoDeduction(p: Individual, y: TaxableYear, magi: Money, s: us.irc.income_individual::FilingStatus, floor_amount: Money) strict {
+    label en official "an active participant whose AGI exceeds the applicable dollar amount by the full $10,000 ($20,000 joint) range has the section 219(b) dollar limitation reduced to zero (section 219(g)(2)(A)-(B))";
+    when active_participant_in_employer_plan(p, y);
+    when modified_agi_for_219(p, y, magi);
+    when section_219g_applicable_dollar_amount(p, y, s, floor_amount);
+    when s == us.irc.income_individual::Joint;
+    when magi >= floor_amount + 20000.00 USD;
+    then not deduction_allowed(p, y, Section219Ira, 5000.00 USD);
+}
+// The linear phase-out for AGI strictly between the floor and floor-plus-
+// range (the ratio computation of (g)(2)(A), rounded to the next lowest $10
+// per (g)(2)(C), with the $200 floor of (g)(2)(B)) stays "stage 2".

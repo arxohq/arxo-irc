@@ -1,0 +1,607 @@
+// 26 U.S.C. §§6601, 6611, 6621, 6622, 6631 — Chapter 67: interest on
+// underpayments (§6601) and overpayments (§6611), the rate (§6621), daily
+// compounding (§6622), and the taxpayer-notice requirement (§6631). §§6602,
+// 6603, 6612 are OUT OF STAGE-1 SCOPE (not named by the task's section
+// list) — left `unreviewed`, note "stage 2".
+//
+// JUDGMENT CALLS AND GAPS (see report):
+//  - §6621's "Federal short-term rate" (b)(3) is a Secretary-determined,
+//    IRB-published quarterly figure (26 U.S.C. 1274(d)) with NO value pinned
+//    in this snapshot: no `.lawparam.json` is written for it (an empty
+//    dataset would be a false claim of a pinned value); instead
+//    `federal_short_term_rate` is a plain `kind empirical` relation a case
+//    or a later parameter-sidecar asserts, and the rate-determination rules
+//    below READ it rather than compute it. SOURCE_GAP: the missing values
+//    live in the quarterly Internal Revenue Bulletin revenue rulings (the
+//    "Rev. Rul. 2026-XX" series under §1274(d)/§6621); see coverage row
+//    26/6621/b/u1.
+//  - The rate rules are keyed to an ACTUAL underpayment/overpayment fact
+//    (`underpayment_amount`/`overpayment_amount`), not to a free-floating
+//    "for any person" rate table: a rule whose only mention of `p` is inside
+//    a negative literal (`not is_c_corporation(p)`) has no positive
+//    occurrence of `p` and is refused by range restriction (§190) — anchoring
+//    on the liability fact both fixes that and is the textually accurate
+//    reading (§6621 sets the rate FOR a liability, not for a person in the
+//    abstract).
+//  - §6621(c) (large corporate underpayment, +5 points instead of +3) is
+//    modeled reading the "applicable date" as a case fact rather than
+//    deriving it from the underlying deficiency-notice timeline (the
+//    30-day/withdrawal/payment-in-full/small-amount exceptions of
+//    (c)(2)(A)-(B) are TECH_GAP: they need `assessment`/F02's deficiency-
+//    notice machinery, not owned here); see coverage row 26/6621/c/u1.
+//  - §6621(d) (net interest rate of zero on equivalent overlapping
+//    over/underpayments) is modeled as an overriding relation rather than a
+//    further arithmetic term, matching the statute's own "the net rate...
+//    shall be zero for such period" framing.
+//  - §6622's daily-compounding formula is not given by the statute text
+//    itself ("such interest... shall be compounded daily") — the exact
+//    day-count and rate-lookup convention is EXTERNAL_DEPENDENCY on 26 CFR
+//    301.6622-1. The formula implemented, `P * ((1 + r/365)^n - 1)` with
+//    exact Decimal arithmetic and `round` only at the final step, is the
+//    ordinary reading of "compounded daily" at a CONSTANT annual rate `r`
+//    for a whole quarter's worth of days `n`; a period spanning a
+//    §6621(b) rate change requires chaining this formula quarter-by-quarter
+//    (not implemented — TECH_GAP, no other stage-1 scenario needs it). The
+//    rule is anchored on an explicit `interest_compounding_request` case
+//    fact rather than free variables, again for range restriction (§190).
+//  - §6601's duty to pay interest is modeled as an institutional
+//    CALCULATION plus a duty on the person to pay it (mirroring §6151's
+//    duty), not merely as a passive `liability`-shaped fact: the statute's
+//    own words are "interest... shall be paid", which is a directive to a
+//    bearer, matching the deontics method note.
+//  - §6601(d), (f), (h)-(k) (carryback/adjustment interest timing, credit
+//    satisfaction, estimated-tax/FUTA exceptions, the §6166 2-percent rate,
+//    the §6205(a) cross-reference) are TECH_GAP/EXTERNAL_DEPENDENCY/
+//    NON_NORMATIVE at this stage — each depends on another package's own
+//    computation (carryback packages, `collection`, the §6166 estate-tax
+//    rules already noted TECH_GAP in 02-installments-and-extensions.law);
+//    see coverage rows 26/6601/d/u1, 26/6601/f/u1, 26/6601/h/u1,
+//    26/6601/i/u1, 26/6601/j/u1, 26/6601/k/u1.
+//  - §6611(c) is repealed (1958) — NON_NORMATIVE. §6611(d), (f), (g)
+//    (advance-payment/withholding date rules, carryback timing, processible-
+//    form gate) are TECH_GAP/EXTERNAL_DEPENDENCY for the same reasons as the
+//    §6601 subsections above; see coverage rows 26/6611/d/u1, 26/6611/f/u1,
+//    26/6611/g/u1. §6611(e)'s 45/180-day windows are written as four
+//    CONCRETE rules (ordinary/withholding x due-date-branch/late-filing-
+//    branch) rather than one rule parameterized by a variable day count:
+//    `add_calendar_period`'s second argument is a `Quantity` LITERAL
+//    (`n calendar_day` only parses with `n` a literal, §84.2), not a
+//    variable Integer multiplied by a unit at runtime.
+
+language "law.core" version "0.2";
+package us.irc.payment_refunds_interest version "0.1.1";
+namespace "urn:us:irc:payment_refunds_interest:clir";
+
+import us.irs.rev_rul_6621_quarterly version "0.1.1";
+
+use self::{
+    IRC_S6601_A,
+    IRC_S6601_C,
+    IRC_S6601_E,
+    IRC_S6611_A,
+    IRC_S6611_E,
+    IRC_S6621_A,
+    IRC_S6621_B,
+    IRC_S6621_C,
+    IRC_S6621_D,
+    IRC_S6622_A,
+    IRC_S6631,
+    Notice,
+    Person,
+    Return,
+    Secretary,
+    TaxKind,
+    TaxableYear,
+    overpayment_amount,
+    remaining_balance,
+    treated_as_filed_for_6611,
+};
+
+// ============================================================================
+// §6601 — Interest on underpayment, nonpayment, or extension of time
+// ============================================================================
+
+relation last_date_prescribed_for_payment(p: Person, y: TaxableYear, kind: TaxKind, d: Date) kind institutional {
+    label en official "the last date prescribed for payment of the tax shall be determined under chapter 62... without regard to any extension of time for payment or any installment agreement entered into under section 6159";
+}
+// (b)(1): the ordinary case reads §6151's own pre-extension due date.
+rule S6601LastDateFromReturnDueDate strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for r: Return;
+    for d: Date;
+    when us.irc.core::return_of(r, p, y, kind) and us.irc.core::due_date(r, d);
+    then last_date_prescribed_for_payment(p, y, kind, d);
+}
+
+pub relation underpayment_amount(p: Person, y: TaxableYear, kind: TaxKind, amount: Money) kind institutional;
+rule S6601UnderpaymentFromBalance strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for bal: Money;
+    when remaining_balance(p, y, kind, bal) and bal > 0 USD;
+    then underpayment_amount(p, y, kind, bal);
+}
+
+relation underpayment_interest_paid(p: Person, y: TaxableYear, kind: TaxKind) kind institutional;
+@source(IRC_S6601_A, relation = formalizes, coverage = exact, quote = "If any amount of tax imposed by this title (whether required to be shown on a return, or to be paid by stamp or by some other method) is not paid on or before the last date prescribed for payment, interest on such amount at the underpayment rate established under section 6621 shall be paid for the period from such last date to the date paid.")
+rule S6601DutyToPayUnderpaymentInterest strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for amount: Money;
+    for last: Date;
+    when underpayment_amount(p, y, kind, amount) and last_date_prescribed_for_payment(p, y, kind, last);
+    then duty PayUnderpaymentInterest {
+        bearer p;
+        beneficiary Secretary;
+        goal achievement {
+            condition underpayment_interest_paid(p, y, kind);
+            window [last, infinity];
+        }
+    };
+}
+
+// --- (c): suspension while a §6213(d) waiver awaits notice and demand ------
+
+relation deficiency_waiver_filed_on(p: Person, y: TaxableYear, kind: TaxKind, d: Date) kind empirical {
+    label en official "a waiver of restrictions under section 6213(d) on the assessment of such deficiency has been filed";
+}
+relation notice_and_demand_made_on(p: Person, y: TaxableYear, kind: TaxKind, d: Date) kind empirical;
+relation deficiency_interest_suspended(p: Person, y: TaxableYear, kind: TaxKind) kind institutional;
+
+relation notice_and_demand_late(p: Person, y: TaxableYear, kind: TaxKind) kind institutional;
+rule S6601NoticeAndDemandLate strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for filed: Date;
+    for demanded: Date;
+    when deficiency_waiver_filed_on(p, y, kind, filed) and notice_and_demand_made_on(p, y, kind, demanded)
+        and demanded > add_calendar_period(filed, 30 calendar_day);
+    then notice_and_demand_late(p, y, kind);
+}
+@source(IRC_S6601_C, relation = formalizes, coverage = exact, quote = "if notice and demand by the Secretary for payment of such deficiency is not made within 30 days after the filing of such waiver, interest shall not be imposed on such deficiency for the period beginning immediately after such 30th day and ending with the date of notice and demand")
+rule S6601SuspendInterestOnLateNoticeAndDemand strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    when notice_and_demand_late(p, y, kind);
+    then deficiency_interest_suspended(p, y, kind);
+}
+
+// --- (e)(1)-(3): the 21-calendar-day/10-business-day grace period on
+// penalties, additional amounts and additions to tax --------------------
+
+entity PenaltyNoticeAndDemand { label en unofficial "a §6601(e) notice and demand for an assessable penalty, additional amount, or addition to tax"; }
+relation penalty_notice_amount(n: PenaltyNoticeAndDemand, p: Person, amount: Money) kind empirical;
+relation penalty_notice_mailed_on(n: PenaltyNoticeAndDemand, mailed: Date) kind empirical;
+relation penalty_paid_on(n: PenaltyNoticeAndDemand, p: Person, paid: Date) kind empirical;
+
+relation penalty_paid_within_grace_period(n: PenaltyNoticeAndDemand) kind institutional;
+rule S6601GraceTwentyOneDays strict {
+    for n: PenaltyNoticeAndDemand;
+    for p: Person;
+    for amount: Money;
+    for mailed: Date;
+    for paid: Date;
+    when penalty_notice_amount(n, p, amount) and amount < 100000 USD
+        and penalty_notice_mailed_on(n, mailed) and penalty_paid_on(n, p, paid)
+        and paid <= add_calendar_period(mailed, 21 calendar_day);
+    then penalty_paid_within_grace_period(n);
+}
+@source(IRC_S6601_E, relation = formalizes, coverage = partial, quote = "Interest shall be imposed under subsection (a) in respect of any assessable penalty, additional amount, or addition to the tax (other than an addition to tax imposed under section 6651(a)(1) or 6653 or under part II of subchapter A of chapter 68) only if such assessable penalty, additional amount, or addition to the tax is not paid within 21 calendar days from the date of notice and demand therefor (10 business days if the amount for which such notice and demand is made equals or exceeds $100,000), and in such case interest shall be imposed only for the period from the date of the notice and demand to the date of payment.")
+rule S6601NoInterestOnPenaltyPaidWithinGracePeriod strict {
+    for n: PenaltyNoticeAndDemand;
+    for p: Person;
+    for amount: Money;
+    when penalty_paid_within_grace_period(n) and penalty_notice_amount(n, p, amount);
+    then prohibition NoInterestOnPenaltyWithinGracePeriod {
+        bearer Secretary;
+        action penalty_notice_amount(n, p, amount);
+        window [-infinity, infinity];
+    };
+}
+
+// ============================================================================
+// §6611 — Interest on overpayments
+// ============================================================================
+
+pub relation overpayment_interest_owed(p: Person, y: TaxableYear, kind: TaxKind, amount: Money) kind institutional;
+@source(IRC_S6611_A, relation = formalizes, coverage = exact, quote = "Interest shall be allowed and paid upon any overpayment in respect of any internal revenue tax at the overpayment rate established under section 6621.")
+rule S6611InterestAllowedOnOverpayment strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for amount: Money;
+    when overpayment_amount(p, y, kind, amount) and amount > 0 USD;
+    then overpayment_interest_owed(p, y, kind, amount);
+}
+
+relation overpayment_interest_paid(p: Person, y: TaxableYear, kind: TaxKind) kind institutional;
+@source(IRC_S6611_A, relation = formalizes, coverage = partial, quote = "Interest shall be allowed and paid upon any overpayment in respect of any internal revenue tax at the overpayment rate established under section 6621.")
+rule S6611DutyToPayOverpaymentInterest strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for amount: Money;
+    when overpayment_interest_owed(p, y, kind, amount) and not_known(overpayment_interest_disallowed(p, y, kind));
+    then duty PayOverpaymentInterest {
+        bearer Secretary;
+        beneficiary p;
+        goal achievement {
+            condition overpayment_interest_paid(p, y, kind);
+            window [-infinity, infinity];
+        }
+    };
+}
+
+// --- (b)(3): no interest for any day before a late return is filed --------
+
+relation return_filed_late(p: Person, y: TaxableYear, r: Return, filed: Date, due: Date) kind institutional;
+rule S6611ReturnFiledLate strict {
+    for p: Person;
+    for y: TaxableYear;
+    for r: Return;
+    for filed: Date;
+    for due: Date;
+    when us.irc.core::return_of(r, p, y, _) and treated_as_filed_for_6611(r, filed) and us.irc.core::due_date(r, due) and filed > due;
+    then return_filed_late(p, y, r, filed, due);
+}
+
+// --- (e): disallowance of interest on certain overpayments (45/180-day rule) --
+// Four CONCRETE rules (ordinary/withholding x due-date-branch/late-filing-
+// branch) — see header note on why the day count cannot be a variable
+// `add_calendar_period` argument.
+
+pub relation overpayment_interest_disallowed(p: Person, y: TaxableYear, kind: TaxKind) kind institutional {
+    label en unofficial "§6611(e): no interest under (a) is allowed on this overpayment — the 45-day (180-day for chapter 3/4 withholding) rule";
+}
+relation overpayment_refunded_on(p: Person, y: TaxableYear, kind: TaxKind, refunded: Date) kind empirical;
+relation overpayment_is_withholding_tax(p: Person, y: TaxableYear, kind: TaxKind) kind empirical {
+    label en unofficial "the overpayment results from tax deducted and withheld under chapter 3 or 4 — the 45-day figures become 180 days";
+}
+
+@source(IRC_S6611_E, relation = formalizes, coverage = partial, quote = "If any overpayment of tax imposed by this title is refunded within 45 days after the last day prescribed for filing the return of such tax (determined without regard to any extension of time for filing the return)")
+rule S6611DisallowInterestOrdinaryWithinFortyFiveDaysOfDueDate strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for r: Return;
+    for due: Date;
+    for refunded: Date;
+    when us.irc.core::return_of(r, p, y, kind) and us.irc.core::due_date(r, due)
+        and overpayment_refunded_on(p, y, kind, refunded) and not overpayment_is_withholding_tax(p, y, kind)
+        and refunded <= add_calendar_period(due, 45 calendar_day);
+    then overpayment_interest_disallowed(p, y, kind);
+}
+@source(IRC_S6611_E, relation = formalizes, coverage = partial, quote = "in the case of a return filed after such last date, is refunded within 45 days after the date the return is filed, no interest shall be allowed under subsection (a) on such overpayment")
+rule S6611DisallowInterestOrdinaryWithinFortyFiveDaysOfLateFiling strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for r: Return;
+    for filed: Date;
+    for refunded: Date;
+    when return_filed_late(p, y, r, filed, _) and overpayment_refunded_on(p, y, kind, refunded) and not overpayment_is_withholding_tax(p, y, kind)
+        and refunded <= add_calendar_period(filed, 45 calendar_day);
+    then overpayment_interest_disallowed(p, y, kind);
+}
+@source(IRC_S6611_E, relation = formalizes, coverage = partial, quote = "In the case of any overpayment resulting from tax deducted and withheld under chapter 3 or 4, paragraphs (1), (2), and (3) shall be applied by substituting \"180 days\" for \"45 days\" each place it appears.")
+rule S6611DisallowInterestWithholdingWithinOneEightyDaysOfDueDate strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for r: Return;
+    for due: Date;
+    for refunded: Date;
+    when us.irc.core::return_of(r, p, y, kind) and us.irc.core::due_date(r, due)
+        and overpayment_refunded_on(p, y, kind, refunded) and overpayment_is_withholding_tax(p, y, kind)
+        and refunded <= add_calendar_period(due, 180 calendar_day);
+    then overpayment_interest_disallowed(p, y, kind);
+}
+@source(IRC_S6611_E, relation = formalizes, coverage = partial, quote = "In the case of any overpayment resulting from tax deducted and withheld under chapter 3 or 4, paragraphs (1), (2), and (3) shall be applied by substituting \"180 days\" for \"45 days\" each place it appears.")
+rule S6611DisallowInterestWithholdingWithinOneEightyDaysOfLateFiling strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for r: Return;
+    for filed: Date;
+    for refunded: Date;
+    when return_filed_late(p, y, r, filed, _) and overpayment_refunded_on(p, y, kind, refunded) and overpayment_is_withholding_tax(p, y, kind)
+        and refunded <= add_calendar_period(filed, 180 calendar_day);
+    then overpayment_interest_disallowed(p, y, kind);
+}
+
+// (e)(2)-(3) (post-claim refunds within the window; IRS-initiated
+// adjustments subtracting the window from the interest period) are TECH_GAP:
+// they need a `Claim`-keyed interest-period computation this stage does not
+// build (no other rule reads a partial-window subtraction); see coverage
+// rows 26/6611/e/2/u1, 26/6611/e/3/u1.
+
+// ============================================================================
+// §6621 — Determination of rate of interest
+// ============================================================================
+
+pub relation federal_short_term_rate(quarter_start: Date, rate_percent: Decimal) kind empirical {
+    label en unofficial "SOURCE_GAP: the Federal short-term rate the Secretary determines under §1274(d) for the first month of the calendar quarter (§6621(b)); no value pinned — read from the quarterly Internal Revenue Bulletin revenue ruling";
+}
+
+// --- underpayment rate, anchored on an actual underpayment ------------------
+
+relation large_corporate_underpayment(p: Person, quarter_start: Date) kind empirical {
+    label en official "any underpayment of a tax by a C corporation for any taxable period if the amount of such underpayment for such period exceeds $100,000";
+}
+relation large_corporate_underpayment_applicable_date_reached(p: Person, quarter_start: Date) kind empirical {
+    label en unofficial "TECH_GAP: the §6621(c)(2) applicable date (30th day after the earlier of a proposed-deficiency letter or a §6212 deficiency notice) has been reached — read as a case fact; the deficiency-notice timeline itself is `assessment`/F02's norm";
+}
+relation large_corporate_underpayment_rate_applies(p: Person, quarter_start: Date) kind institutional;
+rule S6621LargeCorporateRateApplies strict {
+    for p: Person;
+    for quarter_start: Date;
+    when large_corporate_underpayment(p, quarter_start) and large_corporate_underpayment_applicable_date_reached(p, quarter_start);
+    then large_corporate_underpayment_rate_applies(p, quarter_start);
+}
+
+pub relation underpayment_rate_for_liability(p: Person, y: TaxableYear, kind: TaxKind, quarter_start: Date, rate_percent: Decimal) kind institutional {
+    label en official "the underpayment rate established under this section shall be the sum of the Federal short-term rate plus 3 percentage points (5 for a large corporate underpayment after the applicable date)";
+}
+@source(IRC_S6621_C, relation = formalizes, coverage = partial, quote = "For purposes of determining the amount of interest payable under section 6601 on any large corporate underpayment for periods after the applicable date, paragraph (2) of subsection (a) shall be applied by substituting \"5 percentage points\" for \"3 percentage points\".")
+rule S6621LargeCorporateUnderpaymentRate strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for quarter_start: Date;
+    for base: Decimal;
+    when underpayment_amount(p, y, kind, _) and federal_short_term_rate(quarter_start, base) and large_corporate_underpayment_rate_applies(p, quarter_start);
+    then underpayment_rate_for_liability(p, y, kind, quarter_start, base + 5.0);
+}
+@source(IRC_S6621_A, relation = formalizes, coverage = partial, quote = "The underpayment rate established under this section shall be the sum of—")
+rule S6621OrdinaryUnderpaymentRate strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for quarter_start: Date;
+    for base: Decimal;
+    when underpayment_amount(p, y, kind, _) and federal_short_term_rate(quarter_start, base) and not_known(large_corporate_underpayment_rate_applies(p, quarter_start));
+    then underpayment_rate_for_liability(p, y, kind, quarter_start, base + 3.0);
+}
+
+// --- overpayment rate, anchored on an actual overpayment --------------------
+
+relation is_corporation_for_overpayment_rate(p: Person) kind empirical;
+relation corporate_overpayment_exceeds_ten_thousand(p: Person, quarter_start: Date) kind empirical {
+    label en official "an overpayment of tax by a corporation for any taxable period... exceeds $10,000";
+}
+pub relation overpayment_rate_for_liability(p: Person, y: TaxableYear, kind: TaxKind, quarter_start: Date, rate_percent: Decimal) kind institutional {
+    label en official "the sum of the Federal short-term rate plus 3 percentage points (2 percentage points in the case of a corporation, 0.5 above $10,000)";
+}
+@source(IRC_S6621_A, relation = formalizes, coverage = partial, quote = "To the extent that an overpayment of tax by a corporation for any taxable period (as defined in subsection (c)(3), applied by substituting \"overpayment\" for \"underpayment\") exceeds $10,000, subparagraph (B) shall be applied by substituting \"0.5 percentage point\" for \"2 percentage points\".")
+rule S6621CorporateOverpaymentRateAboveTenThousand strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for quarter_start: Date;
+    for base: Decimal;
+    when overpayment_amount(p, y, kind, _) and federal_short_term_rate(quarter_start, base)
+        and is_corporation_for_overpayment_rate(p) and corporate_overpayment_exceeds_ten_thousand(p, quarter_start);
+    then overpayment_rate_for_liability(p, y, kind, quarter_start, base + 0.5);
+}
+rule S6621CorporateOverpaymentRateOtherwise strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for quarter_start: Date;
+    for base: Decimal;
+    when overpayment_amount(p, y, kind, _) and federal_short_term_rate(quarter_start, base)
+        and is_corporation_for_overpayment_rate(p) and not corporate_overpayment_exceeds_ten_thousand(p, quarter_start);
+    then overpayment_rate_for_liability(p, y, kind, quarter_start, base + 2.0);
+}
+@source(IRC_S6621_A, relation = formalizes, coverage = partial, quote = "3 percentage points (2 percentage points in the case of a corporation)")
+rule S6621NonCorporateOverpaymentRate strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for quarter_start: Date;
+    for base: Decimal;
+    when overpayment_amount(p, y, kind, _) and federal_short_term_rate(quarter_start, base) and not is_corporation_for_overpayment_rate(p);
+    then overpayment_rate_for_liability(p, y, kind, quarter_start, base + 3.0);
+}
+
+// --- §6621(a)-(b): quarterly-table rates from the pinned Rev. Rul. 6621 contract ---
+// The §1274(d)/§6621(b) quarterly figures are published by the IRS in Revenue
+// Rulings. This module reads the FINAL §6621(a) tier values from the
+// us.irs.rev_rul_6621_quarterly Table contract (quarterly_rate/3: quarter,
+// tier, rate) under the quarter-index policy
+// (corpus/laws/us/rev-rul-6621-quarterly/quarter-index.json): a from-table
+// rule below fires only for a pinned quarter ("2026-Q1" via Rev. Rul.
+// 2025-22, "2026-Q2" via Rev. Rul. 2026-5, "2026-Q3" via Rev. Rul. 2026-10,
+// "2026-Q4" via Rev. Rul. 2026-15); a quarter absent from the index keeps the
+// case-fact path (`federal_short_term_rate`). The table stores the
+// source-printed percent as a Decimal share, so the rules convert share to
+// points (frac * 100.0); the tiers already carry their §6621(a) spreads, so
+// no spread is added here. Every rate number comes from the tables; .law
+// carries only the tier/quarter key literals — no rate is written here. The
+// case-fact spread rules above are untouched: the table path is parallel,
+// concluding the same `underpayment_rate_for_liability` /
+// `overpayment_rate_for_liability` consequents.
+relation qrate_table_quarter_6621(quarter_start: Date, q: Text) kind empirical {
+    label en unofficial "the quarterly-table key (YYYY-QN) the case assigns to the calendar quarter starting on quarter_start (case-selected: the statute names the quarter, not the table key)";
+}
+relation qrate_pinned_quarter_6621(q: Text) kind institutional {
+    label en unofficial "a calendar quarter pinned in the Rev. Rul. 6621 quarter-index whose table values may be read";
+}
+rule S6621TableQuarter2026Q1 strict {
+    label en unofficial "2026-Q1 is a pinned quarterly-rate quarter (Rev. Rul. 2025-22, quarter-index selection policy)";
+    when true;
+    then qrate_pinned_quarter_6621("2026-Q1");
+}
+rule S6621TableQuarter2026Q2 strict {
+    label en unofficial "2026-Q2 is a pinned quarterly-rate quarter (Rev. Rul. 2026-5, quarter-index selection policy)";
+    when true;
+    then qrate_pinned_quarter_6621("2026-Q2");
+}
+rule S6621TableQuarter2026Q3 strict {
+    label en unofficial "2026-Q3 is a pinned quarterly-rate quarter (Rev. Rul. 2026-10, quarter-index selection policy)";
+    when true;
+    then qrate_pinned_quarter_6621("2026-Q3");
+}
+rule S6621TableQuarter2026Q4 strict {
+    label en unofficial "2026-Q4 is a pinned quarterly-rate quarter (Rev. Rul. 2026-15, quarter-index selection policy)";
+    when true;
+    then qrate_pinned_quarter_6621("2026-Q4");
+}
+// --- §6621(b): short-term rate value from the pinned quarterly table --------
+// Closes the 26/6621/b/* SOURCE_GAP rows structurally: for pinned quarters the
+// Secretary-determined rate is read from the quarterly ruling (base tier),
+// not supplied as a case fact. Percent points: the table stores fractions.
+@source(IRC_S6621_B, relation = formalizes, coverage = partial, quote = "The Secretary shall determine the Federal short-term rate for the first month in each calendar quarter.")
+rule S6621ShortTermRateFromTable strict {
+    label en official "the Federal short-term rate for a pinned calendar quarter is the table base-tier value (section 6621(b))";
+    for quarter_start: Date;
+    for q: Text;
+    for frac: Decimal;
+    when qrate_table_quarter_6621(quarter_start, q) and qrate_pinned_quarter_6621(q)
+        and us.irs.rev_rul_6621_quarterly::quarterly_rate(q, "base", frac);
+    then federal_short_term_rate(quarter_start, frac * 100.0);
+}
+@source(IRC_S6621_A, relation = formalizes, coverage = partial, quote = "The underpayment rate established under this section shall be the sum of—")
+rule S6621OrdinaryUnderpaymentRateFromTable strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for quarter_start: Date;
+    for q: Text;
+    for frac: Decimal;
+    when underpayment_amount(p, y, kind, _) and qrate_table_quarter_6621(quarter_start, q) and qrate_pinned_quarter_6621(q)
+        and us.irs.rev_rul_6621_quarterly::quarterly_rate(q, "under", frac) and not_known(large_corporate_underpayment_rate_applies(p, quarter_start));
+    then underpayment_rate_for_liability(p, y, kind, quarter_start, frac * 100.0);
+}
+@source(IRC_S6621_C, relation = formalizes, coverage = partial, quote = "For purposes of determining the amount of interest payable under section 6601 on any large corporate underpayment for periods after the applicable date, paragraph (2) of subsection (a) shall be applied by substituting \"5 percentage points\" for \"3 percentage points\".")
+rule S6621LargeCorporateUnderpaymentRateFromTable strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for quarter_start: Date;
+    for q: Text;
+    for frac: Decimal;
+    when underpayment_amount(p, y, kind, _) and qrate_table_quarter_6621(quarter_start, q) and qrate_pinned_quarter_6621(q)
+        and us.irs.rev_rul_6621_quarterly::quarterly_rate(q, "large-corp-under", frac) and large_corporate_underpayment_rate_applies(p, quarter_start);
+    then underpayment_rate_for_liability(p, y, kind, quarter_start, frac * 100.0);
+}
+@source(IRC_S6621_A, relation = formalizes, coverage = partial, quote = "3 percentage points (2 percentage points in the case of a corporation)")
+rule S6621NonCorporateOverpaymentRateFromTable strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for quarter_start: Date;
+    for q: Text;
+    for frac: Decimal;
+    when overpayment_amount(p, y, kind, _) and qrate_table_quarter_6621(quarter_start, q) and qrate_pinned_quarter_6621(q)
+        and us.irs.rev_rul_6621_quarterly::quarterly_rate(q, "over", frac) and not is_corporation_for_overpayment_rate(p);
+    then overpayment_rate_for_liability(p, y, kind, quarter_start, frac * 100.0);
+}
+rule S6621CorporateOverpaymentRateOtherwiseFromTable strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for quarter_start: Date;
+    for q: Text;
+    for frac: Decimal;
+    when overpayment_amount(p, y, kind, _) and qrate_table_quarter_6621(quarter_start, q) and qrate_pinned_quarter_6621(q)
+        and us.irs.rev_rul_6621_quarterly::quarterly_rate(q, "corp-over", frac)
+        and is_corporation_for_overpayment_rate(p) and not corporate_overpayment_exceeds_ten_thousand(p, quarter_start);
+    then overpayment_rate_for_liability(p, y, kind, quarter_start, frac * 100.0);
+}
+@source(IRC_S6621_A, relation = formalizes, coverage = partial, quote = "To the extent that an overpayment of tax by a corporation for any taxable period (as defined in subsection (c)(3), applied by substituting \"overpayment\" for \"underpayment\") exceeds $10,000, subparagraph (B) shall be applied by substituting \"0.5 percentage point\" for \"2 percentage points\".")
+rule S6621CorporateOverpaymentRateAboveTenThousandFromTable strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for quarter_start: Date;
+    for q: Text;
+    for frac: Decimal;
+    when overpayment_amount(p, y, kind, _) and qrate_table_quarter_6621(quarter_start, q) and qrate_pinned_quarter_6621(q)
+        and us.irs.rev_rul_6621_quarterly::quarterly_rate(q, "corp-over-above-10k", frac)
+        and is_corporation_for_overpayment_rate(p) and corporate_overpayment_exceeds_ten_thousand(p, quarter_start);
+    then overpayment_rate_for_liability(p, y, kind, quarter_start, frac * 100.0);
+}
+
+// --- §6621(d): net rate of zero on overlapping over/underpayments ----------
+
+relation equivalent_overlapping_overpayment_and_underpayment(p: Person, quarter_start: Date) kind empirical {
+    label en official "for any period, interest is payable under subchapter A and allowable under subchapter B on equivalent underpayments and overpayments by the same taxpayer";
+}
+pub relation net_interest_rate_is_zero(p: Person, quarter_start: Date) kind institutional;
+@source(IRC_S6621_D, relation = formalizes, coverage = exact, quote = "the net rate of interest under this section on such amounts shall be zero for such period")
+rule S6621NetRateZeroOnOverlap strict {
+    for p: Person;
+    for quarter_start: Date;
+    when equivalent_overlapping_overpayment_and_underpayment(p, quarter_start);
+    then net_interest_rate_is_zero(p, quarter_start);
+}
+
+// ============================================================================
+// §6622 — Interest compounded daily
+// ============================================================================
+
+// EXTERNAL_DEPENDENCY on 26 CFR 301.6622-1 for the exact day-count/rate-
+// lookup convention across a rate change. TECH_GAP on the full-duration
+// chain: a first attempt modeled "compounded daily" as a RECURSIVE day-by-
+// day accrual (`compounded_balance_on_day(day) :- compounded_balance_on_day
+// (day-1)`), which is the textually faithful reading, but `check` rejects it
+// — LDC-E4102, "цикл предикатных зависимостей... не стратифицируема": a
+// self-recursive `strict` predicate needs the argumentation-status
+// machinery reserved for `defeasible` cycles (§65/§103), which a plain
+// arithmetic accrual chain is not. `pow(...)` is not a substitute either: in
+// this language it takes (Integer, Integer) only (as used for modular
+// exponentiation elsewhere in the corpus), never a Decimal daily-multiplier
+// base. What IS executable, and is provided below, is the single-day
+// compounding STEP with exact Decimal arithmetic — `next_day_balance`,
+// rounded to the cent exactly as a real daily-compounding ledger would.
+// Chaining that step across an arbitrary day count `n` (the actual §6622
+// duration calculation) is the TECH_GAP: it needs either an iteration
+// construct this 0.1 slice does not have, or `n` case-asserted intermediate
+// balances one per day. Minimal reproduction: a scenario asserting a
+// principal, a rate and `days = 90` has no rule that derives the ending
+// balance after all 90 days — only `next_day_balance` for ONE day at a time.
+relation interest_compounding_request(principal: Money, annual_rate_percent: Decimal) kind empirical {
+    label en unofficial "a request to compute one day's §6622 daily-compounded interest step over the given principal and annual rate";
+}
+pub relation next_day_balance(principal: Money, annual_rate_percent: Decimal, balance: Money) kind institutional {
+    label en official "such interest... shall be compounded daily";
+}
+@source(IRC_S6622_A, relation = formalizes, coverage = partial, quote = "such interest and such amount shall be compounded daily")
+rule S6622ComputeNextDayBalance strict {
+    for principal: Money;
+    for rate: Decimal;
+    when interest_compounding_request(principal, rate) and principal > 0 USD;
+    then next_day_balance(principal, rate,
+        round(principal * (1.0 + (rate / 100.0 / 365.0)), 2, "HALF_UP"));
+}
+
+// ============================================================================
+// §6631 — Notice requirements
+// ============================================================================
+
+relation interest_notice_includes_amount(n: Notice, p: Person) kind empirical {
+    label en unofficial "the notice to the individual taxpayer includes an amount of interest required to be paid";
+}
+relation interest_notice_states_section_and_computation(n: Notice) kind institutional;
+
+@source(IRC_S6631, relation = formalizes, coverage = exact, quote = "The Secretary shall include with each notice to an individual taxpayer which includes an amount of interest required to be paid by such taxpayer under this title information with respect to the section of this title under which the interest is imposed and a computation of the interest.")
+rule S6631DutyToStateInterestSectionAndComputation strict {
+    for n: Notice;
+    for p: Person;
+    when interest_notice_includes_amount(n, p);
+    then duty StateInterestSectionAndComputation {
+        bearer Secretary;
+        beneficiary p;
+        goal achievement {
+            condition interest_notice_states_section_and_computation(n);
+            window [-infinity, infinity];
+        }
+    };
+}

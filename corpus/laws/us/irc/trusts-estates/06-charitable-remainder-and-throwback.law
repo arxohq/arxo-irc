@@ -1,0 +1,275 @@
+// 26 U.S.C. §664 (charitable remainder annuity trusts and unitrusts) and
+// §§665-668 (accumulation distributions / throwback — read from the pinned
+// text; see judgment calls).
+//
+// JUDGMENT CALLS:
+//  - §664(b): the four-tier character ordering is executable directly as a
+//    priority-ordered allocation of the amount distributed against each
+//    tier's available balance (case-supplied per-tier amounts, since the
+//    "undistributed income/gain of prior years" ledger is a cumulative
+//    multi-year figure this package does not itself accumulate — TECH_GAP
+//    for the automatic carry-forward, EXECUTABLE for one year's allocation
+//    given the case-supplied opening balances).
+//  - §664(d)(1)/(2): the 5%/50% payout-rate test and the 10% remainder-value
+//    test are executable NUMERIC tests over case-asserted percentages and
+//    dollar amounts; the section 7520 ACTUARIAL VALUATION producing the
+//    remainder-interest value itself is EXTERNAL_DEPENDENCY (no us.irc.*
+//    owner formalizes section 7520's tables) — the case asserts the
+//    resulting value, and this package tests only the statutory percentage
+//    thresholds over it.
+//  - §664(d)(3) (income exception to the fixed unitrust amount) and §664(d)(4)
+//    (additional-contribution-triggered separate-trust rule) are TECH_GAP:
+//    both require a multi-year make-up ledger this package does not
+//    maintain (same class as the day-by-day-ledger family in TECH-GAPS.md).
+//  - §§665-668: the text is NOT repealed on its face for foreign trusts
+//    (domestic-trust throwback was repealed operationally by the 1997 Act
+//    changes reflected in section 665(c), which this package reads and
+//    formalizes directly: a "qualified trust" is computed WITHOUT the
+//    throwback machinery). §665(a)-(b) (UNI, accumulation distribution) are
+//    executable calculations. §666 (deemed prior-year distribution) and
+//    §667 (partial-tax with 3-of-5-year averaging) require a multi-year,
+//    self-referential ledger (the "5 preceding taxable years", "3 years
+//    remaining") that this package cannot express without the self-
+//    recursive-arithmetic gap the brief warns about (LDC-E4102 class) —
+//    recorded as TECH_GAP G43 (TECH-GAPS.md). §668's interest charge is
+//    likewise TECH_GAP for the full multi-year computation; its ONLY
+//    directly pinned numeric fact (the flat 6% pre-1996 rate, without
+//    compounding) is modeled directly since the statute states it exactly.
+
+language "law.core" version "0.2";
+package us.irc.trusts_estates version "0.1.1";
+namespace "urn:us:irc:trusts_estates:clir";
+
+use self::{
+    IRC_S664_B,
+    IRC_S664_D,
+    IRC_S665_A,
+    IRC_S665_B,
+    IRC_S665_C,
+    IRC_S668_A,
+    Person,
+    TaxableYear,
+    Trust,
+    distributable_net_income,
+    tier1_amount_required_currently,
+    tier2_amount_other_properly_paid,
+};
+
+// ============================================================================
+// §664(b): four-tier character of CRT distributions
+// ============================================================================
+
+enum Section664Tier {
+    OrdinaryIncomeTier;
+    CapitalGainTier;
+    OtherIncomeTier;
+    CorpusTier;
+}
+pub relation crt_tier_available_balance(t: Trust, y: TaxableYear, tier: Section664Tier, amount: Money) kind institutional {
+    label en unofficial "the available balance in the stated section 664(b) tier for the year (current-year amount plus any case-supplied undistributed prior-year balance for tiers 1-2; case-asserted — the automatic multi-year carry is TECH_GAP, see header)";
+}
+pub relation crt_annuity_or_unitrust_amount_paid(t: Trust, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the annuity amount (section 664(d)(1)(A)) or unitrust payment (section 664(d)(2)(A)) actually paid to the recipient for the year (case-asserted)";
+}
+@source(IRC_S664_B, relation = formalizes, coverage = exact, quote = "Amounts distributed by a charitable remainder annuity trust or by a charitable remainder unitrust shall be considered as having the following characteristics in the hands of a beneficiary")
+pub relation crt_tier1_ordinary_income_amount(t: Trust, y: TaxableYear, amount: Money) kind institutional {
+    label en official "tier 1: the portion of a charitable remainder trust distribution characterized as ordinary income (other than capital gain), to the extent of that tier's available balance (section 664(b)(1))";
+}
+rule S664bTier1(t: Trust, y: TaxableYear, paid: Money, avail: Money) strict {
+    when crt_annuity_or_unitrust_amount_paid(t, y, paid);
+    when crt_tier_available_balance(t, y, OrdinaryIncomeTier, avail);
+    when paid <= avail;
+    then crt_tier1_ordinary_income_amount(t, y, paid);
+}
+rule S664bTier1Exceeded(t: Trust, y: TaxableYear, paid: Money, avail: Money) strict {
+    when crt_annuity_or_unitrust_amount_paid(t, y, paid);
+    when crt_tier_available_balance(t, y, OrdinaryIncomeTier, avail);
+    when paid > avail;
+    then crt_tier1_ordinary_income_amount(t, y, avail);
+}
+
+pub relation crt_tier2_capital_gain_amount(t: Trust, y: TaxableYear, amount: Money) kind institutional {
+    label en official "tier 2: the portion of a charitable remainder trust distribution (after tier 1) characterized as capital gain, to the extent of that tier's available balance (section 664(b)(2))";
+}
+rule S664bTier2(t: Trust, y: TaxableYear, paid: Money, tier1: Money, avail2: Money) strict {
+    label en unofficial "tier 2 (capital gain) absorbs the remainder of the payment after tier 1, up to tier 2's own available balance";
+    when crt_annuity_or_unitrust_amount_paid(t, y, paid);
+    when crt_tier1_ordinary_income_amount(t, y, tier1);
+    when crt_tier_available_balance(t, y, CapitalGainTier, avail2);
+    when (paid - tier1) <= avail2;
+    then crt_tier2_capital_gain_amount(t, y, paid - tier1);
+}
+rule S664bTier2Exceeded(t: Trust, y: TaxableYear, paid: Money, tier1: Money, avail2: Money) strict {
+    when crt_annuity_or_unitrust_amount_paid(t, y, paid);
+    when crt_tier1_ordinary_income_amount(t, y, tier1);
+    when crt_tier_available_balance(t, y, CapitalGainTier, avail2);
+    when (paid - tier1) > avail2;
+    then crt_tier2_capital_gain_amount(t, y, avail2);
+}
+
+pub relation crt_tier3_other_income_amount(t: Trust, y: TaxableYear, amount: Money) kind institutional {
+    label en official "tier 3: the portion of a charitable remainder trust distribution (after tiers 1-2) characterized as other income, to the extent of that tier's available balance (section 664(b)(3))";
+}
+rule S664bTier3(t: Trust, y: TaxableYear, paid: Money, tier1: Money, tier2: Money, avail3: Money) strict {
+    when crt_annuity_or_unitrust_amount_paid(t, y, paid);
+    when crt_tier1_ordinary_income_amount(t, y, tier1);
+    when crt_tier2_capital_gain_amount(t, y, tier2);
+    when crt_tier_available_balance(t, y, OtherIncomeTier, avail3);
+    when (paid - tier1 - tier2) <= avail3;
+    then crt_tier3_other_income_amount(t, y, paid - tier1 - tier2);
+}
+rule S664bTier3Exceeded(t: Trust, y: TaxableYear, paid: Money, tier1: Money, tier2: Money, avail3: Money) strict {
+    when crt_annuity_or_unitrust_amount_paid(t, y, paid);
+    when crt_tier1_ordinary_income_amount(t, y, tier1);
+    when crt_tier2_capital_gain_amount(t, y, tier2);
+    when crt_tier_available_balance(t, y, OtherIncomeTier, avail3);
+    when (paid - tier1 - tier2) > avail3;
+    then crt_tier3_other_income_amount(t, y, avail3);
+}
+
+pub relation crt_tier4_corpus_amount(t: Trust, y: TaxableYear, amount: Money) kind institutional {
+    label en official "tier 4: any remaining balance of a charitable remainder trust distribution, after tiers 1-3, is a distribution of trust corpus (section 664(b)(4))";
+}
+@source(IRC_S664_B, relation = formalizes, coverage = exact, quote = "Fourth, as a distribution of trust corpus.")
+rule S664bTier4Corpus(t: Trust, y: TaxableYear, paid: Money, tier1: Money, tier2: Money, tier3: Money) strict {
+    label en official "any remaining balance of the amount distributed, after tiers 1-3, is a distribution of trust corpus (section 664(b)(4))";
+    when crt_annuity_or_unitrust_amount_paid(t, y, paid);
+    when crt_tier1_ordinary_income_amount(t, y, tier1);
+    when crt_tier2_capital_gain_amount(t, y, tier2);
+    when crt_tier3_other_income_amount(t, y, tier3);
+    then crt_tier4_corpus_amount(t, y, paid - tier1 - tier2 - tier3);
+}
+
+// ============================================================================
+// §664(d)(1)-(2): CRAT and CRUT qualification tests
+// ============================================================================
+
+pub relation crt_payout_percentage(t: Trust, percentage: Decimal) kind empirical {
+    label en unofficial "the trust's stated annual payout percentage of the initial (CRAT) or annually-revalued (CRUT) net fair market value (case-asserted; section 664(d)(1)(A)/(2)(A))";
+}
+@source(IRC_S664_D, relation = formalizes, coverage = exact, quote = "a sum certain (which is not less than 5 percent nor more than 50 percent of the initial net fair market value of all property placed in trust)")
+pub relation crat_payout_percentage_within_range(t: Trust) kind institutional {
+    label en official "the charitable remainder annuity trust's payout percentage is not less than 5 percent nor more than 50 percent of the initial net fair market value of all property placed in trust (section 664(d)(1)(A))";
+}
+rule S664d1PayoutWithinRange(t: Trust, pct: Decimal) strict {
+    when crt_payout_percentage(t, pct);
+    when pct >= 0.05;
+    when pct <= 0.50;
+    then crat_payout_percentage_within_range(t);
+}
+@source(IRC_S664_D, relation = formalizes, coverage = exact, quote = "a fixed percentage (which is not less than 5 percent nor more than 50 percent) of the net fair market value of its assets, valued annually")
+pub relation crut_payout_percentage_within_range(t: Trust) kind institutional {
+    label en official "the charitable remainder unitrust's fixed percentage of the annually-revalued net fair market value of its assets is not less than 5 percent nor more than 50 percent (section 664(d)(2)(A))";
+}
+rule S664d2PayoutWithinRange(t: Trust, pct: Decimal) strict {
+    when crt_payout_percentage(t, pct);
+    when pct >= 0.05;
+    when pct <= 0.50;
+    then crut_payout_percentage_within_range(t);
+}
+
+pub relation crt_remainder_interest_value_under_7520(t: Trust, amount: Money) kind empirical {
+    label en unofficial "the value of the remainder interest, determined under section 7520 — EXTERNAL_DEPENDENCY: the actuarial valuation itself is not formalized by any us.irc.* package; asserted here as a case fact (section 664(d)(1)(D)/(2)(D))";
+}
+pub relation crt_initial_net_fmv(t: Trust, amount: Money) kind empirical {
+    label en unofficial "the initial net fair market value of all property placed in the trust (case-asserted; section 664(d)(1)(D)/(2)(D))";
+}
+@source(IRC_S664_D, relation = formalizes, coverage = exact, quote = "the value (determined under section 7520) of such remainder interest is at least 10 percent of the initial net fair market value of all property placed in the trust")
+pub relation crt_10_percent_remainder_test_satisfied(t: Trust) kind institutional {
+    label en official "the value of the remainder interest (determined under section 7520) is at least 10 percent of the initial net fair market value of all property placed in the trust (section 664(d)(1)(D), and the parallel per-contribution test of section 664(d)(2)(D))";
+}
+rule S664d10PercentTest(t: Trust, remainder: Money, initial: Money) strict {
+    when crt_remainder_interest_value_under_7520(t, remainder);
+    when crt_initial_net_fmv(t, initial);
+    when initial > 0 USD;
+    when remainder >= (initial * 0.10);
+    then crt_10_percent_remainder_test_satisfied(t);
+}
+
+@source(IRC_S664_D, relation = formalizes, coverage = exact, quote = "For purposes of this section, a charitable remainder annuity trust is a trust—")
+pub relation charitable_remainder_annuity_trust(t: Trust) kind institutional {
+    label en official "a trust satisfying the section 664(d)(1) payout-percentage and 10%-remainder-value tests (among the other statutory conditions this package does not further formalize — e.g. the term-of-years/life limits, the section 170(c) organization requirement) is a charitable remainder annuity trust (section 664(d)(1))";
+}
+rule S664d1CratClassification(t: Trust) strict {
+    when crat_payout_percentage_within_range(t);
+    when crt_10_percent_remainder_test_satisfied(t);
+    then charitable_remainder_annuity_trust(t);
+}
+@source(IRC_S664_D, relation = formalizes, coverage = exact, quote = "For purposes of this section, a charitable remainder unitrust is a trust—")
+pub relation charitable_remainder_unitrust(t: Trust) kind institutional {
+    label en official "a trust satisfying the section 664(d)(2) payout-percentage and 10%-remainder-value tests (among the other statutory conditions this package does not further formalize) is a charitable remainder unitrust (section 664(d)(2))";
+}
+rule S664d2CrutClassification(t: Trust) strict {
+    when crut_payout_percentage_within_range(t);
+    when crt_10_percent_remainder_test_satisfied(t);
+    then charitable_remainder_unitrust(t);
+}
+
+// ============================================================================
+// §665(a)-(b): undistributed net income and accumulation distribution
+// ============================================================================
+
+pub relation taxes_imposed_on_trust_665(t: Trust, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "the amount of taxes imposed on the trust for the year within the meaning of section 665(d) (case-asserted; the section 665(d)(2) foreign-trust addback is not separately modeled — TECH_GAP)";
+}
+@source(IRC_S665_A, relation = formalizes, coverage = exact, quote = "the term \"undistributed net income\" for any taxable year means the amount by which distributable net income of the trust for such")
+pub relation undistributed_net_income_665(t: Trust, y: TaxableYear, amount: Money) kind institutional {
+    label en official "undistributed net income: the amount by which the trust's DNI for the year exceeds the sum of (1) the section 661(a)(1)-(2) amounts for the year and (2) taxes imposed on the trust attributable to that DNI (section 665(a))";
+}
+rule S665aUndistributedNetIncome(t: Trust, y: TaxableYear, dni: Money, tier1: Money, tier2: Money, taxes: Money) defeasible {
+    when distributable_net_income(t, y, dni);
+    when tier1_amount_required_currently(t, y, tier1);
+    when tier2_amount_other_properly_paid(t, y, tier2);
+    when taxes_imposed_on_trust_665(t, y, taxes);
+    then undistributed_net_income_665(t, y, dni - tier1 - tier2 - taxes);
+}
+
+pub relation qualified_trust_665c(t: Trust) kind empirical {
+    label en unofficial "the trust is a \"qualified trust\" under section 665(c)(2) (not a foreign trust, and not a trust created before March 1, 1984 unless the section 643(f) aggregation exception applies) — case-asserted classification; when true, the section 665-668 throwback machinery does not apply to a distribution (section 665(c)(1))";
+}
+@source(IRC_S665_C, relation = formalizes, coverage = exact, quote = "In the case of a qualified trust, any distribution in any taxable year beginning after the date of the enactment of this subsection shall be computed without regard")
+pub relation throwback_inapplicable_qualified_trust(t: Trust, y: TaxableYear) kind institutional {
+    label en official "for a qualified trust (section 665(c)(2)), a distribution is computed without regard to the section 665-668 accumulation-distribution/throwback provisions (section 665(c)(1)) — this is the 1997-Act repeal of DOMESTIC throwback, read directly from the pinned text";
+}
+rule S665cQualifiedTrustNoThrowback(t: Trust, y: TaxableYear) strict {
+    when qualified_trust_665c(t);
+    when us.irc.core::year_of(t, y);
+    then throwback_inapplicable_qualified_trust(t, y);
+}
+
+pub relation tier2_amount_all_beneficiaries_665(t: Trust, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the total section 661(a)(2) tier-2 amount for the year, before the section 665(b) DNI reduction (case-asserted aggregate; feeds the accumulation-distribution computation)";
+}
+@source(IRC_S665_B, relation = formalizes, coverage = exact, quote = "the term \"accumulation distribution\" means, for any taxable year of the trust, the amount by")
+pub relation accumulation_distribution_665(t: Trust, y: TaxableYear, amount: Money) kind institutional {
+    label en official "accumulation distribution: the amount by which the section 661(a)(2) tier-2 total for the year exceeds DNI for the year reduced (not below zero) by the section 661(a)(1) tier-1 total (section 665(b))";
+}
+rule S665bAccumulationDistributionPositive(t: Trust, y: TaxableYear, tier2: Money, dni: Money, tier1: Money) defeasible {
+    when tier2_amount_all_beneficiaries_665(t, y, tier2);
+    when distributable_net_income(t, y, dni);
+    when tier1_amount_required_currently(t, y, tier1);
+    when dni > tier1;
+    when tier2 > (dni - tier1);
+    then accumulation_distribution_665(t, y, tier2 - (dni - tier1));
+}
+rule S665bAccumulationDistributionZero(t: Trust, y: TaxableYear, tier2: Money, dni: Money, tier1: Money) defeasible {
+    when tier2_amount_all_beneficiaries_665(t, y, tier2);
+    when distributable_net_income(t, y, dni);
+    when tier1_amount_required_currently(t, y, tier1);
+    when dni <= tier1;
+    unless (tier2 > (dni - tier1)) and tier2_amount_all_beneficiaries_665(t, y, tier2) and distributable_net_income(t, y, dni) and tier1_amount_required_currently(t, y, tier1);
+    then accumulation_distribution_665(t, y, 0 USD);
+}
+
+// §666/§667/§668: TECH_GAP G43 (multi-year self-referential throwback
+// ledger — the 3-of-5-year averaging and undistributed-income-year
+// apportionment cannot be expressed without the self-recursive-arithmetic
+// class of gap; see TECH-GAPS.md). Only §668(a)(6)'s flat pre-1996 rate is
+// pinned exactly enough to state directly:
+@source(IRC_S668_A, relation = formalizes, coverage = exact, quote = "Interest for the portion of the period described in paragraph (2) which occurs before January 1, 1996, shall be determined—")
+pub relation section_668_pre_1996_rate_uncompounded(rate: Decimal) kind institutional {
+    label en official "for the portion of the section 668 interest-charge period before January 1, 1996, the interest rate is 6 percent, without compounding until that date (section 668(a)(6))";
+}
+rule S668Pre1996Rate() strict {
+    then section_668_pre_1996_rate_uncompounded(0.06);
+}

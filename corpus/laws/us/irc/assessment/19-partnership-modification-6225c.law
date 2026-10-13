@@ -1,0 +1,595 @@
+// §6225(c) — modification of imputed underpayments
+// (stage 4, 26.09.2026, DECISION-0379, implemented_unverified).
+//
+// The Secretary "shall establish procedures"; this module states (1) the duty, (2) the
+// conditions under which a portion of the adjustments is left out of the imputed
+// underpayment ((c)(2)(A)-(C), (c)(3), (c)(5)), (3) the lower-rate rule ((c)(4)), (4) the
+// timing and approval rules ((c)(7), (c)(8)), and (5) the modified imputed underpayment
+// they produce. Not modelled (TECH_GAP, G56xx): (c)(2)(D) (sections 6501 and 6511 do not
+// apply to the modification return or payment: those relations are keyed by person/year/kind,
+// not by return or payment) and (c)(2)(F)(i)-(ii) (tiered structures: the chain of ownership
+// between the relevant partner and the audited partnership, G3701).
+//
+// METHOD AND JUDGMENT CALLS.
+//  - Amounts left out and lower-rate bases are supplied per partner by the case (the partnership
+//    "demonstrates" them); the module decides WHETHER a partner's portion counts, not how the
+//    portion is measured. The case must not put one portion in two categories (no double count).
+//  - The power of the Secretary's approval ((c)(8)) has an effect that defeasible rules cannot
+//    read (E-0134); the twin `modification_approved_twin` has the same premises.
+//  - (c)(4)(A): the lower rate applied is the greater of the rate the procedure proposes and the
+//    highest rate in effect for the income and taxpayer ("in no event ... less than").
+//  - Rounding: the statute names none for the modified amount; cents, HALF_UP (corpus
+//    convention), applied once to the top-rate part; the lower-rate parts are rounded per partner.
+
+language "law.core" version "0.2";
+package us.irc.assessment version "0.1.1";
+namespace "urn:us:irc:assessment:clir";
+
+use self::{
+    IRC_S6225_C,
+    Partnership,
+    Person,
+    Secretary,
+    TaxableYear,
+    adjustments_taken_into_account_in_adjustment_year,
+    applicable_highest_rate_for_reviewed_year,
+    bba_modification_submission_complete_on,
+    bba_modification_submission_extension_consented_until,
+    imputed_underpayment,
+    net_positive_partnership_adjustments,
+    notice_of_proposed_partnership_adjustment_mailed,
+    partner_treatment_inconsistent,
+};
+
+// ============================================================================
+// (c)(1), (c)(9) — the Secretary's duty to establish procedures
+// ============================================================================
+
+pub relation secretary_established_modification_procedures(pship: Partnership, y: TaxableYear) kind empirical {
+    label en official "the Secretary has established procedures under which the imputed underpayment amount may be modified";
+}
+@source(IRC_S6225_C, relation = formalizes, coverage = exact, quote = "The Secretary shall establish procedures under which the imputed underpayment amount may be modified consistent with the requirements of this subsection.")
+rule S6225c1SecretaryMustEstablishModificationProcedures defeasible {
+    label en official "the Secretary shall establish procedures under which the imputed underpayment may be modified";
+    for pship: Partnership;
+    for y: TaxableYear;
+    for amount: Money;
+    when imputed_underpayment(pship, y, amount);
+    then duty S6225c1EstablishModificationProceduresDuty {
+        bearer Secretary;
+        goal achievement {
+            condition secretary_established_modification_procedures(pship, y);
+            window [-infinity, infinity];
+        }
+    };
+}
+pub relation secretary_established_procedures_for_non_underpayment_adjustments(pship: Partnership, y: TaxableYear) kind empirical {
+    label en official "the Secretary has established procedures under which adjustments not resulting in an imputed underpayment may be modified in the manner the Secretary determines appropriate";
+}
+@source(IRC_S6225_C, relation = formalizes, coverage = exact, quote = "The Secretary shall establish procedures under which the adjustments described in subsection (a)(2) may be modified in such manner as the Secretary determines appropriate.")
+rule S6225c9SecretaryMustEstablishProceduresForAdjustmentsWithoutUnderpayment defeasible {
+    label en official "the Secretary shall establish procedures for modifying adjustments that do not result in an imputed underpayment";
+    for pship: Partnership;
+    for y: TaxableYear;
+    when adjustments_taken_into_account_in_adjustment_year(pship, y);
+    then duty S6225c9EstablishProceduresForAdjustmentsDuty {
+        bearer Secretary;
+        goal achievement {
+            condition secretary_established_procedures_for_non_underpayment_adjustments(pship, y);
+            window [-infinity, infinity];
+        }
+    };
+}
+
+// ============================================================================
+// (c)(2)(A)-(C), (E), (F) last part — partners take adjustments into account
+// ============================================================================
+
+pub relation partner_filed_returns_for_reviewed_and_affected_years(pship: Partnership, y: TaxableYear, partner: Person) kind empirical {
+    label en official "one or more partners file returns for the taxable year of the partners which includes the end of the reviewed year (and for any taxable year with respect to which a tax attribute is affected)";
+}
+pub relation partner_returns_take_all_adjustments_into_account(pship: Partnership, y: TaxableYear, partner: Person) kind empirical {
+    label en official "the returns take into account all adjustments under subsection (a) properly allocable to the partner (and their effect on tax attributes)";
+}
+pub relation partner_payment_of_tax_due_included(pship: Partnership, y: TaxableYear, partner: Person) kind empirical {
+    label en official "payment of any tax due is included with the returns";
+}
+pub relation partner_filing_is_aar_or_tracking_report(pship: Partnership, y: TaxableYear, partner: Person) kind empirical {
+    label en official "the filing is an administrative adjustment request under section 6227 or a partnership adjustment tracking report under section 6226(b)(4)(A)";
+}
+pub relation partner_amended_return_route_satisfied(pship: Partnership, y: TaxableYear, partner: Person) kind institutional {
+    label en official "the requirements of subparagraph (A) are satisfied for the partner";
+}
+@source(IRC_S6225_C, relation = formalizes, coverage = exact, quote = "(iii) payment of any tax due is included with such returns,")
+rule S6225c2AAmendedReturnRouteSatisfied defeasible {
+    label en official "the amended-return route is satisfied by returns that take all adjustments into account with payment of tax due";
+    for pship: Partnership;
+    for y: TaxableYear;
+    for partner: Person;
+    when partner_filed_returns_for_reviewed_and_affected_years(pship, y, partner)
+        and partner_returns_take_all_adjustments_into_account(pship, y, partner)
+        and partner_payment_of_tax_due_included(pship, y, partner)
+        and not_known(partner_filing_is_aar_or_tracking_report(pship, y, partner));
+    then partner_amended_return_route_satisfied(pship, y, partner);
+}
+pub relation partner_paid_amounts_in_lieu_of_returns(pship: Partnership, y: TaxableYear, partner: Person) kind empirical {
+    label en official "the amounts described in subparagraph (A)(iii) are paid by the partner";
+}
+pub relation partner_agrees_to_take_tax_attributes_into_account(pship: Partnership, y: TaxableYear, partner: Person) kind empirical {
+    label en official "the partner agrees to take into account, in the form and manner prescribed by the Secretary, the adjustments to its tax attributes";
+}
+pub relation partner_provides_required_information(pship: Partnership, y: TaxableYear, partner: Person) kind empirical {
+    label en official "the partner provides, in the form and manner specified by the Secretary, such information as the Secretary may require";
+}
+pub relation partner_alternative_route_satisfied(pship: Partnership, y: TaxableYear, partner: Person) kind institutional {
+    label en official "the requirements of subparagraph (A) are treated as satisfied for the partner under the alternative procedure";
+}
+@source(IRC_S6225_C, relation = formalizes, coverage = exact, quote = "the requirements of subparagraph (A) shall be treated as satisfied with respect to adjustments properly allocable to such partner if, in lieu of filing the returns described in such subparagraph—")
+rule S6225c2BAlternativeRouteSatisfied defeasible {
+    label en official "the alternative to filing amended returns is satisfied by payment, the agreement on attributes and the required information";
+    for pship: Partnership;
+    for y: TaxableYear;
+    for partner: Person;
+    when partner_paid_amounts_in_lieu_of_returns(pship, y, partner)
+        and partner_agrees_to_take_tax_attributes_into_account(pship, y, partner)
+        and partner_provides_required_information(pship, y, partner);
+    then partner_alternative_route_satisfied(pship, y, partner);
+}
+pub relation adjustment_reallocates_distributive_share_among_partners(pship: Partnership, y: TaxableYear) kind empirical {
+    label en official "the adjustment reallocates the distributive share of an item from one partner to another";
+}
+pub relation partner_affected_by_reallocation(pship: Partnership, y: TaxableYear, partner: Person) kind empirical {
+    label en official "the partner is affected by the reallocation adjustment";
+}
+pub relation reallocation_partner_unsatisfied(pship: Partnership, y: TaxableYear) kind institutional {
+    label en unofficial "a partner affected by the reallocation satisfies neither subparagraph (A) nor (B)";
+}
+rule S6225c2CUnsatisfiedAffectedPartner defeasible {
+    for pship: Partnership;
+    for y: TaxableYear;
+    for partner: Person;
+    when adjustment_reallocates_distributive_share_among_partners(pship, y)
+        and partner_affected_by_reallocation(pship, y, partner)
+        and not_known(partner_amended_return_route_satisfied(pship, y, partner))
+        and not_known(partner_alternative_route_satisfied(pship, y, partner));
+    then reallocation_partner_unsatisfied(pship, y);
+}
+pub relation partner_requirements_satisfied(pship: Partnership, y: TaxableYear, partner: Person) kind institutional {
+    label en official "the partner's adjustments are taken into account under section 6225(c)(2) (route (A) or (B)), and, for a reallocation, every affected partner satisfies the requirements";
+}
+@source(IRC_S6225_C, relation = formalizes, coverage = exact, quote = "this paragraph shall apply with respect to any such partner only if the requirements of subparagraph (A) or (B) are satisfied with respect to all partners affected by such adjustment.")
+rule S6225c2AbRouteAndReallocationCondition defeasible {
+    label en official "a partner's route counts only if, for a reallocation adjustment, all affected partners satisfy (A) or (B)";
+    for pship: Partnership;
+    for y: TaxableYear;
+    for partner: Person;
+    when partner_amended_return_route_satisfied(pship, y, partner)
+        and not_known(reallocation_partner_unsatisfied(pship, y));
+    then partner_requirements_satisfied(pship, y, partner);
+}
+rule S6225c2BAlternativeRouteAndReallocationCondition defeasible {
+    for pship: Partnership;
+    for y: TaxableYear;
+    for partner: Person;
+    when partner_alternative_route_satisfied(pship, y, partner)
+        and not_known(reallocation_partner_unsatisfied(pship, y));
+    then partner_requirements_satisfied(pship, y, partner);
+}
+pub relation partner_adjustment_portion_taken_into_account(pship: Partnership, y: TaxableYear, partner: Person, amount: Money) kind empirical {
+    label en official "the portion of the adjustments allocable to the partner that the partner takes into account";
+}
+pub relation excluded_partner_portion(pship: Partnership, y: TaxableYear, partner: Person, amount: Money) kind institutional {
+    label en official "the imputed underpayment amount is determined without regard to this portion of the adjustments";
+}
+@source(IRC_S6225_C, relation = formalizes, coverage = exact, quote = "then the imputed underpayment amount shall be determined without regard to the portion of the adjustments so taken into account.")
+rule S6225c2AEffectPortionLeftOut defeasible {
+    label en official "the portion of the adjustments taken into account by a qualifying partner is left out of the imputed underpayment";
+    for pship: Partnership;
+    for y: TaxableYear;
+    for partner: Person;
+    for amount: Money;
+    when partner_requirements_satisfied(pship, y, partner)
+        and partner_adjustment_portion_taken_into_account(pship, y, partner, amount);
+    then excluded_partner_portion(pship, y, partner, amount);
+}
+pub relation partner_tax_attribute_adjustment_binding(pship: Partnership, y: TaxableYear, partner: Person) kind institutional {
+    label en official "the adjustments to the partner's tax attributes are binding for the partner's taxable year including the end of the reviewed year and every year for which an attribute is affected";
+}
+@source(IRC_S6225_C, relation = formalizes, coverage = exact, quote = "The adjustments to the tax attributes of any partner provided for in subparagraph (A)(ii) or (B)(ii) shall be binding with respect to the taxable year of the partner which includes the end of the reviewed year of the partnership and any taxable years for which any tax attribute is affected by such adjustment.")
+rule S6225c2EAttributeAdjustmentsBinding defeasible {
+    label en official "tax attribute adjustments under (A)(ii) or (B)(ii) bind the partner for the affected years";
+    for pship: Partnership;
+    for y: TaxableYear;
+    for partner: Person;
+    when partner_requirements_satisfied(pship, y, partner);
+    then partner_tax_attribute_adjustment_binding(pship, y, partner);
+}
+pub relation partner_failed_to_treat_attribute_as_adjusted(partner: Person, pship: Partnership, y: TaxableYear, item: Money) kind empirical {
+    label en official "the partner fails to treat a tax attribute in the manner the binding adjustment requires";
+}
+@source(IRC_S6225_C, relation = formalizes, coverage = exact, quote = "Any failure to so treat any such tax attribute shall be treated for purposes of this title in the same manner as a failure to treat a partnership-related item in a manner which is consistent with the treatment of such item on the partnership return within the meaning of section 6222.")
+rule S6225c2EFailureIsAnInconsistentTreatmentUnder6222 defeasible {
+    label en official "a failure to treat a bound tax attribute as adjusted is treated as inconsistent treatment under section 6222";
+    for partner: Person;
+    for pship: Partnership;
+    for y: TaxableYear;
+    for item: Money;
+    when partner_tax_attribute_adjustment_binding(pship, y, partner)
+        and partner_failed_to_treat_attribute_as_adjusted(partner, pship, y, item);
+    then partner_treatment_inconsistent(partner, pship, y, item);
+}
+
+// ============================================================================
+// (c)(3) — tax-exempt partners
+// ============================================================================
+
+pub relation partner_is_tax_exempt_entity_168h2(partner: Person) kind empirical {
+    label en official "the partner would not owe tax by reason of its status as a tax-exempt entity (as defined in section 168(h)(2))";
+}
+pub relation partnership_demonstrates_portion_allocable_to_tax_exempt_partner(pship: Partnership, y: TaxableYear, partner: Person, amount: Money) kind empirical {
+    label en official "the portion of the adjustment that the partnership demonstrates is allocable to the tax-exempt partner";
+}
+@source(IRC_S6225_C, relation = formalizes, coverage = exact, quote = "Such procedures shall provide for determining the imputed underpayment without regard to the portion of the adjustment that the partnership demonstrates is allocable to a partner that would not owe tax by reason of its status as a tax-exempt entity (as defined in section 168(h)(2)).")
+rule S6225c3TaxExemptPartnerPortionLeftOut defeasible {
+    label en official "the portion allocable to a tax-exempt partner is left out of the imputed underpayment";
+    for pship: Partnership;
+    for y: TaxableYear;
+    for partner: Person;
+    for amount: Money;
+    when partner_is_tax_exempt_entity_168h2(partner)
+        and partnership_demonstrates_portion_allocable_to_tax_exempt_partner(pship, y, partner, amount);
+    then excluded_partner_portion(pship, y, partner, amount);
+}
+
+// ============================================================================
+// (c)(4) — lower rates
+// ============================================================================
+
+pub enum LowerRateBasis {
+    CCorporationPartner;
+    IndividualCapitalGainOrQualifiedDividend;
+    label en unofficial "the partner types of section 6225(c)(4)(A)(i)-(ii)";
+}
+pub relation partner_is_c_corporation(partner: Person) kind empirical {
+    label en official "the partner is a C corporation";
+}
+pub relation partner_is_individual_or_s_corporation(partner: Person) kind empirical {
+    label en official "the partner is an individual (an S corporation is treated as an individual for clause (ii))";
+}
+pub relation adjustment_is_capital_gain_or_qualified_dividend(pship: Partnership, y: TaxableYear, partner: Person) kind empirical {
+    label en official "the portion of the adjustment allocable to the partner is capital gain or a qualified dividend";
+}
+pub relation partnership_demonstrates_allocable_lower_rate_portion(pship: Partnership, y: TaxableYear, partner: Person, basis: LowerRateBasis) kind empirical {
+    label en official "the partnership demonstrates that a portion of the adjustment is allocable to a partner of the type";
+}
+pub relation lower_rate_basis_applies(pship: Partnership, y: TaxableYear, partner: Person, basis: LowerRateBasis) kind institutional {
+    label en official "a lower rate than the (b)(1)(A) rate is taken into account for the partner's portion";
+}
+@source(IRC_S6225_C, relation = formalizes, coverage = exact, quote = "(i) is a C corporation, or")
+rule S6225c4AiCCorporationBasis defeasible {
+    label en official "a portion allocable to a C corporation partner qualifies for a lower rate";
+    for pship: Partnership;
+    for y: TaxableYear;
+    for partner: Person;
+    when partnership_demonstrates_allocable_lower_rate_portion(pship, y, partner, CCorporationPartner)
+        and partner_is_c_corporation(partner);
+    then lower_rate_basis_applies(pship, y, partner, CCorporationPartner);
+}
+@source(IRC_S6225_C, relation = formalizes, coverage = exact, quote = "(ii) in the case of a capital gain or qualified dividend, is an individual.")
+rule S6225c4AiiIndividualCapitalGainBasis defeasible {
+    label en official "a capital gain or qualified dividend portion allocable to an individual (or S corporation) partner qualifies for a lower rate";
+    for pship: Partnership;
+    for y: TaxableYear;
+    for partner: Person;
+    when partnership_demonstrates_allocable_lower_rate_portion(pship, y, partner, IndividualCapitalGainOrQualifiedDividend)
+        and partner_is_individual_or_s_corporation(partner)
+        and adjustment_is_capital_gain_or_qualified_dividend(pship, y, partner);
+    then lower_rate_basis_applies(pship, y, partner, IndividualCapitalGainOrQualifiedDividend);
+}
+pub relation procedure_lower_rate(pship: Partnership, y: TaxableYear, basis: LowerRateBasis, rate: Decimal) kind empirical {
+    label en official "the lower rate the procedure takes into account for the basis";
+}
+pub relation highest_rate_in_effect_for_income_and_taxpayer(pship: Partnership, y: TaxableYear, basis: LowerRateBasis, rate: Decimal) kind empirical {
+    label en official "the highest rate in effect with respect to the income and taxpayer described in clause (i) or clause (ii)";
+}
+pub relation lower_rate_applied(pship: Partnership, y: TaxableYear, partner: Person, basis: LowerRateBasis, rate: Decimal) kind institutional {
+    label en official "the lower rate taken into account: the procedure's rate, but in no event less than the highest rate in effect for the income and taxpayer";
+}
+@source(IRC_S6225_C, relation = formalizes, coverage = exact, quote = "In no event shall the lower rate determined under the preceding sentence be less than the highest rate in effect with respect to the income and taxpayer described in clause (i) or clause (ii), as the case may be.")
+rule S6225c4AFloorOnTheLowerRate defeasible {
+    label en official "the lower rate is never less than the highest rate in effect for the income and taxpayer";
+    for pship: Partnership;
+    for y: TaxableYear;
+    for partner: Person;
+    for basis: LowerRateBasis;
+    for proposed: Decimal;
+    for floor: Decimal;
+    when lower_rate_basis_applies(pship, y, partner, basis)
+        and procedure_lower_rate(pship, y, basis, proposed)
+        and highest_rate_in_effect_for_income_and_taxpayer(pship, y, basis, floor);
+    then lower_rate_applied(pship, y, partner, basis, max(proposed, floor));
+}
+pub relation partner_distributive_share_portion(pship: Partnership, y: TaxableYear, partner: Person, base: Money) kind empirical {
+    label en official "the portion determined by reference to the partner's distributive share of the items to which the imputed underpayment relates";
+}
+pub relation partner_hypothetical_sale_share(pship: Partnership, y: TaxableYear, partner: Person, base: Money) kind empirical {
+    label en official "the partner's distributive share of net gain or loss if the partnership had sold all of its assets at fair market value as of the close of the reviewed year";
+}
+pub relation underpayment_attributable_to_more_than_one_item(pship: Partnership, y: TaxableYear) kind empirical {
+    label en official "the imputed underpayment is attributable to the adjustment of more than 1 item";
+}
+pub relation partner_share_differs_among_items(pship: Partnership, y: TaxableYear, partner: Person) kind empirical {
+    label en official "the partner's distributive share of the items is not the same with respect to all such items";
+}
+pub relation varied_treatment_of_items(pship: Partnership, y: TaxableYear, partner: Person) kind institutional {
+    label en unofficial "clause (ii) applies to the partner: more than 1 item and the partner's share differs among them";
+}
+rule S6225c4BiiVariedTreatment defeasible {
+    for pship: Partnership;
+    for y: TaxableYear;
+    for partner: Person;
+    when underpayment_attributable_to_more_than_one_item(pship, y) and partner_share_differs_among_items(pship, y, partner);
+    then varied_treatment_of_items(pship, y, partner);
+}
+pub relation lower_rate_portion_base(pship: Partnership, y: TaxableYear, partner: Person, base: Money) kind institutional {
+    label en official "the portion of the adjustment to which the lower rate applies for the partner";
+}
+@source(IRC_S6225_C, relation = formalizes, coverage = exact, quote = "the portion of the imputed underpayment to which the lower rate applies with respect to a partner under subparagraph (A) shall be determined by reference to the partners' distributive share of items to which the imputed underpayment relates.")
+rule S6225c4BiPortionByDistributiveShare defeasible {
+    label en official "the lower-rate portion is determined by the partner's distributive share of the items";
+    for pship: Partnership;
+    for y: TaxableYear;
+    for partner: Person;
+    for base: Money;
+    when partner_distributive_share_portion(pship, y, partner, base)
+        and not_known(varied_treatment_of_items(pship, y, partner));
+    then lower_rate_portion_base(pship, y, partner, base);
+}
+@source(IRC_S6225_C, relation = formalizes, coverage = exact, quote = "the portion of the imputed underpayment to which the lower rate applies with respect to a partner under subparagraph (A) shall be determined by reference to the amount which would have been the partner's distributive share of net gain or loss if the partnership had sold all of its assets at their fair market value as of the close of the reviewed year of the partnership.")
+rule S6225c4BiiPortionByHypotheticalSale defeasible {
+    label en official "with varied treatment the lower-rate portion is the partner's share of net gain or loss on a hypothetical sale of all assets at fair market value";
+    for pship: Partnership;
+    for y: TaxableYear;
+    for partner: Person;
+    for base: Money;
+    when varied_treatment_of_items(pship, y, partner) and partner_hypothetical_sale_share(pship, y, partner, base);
+    then lower_rate_portion_base(pship, y, partner, base);
+}
+pub relation lower_rate_tax_of_partner(pship: Partnership, y: TaxableYear, partner: Person, tax: Money) kind institutional {
+    label en unofficial "the tax on the partner's lower-rate portion at the lower rate applied";
+}
+rule S6225c4LowerRateTaxOfPartner defeasible {
+    for pship: Partnership;
+    for y: TaxableYear;
+    for partner: Person;
+    for basis: LowerRateBasis;
+    for rate: Decimal;
+    for base: Money;
+    when lower_rate_applied(pship, y, partner, basis, rate) and lower_rate_portion_base(pship, y, partner, base);
+    then lower_rate_tax_of_partner(pship, y, partner, round(base * rate, 2, "HALF_UP"));
+}
+
+// ============================================================================
+// (c)(5) — publicly traded partnerships: specified passive activity losses
+// ============================================================================
+
+pub relation publicly_traded_partnership_469k2(pship: Partnership) kind empirical {
+    label en official "the partnership is a publicly traded partnership (as defined in section 469(k)(2))";
+}
+pub relation partner_described_in_469a2(partner: Person) kind empirical {
+    label en official "the person is described in section 469(a)(2)";
+}
+pub relation partner_passive_loss_for_reviewed_year(pship: Partnership, partner: Person, amount: Money) kind empirical {
+    label en official "the passive activity loss of the partner separately determined with respect to the partnership under section 469(k) for the partner's taxable year in which or with which the reviewed year ends";
+}
+pub relation partner_passive_loss_for_adjustment_year(pship: Partnership, partner: Person, amount: Money) kind empirical {
+    label en official "the passive activity loss so determined for the partner's taxable year in which or with which the adjustment year ends";
+}
+pub relation specified_passive_activity_loss(pship: Partnership, partner: Person, amount: Money) kind institutional {
+    label en official "the lesser of the partner's passive activity loss for the taxable year of the reviewed year and for the taxable year of the adjustment year";
+}
+@source(IRC_S6225_C, relation = formalizes, coverage = exact, quote = "the term \"specified passive activity loss\" means, with respect to any specified partner of such publicly traded partnership, the lesser of—")
+rule S6225c5BSpecifiedPassiveActivityLossIsTheLesser defeasible {
+    label en official "the specified passive activity loss is the lesser of the two years' passive activity losses";
+    for pship: Partnership;
+    for partner: Person;
+    for atReviewed: Money;
+    for atAdjustment: Money;
+    when partner_passive_loss_for_reviewed_year(pship, partner, atReviewed)
+        and partner_passive_loss_for_adjustment_year(pship, partner, atAdjustment);
+    then specified_passive_activity_loss(pship, partner, min(atReviewed, atAdjustment));
+}
+pub relation specified_partner(pship: Partnership, partner: Person) kind institutional {
+    label en official "a person who is a partner of the publicly traded partnership, is described in section 469(a)(2), and has a specified passive activity loss with respect to it";
+}
+@source(IRC_S6225_C, relation = formalizes, coverage = exact, quote = "the term \"specified partner\" means any person if such person—")
+rule S6225c5CSpecifiedPartner defeasible {
+    label en official "a partner of a publicly traded partnership described in section 469(a)(2) with a specified passive activity loss is a specified partner";
+    for pship: Partnership;
+    for partner: Person;
+    for amount: Money;
+    when publicly_traded_partnership_469k2(pship)
+        and us.irc.partnerships::is_partner(partner, pship)
+        and partner_described_in_469a2(partner)
+        and specified_passive_activity_loss(pship, partner, amount)
+        and amount > 0.00 USD;
+    then specified_partner(pship, partner);
+}
+pub relation net_decrease_in_specified_passive_loss_attributable(pship: Partnership, y: TaxableYear, partner: Person, amount: Money) kind empirical {
+    label en official "the portion of the adjustment that the partnership demonstrates is attributable to a net decrease in a specified passive activity loss allocable to the specified partner";
+}
+@source(IRC_S6225_C, relation = formalizes, coverage = exact, quote = "(i) for determining the imputed underpayment without regard to the portion of the adjustment that the partnership demonstrates is attributable to a net decrease in a specified passive activity loss which is allocable to a specified partner, and")
+rule S6225c5AiPassiveLossDecreasePortionLeftOut defeasible {
+    label en official "the net decrease in a specified passive activity loss of a specified partner is left out of the imputed underpayment";
+    for pship: Partnership;
+    for y: TaxableYear;
+    for partner: Person;
+    for amount: Money;
+    when publicly_traded_partnership_469k2(pship)
+        and specified_partner(pship, partner)
+        and net_decrease_in_specified_passive_loss_attributable(pship, y, partner, amount);
+    then excluded_partner_portion(pship, y, partner, amount);
+}
+pub relation partnership_took_net_decrease_into_account_in_adjustment_year(pship: Partnership, y: TaxableYear, partner: Person) kind empirical {
+    label en official "the partnership takes the net decrease into account as an adjustment in the adjustment year with respect to the specified partners to which it relates";
+}
+@source(IRC_S6225_C, relation = formalizes, coverage = exact, quote = "(ii) for the partnership to take such net decrease into account as an adjustment in the adjustment year with respect to the specified partners to which such net decrease relates.")
+rule S6225c5AiiPartnershipTakesNetDecreaseIntoAccount defeasible {
+    label en official "the partnership shall take the net decrease into account as an adjustment in the adjustment year for the specified partners";
+    for pship: Partnership;
+    for y: TaxableYear;
+    for partner: Person;
+    for amount: Money;
+    when publicly_traded_partnership_469k2(pship)
+        and specified_partner(pship, partner)
+        and net_decrease_in_specified_passive_loss_attributable(pship, y, partner, amount);
+    then duty S6225c5AiiTakeNetDecreaseIntoAccountDuty {
+        bearer pship;
+        beneficiary Secretary;
+        goal achievement {
+            condition partnership_took_net_decrease_into_account_in_adjustment_year(pship, y, partner);
+            window [-infinity, infinity];
+        }
+    };
+}
+
+// ============================================================================
+// (c)(6), (c)(7), (c)(8) — other procedures, timing, approval
+// ============================================================================
+
+pub relation secretary_provides_additional_modification_procedure(pship: Partnership, y: TaxableYear) kind empirical {
+    label en official "the Secretary by regulations or guidance provides additional procedures to modify imputed underpayment amounts";
+}
+pub relation additional_factor_determined_necessary_or_appropriate(pship: Partnership, y: TaxableYear) kind empirical {
+    label en official "the Secretary determines that the other factors are necessary or appropriate to carry out the purposes of the subsection";
+}
+pub relation additional_modification_procedure_available(pship: Partnership, y: TaxableYear) kind institutional {
+    label en unofficial "an additional modification procedure of the Secretary is available for the partnership and year";
+}
+@source(IRC_S6225_C, relation = formalizes, coverage = exact, quote = "The Secretary may by regulations or guidance provide for additional procedures to modify imputed underpayment amounts on the basis of such other factors as the Secretary determines are necessary or appropriate to carry out the purposes of this subsection.")
+rule S6225c6SecretaryMayProvideAdditionalProcedures defeasible {
+    label en official "the Secretary may provide additional modification procedures on factors determined necessary or appropriate";
+    for pship: Partnership;
+    for y: TaxableYear;
+    when secretary_provides_additional_modification_procedure(pship, y);
+    then power S6225c6AdditionalProcedurePower {
+        holder Secretary;
+        over pship;
+        exercise secretary_provides_additional_modification_procedure(pship, y);
+        valid_when additional_factor_determined_necessary_or_appropriate(pship, y);
+        effect create(additional_modification_procedure_available(pship, y));
+    };
+}
+pub relation modification_submission_timely(pship: Partnership, y: TaxableYear) kind institutional {
+    label en official "everything required under subsection (c) is submitted not later than the close of the 270-day period beginning on the date the notice of proposed partnership adjustment is mailed, or the extended period the Secretary consented to";
+}
+@source(IRC_S6225_C, relation = formalizes, coverage = exact, quote = "Anything required to be filed or submitted under this subsection shall be submitted to the Secretary not later than the close of the 270-day period beginning on the date on which the notice of a proposed partnership adjustment is mailed under section 6231")
+rule S6225c7SubmissionWithin270Days defeasible {
+    label en official "a submission within 270 days of the notice of proposed partnership adjustment is timely";
+    for pship: Partnership;
+    for y: TaxableYear;
+    for submittedOn: Date;
+    for noppaOn: Date;
+    when bba_modification_submission_complete_on(pship, y, submittedOn)
+        and notice_of_proposed_partnership_adjustment_mailed(pship, y, noppaOn)
+        and submittedOn <= add_calendar_period(noppaOn, 270 calendar_day);
+    then modification_submission_timely(pship, y);
+}
+@source(IRC_S6225_C, relation = formalizes, coverage = exact, quote = "unless such period is extended with the consent of the Secretary.")
+rule S6225c7SubmissionWithinConsentedExtension defeasible {
+    label en official "a submission within the period the Secretary consented to extend is timely";
+    for pship: Partnership;
+    for y: TaxableYear;
+    for submittedOn: Date;
+    for until: Date;
+    when bba_modification_submission_complete_on(pship, y, submittedOn)
+        and bba_modification_submission_extension_consented_until(pship, y, until)
+        and submittedOn <= until;
+    then modification_submission_timely(pship, y);
+}
+pub relation secretary_approves_modification(pship: Partnership, y: TaxableYear) kind empirical {
+    label en official "the Secretary approves the modification of the imputed underpayment";
+}
+pub relation modification_approved(pship: Partnership, y: TaxableYear) kind institutional {
+    label en official "the modification of the imputed underpayment is approved by the Secretary";
+}
+pub relation modification_approved_twin(pship: Partnership, y: TaxableYear) kind institutional {
+    label en unofficial "twin of the power effect `modification_approved`, from the same premises, so that defeasible rules can read it (E-0134)";
+}
+@source(IRC_S6225_C, relation = formalizes, coverage = exact, quote = "Any modification of the imputed underpayment amount under this subsection shall be made only upon approval of such modification by the Secretary.")
+rule S6225c8ModificationOnlyOnApproval defeasible {
+    label en official "a modification of the imputed underpayment is made only upon the Secretary's approval, on a timely submission";
+    for pship: Partnership;
+    for y: TaxableYear;
+    when secretary_approves_modification(pship, y);
+    then power S6225c8ApproveModificationPower {
+        holder Secretary;
+        over pship;
+        exercise secretary_approves_modification(pship, y);
+        valid_when modification_submission_timely(pship, y);
+        effect create(modification_approved(pship, y));
+    };
+}
+rule S6225c8ModificationApprovedTwin defeasible {
+    for pship: Partnership;
+    for y: TaxableYear;
+    when secretary_approves_modification(pship, y) and modification_submission_timely(pship, y);
+    then modification_approved_twin(pship, y);
+}
+
+// ============================================================================
+// The modified imputed underpayment
+// ============================================================================
+
+pub relation modification_excluded_total(pship: Partnership, y: TaxableYear, total: Money) kind institutional {
+    label en unofficial "the total of the portions left out of the imputed underpayment under (c)(2), (c)(3) and (c)(5)";
+}
+rule S6225cExcludedTotal defeasible {
+    for pship: Partnership;
+    for y: TaxableYear;
+    when modification_approved_twin(pship, y);
+    then modification_excluded_total(pship, y,
+        sum all amount: Money for partner: Person where excluded_partner_portion(pship, y, partner, amount));
+}
+pub relation modification_lower_rate_base_total(pship: Partnership, y: TaxableYear, total: Money) kind institutional {
+    label en unofficial "the total of the portions to which a lower rate applies";
+}
+rule S6225cLowerRateBaseTotal defeasible {
+    for pship: Partnership;
+    for y: TaxableYear;
+    when modification_approved_twin(pship, y);
+    then modification_lower_rate_base_total(pship, y,
+        sum all base: Money for partner: Person where lower_rate_tax_of_partner(pship, y, partner, _) and lower_rate_portion_base(pship, y, partner, base));
+}
+pub relation modification_lower_rate_tax_total(pship: Partnership, y: TaxableYear, total: Money) kind institutional {
+    label en unofficial "the tax on the lower-rate portions";
+}
+rule S6225cLowerRateTaxTotal defeasible {
+    for pship: Partnership;
+    for y: TaxableYear;
+    when modification_approved_twin(pship, y);
+    then modification_lower_rate_tax_total(pship, y,
+        sum all tax: Money for partner: Person where lower_rate_tax_of_partner(pship, y, partner, tax));
+}
+pub relation modified_imputed_underpayment(pship: Partnership, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the imputed underpayment as modified: the net adjustments less the portions left out and the lower-rate portions, at the highest rate, plus the tax on the lower-rate portions";
+}
+@source(IRC_S6225_C, relation = formalizes, coverage = partial, quote = "the imputed underpayment amount shall be determined without regard to the portion of the adjustments so taken into account.")
+rule S6225cModifiedImputedUnderpayment defeasible {
+    label en official "the modified imputed underpayment leaves out the excluded and lower-rate portions and adds the tax on the lower-rate portions";
+    for pship: Partnership;
+    for y: TaxableYear;
+    for net: Money;
+    for rate: Decimal;
+    for excluded: Money;
+    for lowerBase: Money;
+    for lowerTax: Money;
+    when modification_approved_twin(pship, y)
+        and net_positive_partnership_adjustments(pship, y, net)
+        and applicable_highest_rate_for_reviewed_year(pship, y, rate)
+        and modification_excluded_total(pship, y, excluded)
+        and modification_lower_rate_base_total(pship, y, lowerBase)
+        and modification_lower_rate_tax_total(pship, y, lowerTax);
+    then modified_imputed_underpayment(pship, y,
+        round(max(net - excluded - lowerBase, 0.00 USD) * rate, 2, "HALF_UP") + lowerTax);
+}

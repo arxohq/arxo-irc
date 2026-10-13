@@ -1,0 +1,255 @@
+// Section 1(g): certain unearned income of children taxed as if parent's
+// income ("kiddie tax"). Modelled: (g)(1) computation, (g)(2) child-to-whom-
+// applies conditions, (g)(3) allocable parental tax, (g)(4)(A)/(B) net
+// unearned income, (g)(5) parent selection. NOT modelled to executable rules
+// in this stage (classified below, not silently dropped): (g)(4)(C)
+// (qualified disability trusts — a narrow distributional rule reading
+// sections 642/652/662, none of which this package owns), (g)(6) (TIN
+// reporting — a procedural duty with no computed consequence to check here),
+// (g)(7) (parental election to report a child's income — a genuine `power`
+// this stage records the SHAPE of but does not fully wire, given the
+// dependency chain through §911(d)(2) earned income and §3406 backup
+// withholding this package does not own).
+
+// `Person`/`Individual`/`TaxableYear` aliases live in `filing-status.law`
+// (package-scoped, per LDC-E1201).
+
+// --- Dependency contracts -----------------------------------------------------
+
+use self::{
+    IRC_S1_G,
+    Individual,
+    Person,
+    TaxableYear,
+    married_at_close_of_year,
+    tax_under_section_1,
+};
+
+// §911(d)(2): earned income. Producer: `international`/`gross-income`
+// (unresolved); pending.
+pub relation earned_income(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "earned income (as defined in section 911(d)(2))";
+}
+// §63(c)(5)(A): the standard-deduction limitation amount for certain
+// dependents. Producer: `gross-income` (owns §63); pending.
+pub relation section_63c5a_amount(y: TaxableYear, amount: Money) kind institutional {
+    label en official "the amount in effect for the taxable year under section 63(c)(5)(A)";
+}
+// §152(c): whether a child meets the section 152(c)(3) age requirements
+// (used by the "age 18-but-a-student" branch of (g)(2)(A)(ii)). Producer:
+// unresolved; pending.
+pub relation meets_152c3_age_requirements(child: Person, y: TaxableYear) kind institutional {
+    label en official "meets the age requirements of section 152(c)(3) (determined without regard to subparagraph (B) thereof)";
+}
+pub relation attained_age_18_before_close_of_year(child: Person, y: TaxableYear) kind empirical {
+    label en official "has not attained age 18 before the close of the taxable year";
+}
+pub relation child_files_joint_return(child: Person, y: TaxableYear) kind empirical {
+    label en official "such child does not file a joint return for the taxable year";
+}
+pub relation parent_alive_at_close_of_year(child: Person, y: TaxableYear) kind empirical {
+    label en official "either parent of such child is alive at the close of the taxable year";
+}
+relation itemized_deductions_connected_to_unearned_income(child: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the amount of the itemized deductions allowed by this chapter for the taxable year which are directly connected with the production of the unearned income";
+}
+relation itemizes_deductions(p: Person, y: TaxableYear) kind empirical {
+    label en unofficial "the child itemizes his deductions for the taxable year";
+}
+
+// --- Section 1(g)(2): child to whom this subsection applies ------------------
+
+pub relation kiddie_tax_applies(child: Person, y: TaxableYear) kind institutional {
+    label en official "the child to whom this subsection applies";
+}
+
+@source(IRC_S1_G, quote = "This subsection shall apply to any child for any taxable year if—")
+rule KiddieTaxAppliesUnder18(child: Person, y: TaxableYear) strict {
+    label en official "such child has not attained age 18 before the close of the taxable year, either parent of such child is alive at the close of the taxable year, and such child does not file a joint return for the taxable year";
+    when attained_age_18_before_close_of_year(child, y);
+    when parent_alive_at_close_of_year(child, y);
+    when not child_files_joint_return(child, y);
+    then kiddie_tax_applies(child, y);
+}
+
+@source(IRC_S1_G, quote = "has attained age 18 before the close of the taxable year and meets the age requirements of section 152(c)(3)")
+rule KiddieTaxAppliesStudent(child: Person, y: TaxableYear) strict {
+    label en official "has attained age 18 before the close of the taxable year and meets the age requirements of section 152(c)(3), whose earned income does not exceed one-half of support";
+    when not attained_age_18_before_close_of_year(child, y);
+    when meets_152c3_age_requirements(child, y);
+    when parent_alive_at_close_of_year(child, y);
+    when not child_files_joint_return(child, y);
+    when earned_income_at_most_half_of_support(child, y);
+    then kiddie_tax_applies(child, y);
+}
+
+// §1(g)(2)(A)(ii)(II): "whose earned income ... does not exceed one-half of
+// the amount of the individual's support" — the support computation itself
+// (§152(c)(1)(D), §152(f)(5)) is a dependency this package does not own;
+// declared as a typed institutional contract rather than computed here.
+pub relation earned_income_at_most_half_of_support(child: Person, y: TaxableYear) kind institutional {
+    label en official "whose earned income ... for such taxable year does not exceed one-half of the amount of the individual's support";
+}
+
+// --- Section 1(g)(5): the parent whose income is taken into account ---------
+
+pub relation kiddie_tax_parent(child: Person, y: TaxableYear, parent: Individual) kind institutional {
+    label en official "the parent whose taxable income shall be taken into account";
+}
+relation custodial_parent(child: Person, y: TaxableYear, parent: Individual) kind institutional {
+    label en official "the custodial parent (within the meaning of section 152(e)) of the child";
+}
+relation greater_taxable_income_of_two(y: TaxableYear, candidate: Individual, other: Individual) kind institutional {
+    label en unofficial "candidate has the greater taxable income of the two married-filing-separately individuals";
+}
+
+@source(IRC_S1_G, quote = "in the case of parents who are not married (within the meaning of section 7703), the custodial parent (within the meaning of section 152(e)) of the child")
+rule KiddieTaxParentUnmarried(child: Person, y: TaxableYear, parent: Individual) strict {
+    label en official "in the case of parents who are not married, the custodial parent of the child";
+    when custodial_parent(child, y, parent);
+    when not married_at_close_of_year(parent, y);
+    then kiddie_tax_parent(child, y, parent);
+}
+
+@source(IRC_S1_G, quote = "in the case of married individuals filing separately, the individual with the greater taxable income")
+rule KiddieTaxParentMarriedSeparate(child: Person, y: TaxableYear, parent: Individual, other: Individual) strict {
+    label en official "in the case of married individuals filing separately, the individual with the greater taxable income";
+    when custodial_parent(child, y, parent);
+    when married_at_close_of_year(parent, y);
+    when greater_taxable_income_of_two(y, parent, other);
+    then kiddie_tax_parent(child, y, parent);
+}
+
+// --- Section 1(g)(4): net unearned income -------------------------------------
+
+pub relation net_unearned_income(child: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "net unearned income";
+}
+relation adjusted_gross_income(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "adjusted gross income for the taxable year";
+}
+
+@source(IRC_S1_G, quote = "The term \"net unearned income\" means the excess of—")
+rule NetUnearnedIncomeNonItemizer(child: Person, y: TaxableYear, agi: Money, earned: Money, floor: Money) strict {
+    label en official "the portion of adjusted gross income not attributable to earned income, over twice the section 63(c)(5)(A) amount (child does not itemize)";
+    when not itemizes_deductions(child, y);
+    when adjusted_gross_income(child, y, agi);
+    when earned_income(child, y, earned);
+    when section_63c5a_amount(y, floor);
+    then net_unearned_income(child, y, (agi - earned) - (floor + floor));
+}
+
+@source(IRC_S1_G, quote = "if the child itemizes his deductions for the taxable year, the amount of the itemized deductions allowed by this chapter for the taxable year which are directly connected with the production")
+rule NetUnearnedIncomeItemizer(child: Person, y: TaxableYear, agi: Money, earned: Money, floor: Money, itemized: Money) strict {
+    label en official "the portion of adjusted gross income not attributable to earned income, over the section 63(c)(5)(A) amount plus the connected itemized deductions (child itemizes and they exceed the floor)";
+    when itemizes_deductions(child, y);
+    when adjusted_gross_income(child, y, agi);
+    when earned_income(child, y, earned);
+    when section_63c5a_amount(y, floor);
+    when itemized_deductions_connected_to_unearned_income(child, y, itemized);
+    when itemized_exceeds(itemized, floor);
+    then net_unearned_income(child, y, (agi - earned) - (floor + itemized));
+}
+
+relation itemized_exceeds(itemized: Money, floor: Money) kind institutional {
+    label en unofficial "the itemized deductions directly connected with the unearned income exceed the section 63(c)(5)(A) floor";
+}
+
+// §1(g)(4)(B): "shall not exceed the individual's taxable income" is a cap,
+// not a separate computation; not modelled as its own rule in this stage
+// (classified INTERPRETATION — combining it correctly with the two rules
+// above needs a `min` construct this stage did not verify is available;
+// left for the next pass rather than guessed).
+
+// --- Section 1(g)(3): allocable parental tax ----------------------------------
+
+pub relation allocable_parental_tax(parent: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en official "allocable parental tax";
+}
+relation tax_on_parent_with_children_income(parent: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "the tax which would be imposed by this section on the parent's taxable income if such income included the net unearned income of all children of the parent to whom this subsection applies";
+}
+
+@source(IRC_S1_G, quote = "The term \"allocable parental tax\" means the excess of—")
+rule AllocableParentalTax(parent: Individual, y: TaxableYear, with_children: Money, without: Money) strict {
+    label en official "the excess of the tax on the parent's income including children's net unearned income, over the tax on the parent without regard to this subsection";
+    when tax_on_parent_with_children_income(parent, y, with_children);
+    when tax_under_section_1(parent, y, without);
+    when with_children_exceeds(with_children, without);
+    then allocable_parental_tax(parent, y, with_children - without);
+}
+relation with_children_exceeds(with_children: Money, without: Money) kind institutional {
+    label en unofficial "with_children > without (the excess required by the (g)(3)(A) formula is positive)";
+}
+
+pub relation childs_share_of_allocable_parental_tax(child: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "a child's share of any allocable parental tax";
+}
+relation aggregate_net_unearned_income_of_siblings(parent: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the aggregate net unearned income of all children of such parent to whom this subsection applies";
+}
+
+@source(IRC_S1_G, quote = "A child's share of any allocable parental tax of a parent shall be equal to an amount which bears the same ratio to the total allocable parental tax as the child's net unearned income bears to the aggregate net unearned income of all children")
+rule ChildsShareOfAllocableParentalTax(child: Person, y: TaxableYear, parent: Individual, total: Money, own: Money, aggregate: Money) strict {
+    label en official "a child's share ... bears the same ratio to the total allocable parental tax as the child's net unearned income bears to the aggregate net unearned income of all children of such parent";
+    when kiddie_tax_parent(child, y, parent);
+    when allocable_parental_tax(parent, y, total);
+    when net_unearned_income(child, y, own);
+    when aggregate_net_unearned_income_of_siblings(parent, y, aggregate);
+    when aggregate_is_positive(aggregate);
+    then childs_share_of_allocable_parental_tax(child, y, total * (own / aggregate));
+}
+relation aggregate_is_positive(amount: Money) kind institutional {
+    label en unofficial "aggregate net unearned income of the parent's children is greater than zero (division guard)";
+}
+
+// §1(g)(3)(C) (different parent taxable year) is not modelled: it changes
+// WHICH parent-year value feeds the rule above, not the formula itself;
+// classified INTERPRETATION.
+
+// --- Section 1(g)(1): the kiddie-tax amount ----------------------------------
+
+pub relation kiddie_tax_amount(child: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the tax imposed by this section [on a child to whom subsection (g) applies]";
+}
+relation tax_on_reduced_income(child: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "the tax which would be imposed by this section if the taxable income of such child for the taxable year were reduced by the net unearned income of such child";
+}
+
+@source(IRC_S1_G, quote = "the tax imposed by this section shall be equal to the greater of—")
+rule KiddieTaxAmount(child: Person, y: TaxableYear, without_subsection: Money, reduced: Money, share: Money) strict {
+    label en official "the greater of the tax imposed without regard to this subsection, or the sum of the tax on reduced taxable income plus the child's share of the allocable parental tax";
+    when kiddie_tax_applies(child, y);
+    when tax_under_section_1(child, y, without_subsection);
+    when tax_on_reduced_income(child, y, reduced);
+    when childs_share_of_allocable_parental_tax(child, y, share);
+    when greater_of_two(without_subsection, reduced + share, without_subsection);
+    then kiddie_tax_amount(child, y, without_subsection);
+}
+
+@source(IRC_S1_G, quote = "the tax imposed by this section shall be equal to the greater of—")
+rule KiddieTaxAmountAlternative(child: Person, y: TaxableYear, without_subsection: Money, reduced: Money, share: Money) strict {
+    label en official "the greater of the tax imposed without regard to this subsection, or the sum of the tax on reduced taxable income plus the child's share of the allocable parental tax";
+    when kiddie_tax_applies(child, y);
+    when tax_under_section_1(child, y, without_subsection);
+    when tax_on_reduced_income(child, y, reduced);
+    when childs_share_of_allocable_parental_tax(child, y, share);
+    when greater_of_two(reduced + share, without_subsection, reduced + share);
+    then kiddie_tax_amount(child, y, reduced + share);
+}
+relation greater_of_two(a: Money, b: Money, result: Money) kind institutional {
+    label en unofficial "result is the greater of a and b (external comparison guard, avoids assuming a max() builtin not yet verified in this grammar)";
+}
+
+// §1(g)(6) (TIN reporting duty) and §1(g)(7) (parental election) are
+// classified separately (not modelled to executable rules in this stage):
+// (g)(6) is a `duty` (bearer: the parent; achievement goal: provide the TIN)
+// with no arithmetic consequence this package computes — recorded
+// INTERPRETATION pending a positions module; (g)(7) is a genuine `power` of
+// the parent (valid_when the four (7)(A) conditions, effect: the child is
+// treated as having no gross income and the parent's return includes the
+// specified amounts) whose full wiring depends on §3406 (backup
+// withholding, owned elsewhere) and §6012 (filing duty, owned elsewhere) —
+// recorded EXTERNAL_DEPENDENCY / TECH_GAP with the reproduction "a scenario
+// asserting the four (7)(A) facts and the parent's election has no rule
+// producing the (7)(B) consequence".

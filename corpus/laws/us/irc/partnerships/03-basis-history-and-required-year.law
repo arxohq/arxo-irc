@@ -1,0 +1,249 @@
+// 26 U.S.C. §705, §706(a)-(b) — the partner's outside-basis history and the
+// partnership's required taxable year (majority interest / principal
+// partners / least aggregate deferral).
+//
+// JUDGMENT CALLS AND GAPS (see report):
+//  - §705(a) is modeled as a period-to-period relation, exactly like the
+//    §704(d) carryover above: `outside_basis_start` (case-asserted — either
+//    the section 722/742 basis for the first year, or the prior year's
+//    `outside_basis_end`, which the case re-asserts as next year's start
+//    per the method note "carryovers are relations between periods") plus
+//    THIS year's increases/decreases produces `outside_basis_end`. No rule
+//    reads `outside_basis_end` and `outside_basis_start` of the SAME year in
+//    the same head (no self-recursion; LDC-E4102 avoided).
+//  - §705(a)(1)(C) (depletion excess) and §705(a)(3) (oil-and-gas depletion
+//    reduction) are OUT of scope (need section 613A, not read by this
+//    package) — TECH_GAP, not silently dropped: the increase/decrease rules
+//    below only implement (a)(1)(A)-(B) and (a)(2)(A)-(B).
+//  - The exact-Decimal/"never below zero" requirement is implemented with
+//    `max(0 USD, ...)` at the point section 705(a)(2)-(3) itself says "not
+//    below zero" (the decrease, not the whole basis expression, per the
+//    statute's own parenthetical placement).
+//  - §706(b)(4)(A) majority interest taxable year and (a)(3) principal
+//    partner are both modeled as computations over case-asserted per-partner
+//    taxable-year/interest facts (a finite partner roster, not an aggregate
+//    over a derived predicate).
+//  - §706(b)(4) least aggregate deferral: modeled with the intermediate
+//    "aggregate deferral for a candidate year" value exposed as its own
+//    relation (not just the final winner), per the method note's
+//    "computation... with intermediate values". The candidate-year set
+//    itself is case-supplied (see header of this module and 02's note).
+//  - §706(b)(1)(C) business purpose and (b)(2) partner conforming change are
+//    EVALUATIVE (Secretary's satisfaction), not modeled as an arithmetic
+//    guard: a case that asserts `business_purpose_established` simply
+//    overrides `required_taxable_year`'s consequence via the `unless` guard
+//    on the (i)-(iii) required-year rule (E-0179-style: the norm's own
+//    "except as provided" clause).
+
+language "law.core" version "0.2";
+package us.irc.partnerships version "0.1.1";
+namespace "urn:us:irc:partnerships:clir";
+
+use self::{
+    IRC_S705_A,
+    IRC_S706_A,
+    IRC_S706_B,
+    Partnership,
+    Person,
+    TaxableYear,
+    is_partner,
+    outside_basis_depletion_decrease_705a3,
+    outside_basis_depletion_increase_705a1C,
+    partnership_interest_share,
+};
+
+// ============================================================================
+// §705: determination of basis of partner's interest
+// ============================================================================
+
+pub relation outside_basis_start(partner: Person, pship: Partnership, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the partner's basis in the partnership interest at the START of year y — section 722/742 basis for the first year the partner holds the interest, or the prior year's outside_basis_end re-asserted by the case as this year's start (period-to-period relation, not a recursive ledger)";
+}
+pub relation outside_basis_increase_taxable_income_share(partner: Person, pship: Partnership, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the partner's distributive share for the year of the partnership's taxable income as determined under section 703(a) (section 705(a)(1)(A))";
+}
+pub relation outside_basis_increase_exempt_income_share(partner: Person, pship: Partnership, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the partner's distributive share for the year of income of the partnership exempt from tax under this title (section 705(a)(1)(B))";
+}
+pub relation outside_basis_decrease_distributions(partner: Person, pship: Partnership, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "distributions by the partnership to the partner during the year as provided in section 733 (section 705(a)(2) chapeau) — see 04/05 modules' distribution rules for how this amount is itself computed";
+}
+pub relation outside_basis_decrease_loss_share(partner: Person, pship: Partnership, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the partner's distributive share for the year of losses of the partnership (section 705(a)(2)(A)) — read here as the ALLOWED amount already limited by section 704(d) (partner_loss_allowed), not the unlimited distributive share";
+}
+pub relation outside_basis_decrease_nondeductible_noncapital_expenditures(partner: Person, pship: Partnership, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the partner's distributive share for the year of expenditures of the partnership not deductible in computing its taxable income and not properly chargeable to capital account (section 705(a)(2)(B))";
+}
+
+pub relation outside_basis_end(partner: Person, pship: Partnership, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "the partner's adjusted basis in the partnership interest at the end of year y, after the section 705(a) increases and decreases available to this package's scope (see header for the excluded depletion items)";
+}
+
+@source(IRC_S705_A, relation = formalizes, coverage = partial, quote = "increased by the sum of his distributive share for the taxable year and prior taxable years of")
+rule S705IncreaseByTaxableAndExemptIncome(partner: Person, pship: Partnership, y: TaxableYear, start: Money, ti_share: Money, exempt_share: Money, depletion_excess: Money) defeasible {
+    label en official "the partner's basis is increased by the distributive share of the partnership's taxable income and tax-exempt income for the year (section 705(a)(1)(A)-(B))";
+    when outside_basis_start(partner, pship, y, start);
+    when outside_basis_increase_taxable_income_share(partner, pship, y, ti_share);
+    when outside_basis_increase_exempt_income_share(partner, pship, y, exempt_share);
+    when outside_basis_depletion_increase_705a1C(partner, pship, y, depletion_excess);
+    then outside_basis_after_increases(partner, pship, y, start + ti_share + exempt_share + depletion_excess);
+}
+pub relation outside_basis_after_increases(partner: Person, pship: Partnership, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "outside basis after the section 705(a)(1) increases, before the section 705(a)(2) decreases";
+}
+
+@source(IRC_S705_A, relation = formalizes, coverage = partial, quote = "decreased (but not below zero) by distributions by the partnership as provided in section 733 and by the sum of his distributive share for the taxable year and prior taxable years of")
+rule S705DecreaseByDistributionsLossesAndExpenditures(partner: Person, pship: Partnership, y: TaxableYear, after_increases: Money, distributions: Money, loss_share: Money, nondeductible: Money, depletion: Money) defeasible {
+    label en official "the partner's basis (not below zero) is decreased by distributions under section 733 and by the distributive share of losses and nondeductible noncapitalized expenditures (section 705(a)(2)(A)-(B))";
+    when outside_basis_after_increases(partner, pship, y, after_increases);
+    when outside_basis_decrease_distributions(partner, pship, y, distributions);
+    when outside_basis_decrease_loss_share(partner, pship, y, loss_share);
+    when outside_basis_decrease_nondeductible_noncapital_expenditures(partner, pship, y, nondeductible);
+    when outside_basis_depletion_decrease_705a3(partner, pship, y, depletion);
+    then outside_basis_end(partner, pship, y, max(0 USD, after_increases - distributions - loss_share - nondeductible - depletion));
+}
+
+// This package's pub interface name for outside basis (see AGENT-BRIEF's pub
+// list): an alias over the end-of-year value, since section 705 speaks of
+// "the adjusted basis of a partner's interest" without a start/end split.
+pub relation outside_basis(partner: Person, pship: Partnership, on: TaxableYear, amount: Money) kind institutional {
+    label en official "the adjusted basis of a partner's interest in a partnership as of the end of the stated taxable year (section 705)";
+}
+rule OutsideBasisIsEndOfYearBasis(partner: Person, pship: Partnership, y: TaxableYear, amount: Money) defeasible {
+    when outside_basis_end(partner, pship, y, amount);
+    then outside_basis(partner, pship, y, amount);
+}
+
+// ============================================================================
+// §706(a): year in which partnership income is includible
+// ============================================================================
+
+pub relation partnership_year_ends_within_partner_year(pship_year: TaxableYear, partner_year: TaxableYear) kind empirical {
+    label en unofficial "the stated partnership taxable year ends within or with the stated partner taxable year (section 706(a))";
+}
+
+@source(IRC_S706_A, relation = formalizes, coverage = exact, quote = "the inclusions required by section 702 and section 707(c) with respect to a partnership shall be based on the income, gain, loss, deduction, or credit of the partnership for any taxable year of the partnership ending within or with the taxable year of the partner")
+pub relation includible_in_partner_year(partner: Person, pship: Partnership, pship_year: TaxableYear, partner_year: TaxableYear) kind institutional {
+    label en official "section 702 and section 707(c) inclusions with respect to a partnership are based on the partnership's taxable year ending within or with the partner's taxable year (section 706(a))";
+}
+rule S706aInclusionYear(partner: Person, pship: Partnership, pship_year: TaxableYear, partner_year: TaxableYear) strict {
+    when is_partner(partner, pship);
+    when partnership_year_ends_within_partner_year(pship_year, partner_year);
+    then includible_in_partner_year(partner, pship, pship_year, partner_year);
+}
+
+// ============================================================================
+// §706(b): required taxable year of the partnership
+// ============================================================================
+
+pub relation principal_partner(partner: Person, pship: Partnership) kind institutional {
+    label en official "a partner having an interest of 5 percent or more in partnership profits or capital (section 706(b)(3))";
+}
+@source(IRC_S706_B, relation = formalizes, coverage = exact, quote = "a principal partner is a partner having an interest of 5 percent or more in partnership profits or capital")
+rule S706PrincipalPartner(partner: Person, pship: Partnership, share: Decimal) strict {
+    when partnership_interest_share(partner, pship, share);
+    when share >= 5 percent;
+    then principal_partner(partner, pship);
+}
+
+pub relation testing_day_taxable_year_share(pship: Partnership, y: TaxableYear, aggregate_share: Decimal) kind empirical {
+    label en unofficial "on a section 706(b)(4)(A)(ii) testing day, the aggregate interest in partnership profits and capital of the partners whose taxable year is y (a case-computed roster sum, not re-derived from an aggregate over ownership_interest to avoid a section 111 derived-predicate aggregate)";
+}
+pub relation majority_interest_taxable_year(pship: Partnership, y: TaxableYear) kind institutional {
+    label en official "the taxable year which, on each testing day, constituted the taxable year of one or more partners having an aggregate interest in partnership profits and capital of more than 50 percent (section 706(b)(4)(A)(i))";
+}
+@source(IRC_S706_B, relation = formalizes, coverage = exact, quote = "The term \"majority interest taxable year\" means the taxable year (if any) which, on each testing day, constituted the taxable year of 1 or more partners having (on such day) an aggregate interest in partnership profits and capital of more than 50 percent.")
+rule S706MajorityInterestTaxableYear(pship: Partnership, y: TaxableYear, aggregate_share: Decimal) strict {
+    when testing_day_taxable_year_share(pship, y, aggregate_share);
+    when aggregate_share > 50 percent;
+    then majority_interest_taxable_year(pship, y);
+}
+
+pub relation all_principal_partners_share_year(pship: Partnership, y: TaxableYear) kind empirical {
+    label en unofficial "every principal partner of the partnership has taxable year y (section 706(b)(1)(B)(ii) predicate — a case-asserted roster fact, not an aggregate over a derived predicate)";
+}
+
+// The three-tier default ladder (i)-(iii), each defeated by the ones above
+// it and by the business-purpose exception (b)(1)(C).
+relation business_purpose_established(pship: Partnership, y: TaxableYear) kind institutional {
+    label en unofficial "EVALUATIVE (DECISION-0194, Secretary's satisfaction): the partnership established a business purpose for the stated taxable year (section 706(b)(1)(C)) — case-asserted, not computed";
+}
+
+pub relation required_taxable_year(pship: Partnership, y: TaxableYear) kind institutional {
+    label en official "the partnership's required taxable year under the section 706(b)(1)(B) default ladder, subject to the section 706(b)(1)(C) business-purpose exception";
+}
+@source(IRC_S706_B, relation = formalizes, coverage = exact, quote = "the majority interest taxable year (as defined in paragraph (4))")
+rule S706RequiredYearMajorityInterest(pship: Partnership, y: TaxableYear) defeasible {
+    label en official "the required taxable year is the majority interest taxable year, if there is one (section 706(b)(1)(B)(i))";
+    when majority_interest_taxable_year(pship, y);
+    unless business_purpose_established(pship, y) and majority_interest_taxable_year(pship, y);
+    then required_taxable_year(pship, y);
+}
+@source(IRC_S706_B, relation = formalizes, coverage = exact, quote = "if there is no taxable year described in clause (i), the taxable year of all the principal partners of the partnership")
+rule S706RequiredYearAllPrincipalPartners(pship: Partnership, y: TaxableYear) defeasible {
+    label en official "absent a majority interest taxable year, the required taxable year is the taxable year of all the principal partners (section 706(b)(1)(B)(ii))";
+    when all_principal_partners_share_year(pship, y);
+    unless majority_interest_taxable_year(pship, _) and all_principal_partners_share_year(pship, y);
+    unless business_purpose_established(pship, y) and all_principal_partners_share_year(pship, y);
+    then required_taxable_year(pship, y);
+}
+
+pub relation calendar_year_default_taxable_year(pship: Partnership, y: TaxableYear) kind empirical {
+    label en unofficial "the taxable year y is the calendar year, for the section 706(b)(1)(B)(iii) default (a case-asserted classification of the year instance, since this package's scope does not import a calendar-year test from us.irc.core::time.law)";
+}
+@source(IRC_S706_B, relation = formalizes, coverage = exact, quote = "if there is no taxable year described in clause (i) or (ii), the calendar year unless the Secretary by regulations prescribes another period")
+rule S706RequiredYearCalendarDefault(pship: Partnership, y: TaxableYear) defeasible {
+    label en official "absent a majority interest taxable year or a common principal-partner year, the required taxable year is the calendar year (section 706(b)(1)(B)(iii))";
+    when calendar_year_default_taxable_year(pship, y);
+    unless majority_interest_taxable_year(pship, _) and calendar_year_default_taxable_year(pship, y);
+    unless all_principal_partners_share_year(pship, _) and calendar_year_default_taxable_year(pship, y);
+    unless business_purpose_established(pship, y) and calendar_year_default_taxable_year(pship, y);
+    then required_taxable_year(pship, y);
+}
+
+// --- §706(b)(4): least aggregate deferral, with intermediate values --------
+
+pub relation candidate_taxable_year(pship: Partnership, y: TaxableYear) kind empirical {
+    label en unofficial "y is a candidate year for the section 706(b)(4) least-aggregate-deferral computation (the taxable year of at least one partner) — a case-supplied finite candidate set, per the header note";
+}
+pub relation deferral_months_for_partner_under_candidate(partner: Person, pship: Partnership, candidate: TaxableYear, months: Decimal) kind empirical {
+    label en unofficial "the number of months of income deferral for this partner if the partnership adopted the candidate year (the count of months between the candidate year-end and the partner's own year-end) — a case-computed input, since counting months between two Date year-ends is a case-level fact here, not re-derived from add_calendar_period";
+}
+
+pub relation aggregate_deferral_for_candidate(pship: Partnership, candidate: TaxableYear, weighted_months: Decimal) kind institutional {
+    label en unofficial "intermediate value: the sum, over all partners, of each partner's interest share times the deferral months for the candidate year — the section 706(b)(4) 'aggregate deferral' figure for one candidate";
+}
+rule S706AggregateDeferralForCandidate(partner: Person, pship: Partnership, candidate: TaxableYear, share: Decimal, months: Decimal) strict {
+    label en official "one partner's weighted contribution (interest share times deferral months) to the candidate year's aggregate deferral (section 706(b)(4), the least-aggregate-deferral method of Treas. reg. 1.706-1(b), read from the statute's own use of the term)";
+    when partnership_interest_share(partner, pship, share);
+    when deferral_months_for_partner_under_candidate(partner, pship, candidate, months);
+    then partner_weighted_deferral_for_candidate(partner, pship, candidate, share * months);
+}
+pub relation partner_weighted_deferral_for_candidate(partner: Person, pship: Partnership, candidate: TaxableYear, weighted: Decimal) kind institutional {
+    label en unofficial "one partner's weighted contribution to a candidate year's aggregate deferral (intermediate value)";
+}
+rule S706SumAggregateDeferralForCandidate(pship: Partnership, candidate: TaxableYear) strict {
+    when candidate_taxable_year(pship, candidate);
+    then aggregate_deferral_for_candidate(pship, candidate,
+        sum all weighted: Decimal for partner: Person where partner_weighted_deferral_for_candidate(partner, pship, candidate, weighted));
+}
+
+pub relation minimum_aggregate_deferral(pship: Partnership, minimum: Decimal) kind institutional {
+    label en unofficial "intermediate value: the smallest aggregate deferral among all candidate years for this partnership";
+}
+rule S706MinimumAggregateDeferral(pship: Partnership, some_candidate: TaxableYear) strict {
+    when candidate_taxable_year(pship, some_candidate);
+    then minimum_aggregate_deferral(pship,
+        min all d: Decimal for c: TaxableYear where aggregate_deferral_for_candidate(pship, c, d));
+}
+
+pub relation least_aggregate_deferral_year(pship: Partnership, y: TaxableYear) kind institutional {
+    label en official "the candidate year whose aggregate deferral is the least among all candidate years (section 706(b)(4) least-aggregate-deferral method)";
+}
+rule S706LeastAggregateDeferralYear(pship: Partnership, y: TaxableYear, deferral: Decimal, minimum: Decimal) strict {
+    label en official "y is the least-aggregate-deferral year when its aggregate deferral equals the minimum among all candidates";
+    when aggregate_deferral_for_candidate(pship, y, deferral);
+    when minimum_aggregate_deferral(pship, minimum);
+    when deferral == minimum;
+    then least_aggregate_deferral_year(pship, y);
+}

@@ -1,0 +1,345 @@
+// §6503 — Suspension of the running of the period of limitation.
+//
+// METHOD NOTE: this module is PLAN §7's capability probe — several
+// suspending events over the SAME period must not be double-counted. Each
+// suspending event is modeled as a `suspension_period(p, y, k, origin,
+// start, end)` interval fact (independent of the others); the exact day
+// count is computed with `days_between` (exact calendar days, §84.4) over
+// the UNION of the intervals, not their sum, whenever two intervals are
+// known to overlap — see `S6503TwoOverlappingSuspensionsUnionDays` below
+// for the two-suspension case this stage actually implements.
+//
+// TECH_GAP (confirmed against the compiler, not merely suspected): the
+// suspended-DAY-COUNT (`assessment_period_suspended_days`, an `Integer`)
+// is correctly computable with `days_between`/`min`/`max` over variable
+// dates. STITCHING that count back into an extended
+// `assessment_period_ends` `Date`, however, is NOT: `add_calendar_period`'s
+// second argument must be a LITERAL `Quantity` (§84.2; confirmed by
+// `law-cli-core check`, error LDC-E2108, and independently documented by
+// `us.irc.returns`' own HANDOFF note for the same reason) — a
+// case-computed `Integer` cannot be turned into a `calendar_day` `Quantity`
+// and added to an arbitrary `Date`. This stage therefore computes the
+// suspended-day COUNT (the actual "two overlapping suspensions counted
+// once" probe) but does NOT shift `assessment_period_ends` by it; a
+// consumer needing the final extended date must do that arithmetic
+// outside the engine (same runtime-subset limitation §111 already
+// documents for dynamic aggregates) until a future language version adds
+// a variable-`Quantity` overload of `add_calendar_period`. Generalizing
+// past TWO simultaneous suspending events is a further, separate TECH_GAP
+// (no n-way interval-union primitive).
+//
+// JUDGMENT CALLS AND GAPS (see report):
+//  - §6503(a)(1) suspends BOTH the §6501 assessment period AND the §6502
+//    collection period; this package models only the §6501 side (per
+//    the task instruction not to model §6502) — the collection-period
+//    suspension is a typed institutional dependency contract for
+//    `collection` to read.
+//  - §6503(a)(2) (consolidated-return group suspension) is modeled as
+//    extending the same suspension fact to each group member, not as a
+//    fresh computation.
+//  - §6503(b)-(g), (i) are `collection`'s own norm (§6502 period) and are
+//    NOT modeled here (task instruction); §6503(b)/(c) are read ONLY to
+//    build the two-suspension capability probe below (they suspend
+//    COLLECTION, not assessment, in the actual statute — the probe treats
+//    them as a stand-in pair of overlapping intervals for the capability
+//    demonstration the task asks for, and this modeling choice is flagged
+//    explicitly, not silently presented as the real §6502 rule).
+//  - §6503(d), (e), (g) (chapter 11 extensions, foreign expropriation loss,
+//    chapter 42/§507/§4971/§4975 suspension) are typed institutional
+//    dependency contracts / narrow cross-references, not computed.
+//  - §6503(h) (bankruptcy) is modeled using `package.law`'s
+//    `bankruptcy_case_pending` contract, extending the §6501 assessment
+//    period by 60 days per the text.
+//  - §6503(j) (designated summons judicial-enforcement suspension) and (k)
+//    (cross-references) are NOT modeled — narrow, self-contained special
+//    rules whose own predicates (designated summons validity requirements)
+//    are a full sub-family of their own; classified TECH_GAP/NON_NORMATIVE
+//    in the coverage rows rather than attempted partially.
+//  - The rescission-of-notice sentence from §6212(d) ("nothing in this
+//    subsection shall affect any suspension ... during any period during
+//    which the rescinded notice was outstanding") is read declaratively:
+//    this module's suspension rules do not consult `notice_rescinded` at
+//    all, so a suspension already derived from a (later rescinded)
+//    notice's mailing date is never retracted by rescission.
+
+language "law.core" version "0.2";
+package us.irc.assessment version "0.1.1";
+namespace "urn:us:irc:assessment:clir";
+
+use self::{
+    Corporation,
+    IRC_S6503_A,
+    IRC_S6503_H,
+    IRC_S6503_J,
+    Notice,
+    Person,
+    Proceeding,
+    Return,
+    TaxKind,
+    TaxableYear,
+    assessment_period_ends,
+    bankruptcy_case_pending,
+    decision_final_on,
+    deficiency_notice_for,
+    petition_filed_timely,
+    petition_window_deadline,
+};
+
+pub enum SuspendingEventKind {
+    PetitionWindow;    // §6503(a)(1) — petition-window / pending-Tax-Court-decision suspension
+    Bankruptcy;         // §6503(h)
+    DesignatedSummonsEnforcement; // §6503(j)(1)(A) — module 16
+    DesignatedSummonsCompliance;  // §6503(j)(1)(B) — module 16
+    ChapterFortyTwoCorrection;    // §6503(g) — module 16
+    InsolventBankBar;             // §7507(c)(4) — module 21 (bar on assessment/collection against an insolvent bank, plus 90 days)
+    label en unofficial "which §6503 provision produced this suspension interval";
+}
+pub relation suspension_period(p: Person, y: TaxableYear, k: TaxKind, origin: SuspendingEventKind, start: Date, end: Date) kind institutional {
+    label en unofficial "an interval during which the §6501 assessment period does not run; `origin` names WHICH §6503 provision produced the interval, so two DIFFERENT provisions' intervals for the same (p, y, k) are distinguishable for the overlap probe below (two intervals from the SAME provision are not modeled as separately overlapping — a case with two petition-window notices for the same year is out of this stage's scope)";
+}
+
+// --- (a)(1) — Suspension during the §6213(a) prohibition, plus 60 days ----
+
+@source(IRC_S6503_A, relation = formalizes, coverage = exact, quote = "The running of the period of limitations provided in section 6501 or 6502 on the making of assessments or the collection by levy or a proceeding in court, in respect of any deficiency as defined in section 6211 (relating to income, estate, gift and certain excise taxes), shall (after the mailing of a notice under section 6212(a)) be suspended for the period during which the Secretary is prohibited from making the assessment or from collecting by levy or a proceeding in court (and in any event, if a proceeding in respect of the deficiency is placed on the docket of the Tax Court, until the decision of the Tax Court becomes final), and for 60 days thereafter.")
+pub rule S6503SuspendedDuringPetitionWindowPlusSixtyDays defeasible {
+    for n: Notice;
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for mailedOn: Date;
+    for deadline: Date;
+    when deficiency_notice_for(n, p, y, k)
+        and us.irc.core::mailed_on(n, mailedOn)
+        and petition_window_deadline(n, p, deadline);
+    then suspension_period(p, y, k, PetitionWindow, mailedOn, add_calendar_period(deadline, 60 calendar_day));
+}
+@source(IRC_S6503_A, relation = formalizes, coverage = exact, quote = "and in any event, if a proceeding in respect of the deficiency is placed on the docket of the Tax Court, until the decision of the Tax Court becomes final), and for 60 days thereafter.")
+pub rule S6503SuspendedThroughFinalityPlusSixtyDays defeasible {
+    for pr: Proceeding;
+    for n: Notice;
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for mailedOn: Date;
+    for finalOn: Date;
+    when petition_filed_timely(pr, n, p)
+        and deficiency_notice_for(n, p, y, k)
+        and us.irc.core::mailed_on(n, mailedOn)
+        and decision_final_on(pr, finalOn);
+    then suspension_period(p, y, k, PetitionWindow, mailedOn, add_calendar_period(finalOn, 60 calendar_day));
+}
+
+// --- (a)(2) — Consolidated-return group -------------------------------------
+
+pub relation consolidated_return_group_member(member: Person, filer: Person, y: TaxableYear) kind empirical {
+    label en official "a corporation with which such corporation made a consolidated income tax return for such taxable year";
+}
+pub relation petition_window_suspension_of_filer(filer: Person, y: TaxableYear, n: Notice, start: Date, end: Date) kind institutional {
+    label en unofficial "the (a)(1) suspension interval computed for the FILING corporation, read separately from generic `suspension_period` so extending it to the consolidated group (a)(2) does not recurse through `suspension_period` itself (§110/§191 stratification: a predicate may not both consume and produce itself through the SAME rule family)";
+}
+rule S6503PetitionWindowSuspensionOfFilerFromDomestic defeasible {
+    for n: Notice;
+    for filer: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for mailedOn: Date;
+    for deadline: Date;
+    when deficiency_notice_for(n, filer, y, k)
+        and us.irc.core::mailed_on(n, mailedOn)
+        and petition_window_deadline(n, filer, deadline)
+        and k == us.irc.core::IncomeCh1;
+    then petition_window_suspension_of_filer(filer, y, n, mailedOn, add_calendar_period(deadline, 60 calendar_day));
+}
+@source(IRC_S6503_A, relation = formalizes, coverage = exact, quote = "If a notice under section 6212(a) in respect of a deficiency in tax imposed by subtitle A for any taxable year is mailed to a corporation, the suspension of the running of the period of limitations provided in paragraph (1) of this subsection shall apply in the case of corporations with which such corporation made a consolidated income tax return for such taxable year.")
+rule S6503SuspensionExtendsToConsolidatedGroup defeasible {
+    for n: Notice;
+    for filer: Corporation;
+    for member: Person;
+    for y: TaxableYear;
+    for start: Date;
+    for end: Date;
+    when consolidated_return_group_member(member, filer, y)
+        and petition_window_suspension_of_filer(filer, y, n, start, end);
+    then suspension_period(member, y, us.irc.core::IncomeCh1, PetitionWindow, start, end);
+}
+rule S6503PetitionWindowSuspensionOfFilerAppliesToItself defeasible {
+    for n: Notice;
+    for filer: Person;
+    for y: TaxableYear;
+    for start: Date;
+    for end: Date;
+    when petition_window_suspension_of_filer(filer, y, n, start, end);
+    then suspension_period(filer, y, us.irc.core::IncomeCh1, PetitionWindow, start, end);
+}
+
+// --- (h) — Bankruptcy -------------------------------------------------------
+
+pub relation bankruptcy_case_started(p: Person, start: Date) kind institutional {
+    label en unofficial "the date the title 11 case (and with it the Secretary's prohibition from assessing) began — pending: `collection`, not this package's norm";
+}
+@source(IRC_S6503_H, relation = formalizes, coverage = partial, quote = "The running of the period of limitations provided in section 6501 or 6502 on the making of assessments or collection shall, in a case under title 11 of the United States Code, be suspended for the period during which the Secretary is prohibited by reason of such case from making the assessment or from collecting and—")
+pub rule S6503SuspendedDuringBankruptcyProhibitionPlusSixtyDays strict {
+    for r: Return;
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for start: Date;
+    for prohibitedThrough: Date;
+    when us.irc.core::return_of(r, p, y, k)
+        and bankruptcy_case_pending(p, prohibitedThrough)
+        and bankruptcy_case_started(p, start);
+    then suspension_period(p, y, k, Bankruptcy, start, add_calendar_period(prohibitedThrough, 60 calendar_day));
+}
+
+// ============================================================================
+// Two overlapping suspensions counted once (PLAN §7 capability probe)
+// ============================================================================
+
+pub relation two_suspensions_overlap(p: Person, y: TaxableYear, k: TaxKind) kind institutional {
+    label en unofficial "at least two DISTINCT `suspension_period` origins are on record for the same (p, y, k) and their intervals overlap";
+}
+rule S6503TwoSuspensionsOverlapDetected defeasible {
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for origin1: SuspendingEventKind;
+    for origin2: SuspendingEventKind;
+    for start1: Date;
+    for end1: Date;
+    for start2: Date;
+    for end2: Date;
+    when suspension_period(p, y, k, origin1, start1, end1)
+        and suspension_period(p, y, k, origin2, start2, end2)
+        and origin1 != origin2
+        and start1 <= end2
+        and start2 <= end1;
+    then two_suspensions_overlap(p, y, k);
+}
+
+pub relation assessment_period_suspended_days(p: Person, y: TaxableYear, k: TaxKind, days: Integer) kind institutional {
+    label en unofficial "the total number of calendar days by which the §6501 period is extended (the UNION of every known suspension interval, never their raw sum) — see the module header TECH_GAP for why this `Integer` is not itself folded back into `assessment_period_ends`";
+}
+rule S6503SuspendedDaysFromOneInterval defeasible {
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for origin: SuspendingEventKind;
+    for start: Date;
+    for end: Date;
+    when suspension_period(p, y, k, origin, start, end) and not_known(two_suspensions_overlap(p, y, k));
+    then assessment_period_suspended_days(p, y, k, days_between(start, end));
+}
+@source(IRC_S6503_A, relation = formalizes, coverage = contextual, quote = "shall (after the mailing of a notice under section 6212(a)) be suspended for the period during which the Secretary is prohibited from making the assessment or from collecting by levy or a proceeding in court")
+rule S6503TwoOverlappingSuspensionsUnionDays defeasible {
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for origin1: SuspendingEventKind;
+    for origin2: SuspendingEventKind;
+    for start1: Date;
+    for end1: Date;
+    for start2: Date;
+    for end2: Date;
+    when suspension_period(p, y, k, origin1, start1, end1)
+        and suspension_period(p, y, k, origin2, start2, end2)
+        and origin1 != origin2
+        and start1 <= end2
+        and start2 <= end1;
+    then assessment_period_suspended_days(p, y, k,
+        (days_between(start1, end1) + days_between(start2, end2)) - days_between(max(start1, start2), min(end1, end2)));
+}
+// TECH_GAP: this rule handles exactly TWO overlapping suspension origins.
+// A third simultaneous suspending event (e.g. a bankruptcy case opened
+// during an already-pending petition window that ALSO overlaps a
+// consolidated-group suspension) is not covered — a correct n-way
+// interval-union computation is out of this stage's scope, per the module
+// header.
+
+// ============================================================================
+// G243 wiring — `assessment_period_ends` extended by suspended days
+// ============================================================================
+//
+// The unsuspended §6501 end date (`assessment_period_ends`, `04-limitations
+// .law`) and the suspended-day COUNT (`assessment_period_suspended_days`,
+// above) were computed by two independent modules that never met (TECH-GAPS
+// G243). `add_calendar_period`'s day argument must be a compile-time
+// LITERAL `Quantity` (§84.2; confirmed against the compiler as LDC-E2108,
+// not merely suspected — `assessment_period_suspended_days` is a
+// case-computed `Integer`, not a literal), so this package cannot COMPUTE
+// the extended `Date` outright. Per the task's own fallback instruction,
+// this stage instead publishes a COMPARISON-FORM relation, the same idiom
+// already used by `us.irc.administration`'s §7508A(d)(1) mandatory
+// extension (`candidate_60_day_extension_end` / `days_between(...) == 60`):
+// the consumer proposes a candidate `Date` as an empirical fact and this
+// module confirms or rejects it by exact `days_between` arithmetic against
+// the unsuspended end date plus the unioned suspended-day count. This is
+// NOT a computation of the extended date (the package still cannot produce
+// one on its own, e.g. to answer "what IS the extended date"); it is a
+// validity check of a candidate, which is what "comparison form" means
+// here — a distinct, narrower capability than G243's original ask, called
+// out explicitly rather than silently presented as full wiring.
+pub relation candidate_assessment_period_end_with_suspension(p: Person, y: TaxableYear, k: TaxKind, candidate: Date) kind empirical {
+    label en unofficial "a candidate §6501 assessment-period end date, AS EXTENDED for known §6503 suspensions, proposed by the caller for validation (G243 wiring; see module footer for why this package cannot compute the date outright)";
+}
+pub relation assessment_period_ends_with_suspension(p: Person, y: TaxableYear, k: TaxKind, d: Date) kind institutional {
+    label en unofficial "G243: `d` is confirmed to be the unsuspended §6501 `assessment_period_ends` date extended by exactly the unioned §6503 suspended-day count for (p, y, k) — a candidate the caller supplied and this module validated by exact day arithmetic, not a date this package computed unassisted (see module footer TECH_GAP)";
+}
+@source(IRC_S6503_A, relation = formalizes, coverage = contextual, quote = "shall (after the mailing of a notice under section 6212(a)) be suspended for the period during which the Secretary is prohibited from making the assessment or from collecting by levy or a proceeding in court")
+rule S6503ConfirmSuspendedAssessmentPeriodEnd defeasible {
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for baseEnd: Date;
+    for suspendedDays: Integer;
+    for candidate: Date;
+    when assessment_period_ends(p, y, k, baseEnd)
+        and assessment_period_suspended_days(p, y, k, suspendedDays)
+        and candidate_assessment_period_end_with_suspension(p, y, k, candidate)
+        and candidate >= baseEnd
+        and days_between(baseEnd, candidate) == suspendedDays;
+    then assessment_period_ends_with_suspension(p, y, k, candidate);
+}
+// TECH_GAP (G243, narrowed but not closed): a caller who does not already
+// know the extended date cannot derive it here (no literal-quantity
+// overload of `add_calendar_period` accepts a variable count); it can only
+// ask this module to confirm a value it already computed elsewhere. A
+// future language version adding a variable-`Quantity` overload of
+// `add_calendar_period` (already flagged in this module's header) would
+// let a later stage replace this comparison-form pair with a genuine
+// producing rule.
+
+// ============================================================================
+// §6503(j) — Extension in case of certain summonses (default 60-day floor)
+// ============================================================================
+//
+// STAGE 2b (25.09.2026). §6503(j)(1)'s own suspension apparatus turns on
+// "designated summons" (a defined term with its own multi-part approval,
+// timing, and "clearly states" requirements, (j)(2)) and "judicial
+// enforcement period" ((j)(3), itself defined by reference to when a
+// summons-enforcement proceeding becomes final) — a full sub-family this
+// stage does not build (TECH_GAP; classified per coverage row, not
+// attempted). What IS modeled is the (j)(1) final sentence's DEFAULT
+// floor: "If subparagraph (B) does not apply, such period shall in no
+// event expire before the 60th day after the close of the suspension
+// under subparagraph (A)" — read against a case-supplied judicial-
+// enforcement-period interval (since this package does not itself derive
+// one) as a further `assessment_period_ends` tuple, same "no max-over-
+// derived" caveat as every other exception in this package.
+
+pub relation designated_summons_judicial_enforcement_period(p: Person, y: TaxableYear, k: TaxKind, start: Date, end: Date) kind empirical {
+    label en unofficial "the section 6503(j)(1)(A) judicial-enforcement-period interval for a designated summons — read as GIVEN (this package does not compute (j)(2)'s designated-summons qualification tests or (j)(3)'s enforcement-period finality rule; TECH_GAP)";
+}
+pub relation designated_summons_subparagraph_b_extension_applies(p: Person, y: TaxableYear, k: TaxKind) kind institutional {
+    label en unofficial "section 6503(j)(1)(B): a court required compliance with the summons, triggering the further 120-day extension instead of the default 60-day floor — NOT modeled (TECH_GAP); this package always evaluates the default floor below, which the statute itself makes the fallback when (B) does not apply";
+}
+@source(IRC_S6503_J, relation = formalizes, coverage = partial, quote = "If subparagraph (B) does not apply, such period shall in no event expire before the 60th day after the close of the suspension under subparagraph (A).")
+rule S6503DesignatedSummonsDefaultSixtyDayFloor defeasible {
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for start: Date;
+    for end: Date;
+    when designated_summons_judicial_enforcement_period(p, y, k, start, end)
+        and not_known(designated_summons_subparagraph_b_extension_applies(p, y, k));
+    then assessment_period_ends(p, y, k, add_calendar_period(end, 60 calendar_day));
+}

@@ -1,0 +1,531 @@
+// §951(a) — subpart F inclusion, the pro rata share formula by ownership and
+// days (a)(2); §952(a),(c) — subpart F income definition and the current-
+// year E&P limitation; §954(b)(3)-(4) — the de minimis/full-inclusion tests
+// and the high-tax exception; §954(c) — foreign personal holding company
+// income items (classification only); §957(c) — United States person for
+// this subpart; §958(b) — constructive ownership via section 318(a), wired
+// to `us.irc.corporations::constructive_ownership` with the section 958(b)
+// modifications flagged as a bounded-hop gap. Stage 1b (IRC-10 stage 1b,
+// A13). This module models the 2024-edition (pre-PL 119-21) text of §951(a)
+// throughout: PL 119-21 §70354 rewrites §951(a) for taxable years of foreign
+// corporations beginning after December 31, 2025 (any-day ownership,
+// dropping the "last day" requirement and the other-person's-dividend
+// reduction of (a)(2)(B)) — that rewrite is NOT modeled as a second edition
+// this module (SOURCE_GAP/TECH_GAP, see TECH-GAPS.md G97); §951A and §960(d)
+// DO get a PL 119-21 second edition (module 11), because the coordinator's
+// task named those two specifically.
+
+// --- §951(a): subpart F inclusion -----------------------------------------
+
+use self::{
+    IRC_S951_A,
+    IRC_S952_A,
+    IRC_S952_C,
+    IRC_S954_B,
+    IRC_S954_C,
+    IRC_S954_D,
+    IRC_S954_E,
+    IRC_S957_C,
+    IRC_S958_B,
+    cfc_taxable_year_begins_after_20251231,
+    controlled_foreign_corporation,
+    dividend_out_of_earnings_accumulated_before_holding_954c3C,
+    downward_attribution_barred_958b4,
+};
+
+pub relation us_shareholder_owns_stock_on_last_cfc_day(shareholder: us.irc.core::Person, corp: us.irc.core::Corporation, y: us.irc.core::TaxableYear) kind empirical {
+    label en official "the United States shareholder owns (within the meaning of section 958(a)) stock in the corporation on the last day, in the corporation's taxable year, on which it is a controlled foreign corporation — section 951(a)(1)";
+}
+pub relation subpart_f_income_of_cfc(corp: us.irc.core::Corporation, y: us.irc.core::TaxableYear, amount: Money) kind institutional {
+    label en official "the corporation's subpart F income for the taxable year (section 952)";
+}
+pub relation cfc_status_fraction_of_year(corp: us.irc.core::Corporation, y: us.irc.core::TaxableYear, fraction: Decimal) kind empirical {
+    label en official "the part of the taxable year during which the corporation is a controlled foreign corporation, expressed as a fraction of the entire year — section 951(a)(2)(A)(ii)";
+}
+pub relation shareholder_nonownership_fraction_of_year(shareholder: us.irc.core::Person, corp: us.irc.core::Corporation, y: us.irc.core::TaxableYear, fraction: Decimal) kind empirical {
+    label en official "the part of the taxable year during which the shareholder did NOT own (within the meaning of section 958(a)) the stock, as a fraction of the entire year — section 951(a)(2)(B)(ii), the base of the dividend-reduction offset";
+}
+pub relation dividends_received_by_others_during_year(corp: us.irc.core::Corporation, y: us.irc.core::TaxableYear, amount: Money) kind empirical {
+    label en unofficial "distributions received by any OTHER person during the year as a dividend with respect to the stock, for the section 951(a)(2)(B) reduction (this stage does not itself compute the (B)(i)/(ii) ratio cap on this figure — asserted as the already-capped amount)";
+}
+pub relation shareholder_stock_ownership_share_958a(shareholder: us.irc.core::Person, corp: us.irc.core::Corporation, y: us.irc.core::TaxableYear, share: Decimal) kind empirical {
+    label en official "the shareholder's stock ownership share (within the meaning of section 958(a)) in the corporation, for the section 951(a)(2)(A) 'stock which such shareholder owns' base";
+}
+
+@source(IRC_S951_A, relation = formalizes, coverage = partial, quote = "The pro rata share referred to in paragraph (1)(A)(i) in the case of any United States shareholder is the amount—")
+pub relation pro_rata_share_of_subpart_f_income(shareholder: us.irc.core::Person, corp: us.irc.core::Corporation, y: us.irc.core::TaxableYear, amount: Money) kind institutional {
+    label en official "the United States shareholder's pro rata share of the CFC's subpart F income for the year (section 951(a)(2)): the CFC-status-weighted, ownership-weighted distribution the shareholder's stock would have received, reduced by dividends other persons received during the year";
+}
+rule S951A2ProRataShare defeasible {
+    for shareholder: us.irc.core::Person;
+    for corp: us.irc.core::Corporation;
+    for y: us.irc.core::TaxableYear;
+    for subpart_f_income: Money;
+    for cfc_fraction: Decimal;
+    for ownership_share: Decimal;
+    for other_dividends: Money;
+    when subpart_f_income_of_cfc(corp, y, subpart_f_income)
+     and cfc_status_fraction_of_year(corp, y, cfc_fraction)
+     and shareholder_stock_ownership_share_958a(shareholder, corp, y, ownership_share)
+     and dividends_received_by_others_during_year(corp, y, other_dividends);
+    unless cfc_taxable_year_begins_after_20251231(corp, y)
+     and subpart_f_income_of_cfc(corp, y, subpart_f_income)
+     and cfc_status_fraction_of_year(corp, y, cfc_fraction)
+     and shareholder_stock_ownership_share_958a(shareholder, corp, y, ownership_share)
+     and dividends_received_by_others_during_year(corp, y, other_dividends);
+    then pro_rata_share_of_subpart_f_income(shareholder, corp, y, (subpart_f_income * cfc_fraction * ownership_share) - other_dividends);
+}
+// no other-person dividends this year: the (B) reduction is zero.
+rule S951A2ProRataShareNoOtherDividends defeasible {
+    for shareholder: us.irc.core::Person;
+    for corp: us.irc.core::Corporation;
+    for y: us.irc.core::TaxableYear;
+    for subpart_f_income: Money;
+    for cfc_fraction: Decimal;
+    for ownership_share: Decimal;
+    when subpart_f_income_of_cfc(corp, y, subpart_f_income)
+     and cfc_status_fraction_of_year(corp, y, cfc_fraction)
+     and shareholder_stock_ownership_share_958a(shareholder, corp, y, ownership_share);
+    unless dividends_received_by_others_during_year(corp, y, _)
+     and subpart_f_income_of_cfc(corp, y, subpart_f_income)
+     and cfc_status_fraction_of_year(corp, y, cfc_fraction)
+     and shareholder_stock_ownership_share_958a(shareholder, corp, y, ownership_share);
+    unless cfc_taxable_year_begins_after_20251231(corp, y)
+     and subpart_f_income_of_cfc(corp, y, subpart_f_income)
+     and cfc_status_fraction_of_year(corp, y, cfc_fraction)
+     and shareholder_stock_ownership_share_958a(shareholder, corp, y, ownership_share);
+    then pro_rata_share_of_subpart_f_income(shareholder, corp, y, subpart_f_income * cfc_fraction * ownership_share);
+}
+
+@source(IRC_S951_A, relation = formalizes, coverage = partial, quote = "every person who is a United States shareholder (as defined in subsection (b)) of such corporation and who owns (within the meaning of section 958(a)) stock in such corporation on the last day, in such year, on which such corporation is a controlled foreign corporation shall include in his gross income")
+pub relation subpart_f_inclusion(shareholder: us.irc.core::Person, corp: us.irc.core::Corporation, y: us.irc.core::TaxableYear, amount: Money) kind institutional {
+    label en official "the United States shareholder's section 951(a)(1)(A) gross income inclusion: the pro rata share of the CFC's subpart F income for the year, included because the corporation was a CFC and the shareholder owned stock on its last CFC day of the year";
+}
+rule S951A1Inclusion defeasible {
+    for shareholder: us.irc.core::Person;
+    for corp: us.irc.core::Corporation;
+    for y: us.irc.core::TaxableYear;
+    for amount: Money;
+    when controlled_foreign_corporation(corp, y)
+     and us_shareholder_owns_stock_on_last_cfc_day(shareholder, corp, y)
+     and pro_rata_share_of_subpart_f_income(shareholder, corp, y, amount);
+    unless cfc_taxable_year_begins_after_20251231(corp, y)
+     and us_shareholder_owns_stock_on_last_cfc_day(shareholder, corp, y)
+     and pro_rata_share_of_subpart_f_income(shareholder, corp, y, amount);
+    then subpart_f_inclusion(shareholder, corp, y, amount);
+}
+
+// --- §952(a): subpart F income defined -------------------------------------
+
+pub relation insurance_income_953(corp: us.irc.core::Corporation, y: us.irc.core::TaxableYear, amount: Money) kind empirical {
+    label en unofficial "insurance income as defined under section 953 (not itself modeled this stage — case-asserted input to section 952(a)(1))";
+}
+pub relation foreign_base_company_income_954(corp: us.irc.core::Corporation, y: us.irc.core::TaxableYear, amount: Money) kind institutional {
+    label en official "the foreign base company income determined under section 954 (section 952(a)(2)) — this module models the section 954(b)(3)/(4) tests and (c) FPHCI item classification but not a full dollar computation of every foreign-base-company category; the AMOUNT is asserted as a case input keyed to those classifications";
+}
+pub relation boycott_adjusted_income_and_factor(corp: us.irc.core::Corporation, y: us.irc.core::TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the section 952(a)(3) product (non-951-inclusion, non-(b) income times the section 999 international boycott factor) — asserted directly, section 999 not modeled this stage";
+}
+pub relation illegal_bribes_kickbacks_sum(corp: us.irc.core::Corporation, y: us.irc.core::TaxableYear, amount: Money) kind empirical {
+    label en official "the sum of illegal bribes, kickbacks, or other section 162(c) payments paid by or on behalf of the corporation during the year — section 952(a)(4)";
+}
+pub relation section_901j_country_income(corp: us.irc.core::Corporation, y: us.irc.core::TaxableYear, amount: Money) kind empirical {
+    label en unofficial "income derived from a section 901(j) sanctioned country during a period section 901(j) applies, net of allocable deductions — section 952(a)(5)";
+}
+
+@source(IRC_S952_A, relation = formalizes, coverage = partial, quote = "the term \"subpart F income\" means, in the case of any controlled foreign corporation, the sum of—")
+pub relation subpart_f_income_before_limitation(corp: us.irc.core::Corporation, y: us.irc.core::TaxableYear, amount: Money) kind institutional {
+    label en official "the section 952(a) sum (insurance income + foreign base company income + boycott amount + illegal payments + section 901(j) income), before the section 952(c)(1)(A) current-year-E&P cap";
+}
+rule S952ASubpartFIncomeSum strict {
+    for corp: us.irc.core::Corporation;
+    for y: us.irc.core::TaxableYear;
+    for insurance: Money;
+    for fbc: Money;
+    for boycott: Money;
+    for bribes: Money;
+    for s901j: Money;
+    when insurance_income_953(corp, y, insurance)
+     and foreign_base_company_income_954(corp, y, fbc)
+     and boycott_adjusted_income_and_factor(corp, y, boycott)
+     and illegal_bribes_kickbacks_sum(corp, y, bribes)
+     and section_901j_country_income(corp, y, s901j);
+    then subpart_f_income_before_limitation(corp, y, insurance + fbc + boycott + bribes + s901j);
+}
+
+// --- §952(c)(1)(A): current-year E&P limitation ----------------------------
+//
+// (c)(1)(B) "qualified deficit" carryforward is a running ledger across the
+// CFC's full E&P history — same self-referential-accumulation class as
+// TECH-GAPS G1/G10/G38 — NOT modeled this stage (TECH_GAP G97).
+
+pub relation cfc_earnings_and_profits(corp: us.irc.core::Corporation, y: us.irc.core::TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the corporation's earnings and profits for the taxable year, for the section 952(c)(1)(A) cap";
+}
+@source(IRC_S952_C, relation = formalizes, coverage = exact, quote = "the subpart F income of any controlled foreign corporation for any taxable year shall not exceed the earnings and profits of such corporation for such taxable year")
+rule S952C1ACurrentYearEpLimitation strict {
+    for corp: us.irc.core::Corporation;
+    for y: us.irc.core::TaxableYear;
+    for before: Money;
+    for ep: Money;
+    when subpart_f_income_before_limitation(corp, y, before)
+     and cfc_earnings_and_profits(corp, y, ep);
+    then subpart_f_income_of_cfc(corp, y, min(before, ep));
+}
+
+// --- §954(b)(3): de minimis / full-inclusion tests -------------------------
+
+pub relation gross_insurance_income_953(corp: us.irc.core::Corporation, y: us.irc.core::TaxableYear, amount: Money) kind empirical {
+    label en official "gross insurance income under section 953, for the section 954(b)(3) sum — section 954(b)(3)(C)";
+}
+pub relation gross_income_of_cfc(corp: us.irc.core::Corporation, y: us.irc.core::TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the corporation's gross income for the taxable year, for the section 954(b)(3) ratio tests";
+}
+
+// boundary named by the owner's task: at 5% / $1,000,000 exactly, the
+// de-minimis rule applies ("is less than the LESSER of" — so equality to
+// the lesser value does NOT qualify; 5.0% exactly fails, 4.9% qualifies).
+@source(IRC_S954_B, relation = formalizes, coverage = exact, quote = "If the sum of foreign base company income (determined without regard to paragraph (5)) and the gross insurance income for the taxable year is less than the lesser of—")
+pub relation de_minimis_954b3_applies(corp: us.irc.core::Corporation, y: us.irc.core::TaxableYear) kind institutional {
+    label en official "the section 954(b)(3)(A) de minimis rule applies: FBC income + gross insurance income is less than the lesser of 5% of gross income or $1,000,000 — no part of gross income is FBC income or insurance income for the year";
+}
+rule S954B3ADeMinimisByPercentage defeasible {
+    for corp: us.irc.core::Corporation;
+    for y: us.irc.core::TaxableYear;
+    for fbc: Money;
+    for insurance: Money;
+    for gross: Money;
+    when foreign_base_company_income_954(corp, y, fbc)
+     and gross_insurance_income_953(corp, y, insurance)
+     and gross_income_of_cfc(corp, y, gross)
+     and (fbc + insurance) < (gross * 0.05)
+     and (fbc + insurance) < 1000000 USD;
+    then de_minimis_954b3_applies(corp, y);
+}
+@source(IRC_S954_B, relation = formalizes, coverage = exact, quote = "If the sum of the foreign base company income (determined without regard to paragraph (5)) and the gross insurance income for the taxable year exceeds 70 percent of gross income, the entire gross income for the taxable year shall, subject to the provisions of paragraphs (4) and (5), be treated as foreign base company income or insurance income (whichever is appropriate).")
+pub relation full_inclusion_954b3_applies(corp: us.irc.core::Corporation, y: us.irc.core::TaxableYear) kind institutional {
+    label en official "the section 954(b)(3)(B) full-inclusion rule applies: FBC income + gross insurance income exceeds 70% of gross income — the entire gross income is treated as FBC/insurance income, subject to (4) high-tax and (5) deduction adjustments";
+}
+rule S954B3BFullInclusion defeasible {
+    for corp: us.irc.core::Corporation;
+    for y: us.irc.core::TaxableYear;
+    for fbc: Money;
+    for insurance: Money;
+    for gross: Money;
+    when foreign_base_company_income_954(corp, y, fbc)
+     and gross_insurance_income_953(corp, y, insurance)
+     and gross_income_of_cfc(corp, y, gross)
+     and (fbc + insurance) > (gross * 0.70);
+    then full_inclusion_954b3_applies(corp, y);
+}
+
+// --- §954(b)(4): high-tax exception (90% of section 11 rate — contract) ----
+
+pub relation item_effective_foreign_tax_rate(corp: us.irc.core::Corporation, y: us.irc.core::TaxableYear, item_id: Text, rate: Decimal) kind empirical {
+    label en official "the effective rate of income tax a foreign country imposed on this item of the corporation's income, established to the Secretary's satisfaction — section 954(b)(4)";
+}
+// Wired (stage 3): the section 11(b) maximum rate is read from
+// `us.irc.corporations::maximum_section_11b_rate` (keyed by the taxable year;
+// concluded from the year's begin date, 21 percent for years beginning after
+// December 31, 2017). For an earlier year the relation concludes nothing, so
+// the exception is NEITHER, never a guessed rate.
+@source(IRC_S954_B, relation = formalizes, coverage = exact, quote = "foreign base company income and insurance income shall not include any item of income received by a controlled foreign corporation if the taxpayer establishes to the satisfaction of the Secretary that such income was subject to an effective rate of income tax imposed by a foreign country greater than 90 percent of the maximum rate of tax specified in section 11")
+pub relation high_tax_exception_954b4_applies(corp: us.irc.core::Corporation, y: us.irc.core::TaxableYear, item_id: Text) kind institutional {
+    label en official "the section 954(b)(4) high-tax exception applies to this item: its effective foreign tax rate exceeds 90% of the section 11 maximum rate for the year";
+}
+rule S954B4HighTaxException defeasible {
+    for corp: us.irc.core::Corporation;
+    for y: us.irc.core::TaxableYear;
+    for item_id: Text;
+    for item_rate: Decimal;
+    for max_rate: Decimal;
+    when item_effective_foreign_tax_rate(corp, y, item_id, item_rate)
+     and us.irc.corporations::maximum_section_11b_rate(y, max_rate)
+     and item_rate > (max_rate * 0.90);
+    then high_tax_exception_954b4_applies(corp, y, item_id);
+}
+
+// --- §954(c)(1): foreign personal holding company income (items list) -----
+
+pub relation fphci_item(corp: us.irc.core::Corporation, y: us.irc.core::TaxableYear, item_id: Text, item_type: Text) kind empirical {
+    label en unofficial "an item of the corporation's gross income, tagged by its section 954(c)(1) category ('dividend','interest','royalty','rent','annuity', etc.), for classification";
+}
+@source(IRC_S954_C, relation = formalizes, coverage = exact, quote = "Dividends, interest, royalties, rents, and annuities.")
+pub relation foreign_personal_holding_company_income_item(corp: us.irc.core::Corporation, y: us.irc.core::TaxableYear, item_id: Text) kind institutional {
+    label en official "the item is foreign personal holding company income under section 954(c)(1)(A): a dividend, interest, royalty, rent, or annuity — the (2)/(3) active-conduct/related-person exceptions are NOT modeled this stage (TECH_GAP)";
+}
+rule S954C1ADividendsInterestRoyaltiesRentsAnnuities defeasible {
+    for corp: us.irc.core::Corporation;
+    for y: us.irc.core::TaxableYear;
+    for item_id: Text;
+    for item_type: Text;
+    when fphci_item(corp, y, item_id, item_type)
+     and (item_type == "dividend" or item_type == "interest" or item_type == "royalty" or item_type == "rent" or item_type == "annuity");
+    then foreign_personal_holding_company_income_item(corp, y, item_id);
+}
+
+// --- §957(c): United States person for this subpart ------------------------
+
+pub relation is_us_person_7701a30(p: us.irc.core::Person) kind empirical {
+    label en unofficial "the person is a United States person within the meaning of section 7701(a)(30) — for section 957(c)'s starting point";
+}
+pub relation puerto_rico_corp_bona_fide_resident_exception_957c1(p: us.irc.core::Individual, corp: us.irc.core::Corporation) kind empirical {
+    label en official "the (c)(1) Puerto Rico exception applies: individual is a bona fide resident of Puerto Rico and a dividend from this Puerto-Rico-organized corporation would be section 933(1) Puerto Rico-source income to that individual";
+}
+
+@source(IRC_S957_C, relation = formalizes, coverage = partial, quote = "the term \"United States person\" has the meaning assigned to it by section 7701(a)(30) except that—")
+pub relation united_states_person_957c(p: us.irc.core::Person) kind institutional {
+    label en official "the person is a United States person for purposes of this subpart (section 957(c)): section 7701(a)(30), except for the Puerto Rico/Guam/American-Samoa/Northern-Mariana individual carve-outs of (c)(1)-(2)";
+}
+rule S957CUnitedStatesPersonGeneral defeasible {
+    for p: us.irc.core::Person;
+    when is_us_person_7701a30(p);
+    unless carve_out_957c(p);
+    then united_states_person_957c(p);
+}
+pub relation carve_out_957c(p: us.irc.core::Person) kind institutional {
+    label en official "the section 957(c)(1) Puerto Rico carve-out (or the (c)(2) Guam/American Samoa/Northern Mariana Islands carve-out, not separately modeled this stage — TECH_GAP) removes this individual from 'United States person' for this subpart";
+}
+rule S957C1PuertoRicoCarveOut defeasible {
+    for p: us.irc.core::Individual;
+    for corp: us.irc.core::Corporation;
+    when puerto_rico_corp_bona_fide_resident_exception_957c1(p, corp);
+    then carve_out_957c(p);
+}
+
+// --- §958(b): constructive ownership via section 318(a) --------------------
+//
+// Wires directly to `us.irc.corporations::constructive_ownership` for the
+// four purposes section 958(b) names (951(b), 954(d)(3), 956(c)(2), 957).
+// The (b)(1)-(3) MODIFICATIONS to section 318(a) itself (dropping the
+// nonresident-alien exclusion of (a)(1)(A) for a foreign trust/estate;
+// the >50%-vote "considered as owning all the stock" rule of (2); the
+// 10%-for-50% substitution in (2)(C)) are NOT layered onto the imported
+// relation this stage — a consumer needing the MODIFIED test must supply it
+// as a case fact (TECH_GAP G95, filed in stage 1a, still open). This module
+// exposes the UNMODIFIED section 318(a) result for the four named purposes
+// so a consumer at least has the base attribution to build on.
+pub relation constructive_ownership_958b(p: us.irc.core::Person, corp: us.irc.core::Corporation, share: Decimal) kind institutional {
+    label en official "stock considered as owned under section 958(b): the UNMODIFIED section 318(a) constructive-ownership share from us.irc.corporations, for the four purposes section 958(b) names (951(b), 954(d)(3), 956(c)(2), 957) — the (b)(1)-(3) modifications to section 318(a) are not applied (TECH_GAP G95)";
+}
+@source(IRC_S958_B, relation = formalizes, coverage = partial, quote = "section 318(a) (relating to constructive ownership of stock) shall apply to the extent that the effect is to treat any United States person as a United States shareholder within the meaning of section 951(b)")
+rule S958BConstructiveOwnershipUnmodified strict {
+    for p: us.irc.core::Person;
+    for corp: us.irc.core::Corporation;
+    for share: Decimal;
+    for via: us.irc.corporations::AttributionKind;
+    when us.irc.corporations::constructive_ownership(p, corp, share, via);
+    then constructive_ownership_958b(p, corp, share);
+}
+
+// --- §958(b)(1)-(3): the three modifications to section 318(a) ------------
+//
+// Stage 2b. Continues TECH-GAPS G95/G103. Each modification is modeled as
+// its OWN executable criterion layered onto (or replacing) the unmodified
+// `constructive_ownership_958b` result above, rather than a full re-
+// implementation of section 318(a) with the three changes built in — the
+// underlying `us.irc.corporations::constructive_ownership` relation does
+// not expose enough structure (e.g., which specific family member is the
+// attribution source) to derive modification (1) purely from its output,
+// so (1) reads an additional case-asserted fact identifying the source.
+
+pub relation family_attribution_source_is_nonresident_alien_958b(p: us.irc.core::Person, corp: us.irc.core::Corporation) kind empirical {
+    label en unofficial "the family member whose stock is attributed to p under section 318(a)(1)(A) (a Family-kind constructive_ownership result) is a nonresident alien individual who is not a foreign trust or foreign estate — for the section 958(b)(1) modification";
+}
+pub relation constructive_ownership_958b_modified(p: us.irc.core::Person, corp: us.irc.core::Corporation, share: Decimal) kind institutional {
+    label en official "stock considered as owned under section 958(b) AFTER applying the three (b)(1)-(3) modifications to section 318(a): (1) drops family attribution from a nonresident alien individual (other than a foreign trust/estate); (2) treats an entity owning more than 50% of a corporation's voting power as owning ALL of it; (3) substitutes 10% for 50% in the section 318(a)(2)(C) corporation-to-shareholder attribution threshold";
+}
+@source(IRC_S958_B, relation = formalizes, coverage = exact, quote = "In applying paragraph (1)(A) of section 318(a), stock owned by a nonresident alien individual (other than a foreign trust or foreign estate) shall not be considered as owned by a citizen or by a resident alien individual.")
+rule S958B1DropsNonresidentAlienFamilyAttribution defeasible {
+    for p: us.irc.core::Person;
+    for corp: us.irc.core::Corporation;
+    for share: Decimal;
+    for via: us.irc.corporations::AttributionKind;
+    when us.irc.corporations::constructive_ownership(p, corp, share, via)
+     and via == us.irc.corporations::Family
+     and not_known(family_attribution_source_is_nonresident_alien_958b(p, corp));
+    then constructive_ownership_958b_modified(p, corp, share);
+}
+rule S958BNonFamilyAttributionPassesThroughModified defeasible {
+    for p: us.irc.core::Person;
+    for corp: us.irc.core::Corporation;
+    for share: Decimal;
+    for via: us.irc.corporations::AttributionKind;
+    when us.irc.corporations::constructive_ownership(p, corp, share, via)
+     and via != us.irc.corporations::Family;
+    unless downward_attribution_barred_958b4(p, corp)
+     and us.irc.corporations::constructive_ownership(p, corp, share, via)
+     and via == us.irc.corporations::ToEntity;
+    then constructive_ownership_958b_modified(p, corp, share);
+}
+pub relation entity_owns_majority_voting_power_958b(owner: us.irc.core::Person, corp: us.irc.core::Corporation, vote_share: Decimal) kind empirical {
+    label en unofficial "the entity (partnership, estate, trust, or corporation) owns, directly or indirectly, this share of the total combined voting power of all classes of stock entitled to vote of the corporation, for the section 958(b)(2) majority-vote test";
+}
+@source(IRC_S958_B, relation = formalizes, coverage = exact, quote = "if a partnership, estate, trust, or corporation owns, directly or indirectly, more than 50 percent of the total combined voting power of all classes of stock entitled to vote of a corporation, it shall be considered as owning all the stock entitled to vote")
+rule S958B2MajorityVoteConsideredAsOwningAllStock defeasible {
+    for owner: us.irc.core::Person;
+    for corp: us.irc.core::Corporation;
+    for vote_share: Decimal;
+    when entity_owns_majority_voting_power_958b(owner, corp, vote_share)
+     and vote_share > 0.50;
+    then constructive_ownership_958b_modified(owner, corp, 1.00);
+}
+pub relation shareholder_owns_ten_percent_or_more_of_corp_958b(shareholder: us.irc.core::Person, corp1: us.irc.core::Corporation, ownership_share: Decimal) kind empirical {
+    label en unofficial "the shareholder owns this share (10 percent or more, substituted for the general 50 percent threshold) of corp1, for the section 958(b)(3) modification to section 318(a)(2)(C)";
+}
+pub relation corp_holds_stock_in(corp1: us.irc.core::Corporation, corp2: us.irc.core::Corporation, held_share: Decimal) kind empirical {
+    label en unofficial "corp1 owns, directly or indirectly, this share of corp2's stock, for the section 318(a)(2)(C) corporation-to-shareholder attribution base";
+}
+@source(IRC_S958_B, relation = formalizes, coverage = exact, quote = "In applying subparagraph (C) of section 318(a)(2), the phrase \"10 percent\" shall be substituted for the phrase \"50 percent\" used in subparagraph (C).")
+rule S958B3TenPercentThresholdAttribution defeasible {
+    for shareholder: us.irc.core::Person;
+    for corp1: us.irc.core::Corporation;
+    for corp2: us.irc.core::Corporation;
+    for ownership_share: Decimal;
+    for held_share: Decimal;
+    when shareholder_owns_ten_percent_or_more_of_corp_958b(shareholder, corp1, ownership_share)
+     and ownership_share >= 0.10
+     and corp_holds_stock_in(corp1, corp2, held_share);
+    then constructive_ownership_958b_modified(shareholder, corp2, round(ownership_share * held_share, 4, "HALF_UP"));
+}
+
+// --- §954(d)(3): related person (shared by (c)(2)(A)/(c)(3), (d), (e)) ---
+
+pub relation control_share_of_corp_954d3(person: us.irc.core::Person, corp: us.irc.core::Corporation, share: Decimal) kind empirical {
+    label en unofficial "the person's ownership, directly or indirectly, of the total voting power (or, for a partnership/trust/estate, the beneficial interests) of the corporation, for the section 954(d)(3) more-than-50% control test";
+}
+@source(IRC_S954_D, relation = formalizes, coverage = partial, quote = "control means, with respect to a corporation, the ownership, directly or indirectly, of stock possessing more than 50 percent of the total voting power of all classes of stock entitled to vote or of the total value of stock of such corporation")
+pub relation related_person_954d3(person: us.irc.core::Person, corp: us.irc.core::Corporation) kind institutional {
+    label en official "the person is a related person with respect to the controlled foreign corporation under section 954(d)(3): the person controls, or is controlled by, the CFC (more than 50 percent), determined via `us.irc.corporations::constructive_ownership`-style rules — the (d)(3)'s own cross-reference to section 958 rules and the common-control (B) branch are not independently re-derived this stage";
+}
+rule S954D3RelatedPersonByControl defeasible {
+    for person: us.irc.core::Person;
+    for corp: us.irc.core::Corporation;
+    for share: Decimal;
+    when control_share_of_corp_954d3(person, corp, share)
+     and share > 0.50;
+    then related_person_954d3(person, corp);
+}
+
+// --- §954(c)(2)(A)-(B): active-business exceptions ------------------------
+
+pub relation rent_or_royalty_active_business_954(corp: us.irc.core::Corporation, y: us.irc.core::TaxableYear, item_id: Text, payer: us.irc.core::Person) kind empirical {
+    label en unofficial "the rent or royalty item is derived in the active conduct of a trade or business, for section 954(c)(2)(A)";
+}
+@source(IRC_S954_C, relation = formalizes, coverage = partial, quote = "Foreign personal holding company income shall not include rents and royalties which are derived in the active conduct of a trade or business and which are received from a person other than a related person")
+rule S954C2AActiveBusinessRentsAndRoyalties defeasible {
+    for corp: us.irc.core::Corporation;
+    for y: us.irc.core::TaxableYear;
+    for item_id: Text;
+    for payer: us.irc.core::Person;
+    when rent_or_royalty_active_business_954(corp, y, item_id, payer)
+     and not_known(related_person_954d3(payer, corp));
+    then fphci_excepted_item_954(corp, y, item_id);
+}
+pub relation fphci_excepted_item_954(corp: us.irc.core::Corporation, y: us.irc.core::TaxableYear, item_id: Text) kind institutional {
+    label en official "the item is excepted from foreign personal holding company income under one of the section 954(c)(2)-(3) exceptions modeled this stage: active-business rents/royalties (c)(2)(A), export financing interest (c)(2)(B), or the same-country related-person exception (c)(3)(A)";
+}
+pub relation export_financing_interest_954(corp: us.irc.core::Corporation, y: us.irc.core::TaxableYear, item_id: Text) kind empirical {
+    label en official "the interest is derived in the conduct of a banking business and is export financing interest as defined in section 904(d)(2)(G), for the section 954(c)(2)(B) exception";
+}
+@source(IRC_S954_C, relation = formalizes, coverage = exact, quote = "Foreign personal holding company income shall not include any interest which is derived in the conduct of a banking business and which is export financing interest (as defined in section 904(d)(2)(G)).")
+rule S954C2BExportFinancingInterest defeasible {
+    for corp: us.irc.core::Corporation;
+    for y: us.irc.core::TaxableYear;
+    for item_id: Text;
+    when export_financing_interest_954(corp, y, item_id);
+    then fphci_excepted_item_954(corp, y, item_id);
+}
+
+// --- §954(c)(3)(A): same-country related-person exception ------------------
+
+pub relation dividend_or_interest_from_related_person_954(corp: us.irc.core::Corporation, y: us.irc.core::TaxableYear, item_id: Text, payer: us.irc.core::Corporation) kind empirical {
+    label en unofficial "a dividend or interest item received from a related person (a corporation), for the section 954(c)(3)(A)(i) same-country exception";
+}
+pub relation payer_organized_in_same_country_as_cfc(payer: us.irc.core::Corporation, corp: us.irc.core::Corporation) kind empirical {
+    label en unofficial "the related-person payer corporation is created or organized under the laws of the same foreign country as the controlled foreign corporation, and has a substantial part of its trade-or-business assets located there, for section 954(c)(3)(A)(i)(I)-(II)";
+}
+pub relation reduces_payors_subpart_f_income_954c3b(item_id: Text) kind empirical {
+    label en unofficial "the interest, rent, or royalty reduces the payor's subpart F income (or creates/increases a section 952(c) deficit), for the section 954(c)(3)(B) exception to the exception — blocks (3)(A) from applying";
+}
+@source(IRC_S954_C, relation = formalizes, coverage = partial, quote = "dividends and interest received from a related person which (I) is a corporation created or organized under the laws of the same foreign country under the laws of which the controlled foreign corporation is created or organized, and (II) has a substantial part of its assets used in its trade or business located in such same foreign country")
+rule S954C3ASameCountryRelatedPersonException defeasible {
+    for corp: us.irc.core::Corporation;
+    for y: us.irc.core::TaxableYear;
+    for item_id: Text;
+    for payer: us.irc.core::Corporation;
+    when dividend_or_interest_from_related_person_954(corp, y, item_id, payer)
+     and related_person_954d3(payer, corp)
+     and payer_organized_in_same_country_as_cfc(payer, corp);
+    unless reduces_payors_subpart_f_income_954c3b(item_id)
+     and dividend_or_interest_from_related_person_954(corp, y, item_id, payer);
+    unless dividend_out_of_earnings_accumulated_before_holding_954c3C(item_id)
+     and dividend_or_interest_from_related_person_954(corp, y, item_id, payer);
+    then fphci_excepted_item_954(corp, y, item_id);
+}
+
+// --- §954(d)(1)-(3): foreign base company sales income ---------------------
+
+pub relation purchase_or_sale_pattern_954d(corp: us.irc.core::Corporation, y: us.irc.core::TaxableYear, item_id: Text, counterparty: us.irc.core::Person) kind empirical {
+    label en unofficial "the CFC's income arises from one of the four section 954(d)(1) purchase/sale patterns involving personal property and a related person (buy-from-related/sell-to-any, sell-to-any-on-behalf-of-related, buy-from-any/sell-to-related, or buy-from-any-on-behalf-of-related)";
+}
+pub relation property_manufactured_outside_cfc_country(item_id: Text) kind empirical {
+    label en official "the personal property is manufactured, produced, grown, or extracted outside the country under the laws of which the CFC is created or organized, for section 954(d)(1)(A)";
+}
+pub relation property_for_use_outside_cfc_country(item_id: Text) kind empirical {
+    label en official "the personal property is sold (or purchased, if purchased on behalf of a related person) for use, consumption, or disposition outside the CFC's country of organization, for section 954(d)(1)(B)";
+}
+@source(IRC_S954_D, relation = formalizes, coverage = partial, quote = "the property which is purchased (or in the case of property sold on behalf of a related person, the property which is sold) is manufactured, produced, grown, or extracted outside the country under the laws of which the controlled foreign corporation is created or organized, and\n(B) the property is sold for use, consumption, or disposition outside such foreign country, or, in the case of property purchased on behalf of a related person, is purchased for use, consumption, or disposition outside such foreign country")
+pub relation foreign_base_company_sales_income_item(corp: us.irc.core::Corporation, y: us.irc.core::TaxableYear, item_id: Text) kind institutional {
+    label en official "the item is foreign base company sales income under section 954(d)(1): a related-person purchase-or-sale pattern where the property is manufactured outside the CFC's country of organization and sold/purchased for use outside that country";
+}
+rule S954D1ForeignBaseCompanySalesIncome defeasible {
+    for corp: us.irc.core::Corporation;
+    for y: us.irc.core::TaxableYear;
+    for item_id: Text;
+    for counterparty: us.irc.core::Person;
+    when purchase_or_sale_pattern_954d(corp, y, item_id, counterparty)
+     and related_person_954d3(counterparty, corp)
+     and property_manufactured_outside_cfc_country(item_id)
+     and property_for_use_outside_cfc_country(item_id);
+    then foreign_base_company_sales_income_item(corp, y, item_id);
+}
+pub relation branch_has_same_effect_as_subsidiary_954d2(corp: us.irc.core::Corporation, y: us.irc.core::TaxableYear, item_id: Text) kind empirical {
+    label en unofficial "under Secretary regulations, the CFC's branch or similar establishment outside its country of incorporation has substantially the same effect as if it were a wholly owned subsidiary deriving the income — for section 954(d)(2) (EXTERNAL_DEPENDENCY: the regulatory same-effect test is asserted directly, not derived)";
+}
+@source(IRC_S954_D, relation = formalizes, coverage = partial, quote = "the income attributable to the carrying on of such activities of such branch or similar establishment shall be treated as income derived by a wholly owned subsidiary of the controlled foreign corporation and shall constitute foreign base company sales income of the controlled foreign corporation")
+rule S954D2BranchRuleIncomeIsFbcSalesIncome defeasible {
+    for corp: us.irc.core::Corporation;
+    for y: us.irc.core::TaxableYear;
+    for item_id: Text;
+    when branch_has_same_effect_as_subsidiary_954d2(corp, y, item_id);
+    then foreign_base_company_sales_income_item(corp, y, item_id);
+}
+
+// --- §954(e)(1)-(2): foreign base company services income -------------------
+
+pub relation services_performed_954e(corp: us.irc.core::Corporation, y: us.irc.core::TaxableYear, item_id: Text, beneficiary: us.irc.core::Person) kind empirical {
+    label en unofficial "technical, managerial, engineering, architectural, scientific, skilled, industrial, commercial, or like services performed for or on behalf of the beneficiary, for section 954(e)(1)(A)";
+}
+pub relation services_performed_outside_cfc_country(item_id: Text) kind empirical {
+    label en official "the services are performed outside the country under the laws of which the CFC is created or organized, for section 954(e)(1)(B)";
+}
+pub relation services_directly_related_to_own_manufacture_or_sale_954e2(item_id: Text) kind empirical {
+    label en unofficial "the services are directly related to the CFC's own sale or exchange of property it manufactured, produced, grown, or extracted (or an offer or effort to do so), for the section 954(e)(2) exception";
+}
+@source(IRC_S954_E, relation = formalizes, coverage = partial, quote = "income (whether in the form of compensation, commissions, fees, or otherwise) derived in connection with the performance of technical, managerial, engineering, architectural, scientific, skilled, industrial, commercial, or like services which—\n(A) are performed for or on behalf of any related person (within the meaning of subsection (d)(3)), and\n(B) are performed outside the country under the laws of which the controlled foreign corporation is created or organized")
+pub relation foreign_base_company_services_income_item(corp: us.irc.core::Corporation, y: us.irc.core::TaxableYear, item_id: Text) kind institutional {
+    label en official "the item is foreign base company services income under section 954(e)(1): services performed for a related person outside the CFC's country of organization, unless the (e)(2) manufacture/sale exception applies";
+}
+rule S954E1ForeignBaseCompanyServicesIncome defeasible {
+    for corp: us.irc.core::Corporation;
+    for y: us.irc.core::TaxableYear;
+    for item_id: Text;
+    for beneficiary: us.irc.core::Person;
+    when services_performed_954e(corp, y, item_id, beneficiary)
+     and related_person_954d3(beneficiary, corp)
+     and services_performed_outside_cfc_country(item_id);
+    unless services_directly_related_to_own_manufacture_or_sale_954e2(item_id)
+     and services_performed_954e(corp, y, item_id, beneficiary);
+    then foreign_base_company_services_income_item(corp, y, item_id);
+}

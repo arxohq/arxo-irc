@@ -1,0 +1,437 @@
+// 26 U.S.C. §§2031-2042 (Part III) — the gross estate: the general valuation
+// rule (§2031(a)), the alternate valuation election (§2032), and the
+// inclusion rules for property the decedent owned outright (§2033),
+// transfers within 3 years of death (§2035), retained life estates (§2036),
+// revocable transfers (§2038), joint interests (§2040), powers of
+// appointment (§2041) and life insurance (§2042).
+//
+// METHOD: every inclusion section contributes VALUED ITEMS to the single
+// `gross_estate_item(e, item, amount)` relation; `gross_estate(e, amount)`
+// sums them (PLAN §5 interface value). An item's amount is either its plain
+// value at death (§2031(a)/§2033) or, if a valid §2032 alternate-valuation
+// election is in effect, the value on disposition (within 6 months) or the
+// value 6 months after death — sections 2036/2038/2040/2041/2042 each read
+// whichever of those the case supplies for the SAME item, so alternate
+// valuation is not re-derived per inclusion section.
+//
+// JUDGMENT CALLS:
+//  - Valuation itself (fair market value at a date) is the EVALUATIVE
+//    element DECISION-0194 names ("fair market value"): `value_at_death` /
+//    `value_at_disposition` / `value_at_6_months_after_death` are `kind
+//    empirical` facts a case asserts with an appraisal origin, not derived
+//    arithmetic — see coverage row classification EVALUATIVE.
+//  - §2031(b) (unlisted stock valuation by comparison to listed comparables)
+//    is NON_NORMATIVE for this stage: it instructs HOW an appraiser reaches
+//    the EVALUATIVE `value_at_death` fact, not a separate computable rule.
+//  - §2031(c) (conservation easement exclusion) is modelled only through
+//    paragraphs (1)-(2) (the 40%/$500,000 exclusion amount and the
+//    applicable-percentage formula); paragraphs (4)-(10) (debt-financed
+//    property, retained development rights, the election mechanics and the
+//    30%-entity-interest extension) are TECH_GAP/NON_NORMATIVE — see coverage
+//    notes and TECH-GAPS.md G82.
+//  - §2032A (special use valuation) is NOT modelled this stage: TECH_GAP,
+//    209 disposition rows, own election and 10-year recapture machinery;
+//    flagged as not done in the final report, not silently folded into
+//    §2032.
+//  - §2032(a)(3) ("any interest or estate affected by mere lapse of time")
+//    is NOT modelled: TECH_GAP, needs an actuarial-interest shape this stage
+//    does not build.
+//  - §2033's "at the time of his death" test and the more specific §§2035-
+//    2042 inclusion rules are independent producers of the SAME
+//    `gross_estate_item(e, item, amount)` fact; because facts are set-valued
+//    (not multiset), an item both the §2033 default and a specific section
+//    would separately include (same item, same `value_at_death` amount)
+//    contributes to `gross_estate` once, not twice. A scenario where the
+//    specific section's amount DIFFERS from plain `value_at_death` (e.g. the
+//    §2040(b) one-half rule) never asserts `value_at_death` for that same
+//    item in the same case, by construction of the scenario, so the two
+//    rules do not produce conflicting amounts for one item in this stage's
+//    scenarios; a case that asserted both facts for the same item would be
+//    an inconsistent case fact pattern, not a compiler concern.
+//  - §2036(b) (controlled-corporation voting-rights rule) and §2038's
+//    "notice deemed given" timing rule are NOT modelled: TECH_GAP (narrow;
+//    the general retained-power tests below cover the operative core of
+//    both sections).
+
+language "law.core" version "0.2";
+package us.irc.estate_gift version "0.1.1";
+namespace "urn:us:irc:estate_gift:clir";
+
+use self::{
+    Asset,
+    Estate,
+    IRC_S2031_A,
+    IRC_S2031_C,
+    IRC_S2032_A,
+    IRC_S2032_C,
+    IRC_S2033,
+    IRC_S2035_A,
+    IRC_S2036_A,
+    IRC_S2038_A,
+    IRC_S2040_A,
+    IRC_S2040_B,
+    IRC_S2041_A,
+    IRC_S2041_B,
+    IRC_S2042,
+    Person,
+    conservation_easement_election_valid,
+    conservation_easement_land_base_2031c,
+    executor_of,
+    general_power_2041_whole,
+    gift_tax_gross_up_item_2035b,
+    land_subject_to_qualified_conservation_easement,
+    partial_consideration_2043,
+    power_subject_to_notice_or_delay_2038b,
+    qtip_gift_property_not_includible_in_donor_estate_2523f5,
+    section_2040b_disabled_2056d1,
+};
+
+// --- §2031(a): the general rule and the aggregate ---------------------------
+
+@source(IRC_S2031_A, relation = formalizes, coverage = exact, quote = "The value of the gross estate of the decedent shall be determined by including to the extent provided for in this part, the value at the time of his death of all property, real or personal, tangible or intangible, wherever situated.")
+pub relation gross_estate_item(e: Estate, item: Asset, amount: Money) kind institutional {
+    label en official "the value of one item of property included in the gross estate (section 2031(a))";
+}
+
+pub relation gross_estate(e: Estate, amount: Money) kind institutional {
+    label en official "the value of the gross estate: the sum of every included item (section 2031(a))";
+}
+pub relation gross_estate_items_total(e: Estate, amount: Money) kind institutional {
+    label en unofficial "the sum of every included item, before the section 2035(b) gift-tax gross-up and the section 2031(c) conservation easement exclusion";
+}
+rule GrossEstateItemsTotalRule(e: Estate) defeasible {
+    when gross_estate_item(e, _, _);
+    then gross_estate_items_total(e, sum(collect all v: Money, item: Asset where gross_estate_item(e, item, v) and not_known(qtip_gift_property_not_includible_in_donor_estate_2523f5(e, item)), empty: 0.00 USD));
+}
+rule GrossEstateRule(e: Estate, items: Money) defeasible {
+    label en official "the value of the gross estate: the included items, increased by the chapter 12 tax on gifts of the last 3 years (section 2035(b)) and decreased by the section 2031(c) exclusion";
+    when gross_estate_items_total(e, items);
+    then gross_estate(e, max(0.00 USD, items
+        + sum(collect all g: Money, n: Integer where gift_tax_gross_up_item_2035b(e, n, g), empty: 0.00 USD)
+        - sum(collect all x: Money, i: Asset where conservation_easement_exclusion(e, i, x), empty: 0.00 USD)));
+}
+
+// --- §2032: alternate valuation election -------------------------------------
+
+pub relation value_at_death(e: Estate, item: Asset, amount: Money) kind empirical {
+    label en unofficial "the fair market value of the item at the time of the decedent's death (section 2031(a)); EVALUATIVE/appraised fact";
+}
+pub relation disposed_within_6_months(e: Estate, item: Asset) kind empirical {
+    label en unofficial "the item was distributed, sold, exchanged, or otherwise disposed of within 6 months after the decedent's death (section 2032(a)(1))";
+}
+pub relation value_at_disposition(e: Estate, item: Asset, amount: Money) kind empirical {
+    label en unofficial "the value of the item as of the date of its distribution, sale, exchange or other disposition (section 2032(a)(1)); EVALUATIVE/appraised fact";
+}
+pub relation value_at_6_months_after_death(e: Estate, item: Asset, amount: Money) kind empirical {
+    label en unofficial "the value of the item as of the date 6 months after the decedent's death (section 2032(a)(2)); EVALUATIVE/appraised fact";
+}
+
+pub relation alternate_valuation_return_filed(e: Estate) kind empirical {
+    label en unofficial "the executor made the section 2032 election on the return of the tax imposed by chapter 11";
+}
+pub relation alternate_valuation_decreases_gross_estate(e: Estate) kind empirical {
+    label en unofficial "the election would decrease the value of the gross estate (section 2032(c)(1))";
+}
+pub relation alternate_valuation_decreases_tax(e: Estate) kind empirical {
+    label en unofficial "the election would decrease the sum of the chapter 11 and chapter 13 tax with respect to the includible property, net of allowable credits (section 2032(c)(2))";
+}
+pub relation alternate_valuation_return_timely(e: Estate) kind empirical {
+    label en unofficial "the return was filed not more than 1 year after the time prescribed by law (including extensions) for filing it (section 2032(d)(2))";
+}
+
+@source(IRC_S2032_A, relation = formalizes, coverage = exact, quote = "The value of the gross estate may be determined, if the executor so elects, by valuing all the property included in the gross estate as follows")
+rule AlternateValuationElectionPower(e: Estate, x: Person, w: Interval<Instant>) strict {
+    label en official "the value of the gross estate may be determined, if the executor so elects (section 2032(a))";
+    when executor_of(e, x, w)
+        and alternate_valuation_return_filed(e);
+    then power AlternateValuationElection {
+        holder x;
+        over e;
+        exercise alternate_valuation_return_filed(e);
+        valid_when alternate_valuation_validly_electable(e);
+        effect create(alternate_valuation_elected(e));
+        window w;
+    };
+}
+
+@source(IRC_S2032_C, relation = formalizes, coverage = exact, quote = "No election may be made under this section with respect to an estate unless such election will decrease")
+pub relation alternate_valuation_validly_electable(e: Estate) kind institutional {
+    label en official "the election will decrease both the gross estate and the combined chapter 11/chapter 13 tax, and the return is timely (sections 2032(c), (d))";
+}
+rule AlternateValuationValidlyElectableRule(e: Estate) strict {
+    when alternate_valuation_decreases_gross_estate(e)
+        and alternate_valuation_decreases_tax(e)
+        and alternate_valuation_return_timely(e);
+    then alternate_valuation_validly_electable(e);
+}
+
+pub relation alternate_valuation_elected(e: Estate) kind institutional {
+    label en unofficial "a valid, irrevocable section 2032 alternate valuation election is in effect for this estate";
+}
+
+// --- §2033: property in which the decedent had an interest (the default
+// valuation rule for an item not more specifically addressed below) --------
+
+@source(IRC_S2033, relation = formalizes, coverage = exact, quote = "The value of the gross estate shall include the value of all property to the extent of the interest therein of the decedent at the time of his death.")
+rule GrossEstateItemGeneralRule(e: Estate, item: Asset, amount: Money) defeasible {
+    label en official "the value of the gross estate shall include the value of all property to the extent of the interest therein of the decedent at the time of his death (section 2033)";
+    when value_at_death(e, item, amount)
+        and not_known(alternate_valuation_elected(e));
+    then gross_estate_item(e, item, amount);
+}
+rule GrossEstateItemAltValDisposedRule(e: Estate, item: Asset, amount: Money) defeasible {
+    label en official "section 2032(a)(1): property disposed of within 6 months is valued as of the date of disposition";
+    when alternate_valuation_elected(e)
+        and disposed_within_6_months(e, item)
+        and value_at_disposition(e, item, amount);
+    then gross_estate_item(e, item, amount);
+}
+rule GrossEstateItemAltValNotDisposedRule(e: Estate, item: Asset, amount: Money) defeasible {
+    label en official "section 2032(a)(2): property not disposed of within 6 months is valued as of the date 6 months after death";
+    when alternate_valuation_elected(e)
+        and not_known(disposed_within_6_months(e, item))
+        and value_at_6_months_after_death(e, item, amount);
+    then gross_estate_item(e, item, amount);
+}
+
+// --- §2031(c): qualified conservation easement exclusion (paragraphs (1)-(2)
+// only; see judgment calls) --------------------------------------------------
+
+pub relation conservation_easement_election_made(e: Estate) kind empirical {
+    label en unofficial "the executor made the section 2031(c)(6) election on the estate tax return";
+}
+pub relation land_value_for_easement(e: Estate, item: Asset, amount: Money) kind empirical {
+    label en unofficial "the value of the land subject to a qualified conservation easement (determined without regard to the easement), reduced by any section 2055(f) deduction with respect to the land";
+}
+pub relation easement_value_ratio(e: Estate, item: Asset, ratio: Decimal) kind empirical {
+    label en unofficial "the ratio of the value of the qualified conservation easement to the value of the land (determined without regard to the easement), for computing the applicable percentage (section 2031(c)(2))";
+}
+
+@source(IRC_S2031_C, relation = formalizes, coverage = partial, quote = "the term \"applicable percentage\" means 40 percent reduced (but not below zero) by 2 percentage points for each percentage point (or fraction thereof) by which the value of the qualified conservation easement is less than 30 percent of the value of the land")
+pub relation conservation_easement_applicable_percentage(e: Estate, item: Asset, pct: Decimal) kind institutional {
+    label en official "the applicable percentage for the section 2031(c) exclusion";
+}
+rule ApplicablePercentageAt30OrAboveRule(e: Estate, item: Asset, ratio: Decimal) strict {
+    when easement_value_ratio(e, item, ratio) and ratio >= 0.30;
+    then conservation_easement_applicable_percentage(e, item, 0.40);
+}
+rule ApplicablePercentageBelow30Rule(e: Estate, item: Asset, ratio: Decimal) strict {
+    when easement_value_ratio(e, item, ratio)
+        and ratio < 0.30;
+    then conservation_easement_applicable_percentage(e, item, max(0.0, 0.40 - 2.0 * (0.30 - ratio)));
+}
+
+@source(IRC_S2031_C, relation = formalizes, coverage = exact, quote = "there shall be excluded from the gross estate the lesser of")
+pub relation conservation_easement_exclusion(e: Estate, item: Asset, amount: Money) kind institutional {
+    label en official "the amount excluded from the gross estate under section 2031(c)(1)";
+}
+rule ConservationEasementExclusionRule(e: Estate, item: Asset, land_value: Money, pct: Decimal) defeasible {
+    label en official "the lesser of the applicable percentage of the value of land subject to a qualified conservation easement (net of retained development rights and debt-financed part) and $500,000, on a valid election (section 2031(c)(1), (4)-(6))";
+    when conservation_easement_election_valid(e);
+    when land_subject_to_qualified_conservation_easement(e, item);
+    when conservation_easement_land_base_2031c(e, item, land_value);
+    when conservation_easement_applicable_percentage(e, item, pct);
+    then conservation_easement_exclusion(e, item, min(pct * land_value, 500000.00 USD));
+}
+// The exclusion reduces the gross estate: `GrossEstateRule` above subtracts
+// the sum of `conservation_easement_exclusion` (stage 2, 26.09.2026; stage 1
+// stopped at computing the exclusion, TECH-GAPS G82).
+
+// --- §2035: gifts and relinquished powers within 3 years of death ----------
+
+pub relation transferred_or_power_relinquished_within_3_years(e: Estate, item: Asset) kind empirical {
+    label en unofficial "the decedent made a transfer of an interest in the item, or relinquished a power with respect to it, during the 3-year period ending on the date of the decedent's death (section 2035(a)(1))";
+}
+pub relation would_be_included_under_2036_2037_2038_2042(e: Estate, item: Asset) kind empirical {
+    label en unofficial "the value of the item would have been included in the gross estate under section 2036, 2037, 2038, or 2042 if the transferred interest or relinquished power had been retained by the decedent at death (section 2035(a)(2))";
+}
+pub relation bona_fide_sale_for_full_consideration(e: Estate, item: Asset) kind empirical {
+    label en unofficial "the transfer of the item was a bona fide sale for an adequate and full consideration in money or money's worth (section 2035(d))";
+}
+
+@source(IRC_S2035_A, relation = formalizes, coverage = exact, quote = "the value of the gross estate shall include the value of any property (or interest therein) which would have been so included")
+rule GrossEstateItemUnder2035Rule(e: Estate, item: Asset, amount: Money) defeasible {
+    label en official "section 2035(a): the gross estate includes the value of property transferred (or a power relinquished) within 3 years of death that would otherwise have been included under section 2036, 2037, 2038, or 2042";
+    when transferred_or_power_relinquished_within_3_years(e, item)
+        and would_be_included_under_2036_2037_2038_2042(e, item)
+        and not_known(bona_fide_sale_for_full_consideration(e, item))
+        and not_known(partial_consideration_2043(e, item))
+        and value_at_death(e, item, amount)
+        and not_known(alternate_valuation_elected(e));
+    then gross_estate_item(e, item, amount);
+}
+
+// --- §2036: transfers with retained life estate -----------------------------
+
+pub relation retained_possession_enjoyment_or_income(e: Estate, item: Asset) kind empirical {
+    label en unofficial "the decedent retained, for life or a period not ascertainable without reference to death or not in fact ending before death, the possession or enjoyment of, or the right to income from, the item (section 2036(a)(1))";
+}
+pub relation retained_right_to_designate_possessors(e: Estate, item: Asset) kind empirical {
+    label en unofficial "the decedent retained the right, alone or with another, to designate who shall possess or enjoy the item or its income (section 2036(a)(2))";
+}
+
+@source(IRC_S2036_A, relation = formalizes, coverage = exact, quote = "The value of the gross estate shall include the value of all property to the extent of any interest therein of which the decedent has at any time made a transfer")
+rule GrossEstateItemUnder2036Rule(e: Estate, item: Asset, amount: Money) defeasible {
+    label en official "section 2036(a): a retained life estate or retained right to designate possessors brings the transferred property into the gross estate";
+    when (retained_possession_enjoyment_or_income(e, item) or retained_right_to_designate_possessors(e, item))
+        and not_known(bona_fide_sale_for_full_consideration(e, item))
+        and not_known(partial_consideration_2043(e, item))
+        and value_at_death(e, item, amount)
+        and not_known(alternate_valuation_elected(e));
+    then gross_estate_item(e, item, amount);
+}
+
+// --- §2038: revocable transfers ---------------------------------------------
+
+pub relation power_to_alter_amend_revoke_or_terminate_at_death(e: Estate, item: Asset) kind empirical {
+    label en unofficial "the enjoyment of the transferred item was subject at death to a power (in whatever capacity) held by the decedent alone or with another to alter, amend, revoke or terminate it (section 2038(a)(1))";
+}
+pub relation such_power_relinquished_within_3_years(e: Estate, item: Asset) kind empirical {
+    label en unofficial "such a power was relinquished during the 3-year period ending on the date of the decedent's death (section 2038(a)(1))";
+}
+
+@source(IRC_S2038_A, relation = formalizes, coverage = exact, quote = "where the enjoyment thereof was subject at the date of his death to any change through the exercise of a power")
+rule GrossEstateItemUnder2038Rule(e: Estate, item: Asset, amount: Money) defeasible {
+    label en official "section 2038(a): a retained (or, within 3 years of death, relinquished) power to alter, amend, revoke or terminate brings the transferred property into the gross estate";
+    when (power_to_alter_amend_revoke_or_terminate_at_death(e, item) or such_power_relinquished_within_3_years(e, item))
+        and not_known(bona_fide_sale_for_full_consideration(e, item))
+        and not_known(power_subject_to_notice_or_delay_2038b(e, item))
+        and not_known(partial_consideration_2043(e, item))
+        and value_at_death(e, item, amount)
+        and not_known(alternate_valuation_elected(e));
+    then gross_estate_item(e, item, amount);
+}
+
+// --- §2040: joint interests --------------------------------------------------
+
+pub relation joint_interest_total_value(e: Estate, item: Asset, amount: Money) kind empirical {
+    label en unofficial "the total value of property held by the decedent and another person as joint tenants with right of survivorship, tenants by the entirety, or joint bank depositors (section 2040(a))";
+}
+pub relation qualified_joint_interest(e: Estate, item: Asset) kind empirical {
+    label en unofficial "the item is a qualified joint interest: held by the decedent and the decedent's SPOUSE as tenants by the entirety, or as the only two joint tenants with right of survivorship (section 2040(b)(2))";
+}
+pub relation other_person_consideration_furnished_fraction(e: Estate, item: Asset, fraction: Decimal) kind empirical {
+    label en unofficial "the fraction of the consideration for the item that is shown to have been furnished by the other joint owner, and never received or acquired from the decedent for less than full consideration (section 2040(a))";
+}
+
+relation qualified_joint_interest_effective(e: Estate, item: Asset) kind institutional {
+    label en unofficial "the interest is a qualified joint interest and section 2040(b) applies: it does not apply where the surviving spouse is not a citizen (section 2056(d)(1)(B), 17-marital-deduction-2056-completion.law)";
+}
+rule QualifiedJointInterestEffectiveRule(e: Estate, item: Asset) defeasible {
+    when qualified_joint_interest(e, item);
+    when not_known(section_2040b_disabled_2056d1(e));
+    then qualified_joint_interest_effective(e, item);
+}
+
+@source(IRC_S2040_B, relation = formalizes, coverage = exact, quote = "in the case of any qualified joint interest, the value included in the gross estate with respect to such interest by reason of this section is one-half of the value of such qualified joint interest")
+rule GrossEstateItemQualifiedJointInterestRule(e: Estate, item: Asset, total: Money) defeasible {
+    label en official "section 2040(b)(1): a qualified joint interest between spouses includes exactly one-half of its value";
+    when qualified_joint_interest_effective(e, item)
+        and joint_interest_total_value(e, item, total);
+    then gross_estate_item(e, item, 0.5 * total);
+}
+@source(IRC_S2040_A, relation = formalizes, coverage = exact, quote = "except such part thereof as may be shown to have originally belonged to such other person and never to have been received or acquired by the latter from the decedent for less than an adequate and full consideration")
+rule GrossEstateItemConsiderationFurnishedJointInterestRule(e: Estate, item: Asset, total: Money, other_fraction: Decimal) defeasible {
+    label en official "section 2040(a): a non-qualified joint interest is included except to the extent shown to have been furnished by the other joint owner";
+    when not_known(qualified_joint_interest_effective(e, item))
+        and joint_interest_total_value(e, item, total)
+        and other_person_consideration_furnished_fraction(e, item, other_fraction);
+    then gross_estate_item(e, item, total * (1.0 - other_fraction));
+}
+relation has_consideration_furnished_fraction(e: Estate, item: Asset) kind institutional {
+    label en unofficial "a consideration-furnished fraction has been asserted for this item (closed-world helper, LDC-E0207)";
+}
+rule HasConsiderationFurnishedFractionRule(e: Estate, item: Asset, fraction: Decimal) strict {
+    when other_person_consideration_furnished_fraction(e, item, fraction);
+    then has_consideration_furnished_fraction(e, item);
+}
+rule GrossEstateItemJointInterestNoConsiderationShownRule(e: Estate, item: Asset, total: Money) defeasible {
+    label en official "section 2040(a): absent proof that the other joint owner furnished consideration, the full value is included";
+    when not_known(qualified_joint_interest_effective(e, item))
+        and joint_interest_total_value(e, item, total)
+        and not_known(has_consideration_furnished_fraction(e, item));
+    then gross_estate_item(e, item, total);
+}
+
+// --- §2041: powers of appointment --------------------------------------------
+
+pub relation general_power_of_appointment_at_death_or_exercised(e: Estate, item: Asset) kind empirical {
+    label en unofficial "the decedent had, at death, or exercised or released, a general power of appointment over the item created after October 21, 1942 (section 2041(a)(2))";
+}
+pub relation power_limited_by_ascertainable_standard(e: Estate, item: Asset) kind empirical {
+    label en unofficial "the power to consume, invade or appropriate the item is limited by an ascertainable standard relating to the decedent's health, education, support or maintenance (section 2041(b)(1)(A)) — not a general power of appointment";
+}
+pub relation power_lapsed_during_year(e: Estate, item: Asset) kind empirical {
+    label en unofficial "a power of appointment created after October 21, 1942 lapsed during a calendar year during the decedent's life (section 2041(b)(2))";
+}
+pub relation lapsed_power_property_value(e: Estate, item: Asset, amount: Money) kind empirical {
+    label en unofficial "the value, at the time of the lapse, of the property that could have been appointed by exercise of the lapsed power";
+}
+pub relation aggregate_value_of_fund_at_lapse(e: Estate, item: Asset, amount: Money) kind empirical {
+    label en unofficial "the aggregate value, at the time of the lapse, of the assets out of which (or the proceeds of which) the lapsed power could have been satisfied (section 2041(b)(2)(B))";
+}
+
+@source(IRC_S2041_A, relation = formalizes, coverage = partial, quote = "the decedent has at the time of his death a general power of appointment created after October 21, 1942, or with respect to which the decedent has at any time exercised or released such a power")
+rule GrossEstateItemGeneralPowerRule(e: Estate, item: Asset, amount: Money) defeasible {
+    label en official "section 2041(a)(2): a general power of appointment held, exercised or released by the decedent brings the appointive property into the gross estate";
+    when general_power_2041_whole(e, item)
+        and not_known(partial_consideration_2043(e, item))
+        and value_at_death(e, item, amount)
+        and not_known(alternate_valuation_elected(e));
+    then gross_estate_item(e, item, amount);
+}
+
+@source(IRC_S2041_B, relation = formalizes, coverage = exact, quote = "the greater of the following amounts")
+pub relation lapsed_power_5_or_5_threshold(e: Estate, item: Asset, amount: Money) kind institutional {
+    label en official "the greater of $5,000 or 5 percent of the fund out of which the lapsed power could have been satisfied (section 2041(b)(2))";
+}
+rule LapsedPower5Or5ThresholdRule(e: Estate, item: Asset, fund: Money) strict {
+    when aggregate_value_of_fund_at_lapse(e, item, fund);
+    then lapsed_power_5_or_5_threshold(e, item, max(5000.00 USD, 0.05 * fund));
+}
+rule GrossEstateItemLapsedPowerExceedsThresholdRule(e: Estate, item: Asset, lapsed_value: Money, threshold: Money) defeasible {
+    label en official "section 2041(b)(2): the lapse of a power is a release only to the extent the appointable property exceeds the greater of $5,000 or 5 percent of the fund";
+    when power_lapsed_during_year(e, item)
+        and lapsed_power_property_value(e, item, lapsed_value)
+        and lapsed_power_5_or_5_threshold(e, item, threshold)
+        and lapsed_value > threshold
+        and not_known(alternate_valuation_elected(e));
+    then gross_estate_item(e, item, lapsed_value - threshold);
+}
+rule NoInclusionLapsedPowerWithin5Or5Rule(e: Estate, item: Asset, lapsed_value: Money, threshold: Money) strict {
+    label en official "section 2041(b)(2): a lapse within the $5,000/5-percent exception is not a release and is not included";
+    when power_lapsed_during_year(e, item)
+        and lapsed_power_property_value(e, item, lapsed_value)
+        and lapsed_power_5_or_5_threshold(e, item, threshold)
+        and lapsed_value <= threshold;
+    then lapsed_power_within_5_or_5_exception(e, item);
+}
+pub relation lapsed_power_within_5_or_5_exception(e: Estate, item: Asset) kind institutional {
+    label en unofficial "the lapse falls within the section 2041(b)(2) $5,000/5-percent exception and is not treated as a release";
+}
+
+// --- §2042: proceeds of life insurance ---------------------------------------
+
+pub relation insurance_receivable_by_executor(e: Estate, item: Asset, amount: Money) kind empirical {
+    label en unofficial "the amount receivable by the executor as insurance under a policy on the decedent's life (section 2042(1))";
+}
+pub relation insurance_receivable_by_other_beneficiary(e: Estate, item: Asset, amount: Money) kind empirical {
+    label en unofficial "the amount receivable by a beneficiary other than the executor as insurance under a policy on the decedent's life (section 2042(2))";
+}
+pub relation decedent_possessed_incident_of_ownership(e: Estate, item: Asset) kind empirical {
+    label en unofficial "the decedent possessed at death any incident of ownership in the policy, exercisable alone or with another (section 2042(2))";
+}
+
+@source(IRC_S2042, relation = formalizes, coverage = exact, quote = "To the extent of the amount receivable by the executor as insurance under policies on the life of the decedent.")
+rule GrossEstateItemInsuranceExecutorRule(e: Estate, item: Asset, amount: Money) defeasible {
+    label en official "section 2042(1): insurance receivable by the executor is included regardless of incidents of ownership";
+    when insurance_receivable_by_executor(e, item, amount);
+    then gross_estate_item(e, item, amount);
+}
+@source(IRC_S2042, relation = formalizes, coverage = exact, quote = "To the extent of the amount receivable by all other beneficiaries as insurance under policies on the life of the decedent with respect to which the decedent possessed at his death any of the incidents of ownership")
+rule GrossEstateItemInsuranceIncidentOfOwnershipRule(e: Estate, item: Asset, amount: Money) defeasible {
+    label en official "section 2042(2): insurance receivable by another beneficiary is included if the decedent possessed an incident of ownership at death";
+    when insurance_receivable_by_other_beneficiary(e, item, amount)
+        and decedent_possessed_incident_of_ownership(e, item);
+    then gross_estate_item(e, item, amount);
+}

@@ -1,0 +1,437 @@
+// §1441(a)-(c) — chapter 3 withholding duty on payments to nonresident
+// aliens/foreign partnerships; §1445(a)-(b) — FIRPTA withholding on US real
+// property interest dispositions, with the $300,000 residence exemption;
+// §1471(a)-(b) — chapter 4 (FATCA) withholding on withholdable payments to
+// non-participating foreign financial institutions. Stage 1 (IRC-10 stage
+// 1, A13). §1441(d)-(g), §1442-§1444, §1445(c)-(f), §1446, §1461-§1465,
+// §1471(c)-(f), §1472-§1474 are NOT modeled this stage (stage 2).
+
+// --- §1441(a)-(c): withholding of tax on nonresident aliens ---------------
+
+use self::{
+    IRC_S1441_A,
+    IRC_S1441_C,
+    IRC_S1445_A,
+    IRC_S1445_B,
+    IRC_S1445_C,
+    IRC_S1445_E,
+    IRC_S1446_B,
+    IRC_S1446_F,
+    IRC_S1471_A,
+    eci_taxable_under_graduated_rates,
+    effectively_connected,
+    fatca_transition_exempt_payment_1471note,
+    firpta_affidavit_exemption_defeated_1445b7,
+    portfolio_interest,
+    united_states_real_property_holding_corporation,
+};
+
+pub relation withholding_agent_pays_income_item(agent: us.irc.core::Person, recipient: us.irc.core::Person, amount: Money, item_id: Text) kind empirical {
+    label en official "the withholding agent has control, receipt, custody, disposal, or payment of a section 1441(b) item of income paid to a nonresident alien individual or foreign partnership (section 1441(a))";
+}
+pub relation recipient_is_nonresident_alien_or_foreign_partnership(recipient: us.irc.core::Person) kind empirical {
+    label en unofficial "the recipient is a nonresident alien individual or a foreign partnership, the class section 1441(a) addresses";
+}
+pub relation item_is_reduced_rate_scholarship_item(item_id: Text) kind empirical {
+    label en official "the item is a qualified scholarship/fellowship amount paid to an F/J/M/Q nonimmigrant, taxed at 14 percent under the second sentence of section 1441(b) rather than the general 30 percent rate";
+}
+// §1441(c) exceptions do not depend on the identity of the withholding
+// agent — only on the item and (for (c)(1)) the recipient — so this
+// relation is 2-ary, avoiding an unbound `agent` in its own defining rules.
+pub relation withholding_1441c_exception_applies(recipient: us.irc.core::Person, item_id: Text) kind institutional {
+    label en official "a section 1441(c) exception applies: the item is ECI included in the recipient's section 871(b)(2) gross income (other than compensation for personal services) (c)(1), or the item is portfolio interest under section 871(h) not known/suspected to fail (h)(3)/(4) (c)(9)";
+}
+
+@source(IRC_S1441_A, relation = formalizes, coverage = partial, quote = "deduct and withhold from such items a tax equal to 30 percent thereof, except that in the case of any item of income specified in the second sentence of subsection (b), the tax shall be equal to 14 percent of such item.")
+pub relation withholding_1441_amount(agent: us.irc.core::Person, recipient: us.irc.core::Person, amount: Money, tax: Money) kind institutional {
+    label en official "the amount required to be deducted and withheld under section 1441(a): 30 percent of the item generally, or 14 percent for the section 1441(b) second-sentence scholarship items, unless a section 1441(c) exception applies";
+}
+rule S1441AWithholdingGeneralRate defeasible {
+    for agent: us.irc.core::Person;
+    for recipient: us.irc.core::Person;
+    for amount: Money;
+    for item_id: Text;
+    when withholding_agent_pays_income_item(agent, recipient, amount, item_id)
+     and recipient_is_nonresident_alien_or_foreign_partnership(recipient);
+    unless item_is_reduced_rate_scholarship_item(item_id)
+     and withholding_agent_pays_income_item(agent, recipient, amount, item_id);
+    unless withholding_1441c_exception_applies(recipient, item_id)
+     and withholding_agent_pays_income_item(agent, recipient, amount, item_id);
+    then withholding_1441_amount(agent, recipient, amount, amount * 0.30);
+}
+rule S1441AWithholdingScholarshipRate defeasible {
+    for agent: us.irc.core::Person;
+    for recipient: us.irc.core::Person;
+    for amount: Money;
+    for item_id: Text;
+    when withholding_agent_pays_income_item(agent, recipient, amount, item_id)
+     and recipient_is_nonresident_alien_or_foreign_partnership(recipient)
+     and item_is_reduced_rate_scholarship_item(item_id);
+    unless withholding_1441c_exception_applies(recipient, item_id)
+     and withholding_agent_pays_income_item(agent, recipient, amount, item_id);
+    then withholding_1441_amount(agent, recipient, amount, amount * 0.14);
+}
+@source(IRC_S1441_A, relation = formalizes, coverage = exact, quote = "all persons, in whatever capacity acting (including lessees or mortgagors of real or personal property, fiduciaries, employers, and all officers and employees of the United States) having the control, receipt, custody, disposal, or payment of any of the items of income specified in subsection (b)")
+rule S1441ADutyToWithhold defeasible {
+    for agent: us.irc.core::Person;
+    for recipient: us.irc.core::Person;
+    for amount: Money;
+    for tax: Money;
+    for item_id: Text;
+    when withholding_1441_amount(agent, recipient, amount, tax);
+    then duty S1441WithholdingDuty {
+        bearer agent;
+        beneficiary us.irc.core::IRS;
+        goal achievement {
+            condition us.irc.core::payment(_, agent, tax, _);
+            window [-infinity, infinity];
+        }
+    };
+}
+// §1441(c)(1): ECI compensation-exception. Portfolio interest (c)(9) is
+// wired directly to §871(h)'s `portfolio_interest` relation rather than a
+// separate empirical fact, so the two modules cannot drift.
+@source(IRC_S1441_C, relation = formalizes, coverage = partial, quote = "No deduction or withholding under subsection (a) shall be required in the case of any item of income (other than compensation for personal services) which is effectively connected with the conduct of a trade or business within the United States and which is included in the gross income of the recipient under section 871(b)(2) for the taxable year.")
+rule S1441C1EciException defeasible {
+    for recipient: us.irc.core::Individual;
+    for item_id: Text;
+    for y: us.irc.core::TaxableYear;
+    when effectively_connected(recipient, item_id)
+     and eci_taxable_under_graduated_rates(recipient, y);
+    then withholding_1441c_exception_applies(recipient, item_id);
+}
+@source(IRC_S1441_C, relation = formalizes, coverage = partial, quote = "In the case of portfolio interest (within the meaning of section 871(h)), no tax shall be required to be deducted and withheld from such interest unless the person required to deduct and withhold tax from such interest knows, or has reason to know, that such interest is not portfolio interest by reason of section 871(h)(3) or (4).")
+rule S1441C9PortfolioInterestException defeasible {
+    for recipient: us.irc.core::Individual;
+    for item_id: Text;
+    when portfolio_interest(recipient, item_id);
+    then withholding_1441c_exception_applies(recipient, item_id);
+}
+
+// --- §1445(a)-(b): FIRPTA withholding --------------------------------------
+
+pub relation usrpi_disposition(transferee: us.irc.core::Person, transferor: us.irc.core::Person, amount_realized: Money) kind empirical {
+    label en official "a disposition of a United States real property interest (section 897(c)) by a foreign person, with this amount realized, for section 1445(a)";
+}
+pub relation transferor_is_foreign_person(transferor: us.irc.core::Person) kind empirical {
+    label en unofficial "the transferor is a foreign person, for section 1445(a)";
+}
+pub relation acquired_for_use_as_residence(transferee: us.irc.core::Person, transferor: us.irc.core::Person) kind empirical {
+    label en official "the property is acquired by the transferee for use by the transferee as a residence, for section 1445(b)(5)(A)";
+}
+pub relation transferor_furnishes_nonforeign_affidavit(transferor: us.irc.core::Person) kind empirical {
+    label en official "the transferor furnishes the transferee a perjury-penalty affidavit of the transferor's US TIN and non-foreign status, for section 1445(b)(2)";
+}
+pub relation firpta_1445b_exemption_applies(transferee: us.irc.core::Person, transferor: us.irc.core::Person, amount_realized: Money) kind institutional {
+    label en official "a section 1445(b) exemption from FIRPTA withholding applies: the transferor's nonforeign affidavit (b)(2), or the $300,000-or-less residence exemption (b)(5) — the other (b)(3),(4),(6) exemptions are not modeled this stage (TECH_GAP)";
+}
+
+@source(IRC_S1445_A, relation = formalizes, coverage = exact, quote = "the transferee shall be required to deduct and withhold a tax equal to 15 percent of the amount realized on the disposition")
+pub relation firpta_withholding_amount(transferee: us.irc.core::Person, transferor: us.irc.core::Person, amount_realized: Money, tax: Money) kind institutional {
+    label en official "the amount the transferee must withhold under section 1445(a): 15 percent of the amount realized on a USRPI disposition by a foreign person, unless a section 1445(b) exemption applies";
+}
+rule S1445AFirptaWithholdingAmount defeasible {
+    for transferee: us.irc.core::Person;
+    for transferor: us.irc.core::Person;
+    for amount_realized: Money;
+    when usrpi_disposition(transferee, transferor, amount_realized)
+     and transferor_is_foreign_person(transferor);
+    unless firpta_1445b_exemption_applies(transferee, transferor, amount_realized)
+     and usrpi_disposition(transferee, transferor, amount_realized);
+    then firpta_withholding_amount(transferee, transferor, amount_realized, amount_realized * 0.15);
+}
+rule S1445ADutyToWithhold defeasible {
+    for transferee: us.irc.core::Person;
+    for transferor: us.irc.core::Person;
+    for amount_realized: Money;
+    for tax: Money;
+    when firpta_withholding_amount(transferee, transferor, amount_realized, tax);
+    then duty S1445WithholdingDuty {
+        bearer transferee;
+        beneficiary us.irc.core::IRS;
+        goal achievement {
+            condition us.irc.core::payment(_, transferee, tax, _);
+            window [-infinity, infinity];
+        }
+    };
+}
+rule S1445B2NonforeignAffidavitExemption defeasible {
+    for transferee: us.irc.core::Person;
+    for transferor: us.irc.core::Person;
+    for amount_realized: Money;
+    when transferor_furnishes_nonforeign_affidavit(transferor)
+     and usrpi_disposition(transferee, transferor, amount_realized);
+    unless firpta_affidavit_exemption_defeated_1445b7(transferee, transferor)
+     and usrpi_disposition(transferee, transferor, amount_realized);
+    then firpta_1445b_exemption_applies(transferee, transferor, amount_realized);
+}
+// $300,000 boundary is inclusive ("does not exceed $300,000").
+@source(IRC_S1445_B, relation = formalizes, coverage = exact, quote = "the amount realized for the property does not exceed $300,000")
+rule S1445B5ResidenceExemption defeasible {
+    for transferee: us.irc.core::Person;
+    for transferor: us.irc.core::Person;
+    for amount_realized: Money;
+    when acquired_for_use_as_residence(transferee, transferor)
+     and usrpi_disposition(transferee, transferor, amount_realized)
+     and amount_realized <= 300000 USD;
+    then firpta_1445b_exemption_applies(transferee, transferor, amount_realized);
+}
+
+// --- §1471(a)-(b): FATCA withholding on FFIs -------------------------------
+
+pub relation withholdable_payment_to_ffi(agent: us.irc.core::Person, ffi: us.irc.core::Person, amount: Money) kind empirical {
+    label en official "a withholdable payment made by the withholding agent to a foreign financial institution, for section 1471(a)";
+}
+pub relation ffi_agreement_in_effect(ffi: us.irc.core::Person) kind empirical {
+    label en official "an agreement under section 1471(b)(1) is in effect between the foreign financial institution and the Secretary (or the FFI is deemed-compliant under (b)(2)), for section 1471(a)'s exception";
+}
+
+@source(IRC_S1471_A, relation = formalizes, coverage = exact, quote = "the withholding agent with respect to such payment shall deduct and withhold from such payment a tax equal to 30 percent of the amount of such payment")
+pub relation fatca_withholding_amount(agent: us.irc.core::Person, ffi: us.irc.core::Person, amount: Money, tax: Money) kind institutional {
+    label en official "the amount required to be withheld under section 1471(a): 30 percent of a withholdable payment to a foreign financial institution that does not meet the section 1471(b) requirements";
+}
+rule S1471AFatcaWithholdingAmount defeasible {
+    for agent: us.irc.core::Person;
+    for ffi: us.irc.core::Person;
+    for amount: Money;
+    when withholdable_payment_to_ffi(agent, ffi, amount);
+    unless ffi_agreement_in_effect(ffi)
+     and withholdable_payment_to_ffi(agent, ffi, amount);
+    unless fatca_transition_exempt_payment_1471note(agent, ffi, amount)
+     and withholdable_payment_to_ffi(agent, ffi, amount);
+    then fatca_withholding_amount(agent, ffi, amount, amount * 0.30);
+}
+rule S1471ADutyToWithhold defeasible {
+    for agent: us.irc.core::Person;
+    for ffi: us.irc.core::Person;
+    for amount: Money;
+    for tax: Money;
+    when fatca_withholding_amount(agent, ffi, amount, tax);
+    then duty S1471WithholdingDuty {
+        bearer agent;
+        beneficiary us.irc.core::IRS;
+        goal achievement {
+            condition us.irc.core::payment(_, agent, tax, _);
+            window [-infinity, infinity];
+        }
+    };
+}
+// §1471(b)'s FFI-agreement REQUIREMENTS ((b)(1)(A)-(F): identify US
+// accounts, verify/diligence, report, withhold on recalcitrant passthru
+// payments, respond to Secretary requests, seek waivers or close accounts)
+// are the FFI's own DUTIES once the agreement is in effect — NOT modeled
+// this stage (stage 2): `ffi_agreement_in_effect` is asserted as a case fact
+// rather than derived from the FFI's compliance with those duties.
+
+// --- §1445(c): limitations on amount withheld ------------------------------
+//
+// Stage 2b. (c)(1) the maximum-tax-liability cap and (c)(4) the reduced
+// 10%-rate for a ≤$1,000,000 residence disposition. (c)(2) (Secretary's
+// discretionary reduced amount) and (c)(3) (the 90-day procedural deadline)
+// are NOT modeled — the (c)(2) reduction is the Secretary's own
+// discretionary act (EXTERNAL_DEPENDENCY), and (c)(3)(B) is an
+// administrative deadline external to the withholding computation itself.
+
+pub relation transferor_maximum_tax_liability(transferor: us.irc.core::Person, amount_realized: Money, amount: Money) kind empirical {
+    label en unofficial "the Secretary's determination (on request) of the transferor's maximum tax liability under section 1445(f)(4) for this disposition, for the section 1445(c)(1) withholding cap — EXTERNAL_DEPENDENCY: the Secretary's own computation, asserted directly rather than derived from section 871(b)(1)/882(a)(1) tax plus unsatisfied withholding liability";
+}
+@source(IRC_S1445_C, relation = formalizes, coverage = partial, quote = "The amount required to be withheld under this section with respect to any disposition shall not exceed the amount (if any) determined under subparagraph (B) as the transferor's maximum tax liability.")
+pub relation firpta_withholding_amount_capped(transferee: us.irc.core::Person, transferor: us.irc.core::Person, amount_realized: Money, tax: Money) kind institutional {
+    label en official "the section 1445(a) withholding amount, capped under section 1445(c)(1) at the transferor's maximum tax liability once the Secretary has determined one";
+}
+rule S1445C1CappedAtMaximumTaxLiability defeasible {
+    for transferee: us.irc.core::Person;
+    for transferor: us.irc.core::Person;
+    for amount_realized: Money;
+    for uncapped: Money;
+    for max_liability: Money;
+    when firpta_withholding_amount(transferee, transferor, amount_realized, uncapped)
+     and transferor_maximum_tax_liability(transferor, amount_realized, max_liability);
+    then firpta_withholding_amount_capped(transferee, transferor, amount_realized, min(uncapped, max_liability));
+}
+pub relation residence_disposition_not_1445b5_exempt(transferee: us.irc.core::Person, transferor: us.irc.core::Person, amount_realized: Money) kind empirical {
+    label en official "the property is acquired by the transferee for use as a residence, the amount realized does not exceed $1,000,000, and the section 1445(b)(5) $300,000 exemption of subsection (b) does not apply — the three section 1445(c)(4)(A)-(C) conditions";
+}
+@source(IRC_S1445_C, relation = formalizes, coverage = exact, quote = "subsection (a) shall be applied by substituting \"10 percent\" for \"15 percent\"")
+pub relation firpta_withholding_amount_reduced_residence(transferee: us.irc.core::Person, transferor: us.irc.core::Person, amount_realized: Money, tax: Money) kind institutional {
+    label en official "the section 1445(c)(4) reduced-rate withholding amount: 10 percent (instead of 15 percent) of the amount realized on a ≤$1,000,000 residence disposition not otherwise (b)(5)-exempt";
+}
+rule S1445C4ReducedRateForResidenceUpToOneMillion defeasible {
+    for transferee: us.irc.core::Person;
+    for transferor: us.irc.core::Person;
+    for amount_realized: Money;
+    when residence_disposition_not_1445b5_exempt(transferee, transferor, amount_realized)
+     and amount_realized <= 1000000.00 USD
+     and transferor_is_foreign_person(transferor);
+    then firpta_withholding_amount_reduced_residence(transferee, transferor, amount_realized, round(amount_realized * 0.10, 2, "HALF_UP"));
+}
+
+// --- §1445(e): distributions by corporations, partnerships, trusts, estates -
+//
+// Stage 2b. (e)(1) the domestic-partnership/trust/estate withholding on
+// gain allocable to a foreign partner/beneficiary; (e)(3) the domestic-
+// USRPHC-distribution 15% withholding. (e)(2) (foreign-corporation
+// distributions on which section 897(d)/(e) gain is recognized), (e)(4)-(6)
+// (taxable distributions by partnerships/trusts/estates, dispositions of
+// partnership/trust/estate interests, and RIC/REIT distributions) are NOT
+// modeled this stage — TECH_GAP.
+
+pub relation section_11b_highest_rate(y: us.irc.core::TaxableYear, rate: Decimal) kind empirical {
+    label en unofficial "the highest rate of tax in effect for the taxable year under section 11(b), for the section 1445(e)(1)/(2)/(6) withholding rate — EXTERNAL_DEPENDENCY on `corporations`' own section 11(b) rate";
+}
+pub relation gain_allocable_to_foreign_partner_or_beneficiary(qie: us.irc.core::Person, y: us.irc.core::TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the USRPI-disposition gain of a domestic partnership/trust/estate allocable to a foreign partner or beneficiary (or to a foreign-owned portion of the trust under subpart E), for section 1445(e)(1)(A)-(B)";
+}
+@source(IRC_S1445_E, relation = formalizes, coverage = partial, quote = "such partnership, the trustee of such trust, or the executor of such estate (as the case may be) shall be required to deduct and withhold under subsection (a) a tax equal to the highest rate of tax in effect for the taxable year under section 11(b)")
+pub relation firpta_1445e1_withholding_amount(qie: us.irc.core::Person, y: us.irc.core::TaxableYear, tax: Money) kind institutional {
+    label en official "the section 1445(e)(1) withholding amount: the highest section 11(b) rate multiplied by the USRPI-disposition gain allocable to a foreign partner or beneficiary of a domestic partnership, trust, or estate";
+}
+rule S1445E1DomesticPassThroughWithholding defeasible {
+    for qie: us.irc.core::Person;
+    for y: us.irc.core::TaxableYear;
+    for rate: Decimal;
+    for gain: Money;
+    when section_11b_highest_rate(y, rate)
+     and gain_allocable_to_foreign_partner_or_beneficiary(qie, y, gain);
+    then firpta_1445e1_withholding_amount(qie, y, round(rate * gain, 2, "HALF_UP"));
+}
+pub relation usrphc_distribution_to_foreign_shareholder(corp: us.irc.core::Corporation, shareholder: us.irc.core::Person, amount_realized: Money) kind empirical {
+    label en official "a domestic corporation which is or has been a United States real property holding corporation distributes property to a foreign shareholder in a transaction to which section 302 or part II of subchapter C applies, for section 1445(e)(3)";
+}
+@source(IRC_S1445_E, relation = formalizes, coverage = partial, quote = "such corporation shall deduct and withhold under subsection (a) a tax equal to 15 percent of the amount realized by the foreign shareholder")
+pub relation firpta_1445e3_withholding_amount(corp: us.irc.core::Corporation, shareholder: us.irc.core::Person, tax: Money) kind institutional {
+    label en official "the section 1445(e)(3) withholding amount: 15 percent of the amount realized by a foreign shareholder on a domestic USRPHC's redemption/liquidation-style distribution";
+}
+rule S1445E3UsrphcDistributionWithholding defeasible {
+    for corp: us.irc.core::Corporation;
+    for shareholder: us.irc.core::Person;
+    for amount_realized: Money;
+    when usrphc_distribution_to_foreign_shareholder(corp, shareholder, amount_realized)
+     and united_states_real_property_holding_corporation(corp);
+    then firpta_1445e3_withholding_amount(corp, shareholder, round(amount_realized * 0.15, 2, "HALF_UP"));
+}
+
+// --- §1446(a)-(f): withholding on foreign partners' share of ECI -----------
+
+pub relation partnership_has_eci_allocable_to_foreign_partner(partnership: us.irc.core::Person, foreign_partner: us.irc.core::Person, y: us.irc.core::TaxableYear) kind empirical {
+    label en unofficial "the partnership has effectively connected taxable income for the taxable year, a portion of which is allocable under section 704 to a foreign partner, for section 1446(a)";
+}
+pub relation foreign_partner_is_corporation_1446(foreign_partner: us.irc.core::Person) kind empirical {
+    label en official "the foreign partner is a corporation, for the section 1446(b)(2)(B) applicable-percentage branch (versus (b)(2)(A) for a non-corporate foreign partner)";
+}
+pub relation eci_taxable_income_allocable_to_foreign_partner(partnership: us.irc.core::Person, foreign_partner: us.irc.core::Person, y: us.irc.core::TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the effectively connected taxable income of the partnership (section 1446(c), computed with its own adjustments) allocable under section 704 to the foreign partner, for section 1446(b)(1)";
+}
+pub relation highest_individual_rate(y: us.irc.core::TaxableYear, rate: Decimal) kind empirical {
+    label en unofficial "the highest rate of tax specified in section 1 for the taxable year, for section 1446(b)(2)(A) — EXTERNAL_DEPENDENCY on `income-individual`'s section 1 rate schedule";
+}
+@source(IRC_S1446_B, relation = formalizes, coverage = exact, quote = "the highest rate of tax specified in section 1 in the case of the portion of the effectively connected taxable income which is allocable under section 704 to foreign partners who are not corporations")
+pub relation section_1446_withholding_tax(partnership: us.irc.core::Person, foreign_partner: us.irc.core::Person, y: us.irc.core::TaxableYear, tax: Money) kind institutional {
+    label en official "the section 1446 withholding tax payable by the partnership: the applicable percentage (highest section 1 rate for a non-corporate foreign partner, highest section 11(b) rate for a corporate foreign partner) times the effectively connected taxable income allocable to that foreign partner";
+}
+rule S1446BNonCorporateForeignPartnerRate defeasible {
+    for partnership: us.irc.core::Person;
+    for foreign_partner: us.irc.core::Person;
+    for y: us.irc.core::TaxableYear;
+    for amount: Money;
+    for rate: Decimal;
+    when partnership_has_eci_allocable_to_foreign_partner(partnership, foreign_partner, y)
+     and not_known(foreign_partner_is_corporation_1446(foreign_partner))
+     and eci_taxable_income_allocable_to_foreign_partner(partnership, foreign_partner, y, amount)
+     and highest_individual_rate(y, rate);
+    then section_1446_withholding_tax(partnership, foreign_partner, y, round(rate * amount, 2, "HALF_UP"));
+}
+@source(IRC_S1446_B, relation = formalizes, coverage = exact, quote = "the highest rate of tax specified in section 11(b) in the case of the portion of the effectively connected taxable income which is allocable under section 704 to foreign partners which are corporations")
+rule S1446BCorporateForeignPartnerRate defeasible {
+    for partnership: us.irc.core::Person;
+    for foreign_partner: us.irc.core::Person;
+    for y: us.irc.core::TaxableYear;
+    for amount: Money;
+    for rate: Decimal;
+    when partnership_has_eci_allocable_to_foreign_partner(partnership, foreign_partner, y)
+     and foreign_partner_is_corporation_1446(foreign_partner)
+     and eci_taxable_income_allocable_to_foreign_partner(partnership, foreign_partner, y, amount)
+     and section_11b_highest_rate(y, rate);
+    then section_1446_withholding_tax(partnership, foreign_partner, y, round(rate * amount, 2, "HALF_UP"));
+}
+rule S1446ADutyToPay defeasible {
+    for partnership: us.irc.core::Person;
+    for foreign_partner: us.irc.core::Person;
+    for y: us.irc.core::TaxableYear;
+    for tax: Money;
+    when section_1446_withholding_tax(partnership, foreign_partner, y, tax);
+    then duty S1446WithholdingDuty {
+        bearer partnership;
+        beneficiary us.irc.core::IRS;
+        goal achievement {
+            condition us.irc.core::payment(_, partnership, tax, _);
+            window [-infinity, infinity];
+        }
+    };
+}
+pub relation partner_of_partnership_1446(p: us.irc.core::Person, partnership: us.irc.core::Person) kind empirical {
+    label en unofficial "the person is a partner of the partnership, for the section 1446(e) 'foreign partner' domain (a domain-anchor fact so the definition rule below is range-restricted, §190)";
+}
+pub relation foreign_partner_1446e(p: us.irc.core::Person) kind institutional {
+    label en official "the partner is a foreign partner for section 1446 purposes: not a United States person (section 1446(e))";
+}
+rule S1446ForeignPartnerDefinition defeasible {
+    for p: us.irc.core::Person;
+    for partnership: us.irc.core::Person;
+    when partner_of_partnership_1446(p, partnership)
+     and not_known(us.irc.definitions::united_states_person(p));
+    then foreign_partner_1446e(p);
+}
+pub relation withholding_tax_credit_allowed_1446d(foreign_partner: us.irc.core::Person, partnership: us.irc.core::Person, y: us.irc.core::TaxableYear, amount: Money) kind institutional {
+    label en official "the foreign partner's section 33 credit for their share of the section 1446 withholding tax paid by the partnership (section 1446(d)(1))";
+}
+rule S1446D1CreditForShareOfWithholdingTax defeasible {
+    for foreign_partner: us.irc.core::Person;
+    for partnership: us.irc.core::Person;
+    for y: us.irc.core::TaxableYear;
+    for share: Money;
+    when section_1446_withholding_tax(partnership, foreign_partner, y, share);
+    then withholding_tax_credit_allowed_1446d(foreign_partner, partnership, y, share);
+}
+
+// --- §1446(f): withholding on dispositions of partnership interests --------
+
+pub relation disposition_of_partnership_interest_864c8(transferor: us.irc.core::Person, transferee: us.irc.core::Person, amount_realized: Money) kind empirical {
+    label en official "gain on the disposition of an interest in a partnership would be treated under section 864(c)(8) as effectively connected with a US trade or business, for section 1446(f)(1)";
+}
+pub relation nonforeign_affidavit_furnished_1446f(transferor: us.irc.core::Person) kind empirical {
+    label en official "the transferor furnishes the transferee a perjury-penalty affidavit of the transferor's US TIN and non-foreign status, for the section 1446(f)(2)(A) exception (rules of section 1445(d) apply per (f)(2)(C))";
+}
+@source(IRC_S1446_F, relation = formalizes, coverage = exact, quote = "the transferee shall be required to deduct and withhold a tax equal to 10 percent of the amount realized on the disposition")
+pub relation section_1446f_withholding_amount(transferor: us.irc.core::Person, transferee: us.irc.core::Person, amount_realized: Money, tax: Money) kind institutional {
+    label en official "the section 1446(f)(1) withholding amount: 10 percent of the amount realized on a disposition of a partnership interest whose gain would be section 864(c)(8) ECI, unless the (f)(2) nonforeign-affidavit exception applies";
+}
+rule S1446F1WithholdingOnPartnershipInterestDisposition defeasible {
+    for transferor: us.irc.core::Person;
+    for transferee: us.irc.core::Person;
+    for amount_realized: Money;
+    when disposition_of_partnership_interest_864c8(transferor, transferee, amount_realized);
+    unless nonforeign_affidavit_furnished_1446f(transferor)
+     and disposition_of_partnership_interest_864c8(transferor, transferee, amount_realized);
+    then section_1446f_withholding_amount(transferor, transferee, amount_realized, round(amount_realized * 0.10, 2, "HALF_UP"));
+}
+pub relation transferee_failed_to_withhold_1446f4(transferor: us.irc.core::Person, transferee: us.irc.core::Person, amount_realized: Money, unwithheld: Money) kind empirical {
+    label en unofficial "the transferee failed to withhold the amount required under section 1446(f)(1), for the section 1446(f)(4) partnership-backstop duty";
+}
+pub relation partnership_of_interest_disposed(partnership: us.irc.core::Person, transferor: us.irc.core::Person, transferee: us.irc.core::Person) kind empirical {
+    label en unofficial "the partnership whose interest was disposed of in the section 1446(f)(1) transaction between transferor and transferee — a domain-anchor fact so the (f)(4) backstop rule's `partnership` head variable is range-restricted (§190)";
+}
+@source(IRC_S1446_F, relation = formalizes, coverage = exact, quote = "the partnership shall be required to deduct and withhold from distributions to the transferee a tax in an amount equal to the amount the transferee failed to withhold")
+pub relation section_1446f4_partnership_backstop_amount(partnership: us.irc.core::Person, transferee: us.irc.core::Person, amount: Money) kind institutional {
+    label en official "the section 1446(f)(4) backstop: the partnership must withhold from distributions to the transferee an amount equal to what the transferee failed to withhold under (f)(1)";
+}
+rule S1446F4PartnershipBackstop defeasible {
+    for partnership: us.irc.core::Person;
+    for transferor: us.irc.core::Person;
+    for transferee: us.irc.core::Person;
+    for amount_realized: Money;
+    for unwithheld: Money;
+    when transferee_failed_to_withhold_1446f4(transferor, transferee, amount_realized, unwithheld)
+     and partnership_of_interest_disposed(partnership, transferor, transferee);
+    then section_1446f4_partnership_backstop_amount(partnership, transferee, unwithheld);
+}

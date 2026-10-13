@@ -1,0 +1,367 @@
+// Stage 3 (TECH_GAP reduction): section 45(b)(3) reduction for tax-exempt bonds, section
+// 45(b)(7)(B) correction-and-penalty cure of the prevailing-wage requirement and section
+// 45(b)(8)(D) exception for the apprenticeship requirement, and the sections that incorporate
+// them by "rules similar to the rules of section 45(b)(3) / (7)(B) / (8)".
+// STATUS: implemented_unverified (static check only; scenarios in
+// tests/s3-b-45b-cure-and-reduction-rules.lawtest are NOT executed).
+//
+// SHAPE. The three provisions are stated ONCE, keyed by an asset (facility, project, unit,
+// equipment) and a taxable year, and the incorporating sections read the same relations:
+//   * (b)(3): `reduction_fraction_45b3(asset, y, fraction)` and one reduction step per credit
+//     chain that names it: section 45 itself (credit_before_bonuses_45), 45Y(g)(8)
+//     (clean_electricity_production_credit) and 48E(d)(2) (clean_electricity_investment_credit).
+//   * (b)(7)(B): `prevailing_wage_cure_satisfied_45b7B(asset, y)`; the wage requirement is deemed
+//     satisfied. Wired into the alternative-rate gates of 45 (b)(6), 45Y/48E, and into the
+//     year-less strict wage relations of 45Q, 45V, 30C, 45L and 48C.
+//   * (b)(8)(D): `apprenticeship_requirement_cured_45b8D(asset, y)`; wired into 45 and 45Y/48E.
+// The wage shortfall with the section 6621 interest (plus 6 points) and the count of underpaid
+// laborers and mechanics are case facts: the wage determination of the Secretary of Labor and the
+// interest arithmetic are EXTERNAL_DEPENDENCY. A cure made in a year is read as covering the
+// requirement for the year-less consumers (45Q, 45V, 30C, 45L, 48C): APPROXIMATION.
+// Not wired (empirical consumer relation, see TECH-GAPS G6210): 45U, 45Z, and the apprenticeship
+// side of 45Q, 45V, 30C, 48C.
+
+// --- (b)(3): reduction for tax-exempt bonds -------------------------------------------------------
+
+use self::{
+    Asset,
+    IRC_S30C_G,
+    IRC_S45L_G,
+    IRC_S45Q_H,
+    IRC_S45V_E,
+    IRC_S45Y_G,
+    IRC_S45_B,
+    IRC_S48C_E,
+    IRC_S48E_D,
+    TaxableYear,
+    alternative_rate_requirements_met_45y,
+    apprenticeship_requirement_satisfied_45,
+    apprenticeship_requirement_satisfied_45y,
+    clean_electricity_credit_before_45b3_45y,
+    clean_electricity_investment_before_45b3_48e,
+    clean_electricity_investment_credit,
+    clean_electricity_production_credit,
+    credit_before_45b3_reduction_45,
+    credit_before_bonuses_45,
+    prevailing_wage_requirement_met_30c,
+    prevailing_wage_requirement_met_45l,
+    prevailing_wage_requirement_met_45q,
+    prevailing_wage_requirement_met_45v,
+    prevailing_wage_requirement_met_48c,
+    prevailing_wage_requirement_satisfied_45,
+    prevailing_wage_requirement_satisfied_45y,
+    qualified_facility_meets_6b_requirements_45,
+};
+
+pub relation tax_exempt_bond_proceeds_cumulative_45b3(asset: Asset, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the sum, for the taxable year and all prior taxable years, of proceeds of an issue of obligations exempt under section 103 used to finance the facility, at the close of the taxable year (section 45(b)(3)(A)) — case-asserted";
+}
+pub relation capital_account_additions_cumulative_45b3(asset: Asset, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the aggregate additions to the capital account for the facility for the taxable year and all prior taxable years, at the close of the taxable year (section 45(b)(3)(B)) — case-asserted";
+}
+pub relation reduction_fraction_45b3(asset: Asset, y: TaxableYear, fraction: Decimal) kind institutional {
+    label en official "section 45(b)(3): the lesser of 15 percent and the ratio of the tax-exempt bond proceeds to the capital account additions (rules similar to it apply under 45Y(g)(8) and 48E(d)(2))";
+}
+@source(IRC_S45_B, relation = formalizes, coverage = exact, quote = "shall be reduced by the amount which is the product of the amount so determined for such year and the lesser of 15 percent or a fraction—")
+rule ReductionFraction45b3BelowCapRule(asset: Asset, y: TaxableYear, bonds: Money, additions: Money) strict {
+    label en official "section 45(b)(3): the fraction, when it is below 15 percent";
+    when tax_exempt_bond_proceeds_cumulative_45b3(asset, y, bonds);
+    when capital_account_additions_cumulative_45b3(asset, y, additions);
+    when additions > 0 USD;
+    when bonds < additions * 0.15;
+    then reduction_fraction_45b3(asset, y, div_round(bonds / 1 USD, additions / 1 USD, 10, "HALF_UP"));
+}
+@source(IRC_S45_B, relation = formalizes, coverage = exact, quote = "shall be reduced by the amount which is the product of the amount so determined for such year and the lesser of 15 percent or a fraction—")
+rule ReductionFraction45b3CapRule(asset: Asset, y: TaxableYear, bonds: Money, additions: Money) strict {
+    label en official "section 45(b)(3): the 15 percent limit, when the fraction reaches it";
+    when tax_exempt_bond_proceeds_cumulative_45b3(asset, y, bonds);
+    when capital_account_additions_cumulative_45b3(asset, y, additions);
+    when additions > 0 USD;
+    when bonds >= additions * 0.15;
+    then reduction_fraction_45b3(asset, y, 0.15);
+}
+relation has_reduction_fraction_45b3(asset: Asset, y: TaxableYear) kind institutional;
+rule HasReductionFraction45b3Rule(asset: Asset, y: TaxableYear, f: Decimal) strict {
+    when reduction_fraction_45b3(asset, y, f);
+    then has_reduction_fraction_45b3(asset, y);
+}
+@source(IRC_S45_B, relation = formalizes, coverage = exact, quote = "The amount of the credit determined under subsection (a) with respect to any facility for any taxable year (determined after the application of paragraphs (1) and (2)) shall be reduced by the amount which is the product of the amount so determined for such year and the lesser of 15 percent or a fraction—")
+rule CreditReduced45b3Rule(facility: Asset, y: TaxableYear, before: Money, f: Decimal) strict {
+    label en official "section 45(b)(3): the credit of the facility reduced by the fraction";
+    when credit_before_45b3_reduction_45(facility, y, before);
+    when reduction_fraction_45b3(facility, y, f);
+    then credit_before_bonuses_45(facility, y, round(before * (1.0 - f), 2, "HALF_UP"));
+}
+rule CreditNotReduced45b3Rule(facility: Asset, y: TaxableYear, before: Money) strict {
+    label en official "section 45(b)(3): no tax-exempt bond financing, the credit is not reduced";
+    when credit_before_45b3_reduction_45(facility, y, before);
+    when not_known(has_reduction_fraction_45b3(facility, y));
+    then credit_before_bonuses_45(facility, y, before);
+}
+@source(IRC_S45Y_G, relation = formalizes, coverage = exact, quote = "Rules similar to the rules of section 45(b)(3) shall apply.")
+rule CleanElectricityCreditReduced45Yg8Rule(facility: Asset, y: TaxableYear, before: Money, f: Decimal) defeasible {
+    label en official "section 45Y(g)(8): the rule of section 45(b)(3) applied to the clean electricity production credit";
+    when clean_electricity_credit_before_45b3_45y(facility, y, before);
+    when reduction_fraction_45b3(facility, y, f);
+    then clean_electricity_production_credit(facility, y, round(before * (1.0 - f), 2, "HALF_UP"));
+}
+rule CleanElectricityCreditNotReduced45Yg8Rule(facility: Asset, y: TaxableYear, before: Money) defeasible {
+    label en official "section 45Y(g)(8): no tax-exempt bond financing, no reduction";
+    when clean_electricity_credit_before_45b3_45y(facility, y, before);
+    when not_known(has_reduction_fraction_45b3(facility, y));
+    then clean_electricity_production_credit(facility, y, before);
+}
+@source(IRC_S48E_D, relation = formalizes, coverage = exact, quote = "Rules similar to the rules of section 45(b)(3) shall apply.")
+rule CleanElectricityInvestmentCreditReduced48Ed2Rule(facility: Asset, y: TaxableYear, before: Money, f: Decimal) defeasible {
+    label en official "section 48E(d)(2): the rule of section 45(b)(3) applied to the clean electricity investment credit";
+    when clean_electricity_investment_before_45b3_48e(facility, y, before);
+    when reduction_fraction_45b3(facility, y, f);
+    then clean_electricity_investment_credit(facility, y, round(before * (1.0 - f), 2, "HALF_UP"));
+}
+rule CleanElectricityInvestmentCreditNotReduced48Ed2Rule(facility: Asset, y: TaxableYear, before: Money) defeasible {
+    label en official "section 48E(d)(2): no tax-exempt bond financing, no reduction";
+    when clean_electricity_investment_before_45b3_48e(facility, y, before);
+    when not_known(has_reduction_fraction_45b3(facility, y));
+    then clean_electricity_investment_credit(facility, y, before);
+}
+
+// --- (b)(7)(B): correction and penalty for a failure to pay prevailing wages ---------------------
+
+pub relation wage_underpayment_with_interest_45b7B(asset: Asset, y: TaxableYear, amount: Money) kind empirical {
+    label en official "section 45(b)(7)(B)(i)(I): the sum, over the laborers and mechanics paid below the prevailing rate in the year, of the wage difference and the interest at the section 6621 underpayment rate with 6 percentage points — case-asserted (the wage determination and the interest arithmetic are EXTERNAL_DEPENDENCY)";
+}
+pub relation underpaid_laborers_and_mechanics_45b7B(asset: Asset, y: TaxableYear, count: Decimal) kind empirical {
+    label en official "section 45(b)(7)(B)(i)(II)(bb): the total number of laborers and mechanics who were paid below the prevailing rate for any period during the year — case-asserted";
+}
+pub relation intentional_disregard_of_wage_requirement_45b7B(asset: Asset, y: TaxableYear) kind empirical {
+    label en official "section 45(b)(7)(B)(iii): the Secretary determines that the failure is due to intentional disregard of the requirement — case-asserted";
+}
+pub relation wage_correction_paid_45b7B(asset: Asset, y: TaxableYear, amount: Money) kind empirical {
+    label en official "section 45(b)(7)(B)(i)(I): the amount paid to the laborers and mechanics — case-asserted";
+}
+pub relation wage_penalty_paid_45b7B(asset: Asset, y: TaxableYear, amount: Money) kind empirical {
+    label en official "section 45(b)(7)(B)(i)(II): the penalty paid to the Secretary — case-asserted";
+}
+pub relation wage_failure_final_determination_date_45b7B(asset: Asset, y: TaxableYear, on: Date) kind empirical {
+    label en official "section 45(b)(7)(B)(iv): the date of a final determination by the Secretary of the failure — case-asserted";
+}
+pub relation wage_cure_payments_completed_on_45b7B(asset: Asset, y: TaxableYear, on: Date) kind empirical {
+    label en official "section 45(b)(7)(B)(iv): the date on which the last of the payments of subclauses (I) and (II) was made — case-asserted";
+}
+pub relation wage_correction_required_45b7B(asset: Asset, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 45(b)(7)(B)(i)(I), (iii)(I): the payment to the laborers and mechanics, three times the sum in the case of intentional disregard";
+}
+@source(IRC_S45_B, relation = formalizes, coverage = exact, quote = "(I) makes payment to such laborer or mechanic in an amount equal to the sum of—")
+rule WageCorrectionRequired45b7BRule(asset: Asset, y: TaxableYear, sum: Money) strict {
+    label en official "section 45(b)(7)(B)(i)(I): the sum of the wage difference and the interest";
+    when wage_underpayment_with_interest_45b7B(asset, y, sum);
+    when not_known(intentional_disregard_of_wage_requirement_45b7B(asset, y));
+    then wage_correction_required_45b7B(asset, y, sum);
+}
+@source(IRC_S45_B, relation = formalizes, coverage = exact, quote = "(I) in subclause (I), by substituting \"three times the sum\" for \"the sum\", and")
+rule WageCorrectionRequiredIntentional45b7BRule(asset: Asset, y: TaxableYear, sum: Money) strict {
+    label en official "section 45(b)(7)(B)(iii)(I): three times the sum in the case of intentional disregard";
+    when wage_underpayment_with_interest_45b7B(asset, y, sum);
+    when intentional_disregard_of_wage_requirement_45b7B(asset, y);
+    then wage_correction_required_45b7B(asset, y, round(sum * 3.0, 2, "HALF_UP"));
+}
+pub relation wage_penalty_required_45b7B(asset: Asset, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 45(b)(7)(B)(i)(II), (iii)(II): 5,000 dollars (10,000 dollars in the case of intentional disregard) times the number of underpaid laborers and mechanics";
+}
+@source(IRC_S45_B, relation = formalizes, coverage = exact, quote = "(aa) $5,000, multiplied by")
+rule WagePenaltyRequired45b7BRule(asset: Asset, y: TaxableYear, n: Decimal) strict {
+    label en official "section 45(b)(7)(B)(i)(II): 5,000 dollars per underpaid laborer or mechanic";
+    when underpaid_laborers_and_mechanics_45b7B(asset, y, n);
+    when not_known(intentional_disregard_of_wage_requirement_45b7B(asset, y));
+    then wage_penalty_required_45b7B(asset, y, round(n * 5000.0, 2, "HALF_UP") * 1 USD);
+}
+@source(IRC_S45_B, relation = formalizes, coverage = exact, quote = "(II) in subclause (II), by substituting \"$10,000\" for \"5,000 [1] \" in item (aa) thereof.")
+rule WagePenaltyRequiredIntentional45b7BRule(asset: Asset, y: TaxableYear, n: Decimal) strict {
+    label en official "section 45(b)(7)(B)(iii)(II): 10,000 dollars per underpaid laborer or mechanic in the case of intentional disregard";
+    when underpaid_laborers_and_mechanics_45b7B(asset, y, n);
+    when intentional_disregard_of_wage_requirement_45b7B(asset, y);
+    then wage_penalty_required_45b7B(asset, y, round(n * 10000.0, 2, "HALF_UP") * 1 USD);
+}
+relation has_wage_failure_determination_45b7B(asset: Asset, y: TaxableYear) kind institutional;
+rule HasWageFailureDetermination45b7BRule(asset: Asset, y: TaxableYear, d: Date) strict {
+    when wage_failure_final_determination_date_45b7B(asset, y, d);
+    then has_wage_failure_determination_45b7B(asset, y);
+}
+pub relation wage_cure_payments_timely_45b7B(asset: Asset, y: TaxableYear) kind institutional {
+    label en official "section 45(b)(7)(B)(iv): after a final determination of the failure, the payments are made on or before the 180th day after the determination; without a final determination there is no such limit";
+}
+@source(IRC_S45_B, relation = formalizes, coverage = exact, quote = "subparagraph (B)(i) shall not apply unless the payments described in subclauses (I) and (II) of such subparagraph are made by the taxpayer on or before the date which is 180 days after the date of such determination.")
+rule WageCurePaymentsTimelyAfterDeterminationRule(asset: Asset, y: TaxableYear, d: Date, paid_on: Date) strict {
+    label en official "section 45(b)(7)(B)(iv): payments within 180 days after the final determination";
+    when wage_failure_final_determination_date_45b7B(asset, y, d);
+    when wage_cure_payments_completed_on_45b7B(asset, y, paid_on);
+    when paid_on <= add_calendar_period(d, 180 calendar_day);
+    then wage_cure_payments_timely_45b7B(asset, y);
+}
+rule WageCurePaymentsTimelyNoDeterminationRule(asset: Asset, y: TaxableYear, sum: Money) strict {
+    label en official "section 45(b)(7)(B)(iv): no final determination, no 180-day limit";
+    when wage_underpayment_with_interest_45b7B(asset, y, sum);
+    when not_known(has_wage_failure_determination_45b7B(asset, y));
+    then wage_cure_payments_timely_45b7B(asset, y);
+}
+pub relation prevailing_wage_cure_satisfied_45b7B(asset: Asset, y: TaxableYear) kind institutional {
+    label en official "section 45(b)(7)(B)(i): the taxpayer is deemed to have satisfied the prevailing-wage requirement for the year: the required payment to the laborers and mechanics and the penalty to the Secretary are made, within the time of (iv)";
+}
+@source(IRC_S45_B, relation = formalizes, coverage = exact, quote = "such taxpayer shall be deemed to have satisfied such requirement under such subparagraph with respect to such facility for any year if, with respect to any laborer or mechanic who was paid wages at a rate below the rate described in such subparagraph for any period during such year, such taxpayer—")
+rule PrevailingWageCureSatisfied45b7BRule(asset: Asset, y: TaxableYear, req: Money, paid: Money, preq: Money, ppaid: Money) strict {
+    label en official "section 45(b)(7)(B)(i): the required correction and penalty are paid in time";
+    when wage_correction_required_45b7B(asset, y, req);
+    when wage_correction_paid_45b7B(asset, y, paid);
+    when paid >= req;
+    when wage_penalty_required_45b7B(asset, y, preq);
+    when wage_penalty_paid_45b7B(asset, y, ppaid);
+    when ppaid >= preq;
+    when wage_cure_payments_timely_45b7B(asset, y);
+    then prevailing_wage_cure_satisfied_45b7B(asset, y);
+}
+
+// --- (b)(8)(D): exception to the apprenticeship requirement --------------------------------------
+
+pub relation apprenticeship_shortfall_labor_hours_45b8D(asset: Asset, y: TaxableYear, hours: Decimal) kind empirical {
+    label en official "section 45(b)(8)(D)(i)(II)(bb): the total labor hours for which the requirement of subparagraph (A) or (C) was not satisfied — case-asserted";
+}
+pub relation intentional_disregard_of_apprenticeship_requirement_45b8D(asset: Asset, y: TaxableYear) kind empirical {
+    label en official "section 45(b)(8)(D)(iii): the Secretary determines that the failure is due to intentional disregard — case-asserted";
+}
+pub relation apprenticeship_penalty_paid_45b8D(asset: Asset, y: TaxableYear, amount: Money) kind empirical {
+    label en official "section 45(b)(8)(D)(i)(II): the penalty paid to the Secretary — case-asserted";
+}
+pub relation apprentice_request_denied_without_fault_45b8D(asset: Asset) kind empirical {
+    label en official "section 45(b)(8)(D)(ii)(I): qualified apprentices were requested from a registered apprenticeship program and the request was denied, not by a refusal of the taxpayer or contractors to comply with the program standards — case-asserted";
+}
+pub relation apprenticeship_program_did_not_respond_45b8D(asset: Asset) kind empirical {
+    label en official "section 45(b)(8)(D)(ii)(II): qualified apprentices were requested and the program failed to respond within 5 business days of receiving the request — case-asserted";
+}
+pub relation apprenticeship_good_faith_effort_45b8D(asset: Asset) kind institutional {
+    label en official "section 45(b)(8)(D)(ii): the taxpayer is deemed to have satisfied the apprenticeship requirements: the request was denied without fault or the program did not respond in 5 business days";
+}
+@source(IRC_S45_B, relation = formalizes, coverage = exact, quote = "(I) such request has been denied, provided that such denial is not the result of a refusal by the taxpayer or any contractors or subcontractors engaged in the performance of construction, alteration, or repair work with respect to such qualified facility to comply with the established standards and requirements of the registered apprenticeship program, or")
+rule ApprenticeshipGoodFaithDeniedRule(asset: Asset) strict {
+    label en official "section 45(b)(8)(D)(ii)(I): request denied without fault";
+    when apprentice_request_denied_without_fault_45b8D(asset);
+    then apprenticeship_good_faith_effort_45b8D(asset);
+}
+@source(IRC_S45_B, relation = formalizes, coverage = exact, quote = "(II) the registered apprenticeship program fails to respond to such request within 5 business days after the date on which such registered apprenticeship program received such request.")
+rule ApprenticeshipGoodFaithNoResponseRule(asset: Asset) strict {
+    label en official "section 45(b)(8)(D)(ii)(II): no response within 5 business days";
+    when apprenticeship_program_did_not_respond_45b8D(asset);
+    then apprenticeship_good_faith_effort_45b8D(asset);
+}
+pub relation apprenticeship_penalty_required_45b8D(asset: Asset, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 45(b)(8)(D)(i)(II), (iii): 50 dollars (500 dollars in the case of intentional disregard) times the labor hours for which the requirement was not satisfied";
+}
+@source(IRC_S45_B, relation = formalizes, coverage = exact, quote = "(aa) $50, multiplied by")
+rule ApprenticeshipPenaltyRequiredRule(asset: Asset, y: TaxableYear, hours: Decimal) strict {
+    label en official "section 45(b)(8)(D)(i)(II)(aa): 50 dollars per labor hour";
+    when apprenticeship_shortfall_labor_hours_45b8D(asset, y, hours);
+    when not_known(intentional_disregard_of_apprenticeship_requirement_45b8D(asset, y));
+    then apprenticeship_penalty_required_45b8D(asset, y, round(hours * 50.0, 2, "HALF_UP") * 1 USD);
+}
+@source(IRC_S45_B, relation = formalizes, coverage = exact, quote = "If the Secretary determines that any failure described in subclause (i)(II) is due to intentional disregard of the requirements under subparagraphs (A) and (C), subclause (i)(II) shall be applied by substituting \"$500\" for \"$50\" in item (aa) thereof.")
+rule ApprenticeshipPenaltyRequiredIntentionalRule(asset: Asset, y: TaxableYear, hours: Decimal) strict {
+    label en official "section 45(b)(8)(D)(iii): 500 dollars per labor hour in the case of intentional disregard";
+    when apprenticeship_shortfall_labor_hours_45b8D(asset, y, hours);
+    when intentional_disregard_of_apprenticeship_requirement_45b8D(asset, y);
+    then apprenticeship_penalty_required_45b8D(asset, y, round(hours * 500.0, 2, "HALF_UP") * 1 USD);
+}
+pub relation apprenticeship_requirement_cured_45b8D(asset: Asset, y: TaxableYear) kind institutional {
+    label en official "section 45(b)(8)(D)(i): the taxpayer is not treated as failing the apprenticeship requirements: the good-faith effort of (ii) or the penalty of (i)(II) is paid";
+}
+@source(IRC_S45_B, relation = formalizes, coverage = exact, quote = "A taxpayer shall not be treated as failing to satisfy the requirements of this paragraph if such taxpayer—")
+rule ApprenticeshipRequirementCuredByPenaltyRule(asset: Asset, y: TaxableYear, req: Money, paid: Money) strict {
+    label en official "section 45(b)(8)(D)(i)(II): the required penalty is paid";
+    when apprenticeship_penalty_required_45b8D(asset, y, req);
+    when apprenticeship_penalty_paid_45b8D(asset, y, paid);
+    when paid >= req;
+    then apprenticeship_requirement_cured_45b8D(asset, y);
+}
+@source(IRC_S45_B, relation = formalizes, coverage = exact, quote = "A taxpayer shall not be treated as failing to satisfy the requirements of this paragraph if such taxpayer—")
+rule ApprenticeshipRequirementCuredByGoodFaithRule(asset: Asset, y: TaxableYear, hours: Decimal) strict {
+    label en official "section 45(b)(8)(D)(i)(I): the good-faith effort of clause (ii)";
+    when apprenticeship_shortfall_labor_hours_45b8D(asset, y, hours);
+    when apprenticeship_good_faith_effort_45b8D(asset);
+    then apprenticeship_requirement_cured_45b8D(asset, y);
+}
+
+// --- Incorporation: section 45 (b)(6) gate --------------------------------------------------------
+
+rule QualifiedFacilityMeets6bWageCuredRule(facility: Asset, y: TaxableYear) defeasible {
+    label en official "section 45(b)(6)(B)(iii), (b)(7)(B): the prevailing-wage requirement is deemed satisfied by the cure; the apprenticeship requirement is satisfied";
+    when prevailing_wage_cure_satisfied_45b7B(facility, y);
+    when apprenticeship_requirement_satisfied_45(facility, y);
+    then qualified_facility_meets_6b_requirements_45(facility, y);
+}
+rule QualifiedFacilityMeets6bApprenticeshipCuredRule(facility: Asset, y: TaxableYear) defeasible {
+    label en official "section 45(b)(6)(B)(iii), (b)(8)(D): the prevailing-wage requirement is satisfied; the apprenticeship requirement is not treated as failed";
+    when prevailing_wage_requirement_satisfied_45(facility, y);
+    when apprenticeship_requirement_cured_45b8D(facility, y);
+    then qualified_facility_meets_6b_requirements_45(facility, y);
+}
+rule QualifiedFacilityMeets6bBothCuredRule(facility: Asset, y: TaxableYear) defeasible {
+    label en official "section 45(b)(6)(B)(iii), (b)(7)(B), (b)(8)(D): both requirements are met by the cures";
+    when prevailing_wage_cure_satisfied_45b7B(facility, y);
+    when apprenticeship_requirement_cured_45b8D(facility, y);
+    then qualified_facility_meets_6b_requirements_45(facility, y);
+}
+
+// --- Incorporation: sections 45Y(g)(9)-(10) and 48E(d)(3)-(4) -----------------------------------
+
+@source(IRC_S45Y_G, relation = formalizes, coverage = exact, quote = "Rules similar to the rules of section 45(b)(7) shall apply.")
+rule AlternativeRateWageCured45Yg9Rule(facility: Asset, y: TaxableYear) defeasible {
+    label en official "sections 45Y(g)(9), 48E(d)(3): the prevailing-wage requirement is deemed satisfied by the cure of section 45(b)(7)(B); the apprenticeship requirement is satisfied";
+    when prevailing_wage_cure_satisfied_45b7B(facility, y);
+    when apprenticeship_requirement_satisfied_45y(facility, y);
+    then alternative_rate_requirements_met_45y(facility);
+}
+@source(IRC_S45Y_G, relation = formalizes, coverage = exact, quote = "Rules similar to the rules of section 45(b)(8) shall apply.")
+rule AlternativeRateApprenticeshipCured45Yg10Rule(facility: Asset, y: TaxableYear) defeasible {
+    label en official "sections 45Y(g)(10), 48E(d)(4): the apprenticeship requirement is not treated as failed under section 45(b)(8)(D); the prevailing-wage requirement is satisfied";
+    when prevailing_wage_requirement_satisfied_45y(facility, y);
+    when apprenticeship_requirement_cured_45b8D(facility, y);
+    then alternative_rate_requirements_met_45y(facility);
+}
+@source(IRC_S45Y_G, relation = formalizes, coverage = exact, quote = "Rules similar to the rules of section 45(b)(7) shall apply.")
+rule AlternativeRateBothCured45Yg9Rule(facility: Asset, y: TaxableYear) defeasible {
+    label en official "sections 45Y(g)(9)-(10), 48E(d)(3)-(4): both requirements are met by the cures";
+    when prevailing_wage_cure_satisfied_45b7B(facility, y);
+    when apprenticeship_requirement_cured_45b8D(facility, y);
+    then alternative_rate_requirements_met_45y(facility);
+}
+
+// --- Incorporation: the year-less strict wage relations (APPROXIMATION: a cure in any year) -----
+
+@source(IRC_S45Q_H, relation = formalizes, coverage = exact, quote = "Rules similar to the rules of section 45(b)(7)(B) shall apply.")
+rule PrevailingWageMet45qCuredRule(equipment: Asset, y: TaxableYear) strict {
+    label en official "section 45Q(h)(3)(B): the correction and penalty of section 45(b)(7)(B) deem the wage requirement satisfied";
+    when prevailing_wage_cure_satisfied_45b7B(equipment, y);
+    then prevailing_wage_requirement_met_45q(equipment);
+}
+@source(IRC_S45V_E, relation = formalizes, coverage = exact, quote = "Rules similar to the rules of section 45(b)(7)(B) shall apply.")
+rule PrevailingWageMet45vCuredRule(facility: Asset, y: TaxableYear) strict {
+    label en official "section 45V(e)(3)(B): the correction and penalty of section 45(b)(7)(B) deem the wage requirement satisfied";
+    when prevailing_wage_cure_satisfied_45b7B(facility, y);
+    then prevailing_wage_requirement_met_45v(facility);
+}
+@source(IRC_S30C_G, relation = formalizes, coverage = exact, quote = "Rules similar to the rules of section 45(b)(7)(B) shall apply.")
+rule PrevailingWageMet30cCuredRule(project: Asset, y: TaxableYear) strict {
+    label en official "section 30C(g)(2)(B): the correction and penalty of section 45(b)(7)(B) deem the wage requirement satisfied";
+    when prevailing_wage_cure_satisfied_45b7B(project, y);
+    then prevailing_wage_requirement_met_30c(project);
+}
+@source(IRC_S45L_G, relation = formalizes, coverage = exact, quote = "Rules similar to the rules of section 45(b)(7)(B) shall apply.")
+rule PrevailingWageMet45lCuredRule(unit: Asset, y: TaxableYear) strict {
+    label en official "section 45L(g)(2)(B): the correction and penalty of section 45(b)(7)(B) deem the wage requirement satisfied";
+    when prevailing_wage_cure_satisfied_45b7B(unit, y);
+    then prevailing_wage_requirement_met_45l(unit);
+}
+@source(IRC_S48C_E, relation = formalizes, coverage = exact, quote = "Rules similar to the rules of section 45(b)(7)(B) shall apply.")
+rule PrevailingWageMet48cCuredRule(project: Asset, y: TaxableYear) strict {
+    label en official "section 48C(e)(5)(B): the correction and penalty of section 45(b)(7)(B) deem the wage requirement satisfied";
+    when prevailing_wage_cure_satisfied_45b7B(project, y);
+    then prevailing_wage_requirement_met_48c(project);
+}

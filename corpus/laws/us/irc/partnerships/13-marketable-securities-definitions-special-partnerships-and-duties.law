@@ -1,0 +1,683 @@
+// 26 U.S.C. §704(d)(3)(A), §731(c)(2), (3)(C), (5), (7), §732(e), (f)(2), (f)(4)(B), (f)(6),
+// (f)(8), §734(e), §735(c)(1), §743(e), (f), §751(f) (stage 3 "добор": rows earlier recorded as
+// TECH_GAP "not modeled this pass").
+//
+// JUDGMENT CALLS AND GAPS (see coverage/partnerships.json, TECH-GAPS.md G42xx):
+//  - "Actively traded within the meaning of section 1092(d)(1)" is EXTERNAL_DEPENDENCY: the fact is
+//    asserted. "Substantially all assets ..." limbs (§731(c)(2)(B)(v), (3)(C)(i), §743(e)(5)(D)) are
+//    EVALUATIVE (DECISION-0194): adjudicated case facts, never an arithmetic guard.
+//  - The regulation-based limbs ((B)(vi), (3)(A)(ii), (3)(B) last sentence, (3)(C)(ii)(II),
+//    (3)(C)(iv) lead-in and last sentence) are the Secretary's delegated authority:
+//    EXTERNAL_DEPENDENCY, never invented; asserted where a rule reads them.
+//  - The §731(c)(2) chain is `strict` all the way down (no `unless`): `marketable_security_distributed`
+//    feeds strict rules of module 05, and a strict rule may not read a defeasible producer
+//    (LDC-E4103). The precious-metal exception of (B)(iv) is therefore a positive fact
+//    (`precious_metal_not_held_in_active_business`). The investment-partnership / eligible-partner
+//    chain is defeasible (it reads "never engaged in a trade or business"), and the module-10 rule that
+//    reads it is now `defeasible` too.
+//  - §731(c)(3)(C)(iv) look-thru is ONE tier deep (upper reads the lower's own classification);
+//    a chain of tiers would need a recursive predicate (LDC-E4102) — the case asserts the lower
+//    partnership's already look-through classification.
+//  - §731(c)(4)(B) (allocation of the basis increase among marketable securities) and §732(c)
+//    over N properties stay TECH_GAP: a proportional split needs an aggregate over a per-element
+//    computed quantity (§111 subset limitation).
+//  - §743(a) SBIL rules of module 06 and §734(d) rules of module 10 gain `unless` defeaters for the
+//    §743(e)/(f) and §734(e) special partnerships; their strict consumers in module 06 are now
+//    `defeasible` for the same reason as above.
+
+language "law.core" version "0.2";
+package us.irc.partnerships version "0.1.1";
+namespace "urn:us:irc:partnerships:clir";
+
+use self::{
+    Asset,
+    IRC_S704_D,
+    IRC_S731_C,
+    IRC_S732_E,
+    IRC_S732_F,
+    IRC_S734_E,
+    IRC_S735_C,
+    IRC_S743_B,
+    IRC_S743_E,
+    IRC_S743_F,
+    IRC_S751_F,
+    Partnership,
+    Person,
+    Secretary,
+    TaxableYear,
+    Transaction,
+    corporate_partner_basis_in_stock_after_distribution,
+    corporate_partner_receives_distributed_stock,
+    is_inventory_item_751d,
+    is_partner,
+    is_unrealized_receivable_751c,
+    marketable_security_distributed,
+    marketable_security_distributed_property,
+    partner_distributive_share_loss,
+    property_fmv_at_distribution_732,
+    section_731c4_basis,
+    section_731c_eligible_partner,
+    section_731c_investment_partnership,
+    section_731c_money_treated_amount,
+    section_732f_control_exception,
+    section_732f_controls_at_or_after,
+    section_732f_gain_recognized,
+    section_743b_adjustment,
+    section_751b_exchange,
+    substantial_built_in_loss_after_transfer,
+    transferee_proportionate_share_of_partnership_basis,
+};
+
+// ============================================================================
+// §704(d)(3)(A): section 702(a)(4) and (6) amounts count in the loss
+// ============================================================================
+
+enum Section704d3AAmountKind {
+    CharitableContributions702a4;
+    ForeignTaxes702a6;
+}
+pub relation section_702a_amount_in_loss_limit_704d3A(partner: Person, pship: Partnership, y: TaxableYear, kind: Section704d3AAmountKind, amount: Money) kind empirical {
+    label en unofficial "the partner's distributive share of an amount described in section 702(a)(4) (charitable contributions) or (6) (foreign taxes) (case-asserted; section 704(d)(3)(A))";
+}
+pub relation loss_for_704d_limitation(partner: Person, pship: Partnership, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the amount of loss tested under section 704(d)(1): the distributive share of loss plus the distributive share of the section 702(a)(4) and (6) amounts (section 704(d)(3)(A))";
+}
+@source(IRC_S704_D, relation = formalizes, coverage = exact, quote = "In determining the amount of any loss under paragraph (1), there shall be taken into account the partner's distributive share of amounts described in paragraphs (4) and (6) of section 702(a).")
+rule S704d3AWithAdditionalAmounts(partner: Person, pship: Partnership, y: TaxableYear, loss: Money, k0: Section704d3AAmountKind) defeasible {
+    label en official "the loss tested against basis includes the distributive share of charitable contributions and foreign taxes (section 704(d)(3)(A))";
+    when partner_distributive_share_loss(partner, pship, y, loss);
+    when section_702a_amount_in_loss_limit_704d3A(partner, pship, y, k0, _);
+    then loss_for_704d_limitation(partner, pship, y,
+        loss + sum all a: Money for k: Section704d3AAmountKind where section_702a_amount_in_loss_limit_704d3A(partner, pship, y, k, a));
+}
+rule S704d3AWithoutAdditionalAmounts(partner: Person, pship: Partnership, y: TaxableYear, loss: Money) defeasible {
+    label en unofficial "no section 702(a)(4) or (6) amount: the loss tested is the distributive share of loss itself";
+    when partner_distributive_share_loss(partner, pship, y, loss);
+    unless section_702a_amount_in_loss_limit_704d3A(partner, pship, y, _, _) and partner_distributive_share_loss(partner, pship, y, loss);
+    then loss_for_704d_limitation(partner, pship, y, loss);
+}
+
+// ============================================================================
+// §731(c)(2): marketable securities
+// ============================================================================
+
+enum FinancialInstrumentKind731c {
+    StockOrOtherEquityInterest;
+    EvidenceOfIndebtedness;
+    OptionContract;
+    ForwardOrFuturesContract;
+    NotionalPrincipalContract;
+    DerivativeInstrument;
+    ForeignCurrencyKind;
+}
+pub relation asset_financial_instrument_kind_731c(prop: Asset, kind: FinancialInstrumentKind731c) kind empirical {
+    label en unofficial "the asset is a financial instrument of the stated kind, or a foreign currency (case-asserted classification; section 731(c)(2)(A), (C))";
+}
+pub relation financial_instrument_731c(prop: Asset) kind institutional {
+    label en official "a financial instrument: stocks and other equity interests, evidences of indebtedness, options, forward or futures contracts, notional principal contracts, and derivatives (section 731(c)(2)(C))";
+}
+@source(IRC_S731_C, relation = formalizes, coverage = exact, quote = "The term \"financial instrument\" includes stocks and other equity interests, evidences of indebtedness, options, forward or futures contracts, notional principal contracts, and derivatives.")
+rule S731c2CFinancialInstrument(prop: Asset, kind: FinancialInstrumentKind731c) strict {
+    when asset_financial_instrument_kind_731c(prop, kind);
+    when kind != ForeignCurrencyKind;
+    then financial_instrument_731c(prop);
+}
+pub relation actively_traded_within_1092d1_on_distribution_date(prop: Asset) kind empirical {
+    label en unofficial "as of the date of the distribution the asset is actively traded within the meaning of section 1092(d)(1) (case-asserted: section 1092(d)(1) is EXTERNAL_DEPENDENCY of this package)";
+}
+pub relation marketable_security_731c(prop: Asset) kind institutional {
+    label en official "a marketable security within section 731(c)(2): a financial instrument or foreign currency actively traded on the distribution date, or one of the (B) inclusions";
+}
+@source(IRC_S731_C, relation = formalizes, coverage = exact, quote = "The term \"marketable securities\" means financial instruments and foreign currencies which are, as of the date of the distribution, actively traded (within the meaning of section 1092(d)(1)).")
+rule S731c2AFinancialInstrumentActivelyTraded(prop: Asset) strict {
+    when financial_instrument_731c(prop);
+    when actively_traded_within_1092d1_on_distribution_date(prop);
+    then marketable_security_731c(prop);
+}
+rule S731c2AForeignCurrencyActivelyTraded(prop: Asset) strict {
+    when asset_financial_instrument_kind_731c(prop, ForeignCurrencyKind);
+    when actively_traded_within_1092d1_on_distribution_date(prop);
+    then marketable_security_731c(prop);
+}
+pub relation interest_in_common_trust_fund(prop: Asset) kind empirical {
+    label en unofficial "the asset is an interest in a common trust fund (case-asserted; section 731(c)(2)(B)(i)(I))";
+}
+pub relation interest_in_ric_with_redeemable_securities(prop: Asset) kind empirical {
+    label en unofficial "the asset is an interest in a regulated investment company which is offering for sale or has outstanding any redeemable security (as defined in section 2(a)(32) of the Investment Company Act of 1940) of which it is the issuer (case-asserted; section 731(c)(2)(B)(i)(II))";
+}
+@source(IRC_S731_C, relation = formalizes, coverage = exact, quote = "(I) a common trust fund, or")
+rule S731c2BiCommonTrustFund(prop: Asset) strict {
+    when interest_in_common_trust_fund(prop);
+    then marketable_security_731c(prop);
+}
+@source(IRC_S731_C, relation = formalizes, coverage = exact, quote = "a regulated investment company which is offering for sale or has outstanding any redeemable security")
+rule S731c2BiRegulatedInvestmentCompany(prop: Asset) strict {
+    when interest_in_ric_with_redeemable_securities(prop);
+    then marketable_security_731c(prop);
+}
+pub relation readily_convertible_into_money_or_marketable_securities(prop: Asset) kind empirical {
+    label en unofficial "pursuant to its terms or any other arrangement, the financial instrument is readily convertible into, or exchangeable for, money or marketable securities (case-asserted; section 731(c)(2)(B)(ii))";
+}
+@source(IRC_S731_C, relation = formalizes, coverage = exact, quote = "any financial instrument which, pursuant to its terms or any other arrangement, is readily convertible into, or exchangeable for, money or marketable securities")
+rule S731c2BiiReadilyConvertible(prop: Asset) strict {
+    when financial_instrument_731c(prop);
+    when readily_convertible_into_money_or_marketable_securities(prop);
+    then marketable_security_731c(prop);
+}
+pub relation value_determined_substantially_by_reference_to_marketable_securities(prop: Asset) kind empirical {
+    label en unofficial "the value of the financial instrument is determined substantially by reference to marketable securities (case-asserted; EVALUATIVE 'substantially', adjudicated fact; section 731(c)(2)(B)(iii))";
+}
+@source(IRC_S731_C, relation = formalizes, coverage = exact, quote = "any financial instrument the value of which is determined substantially by reference to marketable securities")
+rule S731c2BiiiValueByReference(prop: Asset) strict {
+    when financial_instrument_731c(prop);
+    when value_determined_substantially_by_reference_to_marketable_securities(prop);
+    then marketable_security_731c(prop);
+}
+pub relation precious_metal_interest_actively_traded(prop: Asset) kind empirical {
+    label en unofficial "an interest in a precious metal which, as of the distribution date, is actively traded within the meaning of section 1092(d)(1) (case-asserted; section 731(c)(2)(B)(iv))";
+}
+pub relation precious_metal_not_produced_used_or_held_in_active_business(prop: Asset) kind empirical {
+    label en unofficial "the metal was NOT produced, used, or held in the active conduct of a trade or business by the partnership (a positive fact, so the chain stays strict; section 731(c)(2)(B)(iv))";
+}
+@source(IRC_S731_C, relation = formalizes, coverage = partial, quote = "any interest in a precious metal which, as of the date of the distribution, is actively traded (within the meaning of section 1092(d)(1)) unless such metal was produced, used, or held in the active conduct of a trade or business by the partnership")
+rule S731c2BivPreciousMetal(prop: Asset) strict {
+    label en official "an actively traded interest in a precious metal not produced, used or held in the partnership's active business is a marketable security (section 731(c)(2)(B)(iv)); the regulations exception is EXTERNAL_DEPENDENCY";
+    when precious_metal_interest_actively_traded(prop);
+    when precious_metal_not_produced_used_or_held_in_active_business(prop);
+    then marketable_security_731c(prop);
+}
+pub relation interest_in_entity_substantially_all_assets_marketable_securities_or_money(prop: Asset) kind empirical {
+    label en unofficial "the asset is an interest in an entity substantially all of whose assets consist (directly or indirectly) of marketable securities, money, or both (EVALUATIVE 'substantially all', adjudicated fact; section 731(c)(2)(B)(v))";
+}
+@source(IRC_S731_C, relation = formalizes, coverage = partial, quote = "interests in any entity if substantially all of the assets of such entity consist (directly or indirectly) of marketable securities, money, or both")
+rule S731c2BvEntityOfMarketableAssets(prop: Asset) strict {
+    label en official "an interest in an entity substantially all of whose assets are marketable securities or money is a marketable security (section 731(c)(2)(B)(v)); the regulations exception is EXTERNAL_DEPENDENCY";
+    when interest_in_entity_substantially_all_assets_marketable_securities_or_money(prop);
+    then marketable_security_731c(prop);
+}
+rule S731cMarketableSecurityDistributed(t: Transaction, pship: Partnership, partner: Person, prop: Asset, fmv: Money) strict {
+    label en official "a distributed asset that is a marketable security is taken into account at its fair market value on the distribution date (section 731(c)(1)(B))";
+    when marketable_security_distributed_property(t, pship, partner, prop);
+    when marketable_security_731c(prop);
+    when property_fmv_at_distribution_732(t, prop, fmv);
+    then marketable_security_distributed(t, pship, partner, fmv);
+}
+
+// ============================================================================
+// §731(c)(3)(C): investment partnership, eligible partner
+// ============================================================================
+
+pub relation partnership_ever_conducted_activity_731c(pship: Partnership, act: Text) kind empirical {
+    label en unofficial "the partnership is, or ever has been, engaged in the activity, which is a trade or business (case-asserted classification; section 731(c)(3)(C)(i))";
+}
+pub relation activity_of_investor_trader_or_dealer_in_investment_asset(pship: Partnership, act: Text) kind empirical {
+    label en unofficial "the activity is undertaken as an investor, trader, or dealer in an asset described in clause (i) (case-asserted; section 731(c)(3)(C)(ii)(I))";
+}
+pub relation activity_specified_in_regulations_731c3Cii(pship: Partnership, act: Text) kind empirical {
+    label en unofficial "the activity is specified in regulations as not a trade or business for this purpose (case-asserted; EXTERNAL_DEPENDENCY; section 731(c)(3)(C)(ii)(II))";
+}
+pub relation partnership_engaged_in_trade_or_business_directly_731c(pship: Partnership) kind institutional {
+    label en official "the partnership is (or has been) engaged in a trade or business, an investor/trader/dealer activity in investment assets not counting (section 731(c)(3)(C)(ii))";
+}
+@source(IRC_S731_C, relation = formalizes, coverage = exact, quote = "A partnership shall not be treated as engaged in a trade or business by reason of")
+rule S731c3CiiEngagedInTradeOrBusiness(pship: Partnership, act: Text) defeasible {
+    when partnership_ever_conducted_activity_731c(pship, act);
+    unless activity_of_investor_trader_or_dealer_in_investment_asset(pship, act) and partnership_ever_conducted_activity_731c(pship, act);
+    unless activity_specified_in_regulations_731c3Cii(pship, act) and partnership_ever_conducted_activity_731c(pship, act);
+    then partnership_engaged_in_trade_or_business_directly_731c(pship);
+}
+pub relation partnership_holds_interest_in_partnership(upper: Partnership, lower: Partnership, share: Decimal) kind empirical {
+    label en unofficial "the (upper) partnership holds a partnership interest in the lower partnership, with the proportionate share (case-asserted; section 731(c)(3)(C)(iv), section 706(d)(3), section 751(f))";
+}
+pub relation partnership_engaged_in_trade_or_business_with_look_through_731c(pship: Partnership) kind institutional {
+    label en official "a partnership is treated as engaged in any trade or business engaged in by any other partnership in which it holds an interest (one tier; section 731(c)(3)(C)(iv)(I))";
+}
+rule S731c3CivDirect(pship: Partnership) defeasible {
+    when partnership_engaged_in_trade_or_business_directly_731c(pship);
+    then partnership_engaged_in_trade_or_business_with_look_through_731c(pship);
+}
+@source(IRC_S731_C, relation = formalizes, coverage = partial, quote = "a partnership shall be treated as engaged in any trade or business engaged in by, and as holding (instead of a partnership interest) a proportionate share of the assets of, any other partnership in which the partnership holds a partnership interest")
+rule S731c3CivLowerTier(upper: Partnership, lower: Partnership, share: Decimal) defeasible {
+    label en official "an upper tier partnership is treated as engaged in the trade or business of a lower tier partnership in which it holds an interest (section 731(c)(3)(C)(iv)(I)); the regulations lead-in is EXTERNAL_DEPENDENCY";
+    when partnership_holds_interest_in_partnership(upper, lower, share);
+    when partnership_engaged_in_trade_or_business_directly_731c(lower);
+    then partnership_engaged_in_trade_or_business_with_look_through_731c(upper);
+}
+pub relation partnership_assets_always_substantially_investment_assets(pship: Partnership) kind empirical {
+    label en unofficial "substantially all the assets (by value) of the partnership have always consisted of money, stock in a corporation, evidences of indebtedness, interest rate, currency or equity notional principal contracts, foreign currencies, interests in or derivatives of such assets or of commodities traded on a board of trade, other assets specified in regulations, or any combination (EVALUATIVE 'substantially all', adjudicated fact; section 731(c)(3)(C)(i)(I)-(VIII))";
+}
+rule S731c3CiInvestmentPartnership(pship: Partnership) defeasible {
+    label en official "an investment partnership: a partnership which has never been engaged in a trade or business and substantially all the assets (by value) of which have always been the enumerated investment assets (section 731(c)(3)(C)(i))";
+    when partnership_assets_always_substantially_investment_assets(pship);
+    unless partnership_engaged_in_trade_or_business_with_look_through_731c(pship) and partnership_assets_always_substantially_investment_assets(pship);
+    then section_731c_investment_partnership(pship);
+}
+pub relation partner_contributed_non_investment_property_before_distribution(partner: Person, pship: Partnership) kind empirical {
+    label en unofficial "before the date of the distribution the partner contributed to the partnership property other than assets described in clause (i) (case-asserted; section 731(c)(3)(C)(iii)(I))";
+}
+pub relation partner_party_to_nonrecognition_transfer_of_ineligible_interest(partner: Person, pship: Partnership) kind empirical {
+    label en unofficial "the partner is the transferor or transferee in a nonrecognition transaction involving a transfer of a portion of a partnership interest with respect to which the transferor was not an eligible partner (case-asserted; section 731(c)(3)(C)(iii)(II))";
+}
+pub relation partner_contributed_partnership_interest(partner: Person, pship: Partnership, lower: Partnership) kind empirical {
+    label en unofficial "the partner contributes to the partnership an interest in another partnership (case-asserted; section 731(c)(3)(C)(iv)(II))";
+}
+pub relation lower_tier_assets_include_non_investment_asset(lower: Partnership) kind empirical {
+    label en unofficial "the lower tier partnership holds property other than assets described in clause (i) (case-asserted; section 731(c)(3)(C)(iv)(II))";
+}
+pub relation partner_treated_as_contributing_non_investment_assets_731c(partner: Person, pship: Partnership) kind institutional {
+    label en official "a partner who contributes an interest in another partnership is treated as contributing a proportionate share of that partnership's assets, so a non-investment asset makes him ineligible (section 731(c)(3)(C)(iv)(II), (iii)(I))";
+}
+@source(IRC_S731_C, relation = formalizes, coverage = partial, quote = "a partner who contributes to a partnership an interest in another partnership shall be treated as contributing a proportionate share of the assets of the other partnership")
+rule S731c3CivIiContributorLookThrough(partner: Person, pship: Partnership, lower: Partnership) defeasible {
+    when partner_contributed_partnership_interest(partner, pship, lower);
+    when lower_tier_assets_include_non_investment_asset(lower);
+    then partner_treated_as_contributing_non_investment_assets_731c(partner, pship);
+}
+@source(IRC_S731_C, relation = formalizes, coverage = exact, quote = "The term \"eligible partner\" means any partner who, before the date of the distribution, did not contribute to the partnership any property other than assets described in clause (i).")
+rule S731c3CiiiEligiblePartner(partner: Person, pship: Partnership) defeasible {
+    label en official "an eligible partner: a partner who did not contribute property other than investment assets before the distribution, and is not a party to a nonrecognition transfer of an ineligible interest (section 731(c)(3)(C)(iii))";
+    when is_partner(partner, pship);
+    unless partner_contributed_non_investment_property_before_distribution(partner, pship);
+    unless partner_party_to_nonrecognition_transfer_of_ineligible_interest(partner, pship);
+    unless partner_treated_as_contributing_non_investment_assets_731c(partner, pship);
+    then section_731c_eligible_partner(partner, pship);
+}
+
+// ============================================================================
+// §731(c)(5): basis of partner's interest and of partnership property
+// ============================================================================
+
+pub relation section_733_disregards_731c_gain(t: Transaction, pship: Partnership, partner: Person) kind institutional {
+    label en official "section 733 is applied as if no gain were recognized under section 731(c) (section 731(c)(5))";
+}
+@source(IRC_S731_C, relation = formalizes, coverage = exact, quote = "Sections 733 and 734 shall be applied as if no gain were recognized, and no adjustment were made to the basis of property, under this subsection.")
+rule S731c5Section733Disregards(t: Transaction, pship: Partnership, partner: Person, prop: Asset, amount: Money) defeasible {
+    when section_731c_money_treated_amount(t, pship, partner, prop, amount);
+    when amount > 0 USD;
+    then section_733_disregards_731c_gain(t, pship, partner);
+}
+pub relation section_734_disregards_731c_basis_adjustment(t: Transaction, pship: Partnership, partner: Person) kind institutional {
+    label en official "section 734 is applied as if no adjustment were made to the basis of property under section 731(c) (section 731(c)(5))";
+}
+rule S731c5Section734Disregards(t: Transaction, pship: Partnership, partner: Person, prop: Asset, amount: Money) defeasible {
+    when section_731c4_basis(t, pship, partner, prop, amount);
+    then section_734_disregards_731c_basis_adjustment(t, pship, partner);
+}
+
+// ============================================================================
+// Duties of the Secretary to prescribe regulations: §731(c)(7), §732(f)(8), §743(e)(6)
+// ============================================================================
+
+pub relation secretary_prescribes_regulations_731c7(o: us.irc.core::Organ) kind empirical {
+    label en unofficial "the Secretary has prescribed the regulations necessary or appropriate to carry out section 731(c), including regulations to prevent avoidance of its purposes (case-asserted)";
+}
+@source(IRC_S731_C, relation = formalizes, coverage = exact, quote = "The Secretary shall prescribe such regulations as may be necessary or appropriate to carry out the purposes of this subsection")
+rule S731c7RegulationsDuty() strict {
+    label en official "the Secretary shall prescribe the regulations necessary or appropriate to carry out section 731(c), including regulations to prevent avoidance (section 731(c)(7)); no time limit is stated, so the goal is a maintenance goal over an open window";
+    when true;
+    then duty S731c7PrescribeRegulations {
+        bearer Secretary;
+        goal maintenance {
+            condition secretary_prescribes_regulations_731c7(Secretary);
+            window [-infinity, infinity];
+        }
+    };
+}
+pub relation secretary_prescribes_regulations_732f8(o: us.irc.core::Organ) kind empirical {
+    label en unofficial "the Secretary has prescribed the regulations necessary to carry out section 732(f), including regulations to avoid double counting and to prevent abuse (case-asserted)";
+}
+@source(IRC_S732_F, relation = formalizes, coverage = exact, quote = "The Secretary shall prescribe such regulations as may be necessary to carry out the purposes of this subsection")
+rule S732f8RegulationsDuty() strict {
+    when true;
+    then duty S732f8PrescribeRegulations {
+        bearer Secretary;
+        goal maintenance {
+            condition secretary_prescribes_regulations_732f8(Secretary);
+            window [-infinity, infinity];
+        }
+    };
+}
+pub relation secretary_prescribes_regulations_743e6(o: us.irc.core::Organ) kind empirical {
+    label en unofficial "the Secretary has prescribed the regulations appropriate to carry out section 743(e), including regulations for applying it to tiered partnerships (case-asserted)";
+}
+@source(IRC_S743_E, relation = formalizes, coverage = exact, quote = "The Secretary shall prescribe such regulations as may be appropriate to carry out the purposes of this subsection")
+rule S743e6RegulationsDuty() strict {
+    when true;
+    then duty S743e6PrescribeRegulations {
+        bearer Secretary;
+        goal maintenance {
+            condition secretary_prescribes_regulations_743e6(Secretary);
+            window [-infinity, infinity];
+        }
+    };
+}
+
+// ============================================================================
+// §732(e), §732(f)(2), (4)(B), (6)
+// ============================================================================
+
+pub relation section_732_inapplicable_to_extent_751b_exchange(t: Transaction, pship: Partnership, partner: Person) kind institutional {
+    label en official "section 732 does not apply to the extent a distribution is treated as a sale or exchange of property under section 751(b) (section 732(e))";
+}
+@source(IRC_S732_E, relation = formalizes, coverage = exact, quote = "This section shall not apply to the extent that a distribution is treated as a sale or exchange of property under section 751(b)")
+rule S732eNotToSection751bExchange(t: Transaction, pship: Partnership, partner: Person, prop: Asset, amount: Money) defeasible {
+    when section_751b_exchange(t, pship, partner, prop, amount);
+    then section_732_inapplicable_to_extent_751b_exchange(t, pship, partner);
+}
+pub relation section_732f_distribution_date(t: Transaction, d: Date) kind empirical {
+    label en unofficial "the date of the distribution of the distributed corporation's stock (case-asserted; section 732(f)(2)(A) 'immediately after such distribution')";
+}
+pub relation section_732f_control_immediately_after(t: Transaction, corporate_partner: us.irc.core::Corporation, distributed_corp: us.irc.core::Corporation) kind institutional {
+    label en official "the corporate partner has control of the distributed corporation immediately after the distribution (section 732(f)(2)(A), (5))";
+}
+rule S732f2AControlImmediatelyAfter(t: Transaction, corporate_partner: us.irc.core::Corporation, distributed_corp: us.irc.core::Corporation, d: Date) defeasible {
+    when section_732f_distribution_date(t, d);
+    when section_732f_controls_at_or_after(t, corporate_partner, distributed_corp, d);
+    then section_732f_control_immediately_after(t, corporate_partner, distributed_corp);
+}
+external judgment relation secretary_satisfied_distribution_not_part_of_plan_to_acquire_control_732f2B(t: Transaction, corporate_partner: us.irc.core::Corporation, distributed_corp: us.irc.core::Corporation) {
+    authority Secretary;
+    label en unofficial "the corporate partner establishes to the satisfaction of the Secretary that the distribution was not part of a plan or arrangement to acquire control of the distributed corporation (DECISION-0194 judgment channel; section 732(f)(2)(B))";
+}
+@source(IRC_S732_F, relation = formalizes, coverage = exact, quote = "the corporate partner establishes to the satisfaction of the Secretary that such distribution was not part of a plan or arrangement to acquire control of the distributed corporation")
+rule S732f2Exception(t: Transaction, pship: Partnership, corporate_partner: us.irc.core::Corporation, distributed_corp: us.irc.core::Corporation) defeasible {
+    label en official "paragraph (1) does not apply to a distribution if the corporate partner lacks control immediately after it and establishes to the Secretary's satisfaction that it was not part of a plan to acquire control (section 732(f)(2))";
+    when corporate_partner_receives_distributed_stock(t, corporate_partner, pship, distributed_corp);
+    when secretary_satisfied_distribution_not_part_of_plan_to_acquire_control_732f2B(t, corporate_partner, distributed_corp);
+    unless section_732f_control_immediately_after(t, corporate_partner, distributed_corp) and corporate_partner_receives_distributed_stock(t, corporate_partner, pship, distributed_corp);
+    then section_732f_control_exception(t, corporate_partner, distributed_corp);
+}
+pub relation corporate_partner_stock_basis_after_732f4(t: Transaction, corporate_partner: us.irc.core::Corporation, distributed_corp: us.irc.core::Corporation, amount: Money) kind institutional {
+    label en official "the corporate partner's adjusted basis in the distributed corporation's stock is increased by the section 732(f)(4) excess recognized as gain (section 732(f)(4)(B))";
+}
+@source(IRC_S732_F, relation = formalizes, coverage = exact, quote = "the corporate partner's adjusted basis in the stock of the distributed corporation shall be increased by such excess")
+rule S732f4BStockBasisIncrease(t: Transaction, corporate_partner: us.irc.core::Corporation, distributed_corp: us.irc.core::Corporation, gain: Money, basis_after: Money) defeasible {
+    when section_732f_gain_recognized(t, corporate_partner, distributed_corp, gain);
+    when corporate_partner_basis_in_stock_after_distribution(t, corporate_partner, distributed_corp, basis_after);
+    then corporate_partner_stock_basis_after_732f4(t, corporate_partner, distributed_corp, basis_after + gain);
+}
+pub relation stock_acquired_other_than_by_partnership_distribution(t: Transaction, corporation: us.irc.core::Corporation, distributed_corp: us.irc.core::Corporation) kind empirical {
+    label en unofficial "the corporation acquires (other than in a distribution from a partnership) stock of the distributed corporation (case-asserted; section 732(f)(6))";
+}
+pub relation stock_basis_determined_by_reference_to_732a2_or_b(t: Transaction, corporation: us.irc.core::Corporation, distributed_corp: us.irc.core::Corporation) kind empirical {
+    label en unofficial "the basis of the acquired stock is determined, by reason of being distributed from a partnership, in whole or in part by reference to subsection (a)(2) or (b) (case-asserted; section 732(f)(6))";
+}
+pub relation original_distributing_partnership_732f6(t: Transaction, pship: Partnership) kind empirical {
+    label en unofficial "the partnership from whose distribution the acquired stock's basis derives (case-asserted; section 732(f)(6))";
+}
+pub relation indirect_distribution_treated_as_receipt_732f6(t: Transaction, corporation: us.irc.core::Corporation, pship: Partnership, distributed_corp: us.irc.core::Corporation) kind institutional {
+    label en official "a corporation that acquires, other than in a distribution from a partnership, stock whose basis derives from a partnership distribution is treated as receiving a distribution of that stock from the partnership (section 732(f)(6))";
+}
+@source(IRC_S732_F, relation = formalizes, coverage = exact, quote = "the corporation shall be treated as receiving a distribution of such stock from a partnership")
+rule S732f6IndirectDistribution(t: Transaction, corporation: us.irc.core::Corporation, pship: Partnership, distributed_corp: us.irc.core::Corporation) strict {
+    when stock_acquired_other_than_by_partnership_distribution(t, corporation, distributed_corp);
+    when stock_basis_determined_by_reference_to_732a2_or_b(t, corporation, distributed_corp);
+    when original_distributing_partnership_732f6(t, pship);
+    then indirect_distribution_treated_as_receipt_732f6(t, corporation, pship, distributed_corp);
+}
+rule S732f6FeedsReceipt(t: Transaction, corporation: us.irc.core::Corporation, pship: Partnership, distributed_corp: us.irc.core::Corporation) strict {
+    label en unofficial "the deemed receipt is a distribution of stock for paragraph (1)(A)";
+    when indirect_distribution_treated_as_receipt_732f6(t, corporation, pship, distributed_corp);
+    then corporate_partner_receives_distributed_stock(t, corporation, pship, distributed_corp);
+}
+
+// ============================================================================
+// §743(f) securitization partnership; §743(e) electing investment partnership; §734(e)
+// ============================================================================
+
+pub relation partnership_sole_business_issues_fixed_principal_securities(pship: Partnership) kind empirical {
+    label en unofficial "the sole business activity of the partnership is to issue securities which provide for a fixed principal (or similar) amount (case-asserted; section 743(f)(2))";
+}
+pub relation securities_serviced_by_cash_flows_of_discrete_pool(pship: Partnership) kind empirical {
+    label en unofficial "the securities are primarily serviced by the cash flows of a discrete pool (fixed or revolving) of receivables or other financial assets that by their terms convert into cash in a finite period (case-asserted; section 743(f)(2))";
+}
+pub relation sponsor_reasonably_believes_pool_not_acquired_to_be_disposed_of(pship: Partnership) kind empirical {
+    label en unofficial "the sponsor of the pool reasonably believes that the pool's assets are not acquired so as to be disposed of (EVALUATIVE 'reasonably believes', adjudicated fact; section 743(f)(2))";
+}
+pub relation securitization_partnership_743f(pship: Partnership) kind institutional {
+    label en official "a securitization partnership: sole business activity issuing fixed-principal securities serviced by a discrete pool of finite-term receivables, the sponsor reasonably believing the pool is not acquired to be disposed of (section 743(f)(2))";
+}
+@source(IRC_S743_F, relation = formalizes, coverage = exact, quote = "the term \"securitization partnership\" means any partnership the sole business activity of which is to issue securities which provide for a fixed principal (or similar) amount")
+rule S743f2SecuritizationPartnership(pship: Partnership) defeasible {
+    when partnership_sole_business_issues_fixed_principal_securities(pship);
+    when securities_serviced_by_cash_flows_of_discrete_pool(pship);
+    when sponsor_reasonably_believes_pool_not_acquired_to_be_disposed_of(pship);
+    then securitization_partnership_743f(pship);
+}
+pub relation sbil_disregarded_for_special_partnership_743ef(t: Transaction, pship: Partnership, y: TaxableYear) kind institutional {
+    label en official "a securitization partnership (section 743(f)(1)) or an electing investment partnership while its election is in effect (section 743(e)(1)) is not treated as having a substantial built-in loss with respect to the transfer";
+}
+@source(IRC_S743_F, relation = formalizes, coverage = exact, quote = "a securitization partnership shall not be treated as having a substantial built-in loss with respect to any transfer")
+rule S743f1NoSubstantialBuiltInLoss(t: Transaction, pship: Partnership, y: TaxableYear) defeasible {
+    when substantial_built_in_loss_after_transfer(t, pship, y);
+    when securitization_partnership_743f(pship);
+    then sbil_disregarded_for_special_partnership_743ef(t, pship, y);
+}
+@source(IRC_S743_E, relation = formalizes, coverage = exact, quote = "an electing investment partnership shall not be treated as having a substantial built-in loss with respect to any transfer occurring while the election under paragraph (6)(A) is in effect")
+rule S743e1NoSubstantialBuiltInLoss(t: Transaction, pship: Partnership, y: TaxableYear) defeasible {
+    when substantial_built_in_loss_after_transfer(t, pship, y);
+    when electing_investment_partnership_743e(pship);
+    then sbil_disregarded_for_special_partnership_743ef(t, pship, y);
+}
+pub relation distribution_by_partnership_to_partner(t: Transaction, pship: Partnership, partner: Person) kind empirical {
+    label en unofficial "the partnership distributes property to the partner in the transaction (case-asserted; section 734(e))";
+}
+pub relation section_734e_securitization_exception(t: Transaction, pship: Partnership) kind institutional {
+    label en official "a securitization partnership is not treated as having a substantial basis reduction with respect to any distribution of property to a partner (section 734(e))";
+}
+@source(IRC_S734_E, relation = formalizes, coverage = exact, quote = "a securitization partnership (as defined in section 743(f)) shall not be treated as having a substantial basis reduction with respect to any distribution of property to a partner")
+rule S734eSecuritizationException(t: Transaction, pship: Partnership, partner: Person) defeasible {
+    when distribution_by_partnership_to_partner(t, pship, partner);
+    when securitization_partnership_743f(pship);
+    then section_734e_securitization_exception(t, pship);
+}
+
+// --- §743(e)(5): electing investment partnership (definition, election power) ---
+
+pub relation partnership_elects_743e5A(pship: Partnership, e: us.irc.core::Election) kind empirical {
+    label en unofficial "the partnership makes an election to have section 743(e) apply (case-asserted; section 743(e)(5)(A))";
+}
+pub relation would_be_investment_company_but_for_3c1_or_3c7(pship: Partnership) kind empirical {
+    label en unofficial "the partnership would be an investment company under section 3(a)(1)(A) of the Investment Company Act of 1940 but for an exemption under paragraph (1) or (7) of section 3(c) of that Act (case-asserted; section 743(e)(5)(B))";
+}
+pub relation substantially_all_partnership_assets_held_for_investment(pship: Partnership) kind empirical {
+    label en unofficial "substantially all of the assets of the partnership are held for investment (EVALUATIVE 'substantially all', adjudicated fact; section 743(e)(5)(D))";
+}
+pub relation contributed_assets_money_amount(pship: Partnership, amount: Money) kind empirical {
+    label en unofficial "the money contributed to the partnership (case-asserted; section 743(e)(5)(E))";
+}
+pub relation contributed_assets_total_amount(pship: Partnership, amount: Money) kind empirical {
+    label en unofficial "the total assets contributed to the partnership (case-asserted; section 743(e)(5)(E))";
+}
+pub relation contributed_asset_with_basis_exceeding_fmv(pship: Partnership) kind empirical {
+    label en unofficial "an asset contributed to the partnership had an adjusted basis in excess of fair market value at the time of contribution (case-asserted; section 743(e)(5)(F))";
+}
+pub relation all_interests_issued_in_private_offering(pship: Partnership) kind empirical {
+    label en unofficial "all partnership interests are issued by the partnership pursuant to a private offering (case-asserted; section 743(e)(5)(G))";
+}
+pub relation first_capital_contribution_date(pship: Partnership, d: Date) kind empirical {
+    label en unofficial "the date of the first capital contribution to the partnership (case-asserted; section 743(e)(5)(G))";
+}
+pub relation last_interest_issue_date(pship: Partnership, d: Date) kind empirical {
+    label en unofficial "the date of the last issuance of a partnership interest (case-asserted; section 743(e)(5)(G))";
+}
+pub relation agreement_restricts_redemption_substantively(pship: Partnership) kind empirical {
+    label en unofficial "the partnership agreement has substantive restrictions on each partner's ability to cause a redemption of the partner's interest (case-asserted; section 743(e)(5)(H))";
+}
+pub relation partnership_agreement_term_years(pship: Partnership, years: Integer) kind empirical {
+    label en unofficial "the term of the partnership provided by the partnership agreement, in years (case-asserted; section 743(e)(5)(I))";
+}
+pub relation electing_investment_partnership_conditions_met_743e5(pship: Partnership) kind institutional {
+    label en official "the conditions (B) through (I) of section 743(e)(5) are met (the election of (A) is the power exercised over them)";
+}
+@source(IRC_S743_E, relation = formalizes, coverage = exact, quote = "at least 95 percent of the assets contributed to such partnership consist of money")
+rule S743e5ConditionsBToI(pship: Partnership, money: Money, total: Money, first: Date, last: Date, years: Integer) defeasible {
+    label en official "the partnership meets conditions (B)-(I): investment-company profile, never a trade or business, substantially all assets held for investment, at least 95 percent of contributed assets in money, no built-in-loss contribution, a private offering within 24 months of the first contribution, substantive redemption restrictions, and a term of at most 15 years (section 743(e)(5)(B)-(I))";
+    when would_be_investment_company_but_for_3c1_or_3c7(pship);
+    when substantially_all_partnership_assets_held_for_investment(pship);
+    when contributed_assets_money_amount(pship, money);
+    when contributed_assets_total_amount(pship, total);
+    when money >= total * 95 percent;
+    when all_interests_issued_in_private_offering(pship);
+    when first_capital_contribution_date(pship, first);
+    when last_interest_issue_date(pship, last);
+    when last < add_calendar_period(first, 24 calendar_month);
+    when agreement_restricts_redemption_substantively(pship);
+    when partnership_agreement_term_years(pship, years);
+    when years <= 15;
+    unless partnership_engaged_in_trade_or_business_with_look_through_731c(pship) and would_be_investment_company_but_for_3c1_or_3c7(pship);
+    unless contributed_asset_with_basis_exceeding_fmv(pship) and would_be_investment_company_but_for_3c1_or_3c7(pship);
+    then electing_investment_partnership_conditions_met_743e5(pship);
+}
+pub relation electing_investment_partnership_743e(pship: Partnership) kind institutional {
+    label en official "an electing investment partnership: a partnership that made the election and meets conditions (B)-(I) of section 743(e)(5)";
+}
+@source(IRC_S743_E, relation = formalizes, coverage = exact, quote = "the partnership makes an election to have this subsection apply")
+rule S743e5AElectionPower(pship: Partnership, e: us.irc.core::Election) defeasible {
+    label en official "a partnership meeting conditions (B)-(I) may elect to have section 743(e) apply (section 743(e)(5)(A))";
+    when partnership_elects_743e5A(pship, e);
+    then power S743e5AInvestmentPartnershipElection {
+        holder pship;
+        over e;
+        exercise partnership_elects_743e5A(pship, e);
+        valid_when electing_investment_partnership_conditions_met_743e5(pship);
+        effect create(electing_investment_partnership_743e(pship));
+        subject Election;
+        window [-infinity, infinity);
+    };
+}
+pub relation secretary_consented_to_revocation_743e5(pship: Partnership) kind empirical {
+    label en unofficial "the Secretary consented to revocation of the section 743(e) election (case-asserted)";
+}
+pub relation partnership_revokes_743e_election(pship: Partnership, e: us.irc.core::Election) kind empirical {
+    label en unofficial "the partnership revokes its section 743(e) election (case-asserted)";
+}
+@source(IRC_S743_E, relation = formalizes, coverage = exact, quote = "The election described in subparagraph (A), once made, shall be irrevocable except with the consent of the Secretary.")
+rule S743e5RevocationPowerRule(pship: Partnership, e: us.irc.core::Election) defeasible {
+    label en official "the election, once made, is irrevocable except with the Secretary's consent: a revocation is a valid exercise only with that consent (section 743(e)(5), last sentence)";
+    when partnership_revokes_743e_election(pship, e);
+    then power S743e5RevocationPower {
+        holder pship;
+        over e;
+        exercise partnership_revokes_743e_election(pship, e);
+        valid_when secretary_consented_to_revocation_743e5(pship);
+        effect remove(electing_investment_partnership_743e(pship));
+        subject Election;
+        window [-infinity, infinity);
+    };
+}
+
+// --- §743(e)(2)-(4): loss deferral for the transferee partner ---
+
+pub relation transferee_share_of_losses_from_property_sales(transferee: Person, pship: Partnership, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the transferee partner's distributive share of losses (without regard to gains) from the sale or exchange of partnership property (case-asserted; section 743(e)(2))";
+}
+pub relation transferor_loss_recognized_on_transfer_743e2(transferee: Person, pship: Partnership, amount: Money) kind empirical {
+    label en unofficial "the loss recognized by the transferor (or any prior transferor, to the extent not fully offset by a prior disallowance under paragraph (2)) on the transfer of the partnership interest (case-asserted; section 743(e)(2))";
+}
+pub relation transferee_basis_reduction_732a2(transferee: Person, pship: Partnership, amount: Money) kind empirical {
+    label en unofficial "the amount by which the transferee partner's basis in property distributed by the partnership is reduced under section 732(a)(2) (case-asserted; section 743(e)(4))";
+}
+pub relation transferor_loss_taken_into_account_743e4(transferee: Person, pship: Partnership, amount: Money) kind institutional {
+    label en official "the transferor's recognized loss taken into account under paragraph (2), reduced by the section 732(a)(2) basis reduction (section 743(e)(4))";
+}
+@source(IRC_S743_E, relation = formalizes, coverage = exact, quote = "the amount of the loss recognized by the transferor on the transfer of the partnership interest which is taken into account under paragraph (2) shall be reduced by the amount of such basis reduction")
+rule S743e4ReducedByBasisReduction(transferee: Person, pship: Partnership, loss: Money, reduction: Money) defeasible {
+    when transferor_loss_recognized_on_transfer_743e2(transferee, pship, loss);
+    when transferee_basis_reduction_732a2(transferee, pship, reduction);
+    then transferor_loss_taken_into_account_743e4(transferee, pship, max(0 USD, loss - reduction));
+}
+rule S743e4NoBasisReduction(transferee: Person, pship: Partnership, loss: Money) defeasible {
+    label en unofficial "without a section 732(a)(2) basis reduction the recognized loss is taken into account in full";
+    when transferor_loss_recognized_on_transfer_743e2(transferee, pship, loss);
+    unless transferee_basis_reduction_732a2(transferee, pship, _) and transferor_loss_recognized_on_transfer_743e2(transferee, pship, loss);
+    then transferor_loss_taken_into_account_743e4(transferee, pship, loss);
+}
+pub relation transferee_loss_disallowed_743e2(transferee: Person, pship: Partnership, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the transferee partner's distributive share of losses from the sale or exchange of partnership property is not allowed except to the extent it exceeds the loss recognized by the transferor on the transfer (section 743(e)(2)): the disallowed amount is the lesser of the share and that loss";
+}
+@source(IRC_S743_E, relation = formalizes, coverage = exact, quote = "the transferee partner's distributive share of losses (without regard to gains) from the sale or exchange of partnership property shall not be allowed except to the extent that it is established that such losses exceed the loss (if any) recognized by the transferor")
+rule S743e2LossDeferral(transferee: Person, pship: Partnership, y: TaxableYear, share: Money, transferor_loss: Money) defeasible {
+    when electing_investment_partnership_743e(pship);
+    when transferee_share_of_losses_from_property_sales(transferee, pship, y, share);
+    when transferor_loss_taken_into_account_743e4(transferee, pship, transferor_loss);
+    then transferee_loss_disallowed_743e2(transferee, pship, y, min(share, transferor_loss));
+}
+pub relation disallowed_loss_does_not_reduce_interest_basis_743e3(transferee: Person, pship: Partnership, y: TaxableYear, amount: Money) kind institutional {
+    label en official "losses disallowed under paragraph (2) do not decrease the transferee partner's basis in the partnership interest (section 743(e)(3))";
+}
+@source(IRC_S743_E, relation = formalizes, coverage = exact, quote = "Losses disallowed under paragraph (2) shall not decrease the transferee partner's basis in the partnership interest.")
+rule S743e3NoBasisDecrease(transferee: Person, pship: Partnership, y: TaxableYear, amount: Money) defeasible {
+    when transferee_loss_disallowed_743e2(transferee, pship, y, amount);
+    then disallowed_loss_does_not_reduce_interest_basis_743e3(transferee, pship, y, amount);
+}
+
+// ============================================================================
+// §735(c)(1): waiver of the section 1231(b) holding period in section 751(d)
+// ============================================================================
+
+pub relation section_1231_property_disregarding_holding_period(pship: Partnership, item: Asset) kind empirical {
+    label en unofficial "the property is described in section 1231 when the holding period of section 1231(b) is disregarded (case-asserted; section 735(c)(1))";
+}
+pub relation inventory_item_751d_for_735(pship: Partnership, item: Asset) kind institutional {
+    label en official "for section 735, an inventory item under section 751(d) determined without regard to any holding period in section 1231(b): property that would be ordinary on sale by the partnership is not inventory when it is described in section 1231 disregarding the holding period (section 735(c)(1))";
+}
+@source(IRC_S735_C, relation = formalizes, coverage = exact, quote = "section 751(d) (defining inventory item) shall be applied without regard to any holding period in section 1231(b)")
+rule S735c1WaiverOfHoldingPeriod(pship: Partnership, item: Asset) defeasible {
+    label en official "section 751(d) applied without the section 1231(b) holding period: an item the module-11 test classifies as inventory stays inventory unless it is section 1231 property disregarding the holding period (section 735(c)(1))";
+    when is_inventory_item_751d(pship, item);
+    unless section_1231_property_disregarding_holding_period(pship, item) and is_inventory_item_751d(pship, item);
+    then inventory_item_751d_for_735(pship, item);
+}
+
+// ============================================================================
+// §751(f): tiered partnerships
+// ============================================================================
+
+pub relation tiered_partnership_property_751f(upper: Partnership, lower: Partnership, item: Asset, share: Decimal) kind institutional {
+    label en official "in determining whether property of a partnership is an unrealized receivable or an inventory item, the partnership is treated as owning its proportionate share of the property of any other partnership in which it is a partner (section 751(f))";
+}
+@source(IRC_S751_F, relation = formalizes, coverage = exact, quote = "such partnership shall be treated as owning its proportionate share of the property of any other partnership in which it is a partner")
+rule S751fInventoryOfLowerTier(upper: Partnership, lower: Partnership, item: Asset, share: Decimal) defeasible {
+    label en official "an inventory item of the lower tier partnership is owned, in proportion to the upper tier's interest, by the upper tier for the section 751(d) test (section 751(f)(2))";
+    when partnership_holds_interest_in_partnership(upper, lower, share);
+    when is_inventory_item_751d(lower, item);
+    then tiered_partnership_property_751f(upper, lower, item, share);
+}
+rule S751fUnrealizedReceivableOfLowerTier(upper: Partnership, lower: Partnership, item: Asset, share: Decimal) defeasible {
+    label en official "an unrealized receivable of the lower tier partnership is owned, in proportion to the upper tier's interest, by the upper tier for the section 751(c) test (section 751(f)(1))";
+    when partnership_holds_interest_in_partnership(upper, lower, share);
+    when is_unrealized_receivable_751c(lower, item);
+    then tiered_partnership_property_751f(upper, lower, item, share);
+}
+
+// ============================================================================
+// §743(b), last sentence: the transferee's proportionate share of partnership basis
+// ============================================================================
+
+pub relation transferee_capital_interest_share_743b(t: Transaction, transferee: Person, share: Decimal) kind empirical {
+    label en unofficial "the transferee partner's interest in partnership capital (case-asserted; section 743(b), last sentence)";
+}
+pub relation partnership_property_basis_other_than_contributed_property(t: Transaction, pship: Partnership, amount: Money) kind empirical {
+    label en unofficial "the adjusted basis of partnership property other than property contributed by a partner (case-asserted; section 743(b))";
+}
+pub relation contributed_property_basis_share_by_704c(t: Transaction, transferee: Person, amount: Money) kind empirical {
+    label en unofficial "the transferee's share of the adjusted basis of property contributed to the partnership, determined under section 704(c) (case-asserted from the module 08 section 704(c) computation; section 743(b), last sentence)";
+}
+@source(IRC_S743_B, relation = formalizes, coverage = exact, quote = "A partner's proportionate share of the adjusted basis of partnership property shall be determined in accordance with his interest in partnership capital and, in the case of property contributed to the partnership by a partner, section 704(c) (relating to contributed property) shall apply in determining such share")
+rule S743bProportionateShareByCapitalAndSection704c(t: Transaction, pship: Partnership, transferee: Person, share: Decimal, other_basis: Money, contributed_share: Money) defeasible {
+    label en official "the proportionate share of partnership property basis is the capital-interest share of the basis of non-contributed property plus the section 704(c) share of contributed property basis (section 743(b), last sentence)";
+    when transferee_capital_interest_share_743b(t, transferee, share);
+    when partnership_property_basis_other_than_contributed_property(t, pship, other_basis);
+    when contributed_property_basis_share_by_704c(t, transferee, contributed_share);
+    then transferee_proportionate_share_of_partnership_basis(t, transferee, other_basis * share + contributed_share);
+}
+pub relation basis_adjustment_with_respect_to_transferee_only_743b(t: Transaction, pship: Partnership, transferee: Person) kind institutional {
+    label en official "under regulations, the section 743(b) increase or decrease is an adjustment to the basis of partnership property with respect to the transferee partner only (section 743(b), last sentence)";
+}
+@source(IRC_S743_B, relation = formalizes, coverage = partial, quote = "such increase or decrease shall constitute an adjustment to the basis of partnership property with respect to the transferee partner only")
+rule S743bAdjustmentTransfereeOnly(t: Transaction, pship: Partnership, transferee: Person, amount: Money) defeasible {
+    label en official "the adjustment applies to the transferee only (the regulations that give the rule its content are EXTERNAL_DEPENDENCY)";
+    when section_743b_adjustment(t, pship, transferee, amount);
+    then basis_adjustment_with_respect_to_transferee_only_743b(t, pship, transferee);
+}

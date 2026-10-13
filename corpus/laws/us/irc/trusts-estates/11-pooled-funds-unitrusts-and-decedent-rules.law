@@ -1,0 +1,626 @@
+// 26 U.S.C. §§641(c)(4), 642(c)(4)-(5), 663(a)(3), 664(d)(3)-(4), 678(a)(2), 678(c),
+// 685(d), 691(a)(4)-(5), 691(c)(3)-(4), 692(b), 692(d)(3) (stage 3 "добор": rows
+// that earlier stages recorded as TECH_GAP "not modeled this pass" or as a
+// multi-year ledger that a period-to-period carry relation expresses).
+//
+// JUDGMENT CALLS AND GAPS (see coverage/trusts-estates.json, TECH-GAPS.md G42xx):
+//  - §664(d)(3) make-up amounts: the "aggregate of amounts paid in prior years"
+//    against "the aggregate of required amounts" is a carried shortfall
+//    (`crut_makeup_shortfall_carry_in`), re-asserted by the case from the prior
+//    year's `crut_makeup_shortfall_carry_out` — the corpus's period-to-period
+//    convention; a self-recursive year-by-year ledger (LDC-E4102) is not built.
+//  - §642(c)(5): the pooled-income-fund definition is the conjunction of the six
+//    statutory limbs over case-asserted limb facts; the valuation rate is the
+//    highest rate of return of the 3 preceding taxable years (max over the asserted
+//    prior-year rates), or 6 percent for a fund in existence less than 3 years.
+//  - §692(b): the date of death "not earlier than" the determination date is two
+//    rules (death on/after the determination date keeps its date; earlier gets
+//    the determination date) — `max(Date, Date)` is not a term.
+//  - §691(c)(3) (GST): the "portion of such tax attributable to items of gross
+//    income of the trust not properly includible before termination" is computed by
+//    `us.irc.estate_gift` chapter 13 machinery this package does not own: the
+//    attributable amount is asserted (EXTERNAL_DEPENDENCY); the allowance is the rule.
+
+language "law.core" version "0.2";
+package us.irc.trusts_estates version "0.1.1";
+namespace "urn:us:irc:trusts_estates:clir";
+
+use self::{
+    Asset,
+    Estate,
+    IRC_S641_C,
+    IRC_S642_C,
+    IRC_S663_A,
+    IRC_S664_B,
+    IRC_S664_D,
+    IRC_S678_A,
+    IRC_S678_C,
+    IRC_S685_D,
+    IRC_S691_A,
+    IRC_S691_C,
+    IRC_S692_B,
+    IRC_S692_D,
+    Person,
+    Section664Tier,
+    TaxableYear,
+    Transaction,
+    Trust,
+    charitable_set_aside_deduction,
+    crt_tier2_capital_gain_amount,
+    crt_tier_available_balance,
+    died_in_active_service_combat_zone_692a,
+    ird_right_transferred,
+    non_grantor_owner_678,
+    section_678b_grantor_taxable_exception,
+    specified_terrorist_victim,
+    tax_not_imposed_amount_692d,
+    treated_as_owner_of_portion,
+};
+
+// ============================================================================
+// §641(c)(4): unused deductions when an ESBT portion ceases to be a separate trust
+// ============================================================================
+
+pub relation separate_trust_642h_carryover_or_excess_deduction(t: Trust, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "a carryover or excess deduction of the separate trust referred to in section 642(h) (case-asserted; section 641(c)(4))";
+}
+pub relation esbt_portion_ceases_separate_trust_treatment(t: Trust, y: TaxableYear) kind empirical {
+    label en unofficial "a portion of the electing small business trust ceases to be treated as a separate trust under paragraph (1) in the year (case-asserted; section 641(c)(4))";
+}
+pub relation entire_trust_takes_642h_carryover_into_account(t: Trust, y: TaxableYear, amount: Money) kind institutional {
+    label en official "when a portion of an electing small business trust ceases to be a separate trust, any carryover or excess deduction of the separate trust referred to in section 642(h) is taken into account by the entire trust (section 641(c)(4))";
+}
+@source(IRC_S641_C, relation = formalizes, coverage = exact, quote = "any carryover or excess deduction of the separate trust which is referred to in section 642(h) shall be taken into account by the entire trust")
+rule S641c4CarryoverToEntireTrust(t: Trust, y: TaxableYear, amount: Money) defeasible {
+    when esbt_portion_ceases_separate_trust_treatment(t, y);
+    when separate_trust_642h_carryover_or_excess_deduction(t, y, amount);
+    then entire_trust_takes_642h_carryover_into_account(t, y, amount);
+}
+
+// ============================================================================
+// §642(c)(4): adjustments; §642(c)(5): pooled income fund
+// ============================================================================
+
+pub relation charitable_deduction_gain_described_in_1202a(et: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the part of the amount otherwise allowable as a section 642(c) deduction that consists of gain described in section 1202(a) (case-asserted; section 642(c)(4))";
+}
+pub relation section_1202_exclusion_allowable_to_estate_or_trust(et: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the exclusion allowable to the estate or trust under section 1202 for the gain (case-asserted; us.irc.property_transactions is not a dependency of this package — EXTERNAL_DEPENDENCY; section 642(c)(4))";
+}
+pub relation section_642c_deduction_reduced_by_1202_exclusion(et: Person, y: TaxableYear, reduction: Money) kind institutional {
+    label en official "to the extent the section 642(c) deduction consists of section 1202(a) gain, proper adjustment is made for the exclusion allowable under section 1202: the deduction is reduced by that exclusion (section 642(c)(4), first sentence)";
+}
+@source(IRC_S642_C, relation = formalizes, coverage = exact, quote = "proper adjustment shall be made for any exclusion allowable to the estate or trust under section 1202")
+rule S642c4Adjustment1202(et: Person, y: TaxableYear, gain: Money, exclusion: Money) defeasible {
+    when charitable_deduction_gain_described_in_1202a(et, y, gain);
+    when section_1202_exclusion_allowable_to_estate_or_trust(et, y, exclusion);
+    then section_642c_deduction_reduced_by_1202_exclusion(et, y, min(gain, exclusion));
+}
+pub relation section_642c_trust_deduction_subject_to_681(t: Trust, y: TaxableYear) kind institutional {
+    label en official "in the case of a trust, the deduction allowed by section 642(c) is subject to section 681 (relating to unrelated business income) (section 642(c)(4), second sentence)";
+}
+@source(IRC_S642_C, relation = formalizes, coverage = exact, quote = "In the case of a trust, the deduction allowed by this subsection shall be subject to section 681")
+rule S642c4TrustSubjectTo681(t: Trust, y: TaxableYear, amount: Money) defeasible {
+    when charitable_set_aside_deduction(t, y, amount);
+    then section_642c_trust_deduction_subject_to_681(t, y);
+}
+
+pub relation pif_donors_transfer_irrevocable_remainder_retaining_life_income(t: Trust) kind empirical {
+    label en unofficial "each donor transfers property, contributing an irrevocable remainder interest to or for the use of an organization described in section 170(b)(1)(A) (other than in clauses (vii) or (viii)), and retaining an income interest for the life of one or more beneficiaries living at the time of the transfer (case-asserted; section 642(c)(5)(A))";
+}
+pub relation pif_property_commingled_with_similar_transfers(t: Trust) kind empirical {
+    label en unofficial "the property transferred by each donor is commingled with the property of other donors who have made or make similar transfers (case-asserted; section 642(c)(5)(B))";
+}
+pub relation pif_terms_bar_tax_exempt_securities(t: Trust) kind empirical {
+    label en unofficial "the trust cannot have investments in securities exempt from the taxes imposed by this subtitle (case-asserted; section 642(c)(5)(C))";
+}
+pub relation pif_includes_only_qualifying_transfers(t: Trust) kind empirical {
+    label en unofficial "the trust includes only amounts received from transfers that meet the requirements of paragraph (5) (case-asserted; section 642(c)(5)(D))";
+}
+pub relation pif_maintained_by_remainder_organization(t: Trust) kind empirical {
+    label en unofficial "the trust is maintained by the organization to which the remainder interest is contributed (case-asserted; section 642(c)(5)(E))";
+}
+pub relation pif_no_donor_or_income_beneficiary_is_trustee(t: Trust) kind empirical {
+    label en unofficial "no donor or beneficiary of an income interest is a trustee (case-asserted; section 642(c)(5)(E))";
+}
+pub relation pif_income_paid_by_rate_of_return_earned(t: Trust) kind empirical {
+    label en unofficial "each beneficiary of an income interest receives income, for each year he is entitled, determined by the rate of return earned by the trust for that year (case-asserted; section 642(c)(5)(F))";
+}
+pub relation pooled_income_fund(t: Trust) kind institutional {
+    label en official "a pooled income fund for purposes of paragraph (3): a trust meeting subparagraphs (A) through (F) of section 642(c)(5)";
+}
+@source(IRC_S642_C, relation = formalizes, coverage = exact, quote = "For purposes of paragraph (3), a pooled income fund is a trust—")
+rule S642c5PooledIncomeFund(t: Trust) defeasible {
+    label en official "a pooled income fund is a trust meeting all six limbs (A)-(F) of section 642(c)(5)";
+    when pif_donors_transfer_irrevocable_remainder_retaining_life_income(t);
+    when pif_property_commingled_with_similar_transfers(t);
+    when pif_terms_bar_tax_exempt_securities(t);
+    when pif_includes_only_qualifying_transfers(t);
+    when pif_maintained_by_remainder_organization(t);
+    when pif_no_donor_or_income_beneficiary_is_trustee(t);
+    when pif_income_paid_by_rate_of_return_earned(t);
+    then pooled_income_fund(t);
+}
+pub relation pif_rate_of_return_for_year(t: Trust, prior_year: TaxableYear, rate: Decimal) kind empirical {
+    label en unofficial "the rate of return earned by the fund for one of the 3 taxable years immediately preceding the taxable year of the transfer (case-asserted per year; section 642(c)(5), flush)";
+}
+pub relation pif_valuation_rate_of_return(t: Trust, rate: Decimal) kind institutional {
+    label en official "the value of the income interest is determined on the basis of the highest rate of return earned by the fund for any of the 3 taxable years immediately preceding the taxable year of the transfer (section 642(c)(5), flush)";
+}
+@source(IRC_S642_C, relation = formalizes, coverage = exact, quote = "the value of the income interest shall be determined on the basis of the highest rate of return earned by the fund for any of the 3 taxable years immediately preceding the taxable year of the fund in which the transfer is made")
+rule S642c5HighestRateOfReturn(t: Trust, y0: TaxableYear) defeasible {
+    when pooled_income_fund(t);
+    when pif_rate_of_return_for_year(t, y0, _);
+    then pif_valuation_rate_of_return(t, max all r: Decimal for py: TaxableYear where pif_rate_of_return_for_year(t, py, r));
+}
+pub relation pif_in_existence_fewer_than_3_preceding_years(t: Trust) kind empirical {
+    label en unofficial "the fund was in existence less than 3 taxable years preceding the taxable year in which the transfer is made (case-asserted; section 642(c)(5), flush)";
+}
+pub relation secretary_prescribed_pif_rate(t: Trust, rate: Decimal) kind empirical {
+    label en unofficial "a different rate of return the Secretary has prescribed for the fund (case-asserted; EXTERNAL_DEPENDENCY on the Secretary's regulations)";
+}
+@source(IRC_S642_C, relation = formalizes, coverage = exact, quote = "the rate of return shall be deemed to be 6 percent per annum, except that the Secretary may prescribe a different rate of return")
+rule S642c5NewFundSixPercent(t: Trust) defeasible {
+    label en official "for a fund in existence less than 3 taxable years the rate of return is deemed to be 6 percent per annum unless the Secretary prescribes another (section 642(c)(5), flush)";
+    when pooled_income_fund(t);
+    when pif_in_existence_fewer_than_3_preceding_years(t);
+    unless secretary_prescribed_pif_rate(t, _) and pif_in_existence_fewer_than_3_preceding_years(t);
+    then pif_valuation_rate_of_return(t, 6 percent);
+}
+rule S642c5NewFundPrescribedRate(t: Trust, rate: Decimal) defeasible {
+    when pooled_income_fund(t);
+    when pif_in_existence_fewer_than_3_preceding_years(t);
+    when secretary_prescribed_pif_rate(t, rate);
+    then pif_valuation_rate_of_return(t, rate);
+}
+
+// ============================================================================
+// §663(a)(3): denial of double deduction
+// ============================================================================
+
+pub relation amount_paid_in_year_previously_counted_under_651_or_661(et: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the part of amounts paid, credited or distributed in the year to which section 651 or 661 applied for a preceding taxable year because credited or required to be distributed then (case-asserted carry; section 663(a)(3))";
+}
+pub relation amount_excluded_from_661a_662a_663a3(et: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "an amount paid in the year to which section 651 or 661 applied for a preceding year is not included as an amount falling within section 661(a) or 662(a) (section 663(a)(3))";
+}
+@source(IRC_S663_A, relation = formalizes, coverage = exact, quote = "Any amount paid, credited, or distributed in the taxable year, if section 651 or section 661 applied to such amount for a preceding taxable year of an estate or trust because credited or required to be distributed in such preceding taxable year.")
+rule S663a3DenialOfDoubleDeduction(et: Person, y: TaxableYear, amount: Money) defeasible {
+    when amount_paid_in_year_previously_counted_under_651_or_661(et, y, amount);
+    then amount_excluded_from_661a_662a_663a3(et, y, amount);
+}
+
+// ============================================================================
+// §664(b), last sentence: undistributed capital gain on a cumulative net basis
+// ============================================================================
+
+pub relation crt_capital_gain_carry_in(t: Trust, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the trust's undistributed capital gain on a cumulative net basis at the start of the year (a period-to-period carry, re-asserted from the prior year's crt_capital_gain_carry_out; section 664(b))";
+}
+pub relation crt_capital_gains_for_year(t: Trust, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "gains from the sale or exchange of capital assets recognized by the trust in the year (case-asserted; section 664(b)(2))";
+}
+pub relation crt_capital_losses_for_year(t: Trust, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "losses from the sale or exchange of capital assets recognized by the trust in the year (case-asserted; section 664(b)(2))";
+}
+pub relation crt_cumulative_net_capital_gain(t: Trust, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the trust's undistributed capital gain determined on a cumulative net basis: the carried amount plus the year's gains less the year's losses (section 664(b), last sentence)";
+}
+@source(IRC_S664_B, relation = formalizes, coverage = exact, quote = "the trust shall determine the amount of its undistributed capital gain on a cumulative net basis")
+rule S664bCumulativeNetCapitalGain(t: Trust, y: TaxableYear, carry: Money, gains: Money, losses: Money) strict {
+    label en official "cumulative net basis: carry-in + gains - losses (losses of a year reduce the cumulative amount, so later gains are netted against them)";
+    when crt_capital_gain_carry_in(t, y, carry);
+    when crt_capital_gains_for_year(t, y, gains);
+    when crt_capital_losses_for_year(t, y, losses);
+    then crt_cumulative_net_capital_gain(t, y, carry + gains - losses);
+}
+rule S664bCapitalGainTierBalanceFromCumulative(t: Trust, y: TaxableYear, cumulative: Money) strict {
+    label en unofficial "the tier-2 available balance is the cumulative net capital gain, not below zero";
+    when crt_cumulative_net_capital_gain(t, y, cumulative);
+    then crt_tier_available_balance(t, y, CapitalGainTier, max(0 USD, cumulative));
+}
+pub relation crt_capital_gain_carry_out(t: Trust, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "the cumulative net capital gain left after the year's tier-2 distribution: to be re-asserted as next year's carry-in";
+}
+rule S664bCapitalGainCarryOut(t: Trust, y: TaxableYear, cumulative: Money, tier2: Money) defeasible {
+    when crt_cumulative_net_capital_gain(t, y, cumulative);
+    when crt_tier2_capital_gain_amount(t, y, tier2);
+    then crt_capital_gain_carry_out(t, y, cumulative - tier2);
+}
+
+// ============================================================================
+// §664(d)(3)-(4): unitrust income exception; severance of additional contributions
+// ============================================================================
+
+pub relation trust_instrument_provides_income_exception_664d3(t: Trust) kind empirical {
+    label en unofficial "the trust instrument provides that the trustee shall pay the income beneficiary for any year the lesser trust income, plus make-up amounts (case-asserted; section 664(d)(3))";
+}
+pub relation crut_required_unitrust_amount_664d2A(t: Trust, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the amount required to be distributed under paragraph (2)(A) for the year (the fixed percentage of the annually determined net fair market value; case-asserted)";
+}
+pub relation crut_trust_income_for_year(t: Trust, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the amount of the trust income for the year (case-asserted; section 664(d)(3))";
+}
+pub relation crut_makeup_shortfall_carry_in(t: Trust, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the excess of the aggregate of the amounts required under paragraph (2)(A) over the aggregate of the amounts paid in prior years (a period-to-period carry, re-asserted from the prior year's crut_makeup_shortfall_carry_out; section 664(d)(3)(B))";
+}
+pub relation crut_income_exception_payment_a(t: Trust, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the amount of the trust income, if less than the amount required to be distributed under paragraph (2)(A) (section 664(d)(3)(A))";
+}
+@source(IRC_S664_D, relation = formalizes, coverage = exact, quote = "the amount of the trust income, if such amount is less than the amount required to be distributed under paragraph (2)(A)")
+rule S664d3AIncomeIfLess(t: Trust, y: TaxableYear, required: Money, income: Money) defeasible {
+    when trust_instrument_provides_income_exception_664d3(t);
+    when crut_required_unitrust_amount_664d2A(t, y, required);
+    when crut_trust_income_for_year(t, y, income);
+    when income < required;
+    then crut_income_exception_payment_a(t, y, income);
+}
+rule S664d3AIncomeNotLess(t: Trust, y: TaxableYear, required: Money, income: Money) defeasible {
+    label en unofficial "income at least the required amount: the (A) payment is the required amount (the make-up limb (B) may add to it)";
+    when trust_instrument_provides_income_exception_664d3(t);
+    when crut_required_unitrust_amount_664d2A(t, y, required);
+    when crut_trust_income_for_year(t, y, income);
+    when income >= required;
+    then crut_income_exception_payment_a(t, y, required);
+}
+pub relation crut_income_exception_payment_b_makeup(t: Trust, y: TaxableYear, amount: Money) kind institutional {
+    label en official "any amount of the trust income in excess of the required amount, to the extent the aggregate paid in prior years was less than the aggregate required amounts (section 664(d)(3)(B))";
+}
+@source(IRC_S664_D, relation = formalizes, coverage = exact, quote = "any amount of the trust income which is in excess of the amount required to be distributed under paragraph (2)(A), to the extent that (by reason of subparagraph (A)) the aggregate of the amounts paid in prior years was less than the aggregate of such required amounts")
+rule S664d3BMakeup(t: Trust, y: TaxableYear, required: Money, income: Money, shortfall: Money) defeasible {
+    when trust_instrument_provides_income_exception_664d3(t);
+    when crut_required_unitrust_amount_664d2A(t, y, required);
+    when crut_trust_income_for_year(t, y, income);
+    when crut_makeup_shortfall_carry_in(t, y, shortfall);
+    when income > required;
+    then crut_income_exception_payment_b_makeup(t, y, min(income - required, shortfall));
+}
+rule S664d3BNoMakeup(t: Trust, y: TaxableYear, required: Money, income: Money) defeasible {
+    label en unofficial "income not above the required amount: no make-up amount for the year";
+    when trust_instrument_provides_income_exception_664d3(t);
+    when crut_required_unitrust_amount_664d2A(t, y, required);
+    when crut_trust_income_for_year(t, y, income);
+    when income <= required;
+    then crut_income_exception_payment_b_makeup(t, y, 0 USD);
+}
+pub relation crut_makeup_shortfall_carry_out(t: Trust, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "the shortfall carried to the next year: the prior shortfall plus the required amount less what the exception permitted to be paid this year";
+}
+rule S664d3CarryOut(t: Trust, y: TaxableYear, required: Money, a: Money, b: Money, shortfall: Money) defeasible {
+    when crut_required_unitrust_amount_664d2A(t, y, required);
+    when crut_income_exception_payment_a(t, y, a);
+    when crut_income_exception_payment_b_makeup(t, y, b);
+    when crut_makeup_shortfall_carry_in(t, y, shortfall);
+    then crut_makeup_shortfall_carry_out(t, y, shortfall + required - a - b);
+}
+
+pub relation contribution_to_charitable_remainder_unitrust(t: Trust, contribution: Transaction) kind empirical {
+    label en unofficial "a contribution is made to a trust which before the contribution is a charitable remainder unitrust (case-asserted; section 664(d)(4)(A))";
+}
+pub relation contribution_would_end_unitrust_status_by_664d2D(t: Trust, contribution: Transaction) kind empirical {
+    label en unofficial "the contribution would, but for paragraph (4), result in the trust ceasing to be a charitable unitrust by reason of paragraph (2)(D) (case-asserted; section 664(d)(4)(B))";
+}
+pub relation contribution_treated_as_transfer_to_separate_trust_664d4(t: Trust, contribution: Transaction) kind institutional {
+    label en official "such a contribution is treated as a transfer to a separate trust under regulations (section 664(d)(4))";
+}
+@source(IRC_S664_D, relation = formalizes, coverage = exact, quote = "such contribution shall be treated as a transfer to a separate trust under regulations prescribed by the Secretary")
+rule S664d4SeveranceOfAdditionalContribution(t: Trust, contribution: Transaction) defeasible {
+    when contribution_to_charitable_remainder_unitrust(t, contribution);
+    when contribution_would_end_unitrust_status_by_664d2D(t, contribution);
+    then contribution_treated_as_transfer_to_separate_trust_664d4(t, contribution);
+}
+
+// ============================================================================
+// §678(a)(2), (c): non-grantor owner (released power); support obligations
+// ============================================================================
+
+pub relation person_partially_released_or_modified_sole_power_678a2(p: Person, t: Trust, portion: Text) kind empirical {
+    label en unofficial "the person has previously partially released or otherwise modified a sole power to vest the corpus or income in himself (case-asserted; section 678(a)(2))";
+}
+pub relation person_retains_control_of_a_grantor_owner_678a2(p: Person, t: Trust, portion: Text) kind empirical {
+    label en unofficial "after the release or modification the person retains such control as would, within the principles of sections 671 to 677, subject a grantor to treatment as owner (case-asserted; section 678(a)(2))";
+}
+@source(IRC_S678_A, relation = formalizes, coverage = exact, quote = "such person has previously partially released or otherwise modified such a power and after the release or modification retains such control as would, within the principles of sections 671 to 677, inclusive, subject a grantor of a trust to treatment as the owner thereof")
+rule S678a2ReleasedPowerStillControls(p: Person, t: Trust, portion: Text) defeasible {
+    label en official "a person other than the grantor is treated as owner of a portion where the person previously partially released or modified a sole vesting power and retains control that would make a grantor an owner (section 678(a)(2)); the section 678(b) grantor-taxable exception applies as in (a)(1)";
+    when person_partially_released_or_modified_sole_power_678a2(p, t, portion);
+    when person_retains_control_of_a_grantor_owner_678a2(p, t, portion);
+    unless section_678b_grantor_taxable_exception(p, t, portion) and person_partially_released_or_modified_sole_power_678a2(p, t, portion) and person_retains_control_of_a_grantor_owner_678a2(p, t, portion);
+    then non_grantor_owner_678(p, t, portion);
+    then treated_as_owner_of_portion(p, t, portion);
+}
+pub relation power_only_to_apply_income_to_support_678c(p: Person, t: Trust, portion: Text) kind empirical {
+    label en unofficial "the power enables the person, as trustee or cotrustee, merely to apply the income of the trust to the support or maintenance of a person whom the holder is obligated to support or maintain (case-asserted; section 678(c))";
+}
+pub relation income_applied_to_support_678c(p: Person, t: Trust, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the income actually applied to that support or maintenance in the year (case-asserted; section 678(c))";
+}
+pub relation support_amount_paid_from_corpus_or_other_than_current_income_678c(p: Person, t: Trust, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "amounts so applied or distributed that are paid out of corpus or out of other than income of the taxable year (case-asserted; section 678(c), second sentence)";
+}
+pub relation section_678a_applies_to_extent_income_applied_678c(p: Person, t: Trust, y: TaxableYear, amount: Money) kind institutional {
+    label en official "subsection (a) does not apply to a support-only power except to the extent the income is so applied (section 678(c), first sentence)";
+}
+@source(IRC_S678_C, relation = formalizes, coverage = exact, quote = "Subsection (a) shall not apply to a power which enables such person, in the capacity of trustee or cotrustee, merely to apply the income of the trust to the support or maintenance of a person whom the holder of the power is obligated to support or maintain except to the extent that such income is so applied.")
+rule S678cSupportPowerAppliesOnlyToAppliedIncome(p: Person, t: Trust, y: TaxableYear, portion: Text, amount: Money) defeasible {
+    when power_only_to_apply_income_to_support_678c(p, t, portion);
+    when income_applied_to_support_678c(p, t, y, amount);
+    then section_678a_applies_to_extent_income_applied_678c(p, t, y, amount);
+}
+pub relation support_payment_from_corpus_treated_as_661a2_amount_taxed_under_662(p: Person, t: Trust, y: TaxableYear, amount: Money) kind institutional {
+    label en official "amounts so applied or distributed out of corpus or out of other than income of the taxable year are considered paid or credited within section 661(a)(2) and are taxed to the holder of the power under section 662 (section 678(c), second sentence)";
+}
+@source(IRC_S678_C, relation = formalizes, coverage = exact, quote = "such amounts shall be considered to be an amount paid or credited within the meaning of paragraph (2) of section 661(a) and shall be taxed to the holder of the power under section 662")
+rule S678cCorpusPaymentTaxedUnder662(p: Person, t: Trust, y: TaxableYear, amount: Money) defeasible {
+    when power_only_to_apply_income_to_support_678c(p, t, _);
+    when support_amount_paid_from_corpus_or_other_than_current_income_678c(p, t, y, amount);
+    then support_payment_from_corpus_treated_as_661a2_amount_taxed_under_662(p, t, y, amount);
+}
+
+// ============================================================================
+// §685(d): amounts refunded to the purchaser on cancellation
+// ============================================================================
+
+pub relation cancellation_payment_from_funeral_trust_to_purchaser(t: Trust, purchaser: Person, payment: Transaction, y: TaxableYear) kind empirical {
+    label en unofficial "a payment from the trust to the purchaser of a section 685(b)(1) contract by reason of cancellation of the contract (case-asserted; section 685(d))";
+}
+pub relation cancellation_payment_consists_of_property_other_than_money(payment: Transaction, prop: Asset) kind empirical {
+    label en unofficial "the payment consists of the stated property other than money (case-asserted; section 685(d), second sentence)";
+}
+pub relation trust_basis_in_property_before_payment(t: Trust, prop: Asset, amount: Money) kind empirical {
+    label en unofficial "the trust's basis in the property immediately before the payment (case-asserted; section 685(d))";
+}
+pub relation no_gain_or_loss_to_purchaser_on_cancellation_685d(purchaser: Person, payment: Transaction) kind institutional {
+    label en official "no gain or loss is recognized to the purchaser of a section 685(b)(1) contract by reason of a payment from the trust upon cancellation of the contract (section 685(d), first sentence)";
+}
+@source(IRC_S685_D, relation = formalizes, coverage = exact, quote = "No gain or loss shall be recognized to a purchaser of a contract described in subsection (b)(1) by reason of any payment from such trust to such purchaser by reason of cancellation of such contract.")
+rule S685dNoGainOrLoss(t: Trust, purchaser: Person, payment: Transaction, y: TaxableYear) defeasible {
+    when cancellation_payment_from_funeral_trust_to_purchaser(t, purchaser, payment, y);
+    then no_gain_or_loss_to_purchaser_on_cancellation_685d(purchaser, payment);
+}
+pub relation purchaser_basis_in_property_received_on_cancellation_685d(purchaser: Person, prop: Asset, amount: Money) kind institutional {
+    label en official "if the cancellation payment consists of property other than money, the purchaser's basis in it is the same as the trust's basis immediately before the payment (section 685(d), second sentence)";
+}
+@source(IRC_S685_D, relation = formalizes, coverage = exact, quote = "the basis of such property in the hands of such purchaser shall be the same as the trust's basis in such property immediately before the payment")
+rule S685dCarryoverBasis(t: Trust, purchaser: Person, payment: Transaction, y: TaxableYear, prop: Asset, basis: Money) defeasible {
+    when cancellation_payment_from_funeral_trust_to_purchaser(t, purchaser, payment, y);
+    when cancellation_payment_consists_of_property_other_than_money(payment, prop);
+    when trust_basis_in_property_before_payment(t, prop, basis);
+    then purchaser_basis_in_property_received_on_cancellation_685d(purchaser, prop, basis);
+}
+
+// ============================================================================
+// §691(a)(4)-(5): installment obligations acquired from the decedent
+// ============================================================================
+
+pub relation installment_obligation_acquired_from_decedent_691a4(decedent: Person, item: Text, recipient: Person) kind empirical {
+    label en unofficial "an installment obligation reportable by the decedent on the installment method under section 453 is acquired by the decedent's estate from the decedent, or by any person by reason of the death or by bequest, devise or inheritance (case-asserted; section 691(a)(4))";
+}
+pub relation installment_obligation_face_amount(decedent: Person, item: Text, face: Money) kind empirical {
+    label en unofficial "the face amount of the installment obligation (case-asserted; section 691(a)(4)(A))";
+}
+pub relation installment_obligation_basis_in_decedents_hands(decedent: Person, item: Text, basis: Money) kind empirical {
+    label en unofficial "the basis of the obligation in the hands of the decedent, determined under section 453B (case-asserted; section 691(a)(4)(A)-(B))";
+}
+pub relation installment_face_over_basis_is_ird_691a4A(decedent: Person, item: Text, amount: Money) kind institutional {
+    label en official "an amount equal to the excess of the face amount of the obligation over its basis in the decedent's hands is an item of gross income in respect of the decedent for paragraph (1) (section 691(a)(4)(A))";
+}
+@source(IRC_S691_A, relation = formalizes, coverage = exact, quote = "an amount equal to the excess of the face amount of such obligation over the basis of the obligation in the hands of the decedent (determined under section 453B) shall, for the purpose of paragraph (1), be considered as an item of gross income in respect of the decedent")
+rule S691a4AFaceOverBasis(decedent: Person, item: Text, recipient: Person, face: Money, basis: Money) defeasible {
+    when installment_obligation_acquired_from_decedent_691a4(decedent, item, recipient);
+    when installment_obligation_face_amount(decedent, item, face);
+    when installment_obligation_basis_in_decedents_hands(decedent, item, basis);
+    when face > basis;
+    then installment_face_over_basis_is_ird_691a4A(decedent, item, face - basis);
+}
+pub relation installment_obligation_is_ird_right_for_a2_a3_691a4B(decedent: Person, item: Text) kind institutional {
+    label en official "the installment obligation is considered a right to receive an item of gross income in respect of the decedent for paragraphs (2) and (3) (section 691(a)(4)(B))";
+}
+@source(IRC_S691_A, relation = formalizes, coverage = exact, quote = "such obligation shall, for purposes of paragraphs (2) and (3), be considered a right to receive an item of gross income in respect of the decedent")
+rule S691a4BRightToReceiveIrd(decedent: Person, item: Text, recipient: Person) defeasible {
+    when installment_obligation_acquired_from_decedent_691a4(decedent, item, recipient);
+    then installment_obligation_is_ird_right_for_a2_a3_691a4B(decedent, item);
+}
+pub relation installment_persons_related_453f1(decedent: Person, item: Text) kind empirical {
+    label en unofficial "the decedent and the obligor were related persons within the meaning of section 453(f)(1) (case-asserted; section 691(a)(5)(B))";
+}
+pub relation installment_obligation_fair_market_value_at_transfer(decedent: Person, item: Text, fmv: Money) kind empirical {
+    label en unofficial "the fair market value of the installment obligation at the time of the transfer (case-asserted)";
+}
+pub relation installment_fair_market_value_used_691a5B(decedent: Person, item: Text, fmv: Money) kind institutional {
+    label en official "where the first sentence of paragraph (2) applies by reason of subparagraph (A) and the decedent and obligor were related, the fair market value of the obligation is treated as not less than its face amount (section 691(a)(5)(B))";
+}
+@source(IRC_S691_A, relation = formalizes, coverage = exact, quote = "the fair market value of the installment obligation shall be treated as not less than its face amount")
+rule S691a5BRelatedFaceFloor(decedent: Person, item: Text, fmv: Money, face: Money) defeasible {
+    when installment_persons_related_453f1(decedent, item);
+    when installment_obligation_fair_market_value_at_transfer(decedent, item, fmv);
+    when installment_obligation_face_amount(decedent, item, face);
+    then installment_fair_market_value_used_691a5B(decedent, item, max(fmv, face));
+}
+rule S691a5BUnrelatedActualValue(decedent: Person, item: Text, fmv: Money) defeasible {
+    label en unofficial "outside the related-person case the actual fair market value is used";
+    when installment_obligation_fair_market_value_at_transfer(decedent, item, fmv);
+    unless installment_persons_related_453f1(decedent, item) and installment_obligation_fair_market_value_at_transfer(decedent, item, fmv);
+    then installment_fair_market_value_used_691a5B(decedent, item, fmv);
+}
+pub relation installment_transfer_inclusion_reduced_by_basis_691a4B(decedent: Person, item: Text, transferor: Person, amount: Money) kind institutional {
+    label en official "the amount includible under paragraph (2) on a transfer of the installment obligation is reduced by the basis of the obligation in the hands of the decedent (section 691(a)(4)(B))";
+}
+@source(IRC_S691_A, relation = formalizes, coverage = exact, quote = "the amount includible in gross income under paragraph (2) shall be reduced by an amount equal to the basis of the obligation in the hands of the decedent")
+rule S691a4BInclusionReducedByBasis(decedent: Person, item: Text, transferor: Person, recipient: Person, fmv: Money, excess: Money, basis: Money) defeasible {
+    when installment_obligation_acquired_from_decedent_691a4(decedent, item, recipient);
+    when ird_right_transferred(decedent, item, transferor, fmv, excess);
+    when installment_obligation_basis_in_decedents_hands(decedent, item, basis);
+    then installment_transfer_inclusion_reduced_by_basis_691a4B(decedent, item, transferor, fmv + excess - basis);
+}
+
+pub relation installment_obligation_obligor(decedent: Person, item: Text, obligor: Person) kind empirical {
+    label en unofficial "the obligor of the installment obligation (case-asserted; section 691(a)(5)(A)(i))";
+}
+pub relation installment_obligation_disposed_to(decedent: Person, item: Text, transferor: Person, transferee: Person) kind empirical {
+    label en unofficial "the holder transfers the installment obligation to a person (case-asserted; section 691(a)(5)(A)(i))";
+}
+pub relation installment_obligation_cancelled_by_holder(decedent: Person, item: Text, holder: Person) kind empirical {
+    label en unofficial "the installment obligation is canceled while held by the person (case-asserted; section 691(a)(5)(A)(ii))";
+}
+pub relation installment_obligation_becomes_unenforceable(decedent: Person, item: Text, holder: Person) kind empirical {
+    label en unofficial "the installment obligation becomes unenforceable while held by the person (case-asserted; section 691(a)(5)(C))";
+}
+pub relation installment_cancellation_occurs_at_death_of_decedent(decedent: Person, item: Text) kind empirical {
+    label en unofficial "the cancellation occurs at the death of the decedent (case-asserted; section 691(a)(5)(A)(iii))";
+}
+pub relation estate_of_decedent(estate: Estate, decedent: Person) kind empirical {
+    label en unofficial "the estate is the estate of the decedent (case-asserted)";
+}
+pub relation installment_event_is_transfer_for_691a2(decedent: Person, item: Text, transferor: Person) kind institutional {
+    label en official "for section 691(a)(2): a transfer to a person other than the obligor, or a cancellation (including an obligation that becomes unenforceable), is a transfer; a cancellation at the death of the decedent is a transfer by the estate (or by the person who held the obligation before the death) (section 691(a)(5)(A), (C))";
+}
+@source(IRC_S691_A, relation = formalizes, coverage = exact, quote = "the second sentence of paragraph (2) shall be applied by inserting \"(other than the obligor)\" after \"or a transfer to a person\"")
+rule S691a5AiTransferToNonObligor(decedent: Person, item: Text, transferor: Person, transferee: Person, obligor: Person) defeasible {
+    when installment_obligation_disposed_to(decedent, item, transferor, transferee);
+    when installment_obligation_obligor(decedent, item, obligor);
+    when transferee != obligor;
+    then installment_event_is_transfer_for_691a2(decedent, item, transferor);
+}
+@source(IRC_S691_A, relation = formalizes, coverage = exact, quote = "any cancellation of such an obligation shall be treated as a transfer")
+rule S691a5AiiCancellationIsTransfer(decedent: Person, item: Text, holder: Person) defeasible {
+    when installment_obligation_cancelled_by_holder(decedent, item, holder);
+    unless installment_cancellation_occurs_at_death_of_decedent(decedent, item) and installment_obligation_cancelled_by_holder(decedent, item, holder);
+    then installment_event_is_transfer_for_691a2(decedent, item, holder);
+}
+@source(IRC_S691_A, relation = formalizes, coverage = exact, quote = "an installment obligation which becomes unenforceable shall be treated as if it were canceled")
+rule S691a5CUnenforceableIsCancellation(decedent: Person, item: Text, holder: Person) defeasible {
+    when installment_obligation_becomes_unenforceable(decedent, item, holder);
+    unless installment_cancellation_occurs_at_death_of_decedent(decedent, item) and installment_obligation_becomes_unenforceable(decedent, item, holder);
+    then installment_event_is_transfer_for_691a2(decedent, item, holder);
+}
+@source(IRC_S691_A, relation = formalizes, coverage = exact, quote = "any cancellation of such an obligation occurring at the death of the decedent shall be treated as a transfer by the estate of the decedent")
+rule S691a5AiiiCancellationAtDeathByEstate(decedent: Person, item: Text, estate: Estate) defeasible {
+    when installment_cancellation_occurs_at_death_of_decedent(decedent, item);
+    when estate_of_decedent(estate, decedent);
+    unless person_other_than_decedent_held_before_death_691a5A(decedent, item) and estate_of_decedent(estate, decedent);
+    then installment_event_is_transfer_for_691a2(decedent, item, estate);
+}
+pub relation person_other_than_decedent_held_before_death_691a5A(decedent: Person, item: Text) kind empirical {
+    label en unofficial "the obligation was held, before the decedent's death, by a person other than the decedent (case-asserted; section 691(a)(5)(A)(iii) parenthetical)";
+}
+pub relation installment_obligation_held_by_other_before_death(decedent: Person, item: Text, holder: Person) kind empirical {
+    label en unofficial "the person other than the decedent who held the obligation before the death (case-asserted)";
+}
+rule S691a5AiiiCancellationAtDeathByOtherHolder(decedent: Person, item: Text, holder: Person) defeasible {
+    label en official "a cancellation at the death is a transfer by the person who held the obligation, if a person other than the decedent held it before the death (section 691(a)(5)(A)(iii) parenthetical)";
+    when installment_cancellation_occurs_at_death_of_decedent(decedent, item);
+    when person_other_than_decedent_held_before_death_691a5A(decedent, item);
+    when installment_obligation_held_by_other_before_death(decedent, item, holder);
+    then installment_event_is_transfer_for_691a2(decedent, item, holder);
+}
+
+// ============================================================================
+// §691(c)(3)-(4): GST allowance; coordination with capital gain provisions
+// ============================================================================
+
+pub relation gst_tax_attributable_to_untaxed_trust_income_691c3(t: Trust, amount: Money) kind empirical {
+    label en unofficial "the portion of the chapter 13 tax on a taxable termination or direct skip occurring as a result of the transferor's death that is attributable to items of trust gross income not properly includible before the termination (case-asserted: the chapter 13 computation is us.irc.estate_gift's — EXTERNAL_DEPENDENCY; section 691(c)(3))";
+}
+pub relation gst_691c3_deduction_allowed(t: Trust, amount: Money) kind institutional {
+    label en official "a deduction is allowed, under principles similar to section 691(c), for the portion of the chapter 13 tax attributable to items of gross income of the trust not properly includible for periods before the termination (section 691(c)(3))";
+}
+@source(IRC_S691_C, relation = formalizes, coverage = partial, quote = "there shall be allowed a deduction (under principles similar to the principles of this subsection) for the portion of such tax attributable to items of gross income of the trust")
+rule S691c3GstDeduction(t: Trust, amount: Money) defeasible {
+    when gst_tax_attributable_to_untaxed_trust_income_691c3(t, amount);
+    then gst_691c3_deduction_allowed(t, amount);
+}
+pub relation ird_item_amount_before_capital_gain_reduction(decedent: Person, item: Text, recipient: Person, amount: Money) kind empirical {
+    label en unofficial "the amount taken into account with respect to an item described in section 691(a)(1) for section 1(h), 1202 or 1211 before the section 691(c)(4) reduction (case-asserted)";
+}
+pub relation ird_item_691c1_deduction_for_item(decedent: Person, item: Text, recipient: Person, deduction: Money) kind empirical {
+    label en unofficial "the deduction allowable under paragraph (1) with respect to the item (case-asserted per item)";
+}
+pub relation ird_item_amount_for_capital_gain_provisions_691c4(decedent: Person, item: Text, recipient: Person, amount: Money) kind institutional {
+    label en official "for sections 1(h), 1202 and 1211 the amount taken into account with respect to an item described in section 691(a)(1) is reduced, but not below zero, by the section 691(c)(1) deduction allowable for that item (section 691(c)(4))";
+}
+@source(IRC_S691_C, relation = formalizes, coverage = exact, quote = "shall be reduced (but not below zero) by the amount of the deduction allowable under paragraph (1) of this subsection with respect to such item")
+rule S691c4CoordinationWithCapitalGainProvisions(decedent: Person, item: Text, recipient: Person, amount: Money, deduction: Money) defeasible {
+    when ird_item_amount_before_capital_gain_reduction(decedent, item, recipient, amount);
+    when ird_item_691c1_deduction_for_item(decedent, item, recipient, deduction);
+    then ird_item_amount_for_capital_gain_provisions_691c4(decedent, item, recipient, max(0 USD, amount - deduction));
+}
+
+// ============================================================================
+// §692(b), (d)(3)
+// ============================================================================
+
+pub relation missing_status_individual_692b(decedent: Person) kind empirical {
+    label en unofficial "the individual was in a missing status within the meaning of section 6013(f)(3)(A) (case-asserted; section 692(b))";
+}
+pub relation actual_date_of_death(decedent: Person, d: Date) kind empirical {
+    label en unofficial "the date of death otherwise determined (case-asserted; section 692(b))";
+}
+pub relation death_determination_date_under_37_usc_556(decedent: Person, d: Date) kind empirical {
+    label en unofficial "the date on which a determination of death is made under section 556 of title 37 of the United States Code (case-asserted; section 692(b))";
+}
+pub relation date_of_death_for_692(decedent: Person, d: Date) kind institutional {
+    label en official "for section 692 the date of death of a missing-status individual is treated as not earlier than the date of the determination of death under 37 U.S.C. 556 (section 692(b), first sentence)";
+}
+@source(IRC_S692_B, relation = formalizes, coverage = exact, quote = "the date of his death shall be treated as being not earlier than the date on which a determination of his death is made under section 556 of title 37 of the United States Code")
+rule S692bDeathNotEarlierThanDetermination(decedent: Person, death: Date, determined: Date) defeasible {
+    when missing_status_individual_692b(decedent);
+    when actual_date_of_death(decedent, death);
+    when death_determination_date_under_37_usc_556(decedent, determined);
+    when death >= determined;
+    then date_of_death_for_692(decedent, death);
+}
+rule S692bDeathMovedToDetermination(decedent: Person, death: Date, determined: Date) defeasible {
+    when missing_status_individual_692b(decedent);
+    when actual_date_of_death(decedent, death);
+    when death_determination_date_under_37_usc_556(decedent, determined);
+    when death < determined;
+    then date_of_death_for_692(decedent, determined);
+}
+pub relation combatant_activities_termination_date_112(decedent: Person, d: Date) kind empirical {
+    label en unofficial "the date designated under section 112 as the date of termination of combatant activities in the combat zone (case-asserted; section 692(b), second sentence)";
+}
+pub relation combat_zone_is_vietnam_conflict(decedent: Person) kind empirical {
+    label en unofficial "the combat zone is the one designated for the Vietnam conflict (case-asserted; section 692(b), second sentence)";
+}
+pub relation section_692b_cutoff_applies(decedent: Person, y: TaxableYear) kind institutional {
+    label en official "the missing-status rule does not cause subsection (a)(1) to apply for a taxable year beginning more than 2 years after the section 112 termination date, except for the Vietnam conflict combat zone (section 692(b), second sentence)";
+}
+@source(IRC_S692_B, relation = formalizes, coverage = exact, quote = "shall not cause subsection (a)(1) to apply for any taxable year beginning more than 2 years after the date designated under section 112")
+rule S692bTwoYearCutoff(decedent: Person, y: TaxableYear, terminated: Date, starts: Date) defeasible {
+    when missing_status_individual_692b(decedent);
+    when combatant_activities_termination_date_112(decedent, terminated);
+    when us.irc.core::begins(y, starts);
+    when starts > add_calendar_period(terminated, 24 calendar_month);
+    unless combat_zone_is_vietnam_conflict(decedent) and missing_status_individual_692b(decedent) and combatant_activities_termination_date_112(decedent, terminated) and us.irc.core::begins(y, starts);
+    then section_692b_cutoff_applies(decedent, y);
+}
+pub relation section_692b_cutoff_bars_forgiveness(decedent: Person, death_date: Date, y: TaxableYear) kind institutional {
+    label en unofficial "helper: the section 692(b) cutoff bars the section 692(a)(1) forgiveness for the year (binds the death date of the immunity rule)";
+}
+rule S692bCutoffBarsForgiveness(decedent: Person, death_date: Date, y: TaxableYear) defeasible {
+    when section_692b_cutoff_applies(decedent, y);
+    when died_in_active_service_combat_zone_692a(decedent, death_date);
+    then section_692b_cutoff_bars_forgiveness(decedent, death_date, y);
+}
+
+pub relation terrorist_victim_tax_on_excluded_items_692d3(decedent: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the amount of tax computed by taking into account only the items attributable to (A) deferred compensation that would have been payable after death had the individual died other than as a specified terrorist victim, or (B) amounts payable in the year that would not have been payable but for an action taken after September 11, 2001 (case-asserted; section 692(d)(3))";
+}
+pub relation section_692d3_tax_not_forgiven(decedent: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "paragraph (1) does not apply to the tax computed on the items of deferred compensation payable after death and on amounts payable only because of a post-September 11, 2001 action (section 692(d)(3))";
+}
+@source(IRC_S692_D, relation = formalizes, coverage = exact, quote = "paragraph (1) shall not apply to the amount of any tax imposed by this chapter which would be computed by only taking into account the items of income, gain, or other amounts attributable to")
+rule S692d3TaxNotForgiven(decedent: Person, y: TaxableYear, amount: Money) defeasible {
+    when specified_terrorist_victim(decedent);
+    when terrorist_victim_tax_on_excluded_items_692d3(decedent, y, amount);
+    then section_692d3_tax_not_forgiven(decedent, y, amount);
+}
+pub relation section_692d_net_tax_forgiven(decedent: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the tax not imposed by paragraph (1), reduced by the tax that paragraph (3) leaves in place (not below zero)";
+}
+rule S692dNetForgiven(decedent: Person, y: TaxableYear, forgiven: Money, kept: Money) defeasible {
+    when tax_not_imposed_amount_692d(decedent, y, forgiven);
+    when section_692d3_tax_not_forgiven(decedent, y, kept);
+    then section_692d_net_tax_forgiven(decedent, y, max(0 USD, forgiven - kept));
+}

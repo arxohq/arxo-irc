@@ -1,0 +1,141 @@
+// Section 267 — Losses, expenses, and interest with respect to transactions
+// between related taxpayers. Stage 1 (IRC-06), priority section. Scope:
+// (a)(1) loss disallowance; (b) the relationship list; (c) constructive
+// ownership attribution (family attribution only, as the most-used rule).
+
+use self::{
+    Corporation,
+    DeductionKind,
+    IRC_S267_A,
+    IRC_S267_B,
+    IRC_S267_C,
+    IRC_S267_D,
+    Person,
+    TaxableYear,
+    controlled_group_loss_deferred_267f,
+    deduction_allowed,
+    persons_specified_for_267a2,
+    transfer_outside_267a1,
+};
+
+pub enum RelatedPartyRelationship {
+    FamilyMembers;                       // (b)(1)
+    IndividualAndControlledCorporation;  // (b)(2)
+    ControlledGroupCorporations;         // (b)(3)
+    GrantorAndFiduciary;                 // (b)(4)
+    FiduciariesCommonGrantor;            // (b)(5)
+    FiduciaryAndBeneficiary;             // (b)(6)
+    FiduciaryAndOtherTrustBeneficiary;   // (b)(7)
+    FiduciaryAndControlledCorporation;   // (b)(8)
+    PersonAndControlledExemptOrg;        // (b)(9)
+    CorporationAndControlledPartnership; // (b)(10)
+    TwoControlledSCorporations;          // (b)(11)
+    ControlledSAndCCorporation;          // (b)(12)
+    ExecutorAndBeneficiary;              // (b)(13)
+}
+pub relation related_persons(a: Person, b: Person, relationship: RelatedPartyRelationship) kind institutional {
+    label en official "the two persons stand in one of the section 267(b) relationships";
+}
+pub relation family_member_of(a: Person, b: Person) kind institutional {
+    label en official "a member of the family of the other, within the section 267(c)(4) definition (brothers, sisters, spouse, ancestors, lineal descendants)";
+}
+@source(IRC_S267_C, quote = "The family of an individual shall include only his brothers and sisters (whether by the whole or half blood), spouse, ancestors, and lineal descendants")
+rule FamilyMembersAreRelatedPersons(a: Person, b: Person) strict {
+    label en official "family members within section 267(c)(4) are related persons under section 267(b)(1)";
+    when family_member_of(a, b);
+    then related_persons(a, b, FamilyMembers);
+}
+
+pub relation loss_from_sale_or_exchange_between_related_persons(seller: Person, buyer: Person, y: TaxableYear, item: Integer, amount: Money) kind empirical {
+    label en official "a loss from the sale or exchange of property, directly or indirectly, between persons in a section 267(b) relationship (section 267(a)(1))";
+}
+pub relation liquidating_distribution_loss(seller: Person, buyer: Person, item: Integer) kind empirical {
+    label en official "the loss is that of a distributing (or distributee) corporation in a distribution in complete liquidation — excepted from disallowance (section 267(a)(1) second sentence)";
+}
+
+@source(IRC_S267_A, quote = "No deduction shall be allowed in respect of any loss from the sale or exchange of property, directly or indirectly, between persons specified in any of the paragraphs of subsection (b)")
+rule RelatedPartyLossDisallowed(seller: Person, buyer: Person, y: TaxableYear, item: Integer, amount: Money, relationship: RelatedPartyRelationship) strict {
+    label en official "no deduction for a loss from a sale or exchange of property between related persons, unless it is a complete-liquidation distribution loss (section 267(a)(1))";
+    when related_persons(seller, buyer, relationship);
+    when loss_from_sale_or_exchange_between_related_persons(seller, buyer, y, item, amount);
+    when not_known(liquidating_distribution_loss(seller, buyer, item));
+    when not_known(transfer_outside_267a1(seller, y, item));
+    when not_known(controlled_group_loss_deferred_267f(seller, y, item, amount));
+    then not deduction_allowed(seller, y, Section262PersonalNonDeductible, amount);
+}
+// JUDGMENT CALL: this rule reuses the generic non-deductible-classification
+// bucket (`Section262PersonalNonDeductible`); section 267(a)(1)'s loss
+// disallowance is properly a PROPERTY-TRANSACTIONS concept (a capital or
+// ordinary loss on a sale, `property-transactions`' pending owner), so the
+// classification itself is a stand-in pending that package's own kind.
+// --- (b)(2): individual and >50%-controlled corporation, via constructive ownership ---
+
+@source(IRC_S267_B, quote = "An individual and a corporation more than 50 percent in value of the outstanding stock of which is owned, directly or indirectly, by or for such individual")
+rule IndividualAndControlledCorporationRelated(p: Person, corp: Corporation, share: Decimal, via: us.irc.corporations::AttributionKind) strict {
+    label en official "an individual and a corporation more than 50 percent of whose stock (by value) the individual owns, directly or indirectly, are related persons (section 267(b)(2))";
+    when us.irc.corporations::constructive_ownership(p, corp, share, via);
+    when share > 0.50;
+    then related_persons(p, corp, IndividualAndControlledCorporation);
+}
+// (b)(3),(9)-(12) (controlled group, exempt organization control, and the
+// S/C corporation combinations) would reuse the same
+// `us.irc.corporations::constructive_ownership` import with a >50% test
+// keyed to two corporations or an entity rather than an individual, but
+// are NOT written this session (TECH_GAP — the import and the pattern are
+// now in place for a follow-up pass). (b)(4)-(8),(13) (trust fiduciary/
+// grantor/beneficiary/executor relationships) stay "stage 2" — no trust
+// entity/relation is imported.
+
+// --- (a)(2): matching of deduction and payee income item -------------------
+
+pub relation payee_not_on_cash_method(seller: Person, payer: Person, y: TaxableYear, item: Integer) kind empirical {
+    label en official "by reason of the payee's method of accounting, the amount is not includible in the payee's gross income unless paid (section 267(a)(2)(A))";
+}
+pub relation payee_includible_on_date(seller: Person, payer: Person, item: Integer, on: Date) kind empirical {
+    label en official "the date the payment becomes includible in the payee's gross income (section 267(a)(2))";
+}
+pub relation deduction_deferred_to_date_under_267a2(payer: Person, item: Integer, on: Date) kind institutional {
+    label en official "the section 267(a)(2) matching rule defers the payer's deduction for the accrued but unpaid amount to the date it becomes includible in the related payee's gross income";
+}
+@source(IRC_S267_A, quote = "then any deduction allowable under this chapter in respect of such amount shall be allowable as of the day as of which such amount is includible in the gross income of the person to whom the payment is made")
+rule DeductionMatchedToPayeeIncomeItem(payer: Person, payee: Person, y: TaxableYear, item: Integer, relationship: RelatedPartyRelationship, on: Date) strict {
+    label en official "an accrued but unpaid deduction owed to a related payee not on the cash method is deferred until includible in the payee's income (section 267(a)(2))";
+    when related_persons(payer, payee, relationship);
+    when payee_not_on_cash_method(payee, payer, y, item);
+    when payee_includible_on_date(payee, payer, item, on);
+    then deduction_deferred_to_date_under_267a2(payer, item, on);
+}
+@source(IRC_S267_A, quote = "then any deduction allowable under this chapter in respect of such amount shall be allowable as of the day as of which such amount is includible in the gross income of the person to whom the payment is made")
+rule DeductionMatchedToPayeeIncomeItemSpecifiedForA2(payer: Person, payee: Person, y: TaxableYear, item: Integer, on: Date) strict {
+    label en official "the matching rule also applies to persons specified only for paragraph (2): pass-thru entity persons (subsection (e)) and a personal service corporation with its employee-owner (section 267(a)(2))";
+    when persons_specified_for_267a2(payer, payee);
+    when payee_not_on_cash_method(payee, payer, y, item);
+    when payee_includible_on_date(payee, payer, item, on);
+    then deduction_deferred_to_date_under_267a2(payer, item, on);
+}
+
+// --- (d): gain on later sale limited by the previously disallowed loss -----
+
+pub relation prior_loss_disallowed_under_267a1(transferor: Person, taxpayer: Person, item: Integer, amount: Money) kind empirical {
+    label en official "a loss sustained by the transferor on a sale to the taxpayer was disallowed under section 267(a)(1) (section 267(d)(1)(A))";
+}
+pub relation gain_on_later_disposition(taxpayer: Person, item: Integer, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the gain the taxpayer realizes selling or otherwise disposing of the property (or substituted-basis property) (section 267(d)(1)(B))";
+}
+pub relation recognized_gain_after_prior_disallowed_loss(taxpayer: Person, item: Integer, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the gain recognized on the later disposition, limited to the excess of the realized gain over the previously disallowed loss allocable to the property (section 267(d)(1))";
+}
+@source(IRC_S267_D, quote = "then such gain shall be recognized only to the extent that it exceeds so much of such loss as is properly allocable to the property sold or otherwise disposed of by the taxpayer")
+rule GainRecognitionLimitedByPriorDisallowedLoss(transferor: Person, taxpayer: Person, item: Integer, y: TaxableYear, disallowed: Money, realized: Money) strict {
+    label en official "gain on a later disposition of previously loss-disallowed property is recognized only to the extent it exceeds the prior disallowed loss allocable to the property (section 267(d)(1))";
+    when prior_loss_disallowed_under_267a1(transferor, taxpayer, item, disallowed);
+    when gain_on_later_disposition(taxpayer, item, y, realized);
+    then recognized_gain_after_prior_disallowed_loss(taxpayer, item, y, max(0.00 USD, realized - disallowed));
+}
+// (d)(2) wash-sale exception is NOT modelled (TECH_GAP).
+
+// (b)(3)-(13) beyond (2), (c)(1)-(3) (options, partnership/estate
+// proportional attribution — section 267's OWN attribution rules, distinct
+// from the imported `us.irc.corporations::constructive_ownership`, which
+// implements section 318's), and (a)(3) (the foreign-related-party
+// timing rule) stay "stage 2" — NOT DONE this session.

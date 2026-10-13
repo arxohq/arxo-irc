@@ -1,0 +1,354 @@
+// 26 U.S.C. §6662 — Accuracy-related penalty on underpayments: the 20 percent
+// base rate (a), the grounds (b), negligence (c), substantial understatement
+// of income tax (d), substantial valuation misstatement (e), the 40 percent
+// gross-valuation-misstatement increase (h), and the 40 percent nondisclosed-
+// noneconomic-substance-transaction increase (i). Subject to §6751(b)
+// (02-procedural-requirements-6751.law) EXCEPT for the (i)/(j) grounds.
+//
+// SCOPE (stage 1, per assignment): (b)(1) negligence, (b)(2) substantial
+// understatement, (b)(3) substantial valuation misstatement, (b)(6)/(i)
+// economic substance, (h) gross valuation misstatement, (j) foreign
+// financial asset (classification only, amount TECH_GAP). (b)(4) pension
+// liability overstatement, (b)(5) estate/gift valuation understatement,
+// (b)(7) foreign asset understatement's OWN amount computation, (b)(8)
+// inconsistent estate basis, (b)(9)/(10) (charitable-contribution-related,
+// 2025 additions) are left `unreviewed`/"stage 2" — not touched.
+//
+// JUDGMENT CALLS AND GAPS (see report):
+//  - (d)(2)(B)'s reduction for substantial authority / adequate disclosure
+//    with a reasonable basis is a DECISION-0194 evaluative element
+//    (`substantial_authority_or_disclosed_with_reasonable_basis`, authority
+//    Secretary/court) — this package computes the UNREDUCED understatement
+//    and applies the reduction only when that judgment fact is present; a
+//    case that asserts nothing gets NEITHER on the reduced figure, not zero.
+//  - (e)(1)(B) (section 482 transfer-pricing valuation misstatement) is NOT
+//    modelled — TECH_GAP; only (e)(1)(A)'s 150%/200% claimed-vs-correct-value
+//    test is.
+//  - (e)(3)'s "net section 482 transfer price adjustment" machinery and its
+//    (D) reasonable-cause coordination rule are NOT modelled — same TECH_GAP.
+//  - (f) pension liability overstatement and (g) estate/gift valuation
+//    understatement are classified `unreviewed` (stage 2), consistent with
+//    the assignment's stage-1 scope list.
+//  - (j) undisclosed foreign financial asset: only the increased-rate
+//    SUBSTITUTION is modelled (40 percent when the ground applies); the
+//    definition of "undisclosed foreign financial asset understatement"
+//    itself ((j)(1)/(j)(2), keyed to sections 6038/6038B/6038D/6046A/1298(f))
+//    is a case-asserted empirical fact (`undisclosed_foreign_asset_amount`),
+//    not computed — TECH_GAP if the underlying reporting facts need deriving.
+
+language "law.core" version "0.2";
+package us.irc.penalties version "0.1.1";
+namespace "urn:us:irc:penalties:clir";
+
+use self::{
+    FailureContext,
+    IRC_S6662_A,
+    IRC_S6662_C,
+    IRC_S6662_D,
+    IRC_S6662_E,
+    IRC_S6662_H,
+    IRC_S6662_I,
+    IRC_S6662_J,
+    Person,
+    Return,
+    TaxKind,
+    TaxableYear,
+    accuracy_or_fraud_penalty_applicable_to_return,
+    gross_pension_or_estate_gift_ground,
+    ground_portion_at_or_below_statutory_limit,
+    ground_taxed_at_increased_rate_6662,
+    reasonable_cause_defense_available,
+    tax_shown_on_return,
+    understatement_for_substantial_test,
+};
+
+pub enum AccuracyGround {
+    Negligence;                          // (b)(1)
+    SubstantialUnderstatement;           // (b)(2)
+    SubstantialValuationMisstatement;    // (b)(3)
+    EconomicSubstance;                   // (b)(6)
+    UndisclosedForeignFinancialAsset;    // (b)(7)
+    PensionLiabilityOverstatement;       // (b)(4) — stage 2, module 28
+    EstateGiftValuationUnderstatement;   // (b)(5) — stage 2, module 28
+    InconsistentEstateBasis;             // (b)(8) — stage 2, module 28
+    CharitableDeduction170pOverstatement; // (b)(9) — stage 2, module 28
+    Section170h7Disallowance;            // (b)(10) — stage 2, module 28
+    label en unofficial "a ground under section 6662(b) to which the accuracy-related penalty applies (stage-1 subset — see module header)";
+}
+
+relation underpayment_attributable_to_ground(p: Person, y: TaxableYear, kind: TaxKind, ground: AccuracyGround, amount: Money) kind empirical {
+    label en unofficial "the portion of an underpayment attributable to the named section 6662(b) ground (case-asserted per-ground allocation)";
+}
+relation gross_valuation_misstatement_ground(p: Person, y: TaxableYear, kind: TaxKind) kind empirical {
+    label en unofficial "the substantial-valuation-misstatement portion is in fact a GROSS valuation misstatement under section 6662(h) (the 200%/400% test)";
+}
+relation nondisclosed_noneconomic_substance_transaction(p: Person, y: TaxableYear, kind: TaxKind) kind institutional {
+    label en official "any portion of a transaction described in subsection (b)(6) with respect to which the relevant facts affecting the tax treatment of the transaction are not adequately disclosed in the return nor in a statement attached to the return";
+}
+
+pub relation accuracy_related_penalty_on_ground(p: Person, y: TaxableYear, kind: TaxKind, ground: AccuracyGround, amount: Money) kind institutional {
+    label en official "there shall be added to the tax an amount equal to 20 percent of the portion of the underpayment to which this section applies";
+}
+@source(IRC_S6662_A, relation = formalizes, coverage = exact, quote = "there shall be added to the tax an amount equal to 20 percent of the portion of the underpayment to which this section applies")
+rule Section6662aBaseRate defeasible {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for ground: AccuracyGround;
+    for portion: Money;
+    for r: Return;
+    for fc: FailureContext;
+    when underpayment_attributable_to_ground(p, y, kind, ground, portion)
+        and us.irc.core::return_of(r, p, y, kind)
+        and accuracy_or_fraud_penalty_applicable_to_return(r)
+        and not gross_valuation_misstatement_ground(p, y, kind)
+        and not_known(nondisclosed_noneconomic_substance_transaction(p, y, kind))
+        and not_known(ground_taxed_at_increased_rate_6662(ground))
+        and not_known(gross_pension_or_estate_gift_ground(p, y, kind, ground));
+    then accuracy_related_penalty_on_ground(p, y, kind, ground, round(portion * AccuracyPenaltyRate, 2, "HALF_UP"));
+    unless reasonable_cause_defense_available(p, y, kind, fc)
+        and underpayment_attributable_to_ground(p, y, kind, ground, portion);
+    unless ground_portion_at_or_below_statutory_limit(p, y, kind, ground)
+        and underpayment_attributable_to_ground(p, y, kind, ground, portion);
+}
+@source(IRC_S6662_H, relation = formalizes, coverage = exact, quote = "subsection (a) shall be applied with respect to such portion by substituting \"40")
+rule Section6662hGrossValuationMisstatement defeasible {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for portion: Money;
+    for r: Return;
+    for fc: FailureContext;
+    when underpayment_attributable_to_ground(p, y, kind, SubstantialValuationMisstatement, portion)
+        and gross_valuation_misstatement_ground(p, y, kind)
+        and us.irc.core::return_of(r, p, y, kind)
+        and accuracy_or_fraud_penalty_applicable_to_return(r);
+    then accuracy_related_penalty_on_ground(p, y, kind, SubstantialValuationMisstatement, round(portion * GrossValuationMisstatementRate, 2, "HALF_UP"));
+    unless reasonable_cause_defense_available(p, y, kind, fc)
+        and underpayment_attributable_to_ground(p, y, kind, SubstantialValuationMisstatement, portion);
+}
+@source(IRC_S6662_I, relation = formalizes, coverage = exact, quote = "subsection (a) shall be applied with respect to such portion by substituting \"40 percent\"")
+rule Section6662iNondisclosedEconomicSubstance strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for portion: Money;
+    for r: Return;
+    when underpayment_attributable_to_ground(p, y, kind, EconomicSubstance, portion)
+        and nondisclosed_noneconomic_substance_transaction(p, y, kind)
+        and us.irc.core::return_of(r, p, y, kind)
+        and accuracy_or_fraud_penalty_applicable_to_return(r);
+    then accuracy_related_penalty_on_ground(p, y, kind, EconomicSubstance, round(portion * GrossValuationMisstatementRate, 2, "HALF_UP"));
+}
+relation undisclosed_foreign_asset_amount(p: Person, y: TaxableYear, kind: TaxKind, amount: Money) kind empirical {
+    label en unofficial "the amount of the undisclosed foreign financial asset understatement (case-asserted; section 6662(j)(1)/(2) definitions are TECH_GAP, see header)";
+}
+@source(IRC_S6662_J, relation = formalizes, coverage = partial, quote = "subsection (a) shall be applied with respect to such portion by substituting \"40 percent\"")
+rule Section6662jUndisclosedForeignAsset strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for amount: Money;
+    for r: Return;
+    when undisclosed_foreign_asset_amount(p, y, kind, amount)
+        and us.irc.core::return_of(r, p, y, kind)
+        and accuracy_or_fraud_penalty_applicable_to_return(r);
+    then accuracy_related_penalty_on_ground(p, y, kind, UndisclosedForeignFinancialAsset, round(amount * GrossValuationMisstatementRate, 2, "HALF_UP"));
+}
+
+// --- (c): negligence classification -----------------------------------------
+
+pub relation negligence(p: Person, y: TaxableYear, kind: TaxKind) kind institutional {
+    label en official "the term \"negligence\" includes any failure to make a reasonable attempt to comply with the provisions of this title, and the term \"disregard\" includes any careless, reckless, or intentional disregard";
+}
+relation failed_reasonable_attempt_to_comply(p: Person, y: TaxableYear, kind: TaxKind) kind empirical {
+    label en unofficial "a failure to make a reasonable attempt to comply with the provisions of this title";
+}
+relation careless_reckless_or_intentional_disregard(p: Person, y: TaxableYear, kind: TaxKind) kind empirical {
+    label en unofficial "a careless, reckless, or intentional disregard of rules or regulations";
+}
+@source(IRC_S6662_C, relation = formalizes, coverage = exact, quote = "the term \"negligence\" includes any failure to make a reasonable attempt to comply with the provisions of this title")
+rule Section6662cNegligenceFailureToComply strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    when failed_reasonable_attempt_to_comply(p, y, kind);
+    then negligence(p, y, kind);
+}
+@source(IRC_S6662_C, relation = formalizes, coverage = partial, quote = "the term \"disregard\" includes any careless, reckless, or intentional disregard")
+rule Section6662cNegligenceDisregard strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    when careless_reckless_or_intentional_disregard(p, y, kind);
+    then negligence(p, y, kind);
+}
+
+// --- (d): substantial understatement of income tax --------------------------
+
+relation tax_required_to_be_shown(p: Person, y: TaxableYear, kind: TaxKind, amount: Money) kind institutional {
+    label en unofficial "the amount of the tax required to be shown on the return for the taxable year (section 6662(d)(1)/(2)) — read directly from us.irc.core::liability";
+}
+rule TaxRequiredToBeShown strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for tax: Money;
+    when us.irc.core::liability(p, y, kind, tax);
+    then tax_required_to_be_shown(p, y, kind, tax);
+}
+pub relation understatement(p: Person, y: TaxableYear, kind: TaxKind, amount: Money) kind institutional {
+    label en official "the term \"understatement\" means the excess of the amount of the tax required to be shown on the return for the taxable year, over the amount of the tax imposed which is shown on the return, reduced by any rebate";
+}
+@source(IRC_S6662_D, relation = formalizes, coverage = partial, quote = "the term \"understatement\" means the excess of")
+rule Section6662dUnderstatement strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for required: Money;
+    for shown: Money;
+    for r: Return;
+    when tax_required_to_be_shown(p, y, kind, required)
+        and us.irc.core::return_of(r, p, y, kind)
+        and tax_shown_on_return(r, shown);
+    then understatement(p, y, kind, max(0.00 USD, required - shown));
+}
+
+pub external judgment relation substantial_authority_or_disclosed_with_reasonable_basis(p: Person, y: TaxableYear, kind: TaxKind) {
+    authority Secretary;
+    label en official "the tax treatment of any item by the taxpayer if there is or was substantial authority for such treatment, or ... the relevant facts affecting the item's tax treatment are adequately disclosed ... and there is a reasonable basis for the tax treatment";
+}
+relation understatement_reduction_amount(p: Person, y: TaxableYear, kind: TaxKind, amount: Money) kind institutional {
+    label en unofficial "the amount of the section 6662(d)(2)(B) reduction attributable to positions with substantial authority or adequately disclosed with a reasonable basis (case-asserted; only applied when the judgment fact is present)";
+}
+pub relation understatement_net_of_reduction(p: Person, y: TaxableYear, kind: TaxKind, amount: Money) kind institutional {
+    label en unofficial "the section 6662(d)(1) understatement after the (d)(2)(B) reduction";
+}
+@source(IRC_S6662_D, relation = formalizes, coverage = partial, quote = "The amount of the understatement under subparagraph (A) shall be reduced by that portion of the understatement")
+rule Section6662dReductionApplied defeasible {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for total: Money;
+    for reduction: Money;
+    when understatement(p, y, kind, total)
+        and substantial_authority_or_disclosed_with_reasonable_basis(p, y, kind)
+        and understatement_reduction_amount(p, y, kind, reduction);
+    then understatement_net_of_reduction(p, y, kind, max(0.00 USD, total - reduction));
+}
+rule Section6662dNoReduction defeasible {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for total: Money;
+    when understatement(p, y, kind, total);
+    then understatement_net_of_reduction(p, y, kind, total);
+    unless substantial_authority_or_disclosed_with_reasonable_basis(p, y, kind) and understatement(p, y, kind, total);
+}
+
+relation is_corporation_subject_to_6662d1B(p: Person, y: TaxableYear, kind: TaxKind) kind empirical {
+    label en unofficial "the taxpayer is a corporation other than an S corporation or personal holding company, for purposes of the section 6662(d)(1)(B) special corporate threshold";
+}
+relation claims_199A_deduction(p: Person, y: TaxableYear) kind empirical {
+    label en official "any taxpayer who claims any deduction allowed under section 199A for the taxable year";
+}
+pub relation substantial_understatement_threshold(p: Person, y: TaxableYear, kind: TaxKind, amount: Money) kind institutional {
+    label en unofficial "the section 6662(d)(1) threshold the understatement (net of the (d)(2)(B) reduction) must exceed";
+}
+@source(IRC_S6662_D, relation = formalizes, coverage = partial, quote = "10 percent of the tax required to be shown on the return for the taxable year, or")
+rule Section6662dThresholdIndividual strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for required: Money;
+    when tax_required_to_be_shown(p, y, kind, required)
+        and not is_corporation_subject_to_6662d1B(p, y, kind)
+        and not claims_199A_deduction(p, y);
+    then substantial_understatement_threshold(p, y, kind, max(round(required * SubstantialUnderstatementPercent, 2, "HALF_UP"), round(SubstantialUnderstatementFloor, 2, "HALF_UP")));
+}
+@source(IRC_S6662_D, relation = formalizes, coverage = exact, quote = "subparagraph (A) shall be applied by substituting \"5 percent\" for \"10 percent\"")
+rule Section6662dThresholdIndividual199A strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for required: Money;
+    when tax_required_to_be_shown(p, y, kind, required)
+        and not is_corporation_subject_to_6662d1B(p, y, kind)
+        and claims_199A_deduction(p, y);
+    then substantial_understatement_threshold(p, y, kind, max(round(required * SubstantialUnderstatement199APercent, 2, "HALF_UP"), round(SubstantialUnderstatementFloor, 2, "HALF_UP")));
+}
+@source(IRC_S6662_D, relation = formalizes, coverage = partial, quote = "10 percent of the tax required to be shown on the return for the taxable year (or, if greater, $10,000), or")
+rule Section6662dThresholdCorporate strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for required: Money;
+    when tax_required_to_be_shown(p, y, kind, required)
+        and is_corporation_subject_to_6662d1B(p, y, kind);
+    then substantial_understatement_threshold(p, y, kind, min(max(round(required * SubstantialUnderstatementPercent, 2, "HALF_UP"), round(SubstantialUnderstatementCorporateFloor, 2, "HALF_UP")), round(SubstantialUnderstatementCorporateCap, 2, "HALF_UP")));
+}
+
+pub relation substantial_understatement_of_income_tax(p: Person, y: TaxableYear, kind: TaxKind) kind institutional {
+    label en official "there is a substantial understatement of income tax for any taxable year if the amount of the understatement for the taxable year exceeds the greater of";
+}
+@source(IRC_S6662_D, relation = formalizes, coverage = partial, quote = "there is a substantial understatement of income tax for any taxable year if the amount of the understatement for the taxable year exceeds the greater of")
+rule Section6662dSubstantialUnderstatement defeasible {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for net: Money;
+    for threshold: Money;
+    when understatement_for_substantial_test(p, y, kind, net)
+        and substantial_understatement_threshold(p, y, kind, threshold)
+        and net > threshold;
+    then substantial_understatement_of_income_tax(p, y, kind);
+}
+
+// --- (e)/(h): substantial and gross valuation misstatement ------------------
+
+relation claimed_value_or_basis(p: Person, y: TaxableYear, kind: TaxKind, amount: Money) kind empirical {
+    label en unofficial "the value of property (or adjusted basis) claimed on the return, for section 6662(e)(1)(A)";
+}
+relation correct_value_or_basis(p: Person, y: TaxableYear, kind: TaxKind, amount: Money) kind empirical {
+    label en unofficial "the amount determined to be the correct amount of the valuation or adjusted basis";
+}
+pub relation substantial_valuation_misstatement(p: Person, y: TaxableYear, kind: TaxKind) kind institutional {
+    label en official "there is a substantial valuation misstatement under chapter 1 if the value of any property (or the adjusted basis of any property) claimed on any return of tax imposed by chapter 1 is 150 percent or more of the amount determined to be the correct amount of such valuation or adjusted basis";
+}
+@source(IRC_S6662_E, relation = formalizes, coverage = partial, quote = "the value of any property (or the adjusted basis of any property) claimed on any return of tax imposed by chapter 1 is 150 percent or more of the amount determined to be the correct amount of such valuation or adjusted basis")
+rule Section6662eSubstantialValuationMisstatement strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for claimed: Money;
+    for correct: Money;
+    for underpayment_portion: Money;
+    when claimed_value_or_basis(p, y, kind, claimed)
+        and correct_value_or_basis(p, y, kind, correct)
+        and claimed >= round(correct * ValuationMisstatementThreshold, 2, "HALF_UP")
+        and underpayment_attributable_to_ground(p, y, kind, SubstantialValuationMisstatement, underpayment_portion)
+        and underpayment_portion > round(ValuationMisstatementUnderpaymentFloor, 2, "HALF_UP");
+    then substantial_valuation_misstatement(p, y, kind);
+}
+pub relation gross_valuation_misstatement(p: Person, y: TaxableYear, kind: TaxKind) kind institutional {
+    label en official "any substantial valuation misstatement under chapter 1 as determined under subsection (e) by substituting \"200 percent\" for \"150 percent\"";
+}
+@source(IRC_S6662_H, relation = formalizes, coverage = partial, quote = "any substantial valuation misstatement under chapter 1 as determined under subsection (e) by substituting")
+rule Section6662hGrossTest strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for claimed: Money;
+    for correct: Money;
+    when claimed_value_or_basis(p, y, kind, claimed)
+        and correct_value_or_basis(p, y, kind, correct)
+        and claimed >= round(correct * GrossValuationMisstatementThreshold, 2, "HALF_UP");
+    then gross_valuation_misstatement(p, y, kind);
+}
+rule GrossValuationMisstatementFeedsGround strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    when gross_valuation_misstatement(p, y, kind);
+    then gross_valuation_misstatement_ground(p, y, kind);
+}

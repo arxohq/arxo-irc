@@ -1,0 +1,132 @@
+// Section 443 — Returns for a period of less than 12 months. Stage 1
+// (IRC-07), priority section. Scope: (a) the two circumstances requiring a
+// short-period return; (b)(1)-(3) the general annualization computation with
+// exact Decimal intermediate values; (b)(2) exception, (c) personal-
+// exemption adjustment and (d) AMT annualization are TECH_GAP/pending-
+// dependency (see notes at each) because they require, respectively, an
+// alternative-tax election mechanism this stage does not build, a section
+// 151 exemption AMOUNT owned by `deductions` (pending dependency), and a
+// section 55(a) AMT liability owned by another package. (e) is a
+// cross-reference table — NON_NORMATIVE.
+
+// --- (a): the two short-period circumstances ---
+
+use self::{
+    IRC_S443_A,
+    IRC_S443_B,
+    Person,
+    TaxableYear,
+    secretary_approves_change_of_accounting_period,
+};
+
+pub relation short_period_from_approved_change(p: Person, y_short: TaxableYear, y_new: TaxableYear) kind empirical {
+    label en official "y_short is the short period beginning the day after the close of the former taxable year and ending the day before the first day of y_new, the newly approved accounting period (section 443(a)(1))";
+}
+pub relation taxpayer_not_in_existence_for_entire_would_be_year(p: Person, y_short: TaxableYear) kind empirical {
+    label en official "the taxpayer is in existence during only part of what would otherwise be its taxable year (section 443(a)(2))";
+}
+pub relation short_period_return_required(p: Person, y_short: TaxableYear) kind institutional {
+    label en official "a return for a period of less than 12 months (a 'short period') is required (section 443(a))";
+}
+
+@source(IRC_S443_A, quote = "When the taxpayer, with the approval of the Secretary, changes his annual accounting period. In such a case, the return shall be made for the short period beginning on the day after the close of the former taxable year and ending at the close of the day before the day designated as the first day of the new taxable year.")
+rule ShortPeriodReturnOnApprovedChange(p: Person, y_short: TaxableYear, y_new: TaxableYear) strict {
+    label en official "a short-period return is required when the taxpayer, with the Secretary's approval, changes its annual accounting period (section 443(a)(1))";
+    when short_period_from_approved_change(p, y_short, y_new);
+    when secretary_approves_change_of_accounting_period(p, y_new);
+    then short_period_return_required(p, y_short);
+}
+@source(IRC_S443_A, quote = "When the taxpayer is in existence during only part of what would otherwise be his taxable year.")
+rule ShortPeriodReturnOnPartialExistence(p: Person, y_short: TaxableYear) strict {
+    label en official "a short-period return is required when the taxpayer is in existence during only part of what would otherwise be its taxable year (section 443(a)(2))";
+    when taxpayer_not_in_existence_for_entire_would_be_year(p, y_short);
+    then short_period_return_required(p, y_short);
+}
+
+// --- (b)(1)/(3): the general annualization computation ---
+
+// "modified taxable income" (b)(3): gross income for the short period minus
+// the deductions allowed for such period, WITHOUT the (c) personal-exemption
+// adjustment (that adjustment is a separate, narrower correction — see the
+// TECH_GAP note below). Bridged from `us.irc.gross_income::taxable_income`,
+// which already reads gross income minus the deductions allowed by chapter 1
+// for the (short) `TaxableYear` y_short.
+pub relation modified_taxable_income(p: Person, y_short: TaxableYear, amount: Money) kind institutional {
+    label en official "the modified taxable income for the short period: gross income for such period minus the deductions allowed by this chapter for such period (section 443(b)(3), before the (c) personal-exemption adjustment)";
+}
+@source(IRC_S443_B, quote = "the term \"modified taxable income\" means, with respect to any period, the gross income for such period minus the deductions allowed by this chapter for such period")
+rule ModifiedTaxableIncomeFromChapter1TaxableIncome(p: Person, y_short: TaxableYear, amount: Money) strict {
+    label en official "the modified taxable income for the short period equals the chapter 1 taxable income computed for that period, before the section 443(c) personal-exemption adjustment (section 443(b)(3))";
+    when us.irc.gross_income::taxable_income(p, y_short, amount);
+    then modified_taxable_income(p, y_short, amount);
+}
+
+pub relation months_in_short_period(y_short: TaxableYear, months: Integer) kind empirical {
+    label en official "the number of months in the short period (section 443(b)(1))";
+}
+
+// Intermediate value 1: the short period's income placed on an annual basis.
+pub relation annualized_modified_taxable_income(p: Person, y_short: TaxableYear, amount: Money) kind institutional {
+    label en official "the modified taxable income for the short period, placed on an annual basis: modified taxable income multiplied by 12, divided by the number of months in the short period (section 443(b)(1), first sentence)";
+}
+@source(IRC_S443_B, quote = "the taxable income for the short period shall be placed on an annual basis by multiplying the modified taxable income for such short period by 12, dividing the result by the number of months in the short period")
+rule AnnualizeModifiedTaxableIncome(p: Person, y_short: TaxableYear, mti: Money, months: Integer) strict {
+    label en official "the short period's modified taxable income is placed on an annual basis by multiplying by 12 and dividing by the number of months in the short period (section 443(b)(1))";
+    when modified_taxable_income(p, y_short, mti);
+    when months_in_short_period(y_short, months);
+    // §58 names no Money/Integer division; `div_round` performs the multiply
+    // and divide as one exact-then-rounded operation (errata E-0036/E-0170).
+    // The statute names no rounding precision for this intermediate value;
+    // cents (2, HALF_UP) is a judgment call, recorded here.
+    then annualized_modified_taxable_income(p, y_short, div_round(mti * 12, months * 1.0, 2, "HALF_UP"));
+}
+
+// Intermediate value 2: "the tax computed on the annual basis" — the
+// generally applicable tax (chapter 1, e.g. section 1 or section 11) applied
+// to the annualized income AS IF it were a full taxable year. This is NOT
+// this package's own computation (the rate schedule belongs to
+// `income-individual`/a corporate-rate owner) — modelled as a typed
+// dependency contract, pending per `accounting.deps.json`.
+pub relation tax_computed_on_annualized_basis(p: Person, y_short: TaxableYear, annualized_income: Money, tax: Money) kind institutional {
+    label en official "the tax computed on the annualized modified taxable income, as if that income were the taxable income for a full taxable year (section 443(b)(1), first sentence; rate-schedule application is an external dependency)";
+}
+
+// Final value: the short-period tax, the same proportion of the annual-basis
+// tax as the number of months in the short period is of 12.
+pub relation short_period_tax(p: Person, y_short: TaxableYear, tax: Money) kind institutional {
+    label en official "the tax for the short period: the same part of the tax computed on the annual basis as the number of months in the short period is of 12 months (section 443(b)(1), second sentence)";
+}
+@source(IRC_S443_B, quote = "The tax shall be the same part of the tax computed on the annual basis as the number of months in the short period is of 12 months.")
+rule ShortPeriodTaxProration(p: Person, y_short: TaxableYear, annualized: Money, annual_tax: Money, months: Integer) strict {
+    label en official "the short-period tax is the annual-basis tax multiplied by the number of months in the short period, divided by 12 (section 443(b)(1))";
+    when short_period_return_required(p, y_short);
+    when annualized_modified_taxable_income(p, y_short, annualized);
+    when tax_computed_on_annualized_basis(p, y_short, annualized, annual_tax);
+    when months_in_short_period(y_short, months);
+    then short_period_tax(p, y_short, div_round(annual_tax * months, 12.0, 2, "HALF_UP"));
+}
+
+// (b)(2) alternative computation ("Exception", the 12-month-period comparison
+// and its floor at "the tax computed on the modified taxable income for the
+// short period") and (b)(2)(C)/(D) the application-for-benefits mechanism are
+// TECH_GAP-02-ACCOUNTING: the comparison needs a second, independently
+// computed annual-basis tax over an ACTUAL (not annualized) 12-month period
+// chosen by (b)(2)(B)'s own branching test (taxpayer's continued existence,
+// or a corporation's disposition of substantially all assets) — a
+// self-referential lookup across taxable years this stage does not build.
+// Recorded, not silently dropped: see TECH-GAPS.md.
+
+// (c) personal-exemption adjustment: TECH_GAP-03-ACCOUNTING — needs the full
+// section 151 exemption AMOUNT (owned by `deductions`, a pending dependency
+// per AGENT-BRIEF) prorated by months/12; not modelled as a rule here to
+// avoid inventing the base amount.
+
+// (d) AMT annualization: EXTERNAL_DEPENDENCY — "the alternative minimum
+// taxable income" and "the amount computed under paragraph (1) of section
+// 55(a)" are not owned by this package (AMT is elsewhere in Subtitle A); the
+// SAME multiply-by-12/divide-by-months-in-short-period shape as (b)(1)
+// applies once that owner's relations exist. Not modelled.
+
+// (e) cross references: NON_NORMATIVE — a reader's index to sections 536,
+// 546, 852(b)(2)(E), 857(b)(2)(C) and 1398(d)(2)(E); it sets no rule of its
+// own for this package.

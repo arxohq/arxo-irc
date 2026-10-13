@@ -1,0 +1,651 @@
+// Stage 3b (IRC-07, A05). Section 1398 remainder: (c) taxation of the estate as an individual,
+// (d)(1), (d)(2)(B), (E), (F), (d)(3) the debtor's year, (e)(2)-(3) income and deductions,
+// (h) administrative expenses and their carrybacks and carryovers, (i) the debtor's succession
+// on termination, (j) accounting period and carrybacks.
+//
+// Method. A defeasible helper `estate_case_1398` bridges the section 1398(a)-(b) application
+// rule and the estate identity (module 09 readable only from defeasible rules). The carry
+// targets of (h)(2)(B) (3 preceding and 7 succeeding taxable years) are unrolled into one
+// predicate per step (LDC-E4102). The amount carried to each year (172(b)(2) computation) and the
+// sums over loss years are case-supplied aggregates (section 111 limit).
+
+use self::{
+    Asset,
+    BankruptcyCase,
+    BankruptcyEstate,
+    CapitalLossCharacter,
+    IRC_S1398_C,
+    IRC_S1398_D,
+    IRC_S1398_E,
+    IRC_S1398_H,
+    IRC_S1398_I,
+    IRC_S1398_J,
+    Person,
+    TaxableYear,
+    Transaction,
+    bankruptcy_estate_of,
+    capital_asset,
+    capital_loss_carryover,
+    commencement_date,
+    election_valid_1398d2,
+    estate_gross_income_from_debtor,
+    long_term,
+    section_1398_applies,
+    succeeding_taxable_year,
+    transfer_estate_to_debtor_on_termination,
+};
+
+pub relation estate_case_1398(c: BankruptcyCase, debtor: Person, estate: BankruptcyEstate) kind institutional {
+    label en unofficial "section 1398(a)-(c): the estate of the debtor in a case to which section 1398 applies";
+}
+rule EstateCaseRule(c: BankruptcyCase, debtor: Person, estate: BankruptcyEstate) defeasible {
+    label en official "section 1398(a)-(c): a case to which the section applies, and its estate";
+    when section_1398_applies(c, debtor);
+    when bankruptcy_estate_of(c, estate);
+    then estate_case_1398(c, debtor, estate);
+}
+
+// =============================================================================
+// Section 1398(c): taxation of the estate
+// =============================================================================
+
+pub relation estate_taxable_income_computed_as_individual_1398c1(estate: BankruptcyEstate) kind institutional {
+    label en official "section 1398(c)(1): the taxable income of the estate is computed in the same manner as for an individual";
+}
+@source(IRC_S1398_C, relation = formalizes, coverage = exact, quote = "the taxable income of the estate shall be computed in the same manner as for an individual")
+rule EstateTaxableIncomeAsIndividualRule(c: BankruptcyCase, debtor: Person, estate: BankruptcyEstate) defeasible {
+    label en official "section 1398(c)(1): the estate computes taxable income as an individual";
+    when estate_case_1398(c, debtor, estate);
+    then estate_taxable_income_computed_as_individual_1398c1(estate);
+}
+pub relation trustee_of_estate(estate: BankruptcyEstate, trustee: Person) kind empirical {
+    label en official "section 1398(c)(1): the trustee of the bankruptcy estate";
+}
+pub relation estate_return_due_date(estate: BankruptcyEstate, y: TaxableYear, due: Date) kind empirical {
+    label en unofficial "the date the estate's tax for the taxable year is to be paid";
+}
+pub relation estate_tax_paid_by_trustee_1398c1(estate: BankruptcyEstate, y: TaxableYear) kind empirical {
+    label en official "section 1398(c)(1): the tax on the estate's taxable income has been paid by the trustee";
+}
+@source(IRC_S1398_C, relation = formalizes, coverage = exact, quote = "The tax shall be computed on such taxable income and shall be paid by the trustee")
+rule TrusteePaysEstateTaxDuty(c: BankruptcyCase, debtor: Person, estate: BankruptcyEstate, trustee: Person, y: TaxableYear, due: Date) defeasible {
+    label en official "section 1398(c)(1): the trustee shall pay the tax on the estate's taxable income (achievement goal by the due date)";
+    when estate_case_1398(c, debtor, estate);
+    when trustee_of_estate(estate, trustee);
+    when estate_return_due_date(estate, y, due);
+    then duty Section1398TrusteePaysEstateTaxDutyPosition {
+        bearer trustee;
+        beneficiary estate;
+        goal achievement {
+            condition estate_tax_paid_by_trustee_1398c1(estate, y);
+            window [-infinity, due];
+        }
+    };
+}
+pub relation estate_taxable_year(estate: BankruptcyEstate, y: TaxableYear) kind empirical {
+    label en unofficial "a taxable year of the estate";
+}
+pub relation estate_tax_under_section_1d_1398c2(estate: BankruptcyEstate, y: TaxableYear) kind institutional {
+    label en official "section 1398(c)(2): the tax on the taxable income of the estate is determined under subsection (d) of section 1 (the rate schedule of the estate's year)";
+}
+@source(IRC_S1398_C, relation = formalizes, coverage = exact, quote = "The tax on the taxable income of the estate shall be determined under subsection (d) of section 1")
+rule EstateTaxUnderSection1dRule(c: BankruptcyCase, debtor: Person, estate: BankruptcyEstate, y: TaxableYear) defeasible {
+    label en official "section 1398(c)(2): the estate's tax is determined under section 1(d)";
+    when estate_case_1398(c, debtor, estate);
+    when estate_taxable_year(estate, y);
+    then estate_tax_under_section_1d_1398c2(estate, y);
+}
+pub relation estate_does_not_itemize(estate: BankruptcyEstate, y: TaxableYear) kind empirical {
+    label en official "section 1398(c)(3): the estate does not itemize deductions";
+}
+pub relation basic_standard_deduction_married_filing_separately(y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the basic standard deduction for a married individual filing a separate return for the year (an amount the standard deduction package owns)";
+}
+pub relation estate_basic_standard_deduction_1398c3(estate: BankruptcyEstate, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 1398(c)(3): the estate's basic standard deduction is the amount for a married individual filing separately";
+}
+@source(IRC_S1398_C, relation = formalizes, coverage = exact, quote = "the basic standard deduction for the estate for the taxable year shall be the same as for a married individual filing a separate return for such year")
+rule EstateBasicStandardDeductionRule(c: BankruptcyCase, debtor: Person, estate: BankruptcyEstate, y: TaxableYear, amount: Money) defeasible {
+    label en official "section 1398(c)(3): a non-itemizing estate takes the married-filing-separately basic standard deduction";
+    when estate_case_1398(c, debtor, estate);
+    when estate_does_not_itemize(estate, y);
+    when basic_standard_deduction_married_filing_separately(y, amount);
+    then estate_basic_standard_deduction_1398c3(estate, y, amount);
+}
+
+// =============================================================================
+// Section 1398(d): the debtor's taxable year
+// =============================================================================
+
+pub relation debtor_taxable_year_unaffected_by_case_1398d1(debtor: Person, c: BankruptcyCase) kind institutional {
+    label en official "section 1398(d)(1): the taxable year of the debtor is determined without regard to the case, except as paragraph (2) provides";
+}
+@source(IRC_S1398_D, relation = formalizes, coverage = exact, quote = "the taxable year of the debtor shall be determined without regard to the case under title 11 of the United States Code")
+rule DebtorYearUnaffectedRule(c: BankruptcyCase, debtor: Person) defeasible {
+    label en official "section 1398(d)(1): absent a valid (d)(2) election the debtor's year is unaffected by the case";
+    when section_1398_applies(c, debtor);
+    when not_known(election_valid_1398d2(debtor, c));
+    then debtor_taxable_year_unaffected_by_case_1398d1(debtor, c);
+}
+pub relation debtor_split_year_dates_1398d3(debtor: Person, c: BankruptcyCase, first_year_end: Date, second_year_start: Date) kind institutional {
+    label en official "section 1398(d)(2)(A), (3): the first year ends the day before the commencement date and the second begins on it";
+}
+@source(IRC_S1398_D, relation = formalizes, coverage = exact, quote = "the term \"commencement date\" means the day on which the case under title 11 of the United States Code to which this section applies commences")
+rule SplitYearDatesRule(debtor: Person, c: BankruptcyCase, commenced: Date, calendar_before_1: Date) defeasible {
+    label en official "section 1398(d)(3): the commencement date divides the two taxable years";
+    when election_valid_1398d2(debtor, c);
+    when commencement_date(c, commenced)
+        and us.irc.core::civil_calendar_boundary_before(commenced, 1, us.irc.core::CalendarDay, calendar_before_1);
+    then debtor_split_year_dates_1398d3(debtor, c, calendar_before_1, commenced);
+}
+pub relation spouse_of_debtor_1398d2B(debtor: Person, spouse: Person) kind empirical {
+    label en official "section 1398(d)(2)(B): a married individual (within the meaning of section 7703), the spouse of the debtor";
+}
+pub relation spouse_elects_to_join_1398d2B(spouse: Person, c: BankruptcyCase) kind empirical {
+    label en official "section 1398(d)(2)(B): the spouse elects to have the debtor's election also apply to the spouse";
+}
+pub relation joint_return_filed_for_year_before_commencement_1398d2B(debtor: Person, spouse: Person, c: BankruptcyCase) kind empirical {
+    label en official "section 1398(d)(2)(B): the debtor and the spouse file a joint return for the taxable year referred to in subparagraph (A)(i)";
+}
+pub relation spouse_year_split_1398d2B(spouse: Person, c: BankruptcyCase) kind institutional {
+    label en official "section 1398(d)(2)(B): the debtor's election also applies to the spouse";
+}
+@source(IRC_S1398_D, relation = formalizes, coverage = exact, quote = "the spouse may elect to have the debtor's election under subparagraph (A) also apply to the spouse, but only if the debtor and the spouse file a joint return")
+rule SpouseJoinsElectionRule(debtor: Person, spouse: Person, c: BankruptcyCase) defeasible {
+    label en official "section 1398(d)(2)(B): the spouse's election is effective only with a valid debtor election and a joint return";
+    when election_valid_1398d2(debtor, c);
+    when spouse_of_debtor_1398d2B(debtor, spouse);
+    when spouse_elects_to_join_1398d2B(spouse, c);
+    when joint_return_filed_for_year_before_commencement_1398d2B(debtor, spouse, c);
+    then spouse_year_split_1398d2B(spouse, c);
+}
+pub relation split_year_return_due(debtor: Person, c: BankruptcyCase, which: Integer, due: Date) kind empirical {
+    label en unofficial "the due date of the return for the first (1) or second (2) split taxable year";
+}
+pub relation split_year_return_filed(debtor: Person, c: BankruptcyCase, which: Integer) kind empirical {
+    label en official "section 1398(d)(2)(E): the return for the split taxable year has been made";
+}
+@source(IRC_S1398_D, relation = formalizes, coverage = exact, quote = "A return shall be made for each of the taxable years specified in subparagraph (A)")
+rule SplitYearReturn1Duty(debtor: Person, c: BankruptcyCase, due: Date) defeasible {
+    label en official "section 1398(d)(2)(E): a return shall be made for the taxable year ending the day before the commencement date";
+    when election_valid_1398d2(debtor, c);
+    when split_year_return_due(debtor, c, 1, due);
+    then duty Section1398SplitYearReturn1DutyPosition {
+        bearer debtor;
+        beneficiary debtor;
+        goal achievement {
+            condition split_year_return_filed(debtor, c, 1);
+            window [-infinity, due];
+        }
+    };
+}
+rule SplitYearReturn2Duty(debtor: Person, c: BankruptcyCase, due: Date) defeasible {
+    label en official "section 1398(d)(2)(E): a return shall be made for the taxable year beginning on the commencement date";
+    when election_valid_1398d2(debtor, c);
+    when split_year_return_due(debtor, c, 2, due);
+    then duty Section1398SplitYearReturn2DutyPosition {
+        bearer debtor;
+        beneficiary debtor;
+        goal achievement {
+            condition split_year_return_filed(debtor, c, 2);
+            window [-infinity, due];
+        }
+    };
+}
+pub relation split_year_return_treated_as_443a1_return_1398d2F(debtor: Person, c: BankruptcyCase, which: Integer) kind institutional {
+    label en official "section 1398(d)(2)(F): for section 443(b), (c) and (d), a return for either split year is a return made under section 443(a)(1)";
+}
+@source(IRC_S1398_D, relation = formalizes, coverage = exact, quote = "a return filed for either of the taxable years referred to in subparagraph (A) shall be treated as a return made under paragraph (1) of subsection (a) of section 443")
+rule SplitYearReturnIs443a1Rule(debtor: Person, c: BankruptcyCase, which: Integer) defeasible {
+    label en official "section 1398(d)(2)(F): a split-year return is a section 443(a)(1) return";
+    when election_valid_1398d2(debtor, c);
+    when split_year_return_filed(debtor, c, which);
+    then split_year_return_treated_as_443a1_return_1398d2F(debtor, c, which);
+}
+
+// =============================================================================
+// Section 1398(e)(2)-(3)
+// =============================================================================
+
+pub relation debtor_gross_income_excludes_estate_items_1398e2(debtor: Person, c: BankruptcyCase, amount: Money) kind institutional {
+    label en official "section 1398(e)(2): the debtor's gross income does not include an item to the extent included in the estate's gross income";
+}
+@source(IRC_S1398_E, relation = formalizes, coverage = exact, quote = "shall not include any item to the extent that such item is included in the gross income of the estate by reason of paragraph (1)")
+rule DebtorIncomeExcludesEstateItemsRule(debtor: Person, estate: BankruptcyEstate, c: BankruptcyCase, amount: Money) defeasible {
+    label en official "section 1398(e)(2): the amount included in the estate's gross income is excluded from the debtor's";
+    when estate_case_1398(c, debtor, estate);
+    when estate_gross_income_from_debtor(estate, c, amount);
+    then debtor_gross_income_excludes_estate_items_1398e2(debtor, c, amount);
+}
+pub relation amount_paid_or_incurred_by_estate(t: Transaction, estate: BankruptcyEstate) kind empirical {
+    label en official "section 1398(e)(3): an amount paid or incurred by the estate";
+}
+pub relation deduction_or_credit_determined_as_if_debtor_1398e3A(t: Transaction, debtor: Person) kind institutional {
+    label en official "section 1398(e)(3)(A): allowability as a deduction or credit is determined as if the debtor had paid it and were still engaged in the pre-case trades, businesses and activities";
+}
+pub relation wages_determined_as_if_debtor_1398e3B(t: Transaction, debtor: Person) kind institutional {
+    label en official "section 1398(e)(3)(B): wage status for subtitle C is determined as if the debtor had paid it and were still engaged in the pre-case trades, businesses and activities";
+}
+@source(IRC_S1398_E, relation = formalizes, coverage = exact, quote = "shall be made as if the amount were paid or incurred by the debtor and as if the debtor were still engaged in the trades and businesses")
+rule DeductionAsIfDebtorRule(t: Transaction, c: BankruptcyCase, debtor: Person, estate: BankruptcyEstate) defeasible {
+    label en official "section 1398(e)(3)(A): deduction and credit determination as if by the debtor";
+    when estate_case_1398(c, debtor, estate);
+    when amount_paid_or_incurred_by_estate(t, estate);
+    then deduction_or_credit_determined_as_if_debtor_1398e3A(t, debtor);
+}
+rule WagesAsIfDebtorRule(t: Transaction, c: BankruptcyCase, debtor: Person, estate: BankruptcyEstate) defeasible {
+    label en official "section 1398(e)(3)(B): wage determination as if by the debtor";
+    when estate_case_1398(c, debtor, estate);
+    when amount_paid_or_incurred_by_estate(t, estate);
+    then wages_determined_as_if_debtor_1398e3B(t, debtor);
+}
+
+// =============================================================================
+// Section 1398(h): administrative expenses
+// =============================================================================
+
+pub relation administrative_item_of_estate(estate: BankruptcyEstate, y: TaxableYear, item: Transaction, amount: Money) kind empirical {
+    label en official "section 1398(h)(1): an administrative expense allowed under section 503 of title 11, or a fee or charge assessed against the estate under chapter 123 of title 28";
+}
+pub relation administrative_item_disallowed_by_other_provision(item: Transaction) kind empirical {
+    label en official "section 1398(h)(1): the item is disallowed under another provision of the title";
+}
+pub relation estate_deduction_allowed_1398h1(estate: BankruptcyEstate, y: TaxableYear, item: Transaction, amount: Money) kind institutional {
+    label en official "section 1398(h)(1): the administrative item is allowed as a deduction";
+}
+@source(IRC_S1398_H, relation = formalizes, coverage = exact, quote = "to the extent not disallowed under any other provision of this title, shall be allowed as a deduction")
+rule AdministrativeItemDeductionRule(c: BankruptcyCase, debtor: Person, estate: BankruptcyEstate, y: TaxableYear, item: Transaction, amount: Money) defeasible {
+    label en official "section 1398(h)(1): administrative expenses and chapter 123 fees are deductible unless disallowed elsewhere";
+    when estate_case_1398(c, debtor, estate);
+    when administrative_item_of_estate(estate, y, item, amount);
+    when not_known(administrative_item_disallowed_by_other_provision(item));
+    then estate_deduction_allowed_1398h1(estate, y, item, amount);
+}
+pub relation deduction_not_allowable_to_debtor_1398h2D(debtor: Person, item: Transaction) kind institutional {
+    label en official "section 1398(h)(2)(D): the deductions allowable solely by reason of paragraph (1) are allowable only to the estate";
+}
+@source(IRC_S1398_H, relation = formalizes, coverage = exact, quote = "shall be allowable only to the estate")
+rule DeductionOnlyToEstateRule(c: BankruptcyCase, debtor: Person, estate: BankruptcyEstate, y: TaxableYear, item: Transaction, amount: Money) defeasible {
+    label en official "section 1398(h)(2)(D): the debtor may not take the estate's administrative deductions";
+    when estate_deduction_allowed_1398h1(estate, y, item, amount);
+    when estate_case_1398(c, debtor, estate);
+    then deduction_not_allowable_to_debtor_1398h2D(debtor, item);
+}
+
+pub relation nol_created_without_172d4_modification(estate: BankruptcyEstate, y: TaxableYear, amount: Money) kind empirical {
+    label en official "section 1398(h)(2)(B): the net operating loss that would be created or increased for the estate year if section 172(c) were applied without the modification of section 172(d)(4)";
+}
+pub relation administrative_expense_loss_1398h2B(estate: BankruptcyEstate, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 1398(h)(2)(B): the administrative expense loss for the taxable year";
+}
+@source(IRC_S1398_H, relation = formalizes, coverage = exact, quote = "shall be an administrative expense loss for such taxable year")
+rule AdministrativeExpenseLossRule(c: BankruptcyCase, debtor: Person, estate: BankruptcyEstate, y: TaxableYear, amount: Money) defeasible {
+    label en official "section 1398(h)(2)(B): the created or increased net operating loss is the administrative expense loss";
+    when estate_case_1398(c, debtor, estate);
+    when nol_created_without_172d4_modification(estate, y, amount);
+    when amount > 0.00 USD;
+    then administrative_expense_loss_1398h2B(estate, y, amount);
+}
+pub relation administrative_expense_carry_year_1398h2B(estate: BankruptcyEstate, loss_year: TaxableYear, target_year: TaxableYear, offset: Integer) kind institutional {
+    label en official "section 1398(h)(2)(B): the loss is an administrative expense carryback to each of the 3 preceding years (offsets -1 to -3) and a carryover to each of the 7 succeeding years (offsets 1 to 7)";
+}
+pub relation administrative_expense_carry_portion_172b2(estate: BankruptcyEstate, loss_year: TaxableYear, target_year: TaxableYear, amount: Money) kind empirical {
+    label en official "section 1398(h)(2)(C): the portion of the loss carried to the target year, determined under section 172(b)(2) with that computation made before this paragraph (a case-supplied computation)";
+}
+pub relation administrative_expense_carry_amount_1398h2C(estate: BankruptcyEstate, loss_year: TaxableYear, target_year: TaxableYear, amount: Money) kind institutional {
+    label en official "section 1398(h)(2)(C): the amount of the administrative expense loss carried to the target year";
+}
+@source(IRC_S1398_H, relation = formalizes, coverage = exact, quote = "The portion of any administrative expense loss which may be carried to any other taxable year shall be determined under section 172(b)(2)")
+rule CarryAmountRule(estate: BankruptcyEstate, loss_year: TaxableYear, target_year: TaxableYear, offset: Integer, amount: Money) defeasible {
+    label en official "section 1398(h)(2)(C): the portion carried to a target year of an administrative expense loss";
+    when administrative_expense_carry_year_1398h2B(estate, loss_year, target_year, offset);
+    when administrative_expense_carry_portion_172b2(estate, loss_year, target_year, amount);
+    then administrative_expense_carry_amount_1398h2C(estate, loss_year, target_year, amount);
+}
+pub relation administrative_expense_carryovers_to_year(estate: BankruptcyEstate, y: TaxableYear, amount: Money) kind empirical {
+    label en official "section 1398(h)(2)(A)(i): the administrative expense carryovers to the taxable year (a case-supplied total over loss years, section 111 limit)";
+}
+pub relation administrative_expense_carrybacks_to_year(estate: BankruptcyEstate, y: TaxableYear, amount: Money) kind empirical {
+    label en official "section 1398(h)(2)(A)(ii): the administrative expense carrybacks to the taxable year (a case-supplied total over loss years, section 111 limit)";
+}
+pub relation administrative_carry_deduction_1398h2A(estate: BankruptcyEstate, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 1398(h)(2)(A): the deduction for the year is the carryovers plus the carrybacks";
+}
+@source(IRC_S1398_H, relation = formalizes, coverage = exact, quote = "There shall be allowed as a deduction for the taxable year an amount equal to the aggregate of (i) the administrative expense carryovers to such year, plus (ii) the administrative expense carrybacks to such year.")
+rule CarryDeductionRule(c: BankruptcyCase, debtor: Person, estate: BankruptcyEstate, y: TaxableYear, carryovers: Money, back: Money) defeasible {
+    label en official "section 1398(h)(2)(A): carryovers plus carrybacks are deductible in the year";
+    when estate_case_1398(c, debtor, estate);
+    when administrative_expense_carryovers_to_year(estate, y, carryovers);
+    when administrative_expense_carrybacks_to_year(estate, y, back);
+    then administrative_carry_deduction_1398h2A(estate, y, carryovers + back);
+}
+
+// carry targets (unrolled)
+pub relation carry_back_step_1_1398h2B(estate: BankruptcyEstate, loss_year: TaxableYear, target_year: TaxableYear) kind institutional {
+    label en unofficial "section 1398(h)(2)(B): the taxable year 1 before the loss year";
+}
+@source(IRC_S1398_H, relation = formalizes, coverage = exact, quote = "an administrative expense carryback to each of the 3 preceding taxable years")
+rule CarryBack1Rule(estate: BankruptcyEstate, loss_year: TaxableYear, target_year: TaxableYear, loss_amount: Money) defeasible {
+    label en official "section 1398(h)(2)(B): carryback year 1";
+    when administrative_expense_loss_1398h2B(estate, loss_year, loss_amount);
+    
+    when succeeding_taxable_year(target_year, loss_year);
+    then carry_back_step_1_1398h2B(estate, loss_year, target_year);
+}
+rule CarryBackTarget1Rule(estate: BankruptcyEstate, loss_year: TaxableYear, target_year: TaxableYear) defeasible {
+    label en official "section 1398(h)(2)(B): carryback target at offset -1";
+    when carry_back_step_1_1398h2B(estate, loss_year, target_year);
+    then administrative_expense_carry_year_1398h2B(estate, loss_year, target_year, -1);
+}
+pub relation carry_back_step_2_1398h2B(estate: BankruptcyEstate, loss_year: TaxableYear, target_year: TaxableYear) kind institutional {
+    label en unofficial "section 1398(h)(2)(B): the taxable year 2 before the loss year";
+}
+@source(IRC_S1398_H, relation = formalizes, coverage = exact, quote = "an administrative expense carryback to each of the 3 preceding taxable years")
+rule CarryBack2Rule(estate: BankruptcyEstate, loss_year: TaxableYear, mid: TaxableYear, target_year: TaxableYear, loss_amount: Money) defeasible {
+    label en official "section 1398(h)(2)(B): carryback year 2";
+    when administrative_expense_loss_1398h2B(estate, loss_year, loss_amount);
+    when carry_back_step_1_1398h2B(estate, loss_year, mid);
+    when succeeding_taxable_year(target_year, mid);
+    then carry_back_step_2_1398h2B(estate, loss_year, target_year);
+}
+rule CarryBackTarget2Rule(estate: BankruptcyEstate, loss_year: TaxableYear, target_year: TaxableYear) defeasible {
+    label en official "section 1398(h)(2)(B): carryback target at offset -2";
+    when carry_back_step_2_1398h2B(estate, loss_year, target_year);
+    then administrative_expense_carry_year_1398h2B(estate, loss_year, target_year, -2);
+}
+pub relation carry_back_step_3_1398h2B(estate: BankruptcyEstate, loss_year: TaxableYear, target_year: TaxableYear) kind institutional {
+    label en unofficial "section 1398(h)(2)(B): the taxable year 3 before the loss year";
+}
+@source(IRC_S1398_H, relation = formalizes, coverage = exact, quote = "an administrative expense carryback to each of the 3 preceding taxable years")
+rule CarryBack3Rule(estate: BankruptcyEstate, loss_year: TaxableYear, mid: TaxableYear, target_year: TaxableYear, loss_amount: Money) defeasible {
+    label en official "section 1398(h)(2)(B): carryback year 3";
+    when administrative_expense_loss_1398h2B(estate, loss_year, loss_amount);
+    when carry_back_step_2_1398h2B(estate, loss_year, mid);
+    when succeeding_taxable_year(target_year, mid);
+    then carry_back_step_3_1398h2B(estate, loss_year, target_year);
+}
+rule CarryBackTarget3Rule(estate: BankruptcyEstate, loss_year: TaxableYear, target_year: TaxableYear) defeasible {
+    label en official "section 1398(h)(2)(B): carryback target at offset -3";
+    when carry_back_step_3_1398h2B(estate, loss_year, target_year);
+    then administrative_expense_carry_year_1398h2B(estate, loss_year, target_year, -3);
+}
+pub relation carry_fwd_step_1_1398h2B(estate: BankruptcyEstate, loss_year: TaxableYear, target_year: TaxableYear) kind institutional {
+    label en unofficial "section 1398(h)(2)(B): the taxable year 1 after the loss year";
+}
+@source(IRC_S1398_H, relation = formalizes, coverage = exact, quote = "an administrative expense carryover to each of the 7 succeeding taxable years")
+rule CarryFwd1Rule(estate: BankruptcyEstate, loss_year: TaxableYear, target_year: TaxableYear, loss_amount: Money) defeasible {
+    label en official "section 1398(h)(2)(B): carryover year 1";
+    when administrative_expense_loss_1398h2B(estate, loss_year, loss_amount);
+    
+    when succeeding_taxable_year(loss_year, target_year);
+    then carry_fwd_step_1_1398h2B(estate, loss_year, target_year);
+}
+rule CarryFwdTarget1Rule(estate: BankruptcyEstate, loss_year: TaxableYear, target_year: TaxableYear) defeasible {
+    label en official "section 1398(h)(2)(B): carryover target at offset 1";
+    when carry_fwd_step_1_1398h2B(estate, loss_year, target_year);
+    then administrative_expense_carry_year_1398h2B(estate, loss_year, target_year, 1);
+}
+pub relation carry_fwd_step_2_1398h2B(estate: BankruptcyEstate, loss_year: TaxableYear, target_year: TaxableYear) kind institutional {
+    label en unofficial "section 1398(h)(2)(B): the taxable year 2 after the loss year";
+}
+@source(IRC_S1398_H, relation = formalizes, coverage = exact, quote = "an administrative expense carryover to each of the 7 succeeding taxable years")
+rule CarryFwd2Rule(estate: BankruptcyEstate, loss_year: TaxableYear, mid: TaxableYear, target_year: TaxableYear, loss_amount: Money) defeasible {
+    label en official "section 1398(h)(2)(B): carryover year 2";
+    when administrative_expense_loss_1398h2B(estate, loss_year, loss_amount);
+    when carry_fwd_step_1_1398h2B(estate, loss_year, mid);
+    when succeeding_taxable_year(mid, target_year);
+    then carry_fwd_step_2_1398h2B(estate, loss_year, target_year);
+}
+rule CarryFwdTarget2Rule(estate: BankruptcyEstate, loss_year: TaxableYear, target_year: TaxableYear) defeasible {
+    label en official "section 1398(h)(2)(B): carryover target at offset 2";
+    when carry_fwd_step_2_1398h2B(estate, loss_year, target_year);
+    then administrative_expense_carry_year_1398h2B(estate, loss_year, target_year, 2);
+}
+pub relation carry_fwd_step_3_1398h2B(estate: BankruptcyEstate, loss_year: TaxableYear, target_year: TaxableYear) kind institutional {
+    label en unofficial "section 1398(h)(2)(B): the taxable year 3 after the loss year";
+}
+@source(IRC_S1398_H, relation = formalizes, coverage = exact, quote = "an administrative expense carryover to each of the 7 succeeding taxable years")
+rule CarryFwd3Rule(estate: BankruptcyEstate, loss_year: TaxableYear, mid: TaxableYear, target_year: TaxableYear, loss_amount: Money) defeasible {
+    label en official "section 1398(h)(2)(B): carryover year 3";
+    when administrative_expense_loss_1398h2B(estate, loss_year, loss_amount);
+    when carry_fwd_step_2_1398h2B(estate, loss_year, mid);
+    when succeeding_taxable_year(mid, target_year);
+    then carry_fwd_step_3_1398h2B(estate, loss_year, target_year);
+}
+rule CarryFwdTarget3Rule(estate: BankruptcyEstate, loss_year: TaxableYear, target_year: TaxableYear) defeasible {
+    label en official "section 1398(h)(2)(B): carryover target at offset 3";
+    when carry_fwd_step_3_1398h2B(estate, loss_year, target_year);
+    then administrative_expense_carry_year_1398h2B(estate, loss_year, target_year, 3);
+}
+pub relation carry_fwd_step_4_1398h2B(estate: BankruptcyEstate, loss_year: TaxableYear, target_year: TaxableYear) kind institutional {
+    label en unofficial "section 1398(h)(2)(B): the taxable year 4 after the loss year";
+}
+@source(IRC_S1398_H, relation = formalizes, coverage = exact, quote = "an administrative expense carryover to each of the 7 succeeding taxable years")
+rule CarryFwd4Rule(estate: BankruptcyEstate, loss_year: TaxableYear, mid: TaxableYear, target_year: TaxableYear, loss_amount: Money) defeasible {
+    label en official "section 1398(h)(2)(B): carryover year 4";
+    when administrative_expense_loss_1398h2B(estate, loss_year, loss_amount);
+    when carry_fwd_step_3_1398h2B(estate, loss_year, mid);
+    when succeeding_taxable_year(mid, target_year);
+    then carry_fwd_step_4_1398h2B(estate, loss_year, target_year);
+}
+rule CarryFwdTarget4Rule(estate: BankruptcyEstate, loss_year: TaxableYear, target_year: TaxableYear) defeasible {
+    label en official "section 1398(h)(2)(B): carryover target at offset 4";
+    when carry_fwd_step_4_1398h2B(estate, loss_year, target_year);
+    then administrative_expense_carry_year_1398h2B(estate, loss_year, target_year, 4);
+}
+pub relation carry_fwd_step_5_1398h2B(estate: BankruptcyEstate, loss_year: TaxableYear, target_year: TaxableYear) kind institutional {
+    label en unofficial "section 1398(h)(2)(B): the taxable year 5 after the loss year";
+}
+@source(IRC_S1398_H, relation = formalizes, coverage = exact, quote = "an administrative expense carryover to each of the 7 succeeding taxable years")
+rule CarryFwd5Rule(estate: BankruptcyEstate, loss_year: TaxableYear, mid: TaxableYear, target_year: TaxableYear, loss_amount: Money) defeasible {
+    label en official "section 1398(h)(2)(B): carryover year 5";
+    when administrative_expense_loss_1398h2B(estate, loss_year, loss_amount);
+    when carry_fwd_step_4_1398h2B(estate, loss_year, mid);
+    when succeeding_taxable_year(mid, target_year);
+    then carry_fwd_step_5_1398h2B(estate, loss_year, target_year);
+}
+rule CarryFwdTarget5Rule(estate: BankruptcyEstate, loss_year: TaxableYear, target_year: TaxableYear) defeasible {
+    label en official "section 1398(h)(2)(B): carryover target at offset 5";
+    when carry_fwd_step_5_1398h2B(estate, loss_year, target_year);
+    then administrative_expense_carry_year_1398h2B(estate, loss_year, target_year, 5);
+}
+pub relation carry_fwd_step_6_1398h2B(estate: BankruptcyEstate, loss_year: TaxableYear, target_year: TaxableYear) kind institutional {
+    label en unofficial "section 1398(h)(2)(B): the taxable year 6 after the loss year";
+}
+@source(IRC_S1398_H, relation = formalizes, coverage = exact, quote = "an administrative expense carryover to each of the 7 succeeding taxable years")
+rule CarryFwd6Rule(estate: BankruptcyEstate, loss_year: TaxableYear, mid: TaxableYear, target_year: TaxableYear, loss_amount: Money) defeasible {
+    label en official "section 1398(h)(2)(B): carryover year 6";
+    when administrative_expense_loss_1398h2B(estate, loss_year, loss_amount);
+    when carry_fwd_step_5_1398h2B(estate, loss_year, mid);
+    when succeeding_taxable_year(mid, target_year);
+    then carry_fwd_step_6_1398h2B(estate, loss_year, target_year);
+}
+rule CarryFwdTarget6Rule(estate: BankruptcyEstate, loss_year: TaxableYear, target_year: TaxableYear) defeasible {
+    label en official "section 1398(h)(2)(B): carryover target at offset 6";
+    when carry_fwd_step_6_1398h2B(estate, loss_year, target_year);
+    then administrative_expense_carry_year_1398h2B(estate, loss_year, target_year, 6);
+}
+pub relation carry_fwd_step_7_1398h2B(estate: BankruptcyEstate, loss_year: TaxableYear, target_year: TaxableYear) kind institutional {
+    label en unofficial "section 1398(h)(2)(B): the taxable year 7 after the loss year";
+}
+@source(IRC_S1398_H, relation = formalizes, coverage = exact, quote = "an administrative expense carryover to each of the 7 succeeding taxable years")
+rule CarryFwd7Rule(estate: BankruptcyEstate, loss_year: TaxableYear, mid: TaxableYear, target_year: TaxableYear, loss_amount: Money) defeasible {
+    label en official "section 1398(h)(2)(B): carryover year 7";
+    when administrative_expense_loss_1398h2B(estate, loss_year, loss_amount);
+    when carry_fwd_step_6_1398h2B(estate, loss_year, mid);
+    when succeeding_taxable_year(mid, target_year);
+    then carry_fwd_step_7_1398h2B(estate, loss_year, target_year);
+}
+rule CarryFwdTarget7Rule(estate: BankruptcyEstate, loss_year: TaxableYear, target_year: TaxableYear) defeasible {
+    label en official "section 1398(h)(2)(B): carryover target at offset 7";
+    when carry_fwd_step_7_1398h2B(estate, loss_year, target_year);
+    then administrative_expense_carry_year_1398h2B(estate, loss_year, target_year, 7);
+}
+
+// =============================================================================
+// Section 1398(i): the debtor succeeds to the estate's attributes on termination
+// =============================================================================
+
+pub relation estate_terminated(c: BankruptcyCase) kind empirical {
+    label en official "section 1398(i): the estate terminates";
+}
+pub relation debtor_succeeds_to_capital_loss_carryover_1398i(debtor: Person, estate: BankruptcyEstate, from_year: TaxableYear, to_year: TaxableYear, character: CapitalLossCharacter, amount: Money) kind institutional {
+    label en official "section 1398(i) with (g)(5): on termination the debtor succeeds to the estate's section 1212 capital loss carryover";
+}
+@source(IRC_S1398_I, relation = formalizes, coverage = partial, quote = "the debtor shall succeed to and take into account the items referred to in paragraphs (1), (2), (3), (4), (5), and (6) of subsection (g)")
+rule DebtorSucceedsToCapitalLossCarryoverRule(c: BankruptcyCase, debtor: Person, estate: BankruptcyEstate, from_year: TaxableYear, to_year: TaxableYear, character: CapitalLossCharacter, amount: Money) defeasible {
+    label en official "section 1398(i): the debtor takes the estate's capital loss carryover on termination";
+    when estate_case_1398(c, debtor, estate);
+    when estate_terminated(c);
+    when capital_loss_carryover(estate, from_year, to_year, character, amount);
+    then debtor_succeeds_to_capital_loss_carryover_1398i(debtor, estate, from_year, to_year, character, amount);
+}
+pub relation debtor_succeeds_to_basis_1398i(debtor: Person, a: Asset, on: Date, amount: Money) kind institutional {
+    label en official "section 1398(i) with (g)(6): on termination the debtor's basis in an asset acquired from the estate is the estate's basis";
+}
+rule DebtorSucceedsToBasisRule(c: BankruptcyCase, debtor: Person, estate: BankruptcyEstate, t: Transaction, a: Asset, on: Date, amount: Money) defeasible {
+    label en official "section 1398(i): the debtor takes the estate's basis in an asset transferred on termination";
+    when estate_case_1398(c, debtor, estate);
+    when estate_terminated(c);
+    when transfer_estate_to_debtor_on_termination(t, estate, debtor, a);
+    when us.irc.core::adjusted_basis(estate, a, on, amount);
+    then debtor_succeeds_to_basis_1398i(debtor, a, on, amount);
+}
+pub relation debtor_succeeds_to_long_term_1398i(debtor: Person, a: Asset) kind institutional {
+    label en official "section 1398(i) with (g)(6): the debtor's holding period tacks the estate's";
+}
+rule DebtorSucceedsToLongTermRule(c: BankruptcyCase, debtor: Person, estate: BankruptcyEstate, t: Transaction, a: Asset) defeasible {
+    label en official "section 1398(i): the estate's long-term holding period passes to the debtor";
+    when estate_case_1398(c, debtor, estate);
+    when estate_terminated(c);
+    when transfer_estate_to_debtor_on_termination(t, estate, debtor, a);
+    when long_term(estate, a);
+    then debtor_succeeds_to_long_term_1398i(debtor, a);
+}
+pub relation debtor_succeeds_to_capital_asset_character_1398i(debtor: Person, a: Asset) kind institutional {
+    label en official "section 1398(i) with (g)(6): the debtor takes the estate's character";
+}
+rule DebtorSucceedsToCapitalAssetCharacterRule(c: BankruptcyCase, debtor: Person, estate: BankruptcyEstate, t: Transaction, a: Asset) defeasible {
+    label en official "section 1398(i): the capital-asset character passes to the debtor";
+    when estate_case_1398(c, debtor, estate);
+    when estate_terminated(c);
+    when transfer_estate_to_debtor_on_termination(t, estate, debtor, a);
+    when capital_asset(estate, a);
+    then debtor_succeeds_to_capital_asset_character_1398i(debtor, a);
+}
+pub relation debtor_succeeds_to_nol_carryover_1398i(debtor: Person, estate: BankruptcyEstate, amount: Money) kind institutional {
+    label en unofficial "section 1398(i) with (g)(1): pending contract - the section 172 net operating loss carryover, owned by income-individual/deductions";
+}
+pub relation debtor_succeeds_to_charitable_carryover_1398i(debtor: Person, estate: BankruptcyEstate, amount: Money) kind institutional {
+    label en unofficial "section 1398(i) with (g)(2): pending contract - the section 170(d)(1) carryover, owned by deductions";
+}
+pub relation debtor_succeeds_to_tax_benefit_items_1398i(debtor: Person, estate: BankruptcyEstate) kind institutional {
+    label en unofficial "section 1398(i) with (g)(3): pending contract - section 111 tax-benefit items, owned by gross-income";
+}
+pub relation debtor_succeeds_to_credit_carryovers_1398i(debtor: Person, estate: BankruptcyEstate) kind institutional {
+    label en unofficial "section 1398(i) with (g)(4): pending contract - credit carryovers, owned by credits";
+}
+pub relation regulations_prescribe_other_attribute_1398g8_i(attribute: Asset) kind empirical {
+    label en official "section 1398(g)(8), (i): another tax attribute prescribed by regulations (external)";
+}
+
+// =============================================================================
+// Section 1398(j): accounting period and carrybacks
+// =============================================================================
+
+pub relation estate_has_no_prior_accounting_period_change(estate: BankruptcyEstate) kind empirical {
+    label en official "section 1398(j)(1): the estate has not previously changed its annual accounting period";
+}
+pub relation estate_elects_accounting_period_change(estate: BankruptcyEstate) kind empirical {
+    label en official "section 1398(j)(1): the estate changes its annual accounting period";
+}
+pub relation estate_accounting_period_changed_1398j1(estate: BankruptcyEstate) kind institutional {
+    label en official "section 1398(j)(1): the estate has changed its annual accounting period once, without Secretary approval";
+}
+@source(IRC_S1398_J, relation = formalizes, coverage = exact, quote = "the estate may change its annual accounting period one time without the approval of the Secretary")
+rule EstateAccountingPeriodChangePower(estate: BankruptcyEstate) strict {
+    label en official "section 1398(j)(1): the estate may change its annual accounting period one time without approval";
+    when estate_elects_accounting_period_change(estate);
+    then power Section1398EstateAccountingPeriodChange {
+        holder estate;
+        over estate;
+        exercise estate_elects_accounting_period_change(estate);
+        valid_when estate_has_no_prior_accounting_period_change(estate);
+        effect create(estate_accounting_period_changed_1398j1(estate));
+        window [@1980-01-01, infinity);
+    };
+}
+pub relation estate_carryback_1398j2(estate: BankruptcyEstate, carry_item: Transaction, carryback_year: TaxableYear, amount: Money) kind empirical {
+    label en official "section 1398(j)(2)(A): a carryback of the estate to a carryback year";
+}
+pub relation carryback_year_before_estates_first_year(carryback_year: TaxableYear) kind empirical {
+    label en official "section 1398(j)(2)(A): the carryback year is a taxable year before the estate's first taxable year";
+}
+pub relation debtor_year_corresponding_to(carryback_year: TaxableYear, debtor_year: TaxableYear) kind empirical {
+    label en official "section 1398(j)(2)(A): the debtor's taxable year corresponding to the carryback year";
+}
+pub relation estate_carryback_taken_into_account_for_debtor_year_1398j2A(estate: BankruptcyEstate, debtor_year: TaxableYear, amount: Money) kind institutional {
+    label en official "section 1398(j)(2)(A): the carryback is taken into account for the debtor's corresponding taxable year";
+}
+@source(IRC_S1398_J, relation = formalizes, coverage = exact, quote = "the carryback to such carryback year shall be taken into account for the debtor's taxable year corresponding to the carryback year")
+rule EstateCarrybackToDebtorYearRule(c: BankruptcyCase, debtor: Person, estate: BankruptcyEstate, item: Transaction, cy: TaxableYear, dy: TaxableYear, amount: Money) defeasible {
+    label en official "section 1398(j)(2)(A): an estate carryback to a pre-estate year is taken into account for the debtor's corresponding year";
+    when estate_case_1398(c, debtor, estate);
+    when estate_carryback_1398j2(estate, item, cy, amount);
+    when carryback_year_before_estates_first_year(cy);
+    when debtor_year_corresponding_to(cy, dy);
+    then estate_carryback_taken_into_account_for_debtor_year_1398j2A(estate, dy, amount);
+}
+pub relation debtor_carryback_1398j2(debtor: Person, carry_item: Transaction, from_year: TaxableYear, to_year: TaxableYear) kind empirical {
+    label en official "section 1398(j)(2)(B): a carryback of the debtor from a taxable year to an earlier taxable year";
+}
+pub relation year_before_debtors_commencement_year(c: BankruptcyCase, y: TaxableYear) kind empirical {
+    label en official "section 1398(j)(2)(B): a taxable year before the debtor's taxable year in which the case commences";
+}
+pub relation debtor_carryback_barred_1398j2B(debtor: Person, carry_item: Transaction) kind institutional {
+    label en official "section 1398(j)(2)(B): the debtor may not carry back to a year before the commencement year a carryback from a year ending after the case commences";
+}
+@source(IRC_S1398_J, relation = formalizes, coverage = exact, quote = "The debtor may not carry back to a taxable year before the debtor's taxable year in which the case commences any carryback from a taxable year ending after the case commences")
+rule DebtorCarrybackBarredRule(c: BankruptcyCase, debtor: Person, item: Transaction, from_year: TaxableYear, to_year: TaxableYear, from_end: Date, commenced: Date) defeasible {
+    label en official "section 1398(j)(2)(B): a post-commencement carryback into a pre-commencement-year is barred";
+    when section_1398_applies(c, debtor);
+    when debtor_carryback_1398j2(debtor, item, from_year, to_year);
+    when us.irc.core::ends(from_year, from_end);
+    when commencement_date(c, commenced);
+    when from_end > commenced;
+    when year_before_debtors_commencement_year(c, to_year);
+    then debtor_carryback_barred_1398j2B(debtor, item);
+}
+pub relation carry_item_is_nol_carryback_172(item: Transaction) kind empirical {
+    label en official "section 1398(j)(2)(C)(i): a net operating loss carryback under section 172";
+}
+pub relation carry_item_is_part_IV_credit_carryback(item: Transaction) kind empirical {
+    label en official "section 1398(j)(2)(C)(i): a carryback of any credit provided by part IV of subchapter A";
+}
+pub relation carryback_1398j2Ci(item: Transaction) kind institutional {
+    label en official "section 1398(j)(2)(C)(i): the term carryback";
+}
+@source(IRC_S1398_J, relation = formalizes, coverage = exact, quote = "The term \"carryback\" means a net operating loss carryback under section 172 or a carryback of any credit provided by part IV of subchapter A")
+rule CarrybackNolRule(item: Transaction) strict {
+    label en official "section 1398(j)(2)(C)(i): a net operating loss carryback is a carryback";
+    when carry_item_is_nol_carryback_172(item);
+    then carryback_1398j2Ci(item);
+}
+rule CarrybackCreditRule(item: Transaction) strict {
+    label en official "section 1398(j)(2)(C)(i): a part IV credit carryback is a carryback";
+    when carry_item_is_part_IV_credit_carryback(item);
+    then carryback_1398j2Ci(item);
+}
+pub relation carried_to_year(item: Transaction, y: TaxableYear) kind empirical {
+    label en official "the taxable year to which the item is carried";
+}
+pub relation carryback_year_1398j2Cii(item: Transaction, y: TaxableYear) kind institutional {
+    label en official "section 1398(j)(2)(C)(ii): the taxable year to which a carryback is carried";
+}
+@source(IRC_S1398_J, relation = formalizes, coverage = exact, quote = "The term \"carryback year\" means the taxable year to which a carryback is carried")
+rule CarrybackYearRule(item: Transaction, y: TaxableYear) strict {
+    label en official "section 1398(j)(2)(C)(ii): the carryback year is the year to which a carryback is carried";
+    when carryback_1398j2Ci(item);
+    when carried_to_year(item, y);
+    then carryback_year_1398j2Cii(item, y);
+}

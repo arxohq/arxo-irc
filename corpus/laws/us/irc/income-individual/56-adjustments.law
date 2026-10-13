@@ -1,0 +1,391 @@
+// Section 56: adjustments in computing alternative minimum taxable income
+// (stage 2). Section 56 replaces, for the alternative minimum tax only, the
+// regular-tax treatment of a list of items. Each adjustment is a signed
+// amount that ADDS to (positive) or SUBTRACTS from (negative) taxable income;
+// `55-amt.law` sums them (`amt_adjustment` by kind) into alternative minimum
+// taxable income.
+//
+// TWO CHANNELS FOR AN ADJUSTMENT. (1) Adjustments whose amount follows from a
+// rule the text states over simple facts (the disallowance of miscellaneous
+// itemized deductions, taxes, the standard deduction and exemptions, the
+// alternative tax net operating loss deduction, the section 87 and recovery
+// exclusions, section 68 disregarded, incentive stock options) are DERIVED
+// below from facts of the case. (2) Adjustments that need another owner's
+// whole computation — the alternative depreciation system of section 168(g),
+// the 150-percent-declining-balance method, ten-year amortization of mining
+// and research costs, percentage-of-completion accounting under section 460,
+// pollution-control amortization, adjusted-basis tracking, and the section
+// 163 interest rules — are NOT computed by this package: the case supplies the
+// resulting adjustment through `amt_adjustment_supplied`, and the coverage
+// rows classify them TECH_GAP / EXTERNAL_DEPENDENCY. The supplied channel does
+// not pretend those rules are implemented; it lets the sum be computed once
+// they are known. A kind must not be both derived here and supplied.
+//
+// The noncorporate-taxpayer guard of subsection (b) is
+// `noncorporate_taxpayer_for_year` (55-amt.law).
+
+// --- The adjustment and preference ledgers ------------------------------------
+
+use self::{
+    IRC_S56_A,
+    IRC_S56_B,
+    IRC_S56_D,
+    IRC_S56_E,
+    IRC_S57_A,
+    Person,
+    TaxableYear,
+    has_amt_interest_recomputation,
+    has_atnol_chain_deduction_year,
+    noncorporate_taxpayer_for_year,
+};
+
+pub enum AmtAdjustmentKind {
+    Depreciation56a1;
+    MiningCosts56a2;
+    LongTermContracts56a3;
+    AlternativeTaxNol56a4;
+    PollutionControl56a5;
+    BasisAdjustment56a6;
+    AlcoholFuelCredit56a7;
+    MiscItemizedDeductions56b1Ai;
+    Taxes56b1Aii;
+    Interest56b1B;
+    RecoveredTaxes56b1C;
+    StandardDeductionAndExemptions56b1D;
+    ItemizedDeductionLimit56b1E;
+    CirculationAndResearch56b2;
+    IncentiveStockOptions56b3;
+    TaxShelterFarmLoss58a;
+    FarmLossDisposition58c2;
+    PassiveActivityLoss58b;
+    DepreciationByProperty56a1;
+    PollutionControlByFacility56a5;
+    MiningCostsByExpenditure56a2;
+    CirculationAndResearchByExpenditure56b2;
+    LongTermContractsByContract56a3;
+    label en unofficial "the adjustment of part VI of subchapter A of chapter 1 that an amount belongs to (one amount per kind per taxpayer per year)";
+}
+
+pub relation amt_adjustment(p: Person, y: TaxableYear, kind: AmtAdjustmentKind, amount: Money) kind institutional {
+    label en unofficial "the amount, signed, by which the section 56 or section 58 treatment changes taxable income of this kind for the year";
+}
+pub relation amt_adjustment_supplied(p: Person, y: TaxableYear, kind: AmtAdjustmentKind, amount: Money) kind empirical {
+    label en unofficial "an adjustment amount computed outside this package under a rule of the Code this package does not compute (depreciation, amortization, percentage-of-completion, section 163 interest, basis, passive activity), signed";
+}
+
+@source(IRC_S56_A, relation = formalizes, coverage = partial, quote = "In determining the amount of the alternative minimum taxable income for any taxable year the following treatment shall apply (in lieu of the treatment applicable for purposes of computing the regular tax):")
+rule AmtAdjustmentFromOutsideComputation(p: Person, y: TaxableYear, k: AmtAdjustmentKind, amount: Money) strict {
+    label en unofficial "an adjustment whose amount another owner's rule computes enters the sum as supplied";
+    when noncorporate_taxpayer_for_year(p, y);
+    when amt_adjustment_supplied(p, y, k, amount);
+    when k != Interest56b1B;
+    then amt_adjustment(p, y, k, amount);
+}
+rule AmtInterestAdjustmentFromOutsideComputation(p: Person, y: TaxableYear, amount: Money) strict {
+    label en unofficial "an interest adjustment computed outside this package enters as supplied only while the package does not recompute it (section 56(b)(1)(B))";
+    when noncorporate_taxpayer_for_year(p, y);
+    when amt_adjustment_supplied(p, y, Interest56b1B, amount);
+    when not_known(has_amt_interest_recomputation(p, y));
+    then amt_adjustment(p, y, Interest56b1B, amount);
+}
+
+pub enum AmtPreferenceKind {
+    Depletion57a1;
+    IntangibleDrillingCosts57a2;
+    PrivateActivityBondInterest57a5;
+    AcceleratedDepreciation57a6;
+    SmallBusinessStock57a7;
+    ChildInterestUnderElection57a5;
+    label en unofficial "the item of tax preference of section 57 that an amount belongs to";
+}
+pub relation amt_preference(p: Person, y: TaxableYear, kind: AmtPreferenceKind, amount: Money) kind institutional {
+    label en unofficial "the amount of an item of tax preference of this kind for the year";
+}
+pub relation amt_preference_supplied(p: Person, y: TaxableYear, kind: AmtPreferenceKind, amount: Money) kind empirical {
+    label en unofficial "an item of tax preference computed outside this package (section 57(a)(6): amounts under repealed paragraphs as in effect before the Tax Reform Act of 1986)";
+}
+
+@source(IRC_S57_A, relation = formalizes, coverage = partial, quote = "For purposes of this part, the items of tax preference determined under this section are—")
+rule AmtPreferenceFromOutsideComputation(p: Person, y: TaxableYear, k: AmtPreferenceKind, amount: Money) strict {
+    label en unofficial "an item of tax preference whose amount another rule computes enters the sum as supplied";
+    when noncorporate_taxpayer_for_year(p, y);
+    when amt_preference_supplied(p, y, k, amount);
+    then amt_preference(p, y, k, amount);
+}
+
+// --- Section 56(b)(1)(A): miscellaneous itemized deductions and taxes ---------
+
+pub relation misc_itemized_deductions_claimed(p: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the miscellaneous itemized deductions (as defined in section 67(b)) claimed in computing the regular tax";
+}
+pub relation section_164_taxes_claimed(p: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the taxes described in paragraph (1), (2), or (3) of section 164(a) or clause (ii) of section 164(b)(5)(A) deducted in computing the regular tax";
+}
+pub relation section_164_taxes_allowed_in_computing_agi(p: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the part of those taxes that is allowable in computing adjusted gross income";
+}
+
+@source(IRC_S56_B, relation = formalizes, coverage = exact, quote = "(i) for any miscellaneous itemized deduction (as defined in section 67(b)), or")
+rule AdjustmentMiscItemizedDeductionsDisallowed(p: Person, y: TaxableYear, claimed: Money) strict {
+    label en official "section 56(b)(1)(A)(i): no deduction is allowed for a miscellaneous itemized deduction, so the amount claimed under the regular tax is added back";
+    when noncorporate_taxpayer_for_year(p, y);
+    when misc_itemized_deductions_claimed(p, y, claimed);
+    then amt_adjustment(p, y, MiscItemizedDeductions56b1Ai, claimed);
+}
+
+@source(IRC_S56_B, relation = formalizes, coverage = exact, quote = "Clause (ii) shall not apply to any amount allowable in computing adjusted gross income.")
+rule AdjustmentTaxesDisallowed(p: Person, y: TaxableYear, claimed: Money, in_agi: Money) strict {
+    label en official "section 56(b)(1)(A)(ii): no deduction for the listed taxes, except an amount allowable in computing adjusted gross income";
+    when noncorporate_taxpayer_for_year(p, y);
+    when section_164_taxes_claimed(p, y, claimed);
+    when section_164_taxes_allowed_in_computing_agi(p, y, in_agi);
+    then amt_adjustment(p, y, Taxes56b1Aii, claimed - in_agi);
+}
+
+// --- Section 56(b)(1)(C): recoveries of taxes disallowed under (A)(ii) --------
+
+pub relation recovery_of_disallowed_tax_included_in_income(p: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "a recovery of any tax to which subparagraph (A)(ii) applied, included in gross income for the regular tax";
+}
+
+@source(IRC_S56_B, relation = formalizes, coverage = exact, quote = "No recovery of any tax to which subparagraph (A)(ii) applied shall be included in gross income for purposes of determining alternative minimum taxable income.")
+rule AdjustmentRecoveryOfDisallowedTaxExcluded(p: Person, y: TaxableYear, recovery: Money) strict {
+    label en official "section 56(b)(1)(C): the recovery is not included in alternative minimum taxable income, so it is subtracted";
+    when noncorporate_taxpayer_for_year(p, y);
+    when recovery_of_disallowed_tax_included_in_income(p, y, recovery);
+    then amt_adjustment(p, y, RecoveredTaxes56b1C, 0.00 USD - recovery);
+}
+
+// --- Section 56(b)(1)(D): standard deduction, personal exemptions, 642(b) ------
+
+pub relation standard_deduction_claimed(p: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the standard deduction under section 63(c) claimed in computing the regular tax";
+}
+pub relation personal_exemption_deduction_claimed(p: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the deduction for personal exemptions under section 151 claimed in computing the regular tax";
+}
+pub relation section_642b_deduction_claimed(p: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the deduction under section 642(b) claimed in computing the regular tax";
+}
+
+@source(IRC_S56_B, relation = formalizes, coverage = exact, quote = "The standard deduction under section 63(c), the deduction for personal exemptions under section 151, and the deduction under section 642(b) shall not be allowed.")
+rule AdjustmentStandardDeductionAndExemptionsDisallowed(p: Person, y: TaxableYear, std: Money, exemptions: Money, estate_trust: Money) strict {
+    label en official "section 56(b)(1)(D): the three deductions are not allowed, so they are added back (each fact is asserted, zero when not claimed)";
+    when noncorporate_taxpayer_for_year(p, y);
+    when standard_deduction_claimed(p, y, std);
+    when personal_exemption_deduction_claimed(p, y, exemptions);
+    when section_642b_deduction_claimed(p, y, estate_trust);
+    then amt_adjustment(p, y, StandardDeductionAndExemptions56b1D, (std + exemptions) + estate_trust);
+}
+
+// --- Section 56(b)(1)(E): section 68 not applicable ---------------------------
+
+pub relation section_68_reduction_of_itemized_deductions(p: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the reduction of itemized deductions applied under section 68 in computing the regular tax";
+}
+
+@source(IRC_S56_B, relation = formalizes, coverage = exact, quote = "Section 68 shall not apply.")
+rule AdjustmentSection68Disregarded(p: Person, y: TaxableYear, reduction: Money) strict {
+    label en official "section 56(b)(1)(E): section 68 does not apply, so the reduction of itemized deductions is restored (subtracted)";
+    when noncorporate_taxpayer_for_year(p, y);
+    when section_68_reduction_of_itemized_deductions(p, y, reduction);
+    then amt_adjustment(p, y, ItemizedDeductionLimit56b1E, 0.00 USD - reduction);
+}
+
+// --- Section 56(a)(7): section 87 not applicable ------------------------------
+
+pub relation section_87_alcohol_fuel_credit_included(p: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the alcohol fuel credit amount included in gross income under section 87 for the regular tax";
+}
+
+@source(IRC_S56_A, relation = formalizes, coverage = exact, quote = "Section 87 (relating to alcohol fuel credit) shall not apply.")
+rule AdjustmentSection87Disregarded(p: Person, y: TaxableYear, included: Money) strict {
+    label en official "section 56(a)(7): section 87 does not apply, so the section 87 inclusion is subtracted";
+    when noncorporate_taxpayer_for_year(p, y);
+    when section_87_alcohol_fuel_credit_included(p, y, included);
+    then amt_adjustment(p, y, AlcoholFuelCredit56a7, 0.00 USD - included);
+}
+
+// --- Section 56(b)(3): incentive stock options --------------------------------
+
+pub relation iso_bargain_element_under_section_83(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the amount includible under section 83 on the transfer of stock acquired by the exercise of an incentive stock option (dependency contract: the section 83 owner computes it; section 421 does not apply for this purpose)";
+}
+
+@source(IRC_S56_B, relation = formalizes, coverage = partial, quote = "Section 421 shall not apply to the transfer of stock acquired pursuant to the exercise of an incentive stock option (as defined in section 422).")
+rule AdjustmentIncentiveStockOptionsTransfer(p: Person, y: TaxableYear, bargain: Money) strict {
+    label en official "section 56(b)(3): section 421 does not apply to the transfer, so the section 83 amount is included for the alternative minimum tax (it is not included for the regular tax under section 421)";
+    when noncorporate_taxpayer_for_year(p, y);
+    when iso_bargain_element_under_section_83(p, y, bargain);
+    then amt_adjustment(p, y, IncentiveStockOptions56b3, bargain);
+}
+
+// --- Section 56(a)(4), (d)(1): the alternative tax net operating loss deduction
+
+pub relation regular_net_operating_loss_deduction(p: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the net operating loss deduction allowed under section 172 in computing the regular tax";
+}
+pub relation atnol_attributable_to_ordinary_losses(p: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the amount of the alternative tax net operating loss deduction attributable to net operating losses (other than an applicable net operating loss with an election under section 172(b)(1)(H)), after the adjustments of paragraph (2)";
+}
+pub relation atnol_attributable_to_elected_applicable_loss(p: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the amount of the deduction attributable to an applicable net operating loss with respect to which an election is made under section 172(b)(1)(H)";
+}
+pub relation amti_before_atnol_and_section_199(p: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "alternative minimum taxable income determined without regard to the alternative tax net operating loss deduction and the deduction under section 199 (a case-supplied figure: computing it inside the package would make alternative minimum taxable income depend on itself)";
+}
+
+pub relation atnol_deduction(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the alternative tax net operating loss deduction";
+}
+
+@source(IRC_S56_D, relation = formalizes, coverage = exact, quote = "(A) the amount of such deduction shall not exceed the sum of—")
+rule AtnolDeductionCapped(p: Person, y: TaxableYear, ordinary: Money, elected: Money, amti: Money) strict {
+    label en official "section 56(d)(1)(A): the deduction is the sum of (i) the lesser of the ordinary-loss amount or 90 percent of alternative minimum taxable income without the deduction and section 199, and (ii) the lesser of the elected applicable-loss amount or the remaining alternative minimum taxable income";
+    when noncorporate_taxpayer_for_year(p, y);
+    when not_known(has_atnol_chain_deduction_year(p, y));
+    when atnol_attributable_to_ordinary_losses(p, y, ordinary);
+    when atnol_attributable_to_elected_applicable_loss(p, y, elected);
+    when amti_before_atnol_and_section_199(p, y, amti);
+    then atnol_deduction(p, y, min(ordinary, max(0.00 USD, amti * 0.9)) + min(elected, max(0.00 USD, amti - min(ordinary, max(0.00 USD, amti * 0.9)))));
+}
+
+@source(IRC_S56_A, relation = formalizes, coverage = exact, quote = "The alternative tax net operating loss deduction shall be allowed in lieu of the net operating loss deduction allowed under section 172.")
+rule AdjustmentAtnolInLieuOfRegularNol(p: Person, y: TaxableYear, regular: Money, alternative: Money) strict {
+    label en official "section 56(a)(4): the alternative tax net operating loss deduction replaces the regular one, so alternative minimum taxable income changes by regular deduction minus alternative deduction";
+    when noncorporate_taxpayer_for_year(p, y);
+    when regular_net_operating_loss_deduction(p, y, regular);
+    when atnol_deduction(p, y, alternative);
+    then amt_adjustment(p, y, AlternativeTaxNol56a4, regular - alternative);
+}
+
+// --- Section 56(e): qualified housing interest --------------------------------
+
+entity Indebtedness {
+    label en unofficial "an indebtedness of a taxpayer whose interest may be qualified housing interest";
+}
+entity DwellingProperty {
+    label en unofficial "property securing or improved with the proceeds of an indebtedness";
+}
+
+pub relation is_qualified_residence_interest(d: Indebtedness, y: TaxableYear) kind institutional {
+    label en official "interest which is qualified residence interest (as defined in section 163(h)(3)) paid or accrued on the indebtedness during the taxable year (dependency contract: the section 163(h) owner)";
+}
+pub relation indebtedness_incurred_for_property(d: Indebtedness, prop: DwellingProperty) kind empirical {
+    label en official "the indebtedness was incurred in acquiring, constructing, or substantially improving the property";
+}
+pub relation property_is_principal_residence(prop: DwellingProperty, taxpayer: Person, y: TaxableYear) kind empirical {
+    label en official "the property is the principal residence (within the meaning of section 121) of the taxpayer at the time the interest accrues";
+}
+pub relation property_is_qualified_residence(prop: DwellingProperty, taxpayer: Person, y: TaxableYear) kind empirical {
+    label en official "the property is a qualified residence (within the meaning of section 163(h)(4))";
+}
+pub relation property_is_house_apartment_condominium_or_mobile_home(prop: DwellingProperty) kind empirical {
+    label en official "the property is a house, apartment, condominium, or mobile home not used on a transient basis, including all structures or other property appurtenant thereto";
+}
+
+pub relation qualified_dwelling(prop: DwellingProperty) kind institutional {
+    label en official "the term \"qualified dwelling\"";
+}
+
+@source(IRC_S56_E, relation = formalizes, coverage = exact, quote = "The term \"qualified dwelling\" means any—")
+rule QualifiedDwellingRule(prop: DwellingProperty) strict {
+    label en official "section 56(e)(2): a house, apartment, condominium, or mobile home not used on a transient basis, with its appurtenant structures";
+    when property_is_house_apartment_condominium_or_mobile_home(prop);
+    then qualified_dwelling(prop);
+}
+
+pub relation qualified_housing_interest_on(d: Indebtedness, taxpayer: Person, y: TaxableYear) kind institutional {
+    label en official "the interest on the indebtedness is qualified housing interest for the taxpayer and year";
+}
+
+@source(IRC_S56_E, relation = formalizes, coverage = partial, quote = "is the principal residence (within the meaning of section 121) of the taxpayer at the time such interest accrues, or")
+rule QualifiedHousingInterestPrincipalResidence(d: Indebtedness, taxpayer: Person, y: TaxableYear, prop: DwellingProperty) strict {
+    label en official "section 56(e)(1)(A): qualified residence interest on an indebtedness incurred to acquire, construct or improve the taxpayer's principal residence";
+    when is_qualified_residence_interest(d, y);
+    when indebtedness_incurred_for_property(d, prop);
+    when property_is_principal_residence(prop, taxpayer, y);
+    then qualified_housing_interest_on(d, taxpayer, y);
+}
+
+@source(IRC_S56_E, relation = formalizes, coverage = partial, quote = "is a qualified dwelling which is a qualified residence (within the meaning of section 163(h)(4)).")
+rule QualifiedHousingInterestQualifiedDwelling(d: Indebtedness, taxpayer: Person, y: TaxableYear, prop: DwellingProperty) strict {
+    label en official "section 56(e)(1)(B): qualified residence interest on an indebtedness incurred for a qualified dwelling that is a qualified residence";
+    when is_qualified_residence_interest(d, y);
+    when indebtedness_incurred_for_property(d, prop);
+    when qualified_dwelling(prop);
+    when property_is_qualified_residence(prop, taxpayer, y);
+    then qualified_housing_interest_on(d, taxpayer, y);
+}
+
+pub relation refinancing_of(new_debt: Indebtedness, old_debt: Indebtedness) kind empirical {
+    label en official "the indebtedness results from the refinancing of the other indebtedness";
+}
+pub relation indebtedness_amount(d: Indebtedness, amount: Money) kind empirical {
+    label en official "the amount of the indebtedness";
+}
+pub relation refinanced_indebtedness_amount_immediately_before(new_debt: Indebtedness, amount: Money) kind empirical {
+    label en official "the amount of the refinanced indebtedness immediately before the refinancing";
+}
+pub relation refinancing_interest_qualified_amount(new_debt: Indebtedness, taxpayer: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the amount of the refinancing indebtedness the interest on which is qualified housing interest: only to the extent it does not exceed the refinanced indebtedness immediately before the refinancing";
+}
+
+@source(IRC_S56_E, relation = formalizes, coverage = exact, quote = "Such term also includes interest on any indebtedness resulting from the refinancing of indebtedness meeting the requirements of the preceding sentence; but only to the extent that the amount of the indebtedness resulting from such refinancing does not exceed the amount of the refinanced indebtedness immediately before the refinancing.")
+rule RefinancingQualifiedHousingInterestCap(new_debt: Indebtedness, old_debt: Indebtedness, taxpayer: Person, y: TaxableYear, amount: Money, old_amount: Money) strict {
+    label en official "section 56(e)(1), last sentence: interest on a refinancing counts up to the amount of the refinanced indebtedness immediately before the refinancing";
+    when refinancing_of(new_debt, old_debt);
+    when qualified_housing_interest_on(old_debt, taxpayer, y);
+    when indebtedness_amount(new_debt, amount);
+    when refinanced_indebtedness_amount_immediately_before(new_debt, old_amount);
+    then refinancing_interest_qualified_amount(new_debt, taxpayer, y, min(amount, old_amount));
+}
+
+pub relation indebtedness_incurred_on(d: Indebtedness, on: Date) kind empirical {
+    label en official "the date the indebtedness was incurred";
+}
+pub relation secured_by_principal_residence_or_family_qualified_dwelling(d: Indebtedness, taxpayer: Person) kind empirical {
+    label en official "the indebtedness is secured by property that, when the indebtedness was incurred, was the taxpayer's principal residence (within the meaning of section 121) or a qualified dwelling used by the taxpayer (or a member of his family within the meaning of section 267(c)(4))";
+}
+
+@source(IRC_S56_E, relation = formalizes, coverage = exact, quote = "The term \"qualified housing interest\" includes interest which is qualified residence interest (as defined in section 163(h)(3)) and is paid or accrued on indebtedness which—")
+rule QualifiedHousingInterestPre1982Debt(d: Indebtedness, taxpayer: Person, y: TaxableYear, incurred: Date) strict {
+    label en official "section 56(e)(3): qualified residence interest on indebtedness incurred before July 1, 1982 and secured by the taxpayer's principal residence or a qualified dwelling used by the taxpayer or a family member";
+    when is_qualified_residence_interest(d, y);
+    when indebtedness_incurred_on(d, incurred);
+    when incurred < @1982-07-01;
+    when secured_by_principal_residence_or_family_qualified_dwelling(d, taxpayer);
+    then qualified_housing_interest_on(d, taxpayer, y);
+}
+
+// --- Section 56(a)(1)(D): normalization rules, a duty of the Secretary --------
+
+entity RegulatoryMandate {
+    label en unofficial "a matter on which a provision of part VI of subchapter A of chapter 1 directs the Secretary to prescribe regulations or other guidance";
+}
+pub relation provision_mandates_secretary_rules(m: RegulatoryMandate) kind institutional {
+    label en unofficial "the Code directs the Secretary to prescribe rules on this matter";
+}
+pub relation secretary_has_prescribed_rules(m: RegulatoryMandate) kind empirical {
+    label en unofficial "the Secretary has prescribed the required rules on this matter";
+}
+
+const NormalizationMethodMandate: RegulatoryMandate = entity_ref("urn:us:irc:income_individual:clir#Mandate56a1D") {
+    label en official "the requirements of a normalization method of accounting for section 56 with respect to public utility property described in section 168(i)(10)";
+}
+assert provision_mandates_secretary_rules(NormalizationMethodMandate);
+
+@source(IRC_S56_A, relation = formalizes, coverage = exact, quote = "the Secretary shall prescribe the requirements of a normalization method of accounting for this section.")
+rule SecretaryPrescribesNormalizationMethod defeasible {
+    label en official "section 56(a)(1)(D): the Secretary shall prescribe the requirements of a normalization method of accounting for public utility property (no time is fixed: an achievement goal over an open window)";
+    for m: RegulatoryMandate;
+    when provision_mandates_secretary_rules(m);
+    when m == NormalizationMethodMandate;
+    then duty NormalizationMethodRequirementsDuty {
+        bearer us.irc.core::Secretary;
+        goal achievement {
+            condition secretary_has_prescribed_rules(m);
+            window [-infinity, infinity];
+        }
+    };
+}

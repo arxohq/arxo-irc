@@ -1,0 +1,397 @@
+// 26 U.S.C. §9801 — Increased portability through limitation on preexisting
+// condition exclusions. Priority section (fully, per task instructions).
+//
+// METHOD NOTES / JUDGMENT CALLS:
+// * The exclusion-PERIOD reduction of (a)(3) ("reduced by the ... aggregate
+//   ... periods of creditable coverage") is modeled as a CLASSIFICATION over
+//   a candidate date (`preexisting_exclusion_may_apply_on`), not as a
+//   computed end-DATE: `add_calendar_period`'s day/month count must be a
+//   literal (AGENT-BRIEF "Compiler traps"), so a Date cannot be constructed
+//   by adding a case-derived (summed) number of days. Comparing two Integer
+//   day-counts via `days_between` avoids that trap entirely and is exact
+//   arithmetic over the asserted dates, matching the "calculation, not an
+//   invented Date" method note.
+// * (c)(2)(A)'s 63-day-break rule is modeled per creditable-coverage period
+//   against the ENROLLMENT DATE directly (the gap immediately preceding
+//   enrollment). A chain of SEVERAL periods separated by SEVERAL distinct
+//   63-day gaps, each breaking continuity independently and cumulatively,
+//   is NOT modeled: TECH_GAP (see coverage note 26/9801/c/2/a/u1) — the
+//   engine has no bounded quantifier over dates/day-by-day ledger (LDC-E4102
+//   territory) to check "no creditable coverage on any day of the gap"
+//   directly; the two-period "does X count given the NEXT period and the
+//   gap to enrollment" case the scenarios ask for is fully modeled.
+// * (c)(2)(D) TAA-related-loss carve-out (plan years before 2014,
+//   transitional) and (e)(2)-(3) issuer-disclosure duties are TECH_GAP/
+//   NON_NORMATIVE per the coverage rows, not silently dropped.
+
+// --- case facts: enrollment, late-enrollee status ---------------------
+
+use self::{
+    GroupHealthPlan,
+    IRC_S9801_A,
+    IRC_S9801_B,
+    IRC_S9801_C,
+    IRC_S9801_D,
+    IRC_S9801_E,
+    IRC_S9801_F,
+    Person,
+    plan_sponsor,
+};
+
+@source(IRC_S9801_B, coverage = partial, quote = "the date of enrollment of the individual in the plan or, if earlier, the first day of the waiting period for such enrollment")
+pub relation enrollment_date(person: Person, plan: GroupHealthPlan, on: Date) kind institutional {
+    label en official "section 9801(b)(2): the enrollment date is the date of enrollment or, if earlier, the first day of the plan's waiting period for the individual";
+}
+
+pub relation waiting_period_first_day(person: Person, plan: GroupHealthPlan, on: Date) kind empirical {
+    label en unofficial "case fact: the first day of the plan's waiting period for this person, if any (section 9801(b)(2))";
+}
+pub relation enrolled_on(person: Person, plan: GroupHealthPlan, on: Date) kind empirical {
+    label en unofficial "case fact: the date the individual actually enrolled under the plan";
+}
+rule EnrollmentDateIsWaitingPeriodStart(person: Person, plan: GroupHealthPlan, w: Date, e: Date) strict {
+    when waiting_period_first_day(person, plan, w) and enrolled_on(person, plan, e) and w <= e;
+    then enrollment_date(person, plan, w);
+}
+rule EnrollmentDateIsEnrollmentItself(person: Person, plan: GroupHealthPlan, e: Date) defeasible {
+    when enrolled_on(person, plan, e);
+    then enrollment_date(person, plan, e);
+    unless enrolled_on(person, plan, e) and waiting_period_first_day(person, plan, _);
+}
+
+@source(IRC_S9801_B, coverage = exact, quote = "The term \"late enrollee\" means, with respect to coverage under a group health plan, a participant or beneficiary who enrolls under the plan other than during—")
+pub relation late_enrollee(person: Person, plan: GroupHealthPlan) kind empirical {
+    label en unofficial "case fact/classification: person enrolled other than during the first eligible period or a section 9801(f) special enrollment period";
+}
+
+// --- creditable coverage: sources named in (c)(1) ----------------------
+
+pub enum CreditableCoverageSourceKind {
+    OtherGroupHealthPlan;
+    HealthInsuranceCoverage;
+    MedicarePartAOrB;
+    Medicaid;
+    Chapter55Title10;
+    IndianHealthService;
+    StateHealthBenefitsRiskPool;
+    FederalEmployeesHealthBenefits;
+    PublicHealthPlan;
+    PeaceCorpsAct;
+}
+
+pub entity CreditableCoveragePeriod {
+    label en unofficial "one period of an individual's coverage of a kind listed in section 9801(c)(1)";
+}
+
+@source(IRC_S9801_C, relation = formalizes, coverage = partial, quote = "the term \"creditable coverage\" means, with respect to an individual, coverage of the individual under any of the following")
+pub relation creditable_coverage_period_of(period: CreditableCoveragePeriod, person: Person, kind: CreditableCoverageSourceKind) kind empirical {
+    label en unofficial "case fact: this period is a period of creditable coverage of this person, of this section 9801(c)(1) kind";
+}
+pub relation creditable_coverage_begins(period: CreditableCoveragePeriod, on: Date) kind empirical {
+    label en unofficial "case fact: the period begins on this date";
+}
+pub relation creditable_coverage_ends(period: CreditableCoveragePeriod, on: Date) kind empirical {
+    label en unofficial "case fact: the period ends on this date";
+}
+
+@source(IRC_S9801_C, relation = formalizes, coverage = partial, quote = "Such term does not include coverage consisting solely of coverage of excepted benefits (as defined in section 9832(c)).")
+pub relation creditable_coverage_period_excepted_benefits_only(period: CreditableCoveragePeriod) kind empirical {
+    label en unofficial "case fact: the period consists solely of excepted benefits under section 9832(c) and so is EXCLUDED from creditable coverage by section 9801(c)(1)'s last sentence";
+}
+
+// The next-period-after existential (excise-entities' "no earlier/no
+// intervening candidate" idiom, reused here to find the NEXT creditable
+// period, if any, after a given one, without a bounded date quantifier).
+// Kept as two SPECIFIC relations (bound through the real `period`/`plan`
+// entities that already appear in positive atoms) rather than one generic
+// two-Date relation: a relation whose head only carries `Date` parameters
+// bound solely by comparisons (`b2 > after and b2 < before`), with no
+// positive atom establishing `after`/`before` themselves, is not
+// range-restricted (§190; LDC-E4101) — the fix is to key the derived fact
+// off the entities the comparison dates ultimately come from.
+relation another_period_starts_before_enrollment(period: CreditableCoveragePeriod, plan: GroupHealthPlan) kind institutional {
+    label en unofficial "some OTHER creditable-coverage period of this person begins strictly between this period's end and the plan's enrollment date";
+}
+rule AnotherPeriodStartsBeforeEnrollment(period: CreditableCoveragePeriod, plan: GroupHealthPlan, person: Person, ends: Date, enroll: Date, period2: CreditableCoveragePeriod, b2: Date) defeasible {
+    when creditable_coverage_period_of(period, person, _)
+        and creditable_coverage_ends(period, ends)
+        and enrollment_date(person, plan, enroll)
+        and creditable_coverage_period_of(period2, person, _)
+        and creditable_coverage_begins(period2, b2)
+        and b2 > ends and b2 < enroll;
+    then another_period_starts_before_enrollment(period, plan);
+}
+relation another_period_starts_before_next(period: CreditableCoveragePeriod, period_next: CreditableCoveragePeriod) kind institutional {
+    label en unofficial "some OTHER creditable-coverage period of this person begins strictly between this period's end and `period_next`'s start";
+}
+rule AnotherPeriodStartsBeforeNext(period: CreditableCoveragePeriod, period_next: CreditableCoveragePeriod, person: Person, ends: Date, begins_next: Date, period2: CreditableCoveragePeriod, b2: Date) defeasible {
+    when creditable_coverage_period_of(period, person, _)
+        and creditable_coverage_ends(period, ends)
+        and creditable_coverage_period_of(period_next, person, _)
+        and creditable_coverage_begins(period_next, begins_next)
+        and creditable_coverage_period_of(period2, person, _)
+        and creditable_coverage_begins(period2, b2)
+        and b2 > ends and b2 < begins_next;
+    then another_period_starts_before_next(period, period_next);
+}
+
+@source(IRC_S9801_C, relation = formalizes, coverage = partial, quote = "A period of creditable coverage shall not be counted, with respect to enrollment of an individual under a group health plan, if, after such period and before the enrollment date, there was a 63-day period during all of which the individual was not covered under any creditable coverage.")
+pub relation creditable_coverage_broken_by_63_day_gap(period: CreditableCoveragePeriod, plan: GroupHealthPlan) kind institutional {
+    label en unofficial "section 9801(c)(2)(A): a 63-consecutive-day gap with NO creditable coverage separates this period's end from the enrollment date (checked against the immediately following period, if any, or the enrollment date itself; a chain of several such gaps across several intervening periods is TECH_GAP, see module header)";
+}
+rule CreditableCoverageBrokenByGapToEnrollment(person: Person, period: CreditableCoveragePeriod, plan: GroupHealthPlan, ends: Date, enroll: Date) defeasible {
+    label en official "section 9801(c)(2)(A): the period does not count when the gap between its end and the enrollment date is at least 63 days and no other period starts in between";
+    when creditable_coverage_period_of(period, person, _)
+        and creditable_coverage_ends(period, ends)
+        and enrollment_date(person, plan, enroll)
+        and days_between(ends, enroll) >= 63;
+    then creditable_coverage_broken_by_63_day_gap(period, plan);
+    unless creditable_coverage_period_of(period, person, _)
+        and enrollment_date(person, plan, _)
+        and another_period_starts_before_enrollment(period, plan);
+}
+rule CreditableCoverageBrokenByGapToNextPeriod(person: Person, period: CreditableCoveragePeriod, plan: GroupHealthPlan, ends: Date, period2: CreditableCoveragePeriod, begins2: Date) defeasible {
+    label en official "section 9801(c)(2)(A): the period does not count when the gap to the NEXT creditable period is itself at least 63 days (a 63-day break with no coverage at all)";
+    when creditable_coverage_period_of(period, person, _)
+        and creditable_coverage_ends(period, ends)
+        and creditable_coverage_period_of(period2, person, _)
+        and creditable_coverage_begins(period2, begins2)
+        and days_between(ends, begins2) >= 63
+        and enrollment_date(person, plan, _);
+    then creditable_coverage_broken_by_63_day_gap(period, plan);
+    unless creditable_coverage_period_of(period, person, _)
+        and creditable_coverage_period_of(period2, person, _)
+        and enrollment_date(person, plan, _)
+        and another_period_starts_before_next(period, period2);
+}
+
+pub relation creditable_coverage_counts(period: CreditableCoveragePeriod, plan: GroupHealthPlan) kind institutional {
+    label en unofficial "the period counts toward the section 9801(a)(3) reduction: it is a real creditable-coverage period (not excepted-benefits-only) and not broken off by a 63-day gap";
+}
+rule CreditableCoverageCounts(period: CreditableCoveragePeriod, person: Person, plan: GroupHealthPlan) defeasible {
+    when creditable_coverage_period_of(period, person, _)
+        and enrollment_date(person, plan, _);
+    then creditable_coverage_counts(period, plan);
+    unless creditable_coverage_period_of(period, person, _)
+        and enrollment_date(person, plan, _)
+        and creditable_coverage_period_excepted_benefits_only(period);
+    unless creditable_coverage_period_of(period, person, _)
+        and enrollment_date(person, plan, _)
+        and creditable_coverage_broken_by_63_day_gap(period, plan);
+}
+
+@source(IRC_S9801_A, relation = formalizes, coverage = partial, quote = "the period of any such preexisting condition exclusion is reduced by the length of the aggregate of the periods of creditable coverage")
+pub relation creditable_coverage_months(person: Person, plan: GroupHealthPlan, months: Integer) kind institutional {
+    label en official "section 9801(a)(3): the aggregate length, in whole months, of the creditable-coverage periods that count toward reducing the preexisting-condition exclusion (day-count summed via `days_between` over counted periods, divided into 30-day months per the corpus's exact-arithmetic convention; a fractional remainder is not itself a further reduction — TECH_GAP if the exact statutory day-to-month convention differs from 30 days, unpinned in the text)";
+}
+rule CreditableCoverageMonthsAggregate(person: Person, plan: GroupHealthPlan) defeasible {
+    label en unofficial "sum of day-lengths of every counted creditable-coverage period, converted to whole months (30-day months)";
+    when enrollment_date(person, plan, _);
+    then creditable_coverage_months(person, plan,
+        (sum all d: Integer for period: CreditableCoveragePeriod, b: Date, e: Date
+            where creditable_coverage_period_of(period, person, _)
+                and creditable_coverage_begins(period, b)
+                and creditable_coverage_ends(period, e)
+                and creditable_coverage_counts(period, plan)
+                and d == days_between(b, e)) / 30);
+}
+
+// --- (a)(1)-(2): the base exclusion window (12 or 18 months) ------------
+
+@source(IRC_S9801_A, relation = formalizes, coverage = exact, quote = "such exclusion extends for a period of not more than 12 months (or 18 months in the case of a late enrollee) after the enrollment date")
+pub relation preexisting_exclusion_base_months(person: Person, plan: GroupHealthPlan, months: Integer) kind institutional {
+    label en official "section 9801(a)(2): the maximum exclusion period before reduction — 12 months, or 18 months for a late enrollee";
+}
+rule PreexistingExclusionBaseMonthsOrdinary(person: Person, plan: GroupHealthPlan) defeasible {
+    when enrollment_date(person, plan, _);
+    then preexisting_exclusion_base_months(person, plan, 12);
+    unless enrollment_date(person, plan, _) and late_enrollee(person, plan);
+}
+rule PreexistingExclusionBaseMonthsLateEnrollee(person: Person, plan: GroupHealthPlan) defeasible {
+    when enrollment_date(person, plan, _) and late_enrollee(person, plan);
+    then preexisting_exclusion_base_months(person, plan, 18);
+}
+
+@source(IRC_S9801_A, relation = formalizes, coverage = exact, quote = "such exclusion relates to a condition (whether physical or mental), regardless of the cause of the condition, for which medical advice, diagnosis, care, or treatment was recommended or received within the 6-month period ending on the enrollment date")
+pub relation condition_within_6_month_lookback(person: Person, plan: GroupHealthPlan) kind empirical {
+    label en unofficial "case fact: medical advice, diagnosis, care or treatment for the condition was recommended or received within the 6-month period ending on the enrollment date (section 9801(a)(1))";
+}
+@source(IRC_S9801_B, relation = formalizes, coverage = exact, quote = "For purposes of this section, genetic information shall not be treated as a condition described in subsection (a)(1) in the absence of a diagnosis of the condition related to such information.")
+pub relation condition_is_undiagnosed_genetic_information(person: Person, plan: GroupHealthPlan) kind empirical {
+    label en unofficial "case fact: the only basis for the exclusion is genetic information with no diagnosis of a related condition — section 9801(b)(1)(B) removes it from (a)(1) entirely";
+}
+
+// --- (d): exclusion not applicable to newborns/adopted children/pregnancy ---
+
+@source(IRC_S9801_D, relation = formalizes, coverage = exact, quote = "a group health plan may not impose any preexisting condition exclusion in the case of an individual who, as of the last day of the 30-day period beginning with the date of birth, is covered under creditable coverage")
+pub relation newborn_covered_within_30_days(person: Person, born_on: Date) kind empirical {
+    label en unofficial "case fact: the newborn is covered under creditable coverage as of the 30th day after birth";
+}
+@source(IRC_S9801_D, relation = formalizes, coverage = exact, quote = "a group health plan may not impose any preexisting condition exclusion in the case of a child who is adopted or placed for adoption before attaining 18 years of age and who, as of the last day of the 30-day period beginning on the date of the adoption or placement for adoption, is covered under creditable coverage")
+pub relation adopted_child_covered_within_30_days(person: Person, adopted_on: Date) kind empirical {
+    label en unofficial "case fact: the adopted/placed-for-adoption child (under 18) is covered under creditable coverage as of the 30th day after adoption/placement";
+}
+@source(IRC_S9801_D, relation = formalizes, coverage = exact, quote = "a group health plan may not impose any preexisting condition exclusion relating to pregnancy as a preexisting condition")
+pub relation condition_is_pregnancy(person: Person, plan: GroupHealthPlan) kind empirical {
+    label en unofficial "case fact: the asserted preexisting condition is pregnancy — section 9801(d)(3) bars an exclusion outright, without any 30-day/creditable-coverage test";
+}
+@source(IRC_S9801_D, relation = formalizes, coverage = exact, quote = "Paragraphs (1) and (2) shall no longer apply to an individual after the end of the first 63-day period during all of which the individual was not covered under any creditable coverage.")
+pub relation newborn_or_adopted_63_day_gap_since(person: Person, plan: GroupHealthPlan) kind empirical {
+    label en unofficial "case fact: after the birth/adoption protection attached, the individual went 63 consecutive days with no creditable coverage at all — section 9801(d)(4) ends the (d)(1)/(2) protection from that point";
+}
+
+pub relation preexisting_exclusion_barred_under_d(person: Person, plan: GroupHealthPlan) kind institutional {
+    label en official "section 9801(d): no preexisting condition exclusion may be imposed at all (newborn/adopted-child protection while unbroken, or pregnancy)";
+}
+rule PreexistingExclusionBarredNewborn(person: Person, plan: GroupHealthPlan, born: Date) defeasible {
+    when newborn_covered_within_30_days(person, born) and enrollment_date(person, plan, _);
+    unless newborn_or_adopted_63_day_gap_since(person, plan);
+    then preexisting_exclusion_barred_under_d(person, plan);
+}
+rule PreexistingExclusionBarredAdopted(person: Person, plan: GroupHealthPlan, adopted: Date) defeasible {
+    when adopted_child_covered_within_30_days(person, adopted) and enrollment_date(person, plan, _);
+    unless newborn_or_adopted_63_day_gap_since(person, plan);
+    then preexisting_exclusion_barred_under_d(person, plan);
+}
+rule PreexistingExclusionBarredPregnancy defeasible {
+    for person: Person;
+    for plan: GroupHealthPlan;
+    when condition_is_pregnancy(person, plan) and enrollment_date(person, plan, _);
+    then preexisting_exclusion_barred_under_d(person, plan);
+}
+
+// --- (a): the exclusion classification over a candidate (condition) date ---
+
+pub relation condition_date_in_question(person: Person, plan: GroupHealthPlan, on: Date) kind empirical {
+    label en unofficial "case fact: the date a scenario asks whether section 9801(a) may exclude coverage of the condition (the candidate date bound below, so the rule stays range-restricted per §190)";
+}
+
+@source(IRC_S9801_A, relation = formalizes, coverage = exact, quote = "a group health plan may, with respect to a participant or beneficiary, impose a preexisting condition exclusion only if")
+pub relation preexisting_exclusion_may_apply_on(person: Person, plan: GroupHealthPlan, on: Date) kind institutional {
+    label en official "section 9801(a): a preexisting-condition exclusion MAY be imposed against this person on this date — all three (a) conditions are met and none of the (b)(1)(B)/(d) bars applies";
+}
+rule PreexistingExclusionMayApply(person: Person, plan: GroupHealthPlan, on: Date, enroll: Date, base: Integer, credit: Integer) defeasible {
+    label en official "section 9801(a)(1)-(3): within the 6-month look-back, and the candidate date falls before the (base months - creditable months) boundary after enrollment";
+    when condition_date_in_question(person, plan, on)
+        and condition_within_6_month_lookback(person, plan)
+        and enrollment_date(person, plan, enroll)
+        and preexisting_exclusion_base_months(person, plan, base)
+        and creditable_coverage_months(person, plan, credit)
+        and on >= enroll
+        and days_between(enroll, on) < (base - credit) * 30;
+    then preexisting_exclusion_may_apply_on(person, plan, on);
+    unless condition_date_in_question(person, plan, on)
+        and condition_is_undiagnosed_genetic_information(person, plan);
+    unless condition_date_in_question(person, plan, on)
+        and preexisting_exclusion_barred_under_d(person, plan);
+}
+
+// --- (e): certification duty --------------------------------------------
+
+pub entity Certification;
+@source(IRC_S9801_E, relation = formalizes, coverage = partial, quote = "at the time an individual ceases to be covered under the plan or otherwise becomes covered under a COBRA continuation provision")
+pub relation coverage_ceased_or_cobra_started_on(person: Person, plan: GroupHealthPlan, on: Date) kind empirical {
+    label en unofficial "case fact: the date the individual ceased plan coverage or became covered under a COBRA continuation provision (section 9801(e)(1)(A)(i))";
+}
+@source(IRC_S9801_E, relation = formalizes, coverage = partial, quote = "in the case of an individual becoming covered under such a provision, at the time the individual ceases to be covered under such provision")
+pub relation cobra_coverage_ceased_on(person: Person, plan: GroupHealthPlan, on: Date) kind empirical {
+    label en unofficial "case fact: the date COBRA continuation coverage itself ceased (section 9801(e)(1)(A)(ii))";
+}
+@source(IRC_S9801_E, relation = formalizes, coverage = partial, quote = "on the request on behalf of an individual made not later than 24 months after the date of cessation of the coverage described in clause (i) or (ii), whichever is later")
+pub relation certification_requested_on(person: Person, plan: GroupHealthPlan, on: Date) kind empirical {
+    label en unofficial "case fact: a request for certification was made on behalf of the individual on this date (section 9801(e)(1)(A)(iii))";
+}
+pub relation certification_issued(cert: Certification, person: Person, plan: GroupHealthPlan, on: Date) kind empirical {
+    label en unofficial "case fact: the plan issued the certification on this date";
+}
+
+@source(IRC_S9801_E, relation = formalizes, coverage = exact, quote = "A group health plan shall provide the certification described in subparagraph (B)")
+rule S9801ECertificationAtCessationDuty(person: Person, plan: GroupHealthPlan, sponsor: Person, ceased: Date) strict {
+    label en official "section 9801(e)(1)(A)(i): the plan must certify at the time coverage ceases or COBRA coverage begins";
+    when coverage_ceased_or_cobra_started_on(person, plan, ceased) and plan_sponsor(plan, sponsor);
+    then duty S9801CertificationAtCessation {
+        bearer sponsor;
+        beneficiary person;
+        goal achievement {
+            condition certification_issued(_, person, plan, _);
+            window [ceased, ceased];
+        }
+    };
+}
+rule S9801ECertificationAtCobraEndDuty(person: Person, plan: GroupHealthPlan, sponsor: Person, ended: Date) strict {
+    label en official "section 9801(e)(1)(A)(ii): the plan must certify when COBRA continuation coverage itself ends";
+    when cobra_coverage_ceased_on(person, plan, ended) and plan_sponsor(plan, sponsor);
+    then duty S9801CertificationAtCobraEnd {
+        bearer sponsor;
+        beneficiary person;
+        goal achievement {
+            condition certification_issued(_, person, plan, _);
+            window [ended, ended];
+        }
+    };
+}
+rule S9801ECertificationOnRequestDuty(person: Person, plan: GroupHealthPlan, sponsor: Person, requested: Date, ceased: Date, latest_ceased: Date) strict {
+    label en official "section 9801(e)(1)(A)(iii): the plan must certify on a timely request, made not later than 24 months after the later cessation event";
+    when certification_requested_on(person, plan, requested)
+        and plan_sponsor(plan, sponsor)
+        and coverage_ceased_or_cobra_started_on(person, plan, ceased)
+        and requested <= add_calendar_period(ceased, 24 calendar_month);
+    then duty S9801CertificationOnRequest {
+        bearer sponsor;
+        beneficiary person;
+        goal achievement {
+            condition certification_issued(_, person, plan, _);
+            window [requested, requested];
+        }
+    };
+}
+
+// --- (f): special enrollment periods -------------------------------------
+
+@source(IRC_S9801_F, relation = formalizes, coverage = partial, quote = "the employee requests such enrollment not later than 30 days after the date of exhaustion of coverage described in subparagraph (C)(i) or termination of coverage or employer contribution described in subparagraph (C)(ii).")
+pub relation prior_coverage_lost_on(person: Person, on: Date) kind empirical {
+    label en unofficial "case fact: the date prior group coverage was exhausted (COBRA) or terminated for loss of eligibility/employer-contribution termination (section 9801(f)(1)(C))";
+}
+pub relation special_enrollment_requested_on(person: Person, plan: GroupHealthPlan, on: Date) kind empirical {
+    label en unofficial "case fact: the date the employee/dependent requested special enrollment";
+}
+@source(IRC_S9801_F, relation = formalizes, coverage = exact, quote = "A group health plan shall permit an employee who is eligible, but not enrolled, for coverage under the terms of the plan (or a dependent of such an employee if the dependent is eligible, but not enrolled, for coverage under such terms) to enroll for coverage under the terms of the plan")
+pub relation loss_of_coverage_special_enrollment_timely(person: Person, plan: GroupHealthPlan) kind institutional {
+    label en official "section 9801(f)(1)(D): the request for special enrollment following loss of other coverage was made not later than 30 days after the loss";
+}
+rule LossOfCoverageSpecialEnrollmentTimely(person: Person, plan: GroupHealthPlan, lost: Date, requested: Date) strict {
+    when prior_coverage_lost_on(person, lost)
+        and special_enrollment_requested_on(person, plan, requested)
+        and requested <= add_calendar_period(lost, 30 calendar_day);
+    then loss_of_coverage_special_enrollment_timely(person, plan);
+}
+
+@source(IRC_S9801_F, relation = formalizes, coverage = partial, quote = "a person becomes such a dependent of the individual through marriage, birth, or adoption or placement for adoption")
+pub relation became_dependent_on(dependent: Person, of: Person, on: Date) kind empirical {
+    label en unofficial "case fact: the date a person became a dependent of a plan participant through marriage, birth, or adoption/placement for adoption (section 9801(f)(2)(A)(iii))";
+}
+@source(IRC_S9801_F, relation = formalizes, coverage = exact, quote = "The dependent special enrollment period under this subparagraph shall be a period of not less than 30 days")
+pub relation dependent_special_enrollment_timely(dependent: Person, plan: GroupHealthPlan) kind institutional {
+    label en official "section 9801(f)(2)(B): the dependent special enrollment request was made within the (at least) 30-day period starting when dependent coverage became available or the marriage/birth/adoption event occurred, whichever is later";
+}
+rule DependentSpecialEnrollmentTimely(dependent: Person, of: Person, plan: GroupHealthPlan, dep_event: Date, requested: Date) strict {
+    when became_dependent_on(dependent, of, dep_event)
+        and special_enrollment_requested_on(dependent, plan, requested)
+        and requested <= add_calendar_period(dep_event, 30 calendar_day);
+    then dependent_special_enrollment_timely(dependent, plan);
+}
+
+@source(IRC_S9801_F, relation = formalizes, coverage = partial, quote = "the employee requests coverage under the group health plan not later than 60 days after the date of termination of such coverage")
+pub relation medicaid_chip_loss_on(person: Person, on: Date) kind empirical {
+    label en unofficial "case fact: the date of termination of Medicaid/State child health plan (CHIP) coverage, or the date of a CHIP/Medicaid premium-assistance eligibility determination (section 9801(f)(3)(A))";
+}
+@source(IRC_S9801_F, relation = formalizes, coverage = exact, quote = "the employee requests coverage under the group health plan not later than 60 days after the date the employee or dependent is determined to be eligible for such assistance")
+pub relation chip_medicaid_special_enrollment_timely(person: Person, plan: GroupHealthPlan) kind institutional {
+    label en official "section 9801(f)(3): the CHIP/Medicaid-triggered special enrollment request was made within 60 days";
+}
+rule ChipMedicaidSpecialEnrollmentTimely(person: Person, plan: GroupHealthPlan, lost: Date, requested: Date) strict {
+    when medicaid_chip_loss_on(person, lost)
+        and special_enrollment_requested_on(person, plan, requested)
+        and requested <= add_calendar_period(lost, 60 calendar_day);
+    then chip_medicaid_special_enrollment_timely(person, plan);
+}

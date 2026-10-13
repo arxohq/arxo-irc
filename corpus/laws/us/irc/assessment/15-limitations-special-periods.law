@@ -1,0 +1,786 @@
+// §6501 — special periods and rules that stages 1-3 left as TECH_GAP
+// (stage 4, 26.09.2026, DECISION-0379, implemented_unverified).
+//
+// Covered here: (c)(6) termination tax, (c)(9) undisclosed gifts, (c)(10)
+// listed transactions, (c)(12) partnership-adjustment taxes, (d)(2)-(3)
+// dissolution branches, (e)(1)(C), (e)(2), (e)(3) omissions, (f) personal
+// holding company schedule, (g) good-faith misclassification, (i)-(k)
+// carryback rules, (l) chapter 42 / IRA rules, (m) credit elections, (n)
+// employer shared responsibility.
+//
+// METHOD.
+//  - A period that REPLACES the general 3-year rule (6-year periods, (n))
+//    is announced by `six_year_assessment_period` / the dedicated tuple and
+//    suppresses the general rule through `general_three_year_period_displaced`
+//    (the general rule of 04-limitations.law reads it under `not_known`).
+//  - A period that applies to ONE ITEM of the year's tax ("a deficiency
+//    attributable to ...", "with respect to such transaction") is written to
+//    the dedicated relation `assessment_period_ends_for_attributable_item`,
+//    NOT to `assessment_period_ends`: `assessment_period_ends` has no item
+//    argument, and a further tuple there would move the bar of the whole
+//    year's tax (no max-over-derived, module 04 header). A consumer reads
+//    the dedicated relation for the item at hand.
+//  - Facts the statute leaves to other owners (private foundation status,
+//    IRA status, credit-election sections, the §6056 return) are empirical
+//    case facts named in the label; nothing is computed on their behalf.
+//
+// JUDGMENT CALLS.
+//  - (e)(2)/(e)(3) omissions net of disclosed items: the case asserts only the
+//    NET omitted amount (`omitted_*`), the same convention as (e)(1)(B)(iii).
+//  - (f): the 6-year period applies to the personal holding company tax only;
+//    it is kept in `phc_tax_assessment_period_ends`, apart from the return's
+//    ordinary period (the ordinary 3-year tuple of the same return stays).
+//  - (l)(4)(B)(ii): the deemed filing date is the unextended due date, from
+//    which the general rule counts 3 years (the immunity reads it as usual).
+//  - (d) ceiling "but not after 3 years": not enforced here; the power writes
+//    the 18-month tuple and a consumer takes the earlier of the two (G136).
+//  - (k): the cap on the amount assessable "solely by reason of this
+//    subsection" is a Money relation, not a pruning of the period.
+
+language "law.core" version "0.2";
+package us.irc.assessment version "0.1.1";
+namespace "urn:us:irc:assessment:clir";
+
+use self::{
+    Corporation,
+    IRC_S6501_C,
+    IRC_S6501_D,
+    IRC_S6501_E,
+    IRC_S6501_F,
+    IRC_S6501_G,
+    IRC_S6501_I,
+    IRC_S6501_J,
+    IRC_S6501_K,
+    IRC_S6501_L,
+    IRC_S6501_M,
+    IRC_S6501_N,
+    Partnership,
+    Person,
+    Return,
+    TaxKind,
+    TaxableYear,
+    assessment_period_ends,
+    assessment_period_ends_via_carryback,
+    assessment_period_unlimited,
+    corporation_dissolution_completed,
+    corporation_prompt_assessment_request,
+    deemed_filed_date,
+    notice_of_final_partnership_adjustment_mailed,
+    prompt_assessment_request_valid,
+    prompt_assessment_requested,
+    substantial_omission_from_gross_income,
+};
+
+// ============================================================================
+// Shared machinery
+// ============================================================================
+
+pub enum AttributableItemKind {
+    ListedTransaction;          // §6501(c)(10)
+    PartnershipAdjustmentTax;   // §6501(c)(12)
+    ContributionFailure4942g3;  // §6501(l)(2)
+    SetAsideFailure4942g2;      // §6501(l)(3)
+    CreditElection;             // §6501(m)
+    label en unofficial "which §6501 provision extends the period for one item of the year's tax";
+}
+pub relation assessment_period_ends_for_attributable_item(p: Person, y: TaxableYear, k: TaxKind, origin: AttributableItemKind, d: Date) kind institutional {
+    label en unofficial "the last date on which the tax attributable to one item (transaction, election, adjustment, contribution) may be assessed, when a §6501 provision names an item-specific period; NOT the whole year's period (`assessment_period_ends`)";
+}
+pub relation six_year_assessment_period(p: Person, y: TaxableYear, k: TaxKind) kind institutional {
+    label en unofficial "a §6501 provision replaces the 3-year period of (a) with a 6-year period from the filing of the return for this (person, year, tax)";
+}
+pub relation general_three_year_period_displaced(p: Person, y: TaxableYear, k: TaxKind) kind institutional {
+    label en unofficial "a special provision fixes the assessment period for this (person, year, tax) instead of the 3-year rule of (a) ((e)/(l)(4)(C) six years)";
+}
+rule S6501SubstantialOmissionIsSixYearPeriod strict {
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    when substantial_omission_from_gross_income(p, y, k);
+    then six_year_assessment_period(p, y, k);
+}
+rule S6501SixYearPeriodDisplacesGeneral defeasible {
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    when six_year_assessment_period(p, y, k);
+    then general_three_year_period_displaced(p, y, k);
+}
+rule S6501SixYearPeriodTuple defeasible {
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for filed: Date;
+    when six_year_assessment_period(p, y, k) and deemed_filed_date(p, y, k, filed);
+    then assessment_period_ends(p, y, k, add_calendar_period(filed, 6 calendar_year));
+}
+
+// ============================================================================
+// (c)(6), (c)(9) — no period
+// ============================================================================
+
+pub relation private_foundation_termination_tax_507(p: Person, y: TaxableYear, k: TaxKind) kind empirical {
+    label en official "a tax on termination of private foundation status under section 507";
+}
+@source(IRC_S6501_C, relation = formalizes, coverage = exact, quote = "In the case of a tax on termination of private foundation status under section 507, such tax may be assessed, or a proceeding in court for the collection of such tax may be begun without assessment, at any time.")
+rule S6501C6TerminationTaxNoLimitation strict {
+    label en official "a tax on termination of private foundation status under section 507 may be assessed at any time";
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    when private_foundation_termination_tax_507(p, y, k);
+    then assessment_period_unlimited(p, y, k);
+}
+pub relation gift_required_on_return_and_not_shown(p: Person, y: TaxableYear) kind empirical {
+    label en official "a gift of property whose value (or the increase in taxable gifts required under section 2701(d)) is required to be shown on a return of tax imposed by chapter 12 (without regard to section 2503(b)) and is not shown on such return";
+}
+pub relation gift_item_adequately_disclosed(p: Person, y: TaxableYear) kind empirical {
+    label en official "the item is disclosed in the return, or in a statement attached to the return, in a manner adequate to apprise the Secretary of the nature of such item";
+}
+@source(IRC_S6501_C, relation = formalizes, coverage = exact, quote = "any tax imposed by chapter 12 on such gift may be assessed, or a proceeding in court for the collection of such tax may be begun without assessment, at any time.")
+rule S6501C9UndisclosedGiftNoLimitation strict {
+    label en official "chapter 12 tax on a gift required to be shown on the return and not shown may be assessed at any time, unless the item is adequately disclosed";
+    for p: Person;
+    for y: TaxableYear;
+    when gift_required_on_return_and_not_shown(p, y) and not_known(gift_item_adequately_disclosed(p, y));
+    then assessment_period_unlimited(p, y, us.irc.core::GiftCh12);
+}
+
+// ============================================================================
+// (c)(10) — listed transactions: 1 year after the EARLIER of (A), (B)
+// ============================================================================
+
+pub relation listed_transaction_information_omitted(p: Person, y: TaxableYear) kind empirical {
+    label en official "a taxpayer fails to include on any return or statement for the taxable year any information with respect to a listed transaction (as defined in section 6707A(c)(2)) which is required under section 6011 to be included";
+}
+pub relation listed_transaction_information_furnished_on(p: Person, y: TaxableYear, d: Date) kind empirical {
+    label en official "the date on which the Secretary is furnished the information so required";
+}
+pub relation material_advisor_met_6112_on(p: Person, y: TaxableYear, d: Date) kind empirical {
+    label en official "the date that a material advisor meets the requirements of section 6112 with respect to a request by the Secretary under section 6112(b) relating to such transaction with respect to such taxpayer";
+}
+pub relation listed_transaction_b_date_strictly_earlier(p: Person, y: TaxableYear, aDate: Date) kind institutional {
+    label en unofficial "G136 pattern: a section 6112 date strictly earlier than the given (A) date exists";
+}
+rule S6501C10BEarlierThanA defeasible {
+    for p: Person;
+    for y: TaxableYear;
+    for aDate: Date;
+    for bDate: Date;
+    when listed_transaction_information_furnished_on(p, y, aDate)
+        and material_advisor_met_6112_on(p, y, bDate)
+        and bDate < aDate;
+    then listed_transaction_b_date_strictly_earlier(p, y, aDate);
+}
+pub relation listed_transaction_a_date_not_later(p: Person, y: TaxableYear, bDate: Date) kind institutional {
+    label en unofficial "G136 pattern: an (A) date on or before the given section 6112 date exists";
+}
+rule S6501C10ANotLaterThanB defeasible {
+    for p: Person;
+    for y: TaxableYear;
+    for aDate: Date;
+    for bDate: Date;
+    when listed_transaction_information_furnished_on(p, y, aDate)
+        and material_advisor_met_6112_on(p, y, bDate)
+        and aDate <= bDate;
+    then listed_transaction_a_date_not_later(p, y, bDate);
+}
+@source(IRC_S6501_C, relation = formalizes, coverage = exact, quote = "the time for assessment of any tax imposed by this title with respect to such transaction shall not expire before the date which is 1 year after the earlier of—")
+rule S6501C10PeriodFromInformationFurnished defeasible {
+    label en official "the time to assess tax with respect to the listed transaction does not expire before 1 year after the date the required information is furnished, when that is the earlier date";
+    for p: Person;
+    for y: TaxableYear;
+    for aDate: Date;
+    when listed_transaction_information_omitted(p, y)
+        and listed_transaction_information_furnished_on(p, y, aDate)
+        and not_known(listed_transaction_b_date_strictly_earlier(p, y, aDate));
+    then assessment_period_ends_for_attributable_item(p, y, us.irc.core::IncomeCh1, ListedTransaction, add_calendar_period(aDate, 1 calendar_year));
+}
+@source(IRC_S6501_C, relation = formalizes, coverage = exact, quote = "the date that a material advisor meets the requirements of section 6112 with respect to a request by the Secretary under section 6112(b) relating to such transaction with respect to such taxpayer.")
+rule S6501C10PeriodFromMaterialAdvisorCompliance defeasible {
+    label en official "the time to assess tax with respect to the listed transaction does not expire before 1 year after the material advisor meets section 6112, when that is the earlier date";
+    for p: Person;
+    for y: TaxableYear;
+    for bDate: Date;
+    when listed_transaction_information_omitted(p, y)
+        and material_advisor_met_6112_on(p, y, bDate)
+        and not_known(listed_transaction_a_date_not_later(p, y, bDate));
+    then assessment_period_ends_for_attributable_item(p, y, us.irc.core::IncomeCh1, ListedTransaction, add_calendar_period(bDate, 1 calendar_year));
+}
+
+// ============================================================================
+// (c)(12) — taxes under chapters 2 and 2A attributable to a partnership adjustment
+// ============================================================================
+
+pub relation tax_attributable_to_subchapter_c_partnership_adjustment(p: Person, y: TaxableYear, k: TaxKind, pship: Partnership, reviewedYear: TaxableYear) kind empirical {
+    label en official "a tax imposed under chapter 2 or 2A which is attributable to a partnership adjustment determined under subchapter C of chapter 63";
+}
+pub relation section_6234_decision_final_on(pship: Partnership, reviewedYear: TaxableYear, d: Date) kind empirical {
+    label en official "the decision of a court in a proceeding brought under section 6234 becomes final";
+}
+@source(IRC_S6501_C, relation = formalizes, coverage = exact, quote = "(A) in the case of an adjustment pursuant to the decision of a court in a proceeding brought under section 6234, such decision becomes final, or")
+rule S6501C12ACourtDecisionFinalPlusOneYear defeasible {
+    label en official "the assessment period of the chapter 2/2A tax attributable to a court-decided partnership adjustment does not expire before 1 year after the decision becomes final";
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for pship: Partnership;
+    for reviewedYear: TaxableYear;
+    for finalOn: Date;
+    when tax_attributable_to_subchapter_c_partnership_adjustment(p, y, k, pship, reviewedYear)
+        and section_6234_decision_final_on(pship, reviewedYear, finalOn)
+        and (k == us.irc.core::SelfEmploymentCh2 or k == us.irc.core::NiitCh2A);
+    then assessment_period_ends_for_attributable_item(p, y, k, PartnershipAdjustmentTax, add_calendar_period(finalOn, 1 calendar_year));
+}
+pub relation section_6234_decision_exists(pship: Partnership, reviewedYear: TaxableYear) kind institutional {
+    label en unofficial "existential wrapper over `section_6234_decision_final_on`, so that case (B) can test its absence";
+}
+rule S6501C12DecisionExists defeasible {
+    for pship: Partnership;
+    for reviewedYear: TaxableYear;
+    for finalOn: Date;
+    when section_6234_decision_final_on(pship, reviewedYear, finalOn);
+    then section_6234_decision_exists(pship, reviewedYear);
+}
+@source(IRC_S6501_C, relation = formalizes, coverage = exact, quote = "(B) in any other case, 90 days after the date on which the notice of the final partnership adjustment is mailed under section 6231.")
+rule S6501C12BOtherCaseNinetyDaysAfterFpaPlusOneYear defeasible {
+    label en official "in any other case the period of the chapter 2/2A tax does not expire before 1 year after the date 90 days after the notice of final partnership adjustment is mailed";
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for pship: Partnership;
+    for reviewedYear: TaxableYear;
+    for mailedOn: Date;
+    when tax_attributable_to_subchapter_c_partnership_adjustment(p, y, k, pship, reviewedYear)
+        and notice_of_final_partnership_adjustment_mailed(pship, reviewedYear, mailedOn)
+        and not_known(section_6234_decision_exists(pship, reviewedYear))
+        and (k == us.irc.core::SelfEmploymentCh2 or k == us.irc.core::NiitCh2A);
+    then assessment_period_ends_for_attributable_item(p, y, k, PartnershipAdjustmentTax, add_calendar_period(add_calendar_period(mailedOn, 90 calendar_day), 1 calendar_year));
+}
+
+// ============================================================================
+// (d)(2), (d)(3) — corporate dissolution branches of the prompt-assessment request
+// ============================================================================
+
+pub relation corporation_notified_dissolution_already_begun(p: Person, y: TaxableYear, requestedOn: Date) kind empirical {
+    label en official "the written request notifies the Secretary that a dissolution has in good faith been begun (section 6501(d)(2)(A))";
+}
+pub relation corporation_dissolution_completed_on(p: Person, y: TaxableYear, completedOn: Date) kind empirical {
+    label en official "the date the dissolution is completed";
+}
+@source(IRC_S6501_D, relation = formalizes, coverage = exact, quote = "(2)(A) such written request notifies the Secretary that a dissolution has in good faith been begun, and (B) the dissolution is completed; or")
+rule S6501PromptAssessmentValidForCorporationDissolutionAlreadyBegun defeasible {
+    label en official "a corporation's request is valid when it notifies that a dissolution has in good faith been begun and the dissolution is completed";
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for requestedOn: Date;
+    when prompt_assessment_requested(p, y, k, requestedOn)
+        and corporation_prompt_assessment_request(p)
+        and corporation_notified_dissolution_already_begun(p, y, requestedOn)
+        and corporation_dissolution_completed(p, y);
+    then prompt_assessment_request_valid(p, y, k, requestedOn);
+}
+@source(IRC_S6501_D, relation = formalizes, coverage = exact, quote = "(3) a dissolution has been completed at the time such written request is made.")
+rule S6501PromptAssessmentValidForCorporationDissolutionAlreadyCompleted defeasible {
+    label en official "a corporation's request is valid when a dissolution has been completed at the time the request is made";
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for requestedOn: Date;
+    for completedOn: Date;
+    when prompt_assessment_requested(p, y, k, requestedOn)
+        and corporation_prompt_assessment_request(p)
+        and corporation_dissolution_completed_on(p, y, completedOn)
+        and completedOn <= requestedOn;
+    then prompt_assessment_request_valid(p, y, k, requestedOn);
+}
+
+// ============================================================================
+// (e)(1)(C), (e)(2), (e)(3) — six-year periods for omissions
+// ============================================================================
+
+pub relation omitted_amount_includible_under_951a(r: Return, amount: Money) kind empirical {
+    label en official "the taxpayer omits from gross income an amount properly includible therein under section 951(a)";
+}
+@source(IRC_S6501_E, relation = formalizes, coverage = exact, quote = "If the taxpayer omits from gross income an amount properly includible therein under section 951(a), the tax may be assessed, or a proceeding in court for the collection of such tax may be done without assessing, at any time within 6 years after the return was filed.")
+rule S6501E1CConstructiveDividendOmissionSixYears strict {
+    label en official "an omission of an amount includible under section 951(a) gives a 6-year assessment period (no percentage threshold)";
+    for r: Return;
+    for p: Person;
+    for y: TaxableYear;
+    for amount: Money;
+    when us.irc.core::return_of(r, p, y, us.irc.core::IncomeCh1) and omitted_amount_includible_under_951a(r, amount);
+    then six_year_assessment_period(p, y, us.irc.core::IncomeCh1);
+}
+pub relation gross_estate_or_gifts_stated_on_return(r: Return, amount: Money) kind empirical {
+    label en official "the gross estate stated in the return (chapter 11) or the total amount of gifts stated in the return (chapter 12)";
+}
+pub relation omitted_from_gross_estate_or_gifts(r: Return, amount: Money) kind empirical {
+    label en official "items includible in the gross estate or total gifts that the return omits, NET of any item disclosed in the return or an attached statement in a manner adequate to apprise the Secretary of its nature and amount";
+}
+@source(IRC_S6501_E, relation = formalizes, coverage = exact, quote = "if the taxpayer omits from the gross estate or from the total amount of the gifts made during the period for which the return was filed items includible in such gross estate or such total gifts, as the case may be, as exceed in amount 25 percent of the gross estate stated in the return or the total amount of gifts stated in the return")
+rule S6501E2EstateGiftOmissionOverTwentyFivePercent strict {
+    label en official "an omission from the gross estate or total gifts exceeding 25 percent of the amount stated gives a 6-year period";
+    for r: Return;
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for stated: Money;
+    for omitted: Money;
+    when us.irc.core::return_of(r, p, y, k)
+        and (k == us.irc.core::EstateCh11 or k == us.irc.core::GiftCh12)
+        and gross_estate_or_gifts_stated_on_return(r, stated)
+        and omitted_from_gross_estate_or_gifts(r, omitted)
+        and (omitted * 4.00) > stated;
+    then six_year_assessment_period(p, y, k);
+}
+pub relation is_subtitle_d_tax(k: TaxKind) kind institutional {
+    label en unofficial "the tax kind is a tax imposed under a provision of subtitle D (miscellaneous excise taxes, chapters 31-50A)";
+}
+rule S6501E3SubtitleDKinds strict {
+    then is_subtitle_d_tax(us.irc.core::RetailExciseCh31);
+    then is_subtitle_d_tax(us.irc.core::ManufacturersExciseCh32);
+    then is_subtitle_d_tax(us.irc.core::FacilitiesServicesExciseCh33);
+    then is_subtitle_d_tax(us.irc.core::InsurancePoliciesExciseCh34);
+    then is_subtitle_d_tax(us.irc.core::WageringExciseCh35);
+    then is_subtitle_d_tax(us.irc.core::OtherExciseCh36);
+    then is_subtitle_d_tax(us.irc.core::StockRepurchaseExciseCh37);
+    then is_subtitle_d_tax(us.irc.core::EnvironmentalExciseCh38);
+    then is_subtitle_d_tax(us.irc.core::PublicCharitiesExciseCh41);
+    then is_subtitle_d_tax(us.irc.core::PrivateFoundationsExciseCh42);
+    then is_subtitle_d_tax(us.irc.core::QualifiedPlansExciseCh43);
+    then is_subtitle_d_tax(us.irc.core::InvestmentEntitiesExciseCh44);
+    then is_subtitle_d_tax(us.irc.core::ExpatriatedEntitiesExciseCh45);
+    then is_subtitle_d_tax(us.irc.core::GoldenParachuteExciseCh46);
+    then is_subtitle_d_tax(us.irc.core::GroupHealthPlansExciseCh47);
+    then is_subtitle_d_tax(us.irc.core::MinimumEssentialCoverageCh48);
+    then is_subtitle_d_tax(us.irc.core::CosmeticServicesExciseCh49);
+    then is_subtitle_d_tax(us.irc.core::ForeignProcurementExciseCh50);
+    then is_subtitle_d_tax(us.irc.core::DesignatedDrugsFeeCh50A);
+}
+pub relation excise_tax_reported_on_return(r: Return, amount: Money) kind empirical {
+    label en official "the amount of tax reported on a return of a tax imposed under a provision of subtitle D";
+}
+pub relation excise_tax_omitted_from_return(r: Return, amount: Money) kind empirical {
+    label en official "an amount of such tax properly includible on the return but omitted, NET of chapter 41, 42, 43 or 44 tax whose giving transaction is disclosed in the return or an attached statement in a manner adequate to apprise the Secretary of the existence and nature of the item";
+}
+@source(IRC_S6501_E, relation = formalizes, coverage = exact, quote = "if the return omits an amount of such tax properly includible thereon which exceeds 25 percent of the amount of such tax reported thereon")
+rule S6501E3ExciseOmissionOverTwentyFivePercent strict {
+    label en official "an omission of subtitle D tax exceeding 25 percent of the tax reported gives a 6-year period";
+    for r: Return;
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for reported: Money;
+    for omitted: Money;
+    when us.irc.core::return_of(r, p, y, k)
+        and is_subtitle_d_tax(k)
+        and excise_tax_reported_on_return(r, reported)
+        and excise_tax_omitted_from_return(r, omitted)
+        and (omitted * 4.00) > reported;
+    then six_year_assessment_period(p, y, k);
+}
+
+// ============================================================================
+// (f) — personal holding company schedule
+// ============================================================================
+
+pub relation phc_schedule_not_filed_with_return(c: Corporation, y: TaxableYear) kind empirical {
+    label en official "the corporation fails to file with its chapter 1 return the schedule of section 543 items and of the section 544 owners of more than 50 percent in value during the last half of the year";
+}
+pub relation phc_tax_assessment_period_ends(c: Corporation, y: TaxableYear, d: Date) kind institutional {
+    label en unofficial "the last date on which the personal holding company tax for the year may be assessed when the schedule of section 6501(f) was not filed (6 years after the return)";
+}
+@source(IRC_S6501_F, relation = formalizes, coverage = exact, quote = "the personal holding company tax for such year may be assessed, or a proceeding in court for the collection of such tax may be begun without assessment, at any time within 6 years after the return for such year was filed.")
+rule S6501FPhcScheduleFailureSixYears defeasible {
+    label en official "the personal holding company tax may be assessed within 6 years after the return was filed when the required schedule is not filed";
+    for c: Corporation;
+    for y: TaxableYear;
+    for r: Return;
+    for filed: Date;
+    when us.irc.corporations::personal_holding_company(c, y)
+        and phc_schedule_not_filed_with_return(c, y)
+        and us.irc.core::return_of(r, c, y, us.irc.core::IncomeCh1)
+        and us.irc.core::filed_on(r, filed);
+    then phc_tax_assessment_period_ends(c, y, add_calendar_period(filed, 6 calendar_year));
+}
+
+// ============================================================================
+// (g) — good-faith misclassification: the return counts as the corporation's
+// ============================================================================
+
+pub relation return_deemed_return_of_reclassified_taxpayer(r: Return, p: Person, y: TaxableYear, k: TaxKind) kind institutional {
+    label en unofficial "for purposes of section 6501 the return is deemed the return of the corporation (or taxable organization, or non-DISC corporation) the filer was thereafter held to be";
+}
+external judgment relation determined_in_good_faith_to_be_trust_or_partnership(p: Person) {
+    authority TaxCourt;
+    label en official "a taxpayer determines in good faith that it is a trust or partnership and files a return as such under subtitle A";
+}
+pub relation held_to_be_corporation_for_year(p: Person, y: TaxableYear) kind empirical {
+    label en official "the taxpayer is thereafter held to be a corporation for the taxable year for which the return is filed";
+}
+pub relation filed_return_as_trust_or_partnership(r: Return, p: Person, y: TaxableYear) kind empirical {
+    label en official "the taxpayer files a return as a trust or partnership under subtitle A for the year";
+}
+@source(IRC_S6501_G, relation = formalizes, coverage = exact, quote = "such return shall be deemed the return of the corporation for purposes of this section.")
+rule S6501G1TrustOrPartnershipReturnDeemedCorporationReturn defeasible {
+    label en official "a good-faith trust or partnership return of a taxpayer later held to be a corporation is deemed the corporation's return";
+    for r: Return;
+    for p: Person;
+    for y: TaxableYear;
+    when filed_return_as_trust_or_partnership(r, p, y)
+        and determined_in_good_faith_to_be_trust_or_partnership(p)
+        and held_to_be_corporation_for_year(p, y);
+    then return_deemed_return_of_reclassified_taxpayer(r, p, y, us.irc.core::IncomeCh1);
+}
+external judgment relation determined_in_good_faith_to_be_exempt_organization(p: Person) {
+    authority TaxCourt;
+    label en official "a taxpayer determines in good faith that it is an exempt organization and files a return as such under section 6033";
+}
+pub relation filed_return_as_exempt_organization(r: Return, p: Person, y: TaxableYear) kind empirical {
+    label en official "the taxpayer files a return as an exempt organization under section 6033";
+}
+pub relation held_to_be_taxable_organization_for_year(p: Person, y: TaxableYear) kind empirical {
+    label en official "the taxpayer is thereafter held to be a taxable organization for the taxable year for which the return is filed";
+}
+@source(IRC_S6501_G, relation = formalizes, coverage = exact, quote = "such return shall be deemed the return of the organization for purposes of this section.")
+rule S6501G2ExemptOrganizationReturnDeemedTaxableReturn defeasible {
+    label en official "a good-faith exempt-organization return of a taxpayer later held taxable is deemed the organization's return";
+    for r: Return;
+    for p: Person;
+    for y: TaxableYear;
+    when filed_return_as_exempt_organization(r, p, y)
+        and determined_in_good_faith_to_be_exempt_organization(p)
+        and held_to_be_taxable_organization_for_year(p, y);
+    then return_deemed_return_of_reclassified_taxpayer(r, p, y, us.irc.core::IncomeCh1);
+}
+external judgment relation determined_in_good_faith_to_be_disc(p: Person) {
+    authority TaxCourt;
+    label en official "a corporation determines in good faith that it is a DISC (as defined in section 992(a)) and files a return as such under section 6011(c)(2)";
+}
+pub relation filed_return_as_disc(r: Return, p: Person, y: TaxableYear) kind empirical {
+    label en official "the corporation files a return as a DISC under section 6011(c)(2)";
+}
+pub relation held_not_to_be_disc_for_year(p: Person, y: TaxableYear) kind empirical {
+    label en official "the corporation is thereafter held to be a corporation which is not a DISC for the taxable year for which the return is filed";
+}
+@source(IRC_S6501_G, relation = formalizes, coverage = exact, quote = "such return shall be deemed the return of a corporation which is not a DISC for purposes of this section.")
+rule S6501G3DiscReturnDeemedNonDiscReturn defeasible {
+    label en official "a good-faith DISC return of a corporation later held not a DISC is deemed the return of a non-DISC corporation";
+    for r: Return;
+    for p: Person;
+    for y: TaxableYear;
+    when filed_return_as_disc(r, p, y)
+        and determined_in_good_faith_to_be_disc(p)
+        and held_not_to_be_disc_for_year(p, y);
+    then return_deemed_return_of_reclassified_taxpayer(r, p, y, us.irc.core::IncomeCh1);
+}
+rule S6501GDeemedReturnStartsThePeriod defeasible {
+    for r: Return;
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for filed: Date;
+    when return_deemed_return_of_reclassified_taxpayer(r, p, y, k) and us.irc.core::filed_on(r, filed);
+    then deemed_filed_date(p, y, k, filed);
+}
+
+// ============================================================================
+// (i), (j), (k) — carrybacks (same shape as (h) of module 04)
+// ============================================================================
+
+pub relation deficiency_attributable_to_foreign_tax_carryback(p: Person, y: TaxableYear, k: TaxKind, excessTaxYear: TaxableYear) kind empirical {
+    label en official "a deficiency attributable to the application to the taxpayer of a carryback under section 904(c) or 907(f)";
+}
+@source(IRC_S6501_I, relation = formalizes, coverage = exact, quote = "such deficiency may be assessed at any time before the expiration of one year after the expiration of the period within which a deficiency may be assessed for the taxable year of the excess taxes described in section 904(c) or 907(f) which result in such carryback.")
+rule S6501IForeignTaxCarrybackOneYearAfterExcessYearPeriod defeasible {
+    label en official "a deficiency attributable to a foreign tax carryback may be assessed until 1 year after the period for the excess-taxes year";
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for excessTaxYear: TaxableYear;
+    for excessYearEnd: Date;
+    when deficiency_attributable_to_foreign_tax_carryback(p, y, k, excessTaxYear)
+        and assessment_period_ends(p, excessTaxYear, k, excessYearEnd);
+    then assessment_period_ends_via_carryback(p, y, k, add_calendar_period(excessYearEnd, 1 calendar_year));
+}
+pub relation deficiency_attributable_to_credit_carryback(p: Person, y: TaxableYear, k: TaxKind, creditYear: TaxableYear) kind empirical {
+    label en official "a deficiency attributable to the application to the taxpayer of a credit carryback";
+}
+pub relation deficiency_attributable_to_credit_carryback_via_later_year(p: Person, y: TaxableYear, k: TaxKind, subsequentYear: TaxableYear) kind empirical {
+    label en official "a deficiency attributable to a portion of a credit carryback from a taxable year attributable to a net operating loss carryback, capital loss carryback, or other credit carryback from a subsequent taxable year";
+}
+@source(IRC_S6501_J, relation = formalizes, coverage = exact, quote = "such deficiency may be assessed at any time before the expiration of the period within which a deficiency for the taxable year of the unused credit which results in such carryback may be assessed")
+rule S6501J1CreditCarrybackTracksCreditYearPeriod defeasible {
+    label en official "a deficiency attributable to a credit carryback may be assessed until the period for the year of the unused credit expires";
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for creditYear: TaxableYear;
+    for creditYearEnd: Date;
+    when deficiency_attributable_to_credit_carryback(p, y, k, creditYear)
+        and assessment_period_ends(p, creditYear, k, creditYearEnd);
+    then assessment_period_ends_via_carryback(p, y, k, creditYearEnd);
+}
+@source(IRC_S6501_J, relation = formalizes, coverage = exact, quote = "or with respect to any portion of a credit carryback from a taxable year attributable to a net operating loss carryback, capital loss carryback, or other credit carryback from a subsequent taxable year, at any time before the expiration of the period within which a deficiency for such subsequent taxable year may be assessed.")
+rule S6501J1CreditCarrybackPortionTracksSubsequentYearPeriod defeasible {
+    label en official "a deficiency attributable to the portion of a credit carryback caused by a later year's carryback may be assessed until the period for that later year expires";
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for subsequentYear: TaxableYear;
+    for subsequentEnd: Date;
+    when deficiency_attributable_to_credit_carryback_via_later_year(p, y, k, subsequentYear)
+        and assessment_period_ends(p, subsequentYear, k, subsequentEnd);
+    then assessment_period_ends_via_carryback(p, y, k, subsequentEnd);
+}
+pub relation tentative_carryback_amount_applied_6411(p: Person, priorYear: TaxableYear, k: TaxKind, carrybackYear: TaxableYear, amount: Money) kind empirical {
+    label en official "an amount has been applied, credited, or refunded under section 6411 by reason of a net operating loss carryback, a capital loss carryback, or a credit carryback from the carryback year to the prior taxable year";
+}
+pub relation amount_assessable_solely_by_h_or_j(p: Person, priorYear: TaxableYear, k: TaxKind, amount: Money) kind empirical {
+    label en official "any amount which may be assessed solely by reason of subsection (h) or (j), as the case may be";
+}
+@source(IRC_S6501_K, relation = formalizes, coverage = exact, quote = "the period described in subsection (a) of this section for assessing a deficiency for such prior taxable year shall be extended to include the period described in subsection (h) or (j), whichever is applicable")
+rule S6501KTentativeCarrybackExtendsPriorYearPeriod defeasible {
+    label en official "a prior year that received a section 6411 tentative adjustment may be assessed until the period of the carryback year expires";
+    for p: Person;
+    for priorYear: TaxableYear;
+    for k: TaxKind;
+    for carrybackYear: TaxableYear;
+    for amount: Money;
+    for carrybackEnd: Date;
+    when tentative_carryback_amount_applied_6411(p, priorYear, k, carrybackYear, amount)
+        and assessment_period_ends(p, carrybackYear, k, carrybackEnd);
+    then assessment_period_ends_via_carryback(p, priorYear, k, carrybackEnd);
+}
+pub relation amount_assessable_solely_by_6501k_limit(p: Person, priorYear: TaxableYear, k: TaxKind, limit: Money) kind institutional {
+    label en unofficial "the most that may be assessed solely by reason of subsection (k): the amount applied, credited, or refunded under section 6411, reduced by the amount assessable solely by reason of (h) or (j)";
+}
+@source(IRC_S6501_K, relation = formalizes, coverage = exact, quote = "except that the amount which may be assessed solely by reason of this subsection shall not exceed the amount so applied, credited, or refunded under section 6411, reduced by any amount which may be assessed solely by reason of subsection (h) or (j), as the case may be.")
+rule S6501KLimitOnAmountAssessableSolelyByReasonOfK defeasible {
+    label en official "the amount assessable solely by reason of (k) is at most the section 6411 amount less the amount assessable solely by reason of (h) or (j)";
+    for p: Person;
+    for priorYear: TaxableYear;
+    for k: TaxKind;
+    for carrybackYear: TaxableYear;
+    for applied: Money;
+    for hOrJ: Money;
+    when tentative_carryback_amount_applied_6411(p, priorYear, k, carrybackYear, applied)
+        and amount_assessable_solely_by_h_or_j(p, priorYear, k, hOrJ);
+    then amount_assessable_solely_by_6501k_limit(p, priorYear, k, applied - hOrJ);
+}
+
+// ============================================================================
+// (l) — chapter 42 and similar taxes; individual retirement plans
+// ============================================================================
+
+pub relation liability_arises_from_act_in_year(p: Person, y: TaxableYear, k: TaxKind, actYear: TaxableYear) kind empirical {
+    label en official "the act (or failure to act) giving rise to liability for the tax (section 4912, chapter 42 other than section 4940, or section 4975) occurred in this year";
+}
+pub relation is_chapter_42_family_tax_other_than_4940(p: Person, y: TaxableYear, k: TaxKind) kind empirical {
+    label en official "the tax is imposed by section 4912, by chapter 42 (other than section 4940), or by section 4975";
+}
+@source(IRC_S6501_L, relation = formalizes, coverage = exact, quote = "the return referred to in this section shall be the return filed by the private foundation, plan, trust, or other organization (as the case may be) for the year in which the act (or failure to act) giving rise to liability for such tax occurred.")
+rule S6501L1ReturnOfTheActYearIsTheReturnOfRecord defeasible {
+    label en official "for section 4912, chapter 42 (other than 4940) and section 4975 taxes the return of record is the organization's return for the year of the act";
+    for r: Return;
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for actYear: TaxableYear;
+    for rk: TaxKind;
+    for filed: Date;
+    when is_chapter_42_family_tax_other_than_4940(p, y, k)
+        and liability_arises_from_act_in_year(p, y, k, actYear)
+        and us.irc.core::return_of(r, p, actYear, rk)
+        and us.irc.core::filed_on(r, filed);
+    then deemed_filed_date(p, y, k, filed);
+}
+pub relation deficiency_from_4942g3_contribution_failure(p: Person, y: TaxableYear, k: TaxKind, contributionYear: TaxableYear) kind empirical {
+    label en official "a deficiency of tax of a private foundation making a contribution in the manner provided in section 4942(g)(3) attributable to the failure of a section 501(c)(3) organization to make the distribution prescribed by section 4942(g)(3)";
+}
+@source(IRC_S6501_L, relation = formalizes, coverage = exact, quote = "such deficiency may be assessed at any time before the expiration of one year after the expiration of the period within which a deficiency may be assessed for the taxable year with respect to which the contribution was made.")
+rule S6501L2ContributionFailureOneYearAfterContributionYearPeriod defeasible {
+    label en official "a deficiency from a section 4942(g)(3) contribution failure may be assessed until 1 year after the period for the contribution year";
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for contributionYear: TaxableYear;
+    for contributionYearEnd: Date;
+    when deficiency_from_4942g3_contribution_failure(p, y, k, contributionYear)
+        and assessment_period_ends(p, contributionYear, k, contributionYearEnd);
+    then assessment_period_ends_for_attributable_item(p, y, k, ContributionFailure4942g3, add_calendar_period(contributionYearEnd, 1 calendar_year));
+}
+pub relation deficiency_from_4942g2_set_aside_failure(p: Person, y: TaxableYear, k: TaxKind, setAsideYear: TaxableYear) kind empirical {
+    label en official "a deficiency attributable to the failure of an amount set aside by a private foundation for a specific project to be treated as a qualifying distribution under section 4942(g)(2)(B)(ii)";
+}
+@source(IRC_S6501_L, relation = formalizes, coverage = exact, quote = "such deficiency may be assessed at any time before the expiration of 2 years after the expiration of the period within which a deficiency may be assessed for the taxable year to which the amount set aside relates.")
+rule S6501L3SetAsideFailureTwoYearsAfterSetAsideYearPeriod defeasible {
+    label en official "a deficiency from a section 4942(g)(2)(B)(ii) set-aside failure may be assessed until 2 years after the period for the set-aside year";
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for setAsideYear: TaxableYear;
+    for setAsideYearEnd: Date;
+    when deficiency_from_4942g2_set_aside_failure(p, y, k, setAsideYear)
+        and assessment_period_ends(p, setAsideYear, k, setAsideYearEnd);
+    then assessment_period_ends_for_attributable_item(p, y, k, SetAsideFailure4942g2, add_calendar_period(setAsideYearEnd, 2 calendar_year));
+}
+pub relation is_tax_under_4973_or_4974_on_ira(p: Person, y: TaxableYear, k: TaxKind) kind empirical {
+    label en official "the tax is imposed by section 4973 or 4974 in connection with an individual retirement plan";
+}
+pub relation is_tax_under_4973(p: Person, y: TaxableYear, k: TaxKind) kind empirical {
+    label en official "the tax is imposed by section 4973";
+}
+pub relation ira_tax_attributable_to_acquiring_property_below_fmv(p: Person, y: TaxableYear, k: TaxKind) kind empirical {
+    label en official "the tax imposed by section 4973 is attributable to acquiring property for less than fair market value";
+}
+pub relation ira_income_tax_return_of_record(r: Return, p: Person, y: TaxableYear, k: TaxKind) kind institutional {
+    label en unofficial "the return referred to in section 6501 includes the income tax return filed by the person for the year of the act (section 6501(l)(4)(A))";
+}
+@source(IRC_S6501_L, relation = formalizes, coverage = exact, quote = "the return referred to in this section shall include the income tax return filed by the person on whom the tax under such section is imposed for the year in which the act (or failure to act) giving rise to the liability for such tax occurred.")
+rule S6501L4AIncomeTaxReturnIsReturnOfRecord defeasible {
+    label en official "for section 4973/4974 IRA taxes the return of record includes the person's income tax return for the year of the act, unless the tax comes from acquiring property below fair market value";
+    for r: Return;
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for actYear: TaxableYear;
+    when is_tax_under_4973_or_4974_on_ira(p, y, k)
+        and liability_arises_from_act_in_year(p, y, k, actYear)
+        and us.irc.core::return_of(r, p, actYear, us.irc.core::IncomeCh1)
+        and not_known(ira_tax_attributable_to_acquiring_property_below_fmv(p, y, k));
+    then ira_income_tax_return_of_record(r, p, y, k);
+}
+rule S6501L4AIraReturnOfRecordStartsThePeriod defeasible {
+    for r: Return;
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for filed: Date;
+    when ira_income_tax_return_of_record(r, p, y, k) and us.irc.core::filed_on(r, filed);
+    then deemed_filed_date(p, y, k, filed);
+}
+pub relation person_not_required_to_file_income_tax_return(p: Person, y: TaxableYear) kind empirical {
+    label en official "the person is not required to file an income tax return for the year";
+}
+pub relation income_tax_return_due_date_without_extension(p: Person, y: TaxableYear, d: Date) kind empirical {
+    label en official "the date by which the income tax return would have been required to be filed (excluding any extension)";
+}
+@source(IRC_S6501_L, relation = formalizes, coverage = exact, quote = "the 3-year period referred to in subsection (a) with respect to the return shall be deemed to begin on the date by which the return would have been required to be filed (excluding any extension thereof).")
+rule S6501L4BNonFilerPeriodBeginsOnUnextendedDueDate defeasible {
+    label en official "for a person not required to file, the 3-year period begins on the date the income tax return would have been due, without extension";
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    for due: Date;
+    when is_tax_under_4973_or_4974_on_ira(p, y, k)
+        and person_not_required_to_file_income_tax_return(p, y)
+        and income_tax_return_due_date_without_extension(p, y, due)
+        and not_known(ira_tax_attributable_to_acquiring_property_below_fmv(p, y, k));
+    then deemed_filed_date(p, y, k, due);
+}
+@source(IRC_S6501_L, relation = formalizes, coverage = exact, quote = "subsection (a) shall be applied by substituting a 6-year period in lieu of the 3-year period otherwise referred to in such subsection.")
+rule S6501L4CSixYearPeriodForSection4973TaxOnIncomeTaxReturn defeasible {
+    label en official "when the section 4973 tax is measured against the individual's income tax return, the period is 6 years";
+    for r: Return;
+    for p: Person;
+    for y: TaxableYear;
+    for k: TaxKind;
+    when is_tax_under_4973(p, y, k) and ira_income_tax_return_of_record(r, p, y, k);
+    then six_year_assessment_period(p, y, k);
+}
+
+// ============================================================================
+// (m) — deficiencies attributable to credit elections
+// ============================================================================
+
+pub enum CreditElectionSection6501m {
+    Sec30Bh9;
+    Sec30Ce4;
+    Sec30Df6;
+    Sec35g11;
+    Sec40f;
+    Sec43;
+    Sec45B;
+    Sec45Cd4;
+    Sec45Hg;
+    Sec51j;
+    label en unofficial "the credit election provisions listed in section 6501(m)";
+}
+pub relation credit_election_or_revocation_notified_on(p: Person, y: TaxableYear, which: CreditElectionSection6501m, d: Date) kind empirical {
+    label en official "the Secretary is notified of an election (or revocation of an election) under a listed credit provision";
+}
+@source(IRC_S6501_M, relation = formalizes, coverage = exact, quote = "shall not expire before the date 1 year after the date on which the Secretary is notified of such election (or revocation).")
+rule S6501MCreditElectionOneYearAfterNotification defeasible {
+    label en official "the period for assessing a deficiency attributable to a listed credit election does not expire before 1 year after the Secretary is notified";
+    for p: Person;
+    for y: TaxableYear;
+    for which: CreditElectionSection6501m;
+    for notifiedOn: Date;
+    when credit_election_or_revocation_notified_on(p, y, which, notifiedOn);
+    then assessment_period_ends_for_attributable_item(p, y, us.irc.core::IncomeCh1, CreditElection, add_calendar_period(notifiedOn, 1 calendar_year));
+}
+
+// ============================================================================
+// (n) — assessable payment of employer shared responsibility (section 4980H)
+// ============================================================================
+
+pub relation assessable_payment_4980h(p: Person, y: TaxableYear) kind empirical {
+    label en official "an assessable payment under section 4980H for the calendar year";
+}
+pub relation section_6056_return_due_date(p: Person, y: TaxableYear, d: Date) kind empirical {
+    label en official "the due date for filing the return under section 6056 for the calendar year";
+}
+pub relation section_6056_return_filed_on(p: Person, y: TaxableYear, d: Date) kind empirical {
+    label en official "the date the return under section 6056 was filed for the calendar year";
+}
+pub relation section_6056_return_filed(p: Person, y: TaxableYear) kind institutional {
+    label en unofficial "existential wrapper over `section_6056_return_filed_on`, to test a return that was never filed";
+}
+rule S6501NReturnFiledExists defeasible {
+    for p: Person;
+    for y: TaxableYear;
+    for d: Date;
+    when section_6056_return_filed_on(p, y, d);
+    then section_6056_return_filed(p, y);
+}
+pub relation employer_shared_responsibility_period_ends(p: Person, y: TaxableYear, d: Date) kind institutional {
+    label en unofficial "the last date on which the assessable payment under section 4980H for the year may be assessed (6 years from the later of the section 6056 due date and the date the return was filed)";
+}
+@source(IRC_S6501_N, relation = formalizes, coverage = exact, quote = "the period for assessment shall expire at the end of the 6-year period beginning on the due date for filing the return under section 6056 (or, if later, the date such return was filed) for the calendar year with respect to which such payment is determined.")
+rule S6501NPeriodFromDueDateWhenNotFiledLate defeasible {
+    label en official "the 4980H period runs 6 years from the section 6056 due date when the return was filed on or before it or never filed";
+    for p: Person;
+    for y: TaxableYear;
+    for due: Date;
+    when assessable_payment_4980h(p, y)
+        and section_6056_return_due_date(p, y, due)
+        and not_known(section_6056_return_filed_after_due(p, y));
+    then employer_shared_responsibility_period_ends(p, y, add_calendar_period(due, 6 calendar_year));
+}
+pub relation section_6056_return_filed_after_due(p: Person, y: TaxableYear) kind institutional {
+    label en unofficial "the section 6056 return was filed after its due date";
+}
+rule S6501N6056ReturnFiledAfterDue defeasible {
+    for p: Person;
+    for y: TaxableYear;
+    for due: Date;
+    for filed: Date;
+    when section_6056_return_due_date(p, y, due) and section_6056_return_filed_on(p, y, filed) and filed > due;
+    then section_6056_return_filed_after_due(p, y);
+}
+@source(IRC_S6501_N, relation = formalizes, coverage = exact, quote = "(or, if later, the date such return was filed)")
+rule S6501NPeriodFromFilingDateWhenFiledLate defeasible {
+    label en official "the 4980H period runs 6 years from the date the section 6056 return was filed when that is later than the due date";
+    for p: Person;
+    for y: TaxableYear;
+    for due: Date;
+    for filed: Date;
+    when assessable_payment_4980h(p, y)
+        and section_6056_return_due_date(p, y, due)
+        and section_6056_return_filed_on(p, y, filed)
+        and filed > due;
+    then employer_shared_responsibility_period_ends(p, y, add_calendar_period(filed, 6 calendar_year));
+}

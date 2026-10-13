@@ -1,0 +1,222 @@
+// 26 U.S.C. §6656 — Failure to make deposit of taxes: the 2/5/10/15 percent
+// tiered addition (a)/(b), the first-time-depositor waiver power (c), the
+// misdirected-deposit abatement power (d). NOT exempt from §6751(b): the
+// PenaltyDetermination/valid_when machinery of 02-procedural-requirements-
+// 6751.law applies (deposit penalties are commonly automatically calculated
+// through electronic means, satisfying (b)(2)(B), but that is a case fact,
+// not a per-se exemption the way §6651/6654/6655 are).
+//
+// JUDGMENT CALLS AND GAPS (see report):
+//  - `Deposit` is a NEW LOCAL entity (not in `us.irc.core`): core's
+//    `Payment` shape is keyed to a `TaxableYear`, but a deposit under
+//    §6302(c) is keyed to a shorter period (a semimonthly/monthly deposit
+//    period, `us.irc.core::Period`) — reusing `Payment` would either lose
+//    that period or misuse `TaxableYear`. Not proposed as a core addition
+//    because no other pending owner has signalled needing it yet (the same
+//    "single user" caution CONTRACT.md gives for `GovernmentalUnit`).
+//  - (b)(1)(B)'s "special rule" (15 percent if not deposited by the earlier
+//    of the 10-day delinquency notice or the immediate-payment demand) is one
+//    empirical predicate (`deposit_special_rule_triggered`) rather than a
+//    computed date comparison, because §6303's delinquency-notice date and
+//    §6861/6862/6331(a) demand dates are `assessment`/`collection` (F02/F04)
+//    territory this package does not own — EXTERNAL_DEPENDENCY-adjacent.
+//  - (c) and (d) are modelled as POWERS of the Secretary to WAIVE/ABATE
+//    (matching E-0239's invalid-exercise discipline), each `valid_when` a
+//    single derived atom combining that subsection's conditions.
+//  - (e) (designation of the period a deposit applies to) is NOT modelled:
+//    it answers a DIFFERENT question (which period's underpayment a payment
+//    cures) that this package's `deposit_applied_to_period` dependency
+//    contract already assumes is answered — TECH_GAP if a case needs the
+//    90-day designation window itself litigated.
+
+language "law.core" version "0.2";
+package us.irc.penalties version "0.1.1";
+namespace "urn:us:irc:penalties:clir";
+
+use self::{
+    IRC_S6656_A,
+    IRC_S6656_B,
+    IRC_S6656_C,
+    IRC_S6656_D,
+    Person,
+    Secretary,
+    TaxKind,
+    TaxableYear,
+};
+
+entity Deposit {
+    label en unofficial "an amount deposited (or required to be deposited) in a government depository under section 6302(c)";
+}
+relation deposit_of(dep: Deposit, p: Person, y: TaxableYear, kind: TaxKind) kind institutional {
+    label en unofficial "the deposit is required of a person for a taxable year under one taxing chapter";
+}
+relation deposit_required_amount(dep: Deposit, amount: Money) kind institutional {
+    label en unofficial "PENDING (owner: returns/collection) — the amount of tax required to be deposited";
+}
+relation deposit_prescribed_date(dep: Deposit, d: Date) kind institutional {
+    label en unofficial "PENDING (owner: returns/collection) — the date prescribed for making the deposit";
+}
+relation deposit_made_amount(dep: Deposit, amount: Money) kind empirical {
+    label en unofficial "the amount, if any, actually deposited on or before the date prescribed therefor";
+}
+relation deposit_made_on(dep: Deposit, d: Date) kind empirical {
+    label en unofficial "the date the deposit was actually made (used to count days late)";
+}
+
+pub relation deposit_underpayment(dep: Deposit, amount: Money) kind institutional {
+    label en official "the term \"underpayment\" means the excess of the amount of the tax required to be deposited over the amount, if any, thereof deposited on or before the date prescribed therefor";
+}
+@source(IRC_S6656_B, relation = formalizes, coverage = partial, quote = "The term \"underpayment\" means the excess of the amount of the tax required to be deposited over the amount, if any, thereof deposited on or before the date prescribed therefor")
+rule DepositUnderpayment strict {
+    for dep: Deposit;
+    for required: Money;
+    for made: Money;
+    when deposit_required_amount(dep, required) and deposit_made_amount(dep, made);
+    then deposit_underpayment(dep, max(0.00 USD, required - made));
+}
+
+// --- (b)(1)(A): applicable percentage by days late --------------------------
+
+relation deposit_special_rule_triggered(dep: Deposit) kind empirical {
+    label en official "In any case where the tax is not deposited on or before the earlier of (i) the day 10 days after the date of the first delinquency notice to the taxpayer under section 6303, or (ii) the day on which notice and demand for immediate payment is given under section 6861 or 6862 or the last sentence of section 6331(a)";
+}
+pub relation deposit_applicable_percentage(dep: Deposit, rate: Decimal) kind institutional {
+    label en official "the term \"applicable percentage\" means (i) 2 percent if the failure is for not more than 5 days, (ii) 5 percent if the failure is for more than 5 days but not more than 15 days, and (iii) 10 percent if the failure is for more than 15 days";
+}
+@source(IRC_S6656_B, relation = formalizes, coverage = exact, quote = "2 percent if the failure is for not more than 5 days")
+rule DepositApplicablePercentageTier1 strict {
+    for dep: Deposit;
+    for due: Date;
+    for made: Date;
+    when deposit_prescribed_date(dep, due) and deposit_made_on(dep, made)
+        and days_between(due, made) <= 5
+        and not deposit_special_rule_triggered(dep);
+    then deposit_applicable_percentage(dep, DepositRateTier1);
+}
+@source(IRC_S6656_B, relation = formalizes, coverage = exact, quote = "5 percent if the failure is for more than 5 days but not more than 15 days")
+rule DepositApplicablePercentageTier2 strict {
+    for dep: Deposit;
+    for due: Date;
+    for made: Date;
+    when deposit_prescribed_date(dep, due) and deposit_made_on(dep, made)
+        and days_between(due, made) > 5 and days_between(due, made) <= 15
+        and not deposit_special_rule_triggered(dep);
+    then deposit_applicable_percentage(dep, DepositRateTier2);
+}
+@source(IRC_S6656_B, relation = formalizes, coverage = exact, quote = "10 percent if the failure is for more than 15 days")
+rule DepositApplicablePercentageTier3 strict {
+    for dep: Deposit;
+    for due: Date;
+    for made: Date;
+    when deposit_prescribed_date(dep, due) and deposit_made_on(dep, made)
+        and days_between(due, made) > 15
+        and not deposit_special_rule_triggered(dep);
+    then deposit_applicable_percentage(dep, DepositRateTier3);
+}
+@source(IRC_S6656_B, relation = formalizes, coverage = exact, quote = "the applicable percentage shall be 15 percent")
+rule DepositApplicablePercentageSpecialRule strict {
+    for dep: Deposit;
+    when deposit_special_rule_triggered(dep);
+    then deposit_applicable_percentage(dep, DepositRateSpecialRule);
+}
+
+pub relation failure_to_deposit_addition(dep: Deposit, amount: Money) kind institutional {
+    label en official "there shall be imposed upon such person a penalty equal to the applicable percentage of the amount of the underpayment";
+}
+@source(IRC_S6656_A, relation = formalizes, coverage = exact, quote = "there shall be imposed upon such person a penalty equal to the applicable percentage of the amount of the underpayment")
+rule FailureToDepositAddition strict {
+    for dep: Deposit;
+    for underpayment: Money;
+    for rate: Decimal;
+    when deposit_underpayment(dep, underpayment) and deposit_applicable_percentage(dep, rate);
+    then failure_to_deposit_addition(dep, round(underpayment * rate, 2, "HALF_UP"));
+}
+
+// --- (c): first-time depositor waiver power ---------------------------------
+
+relation meets_7430_c_4_a_ii_requirements(p: Person) kind empirical {
+    label en official "such person meets the requirements referred to in section 7430(c)(4)(A)(ii)";
+}
+relation inadvertent_first_quarter_or_first_changed_deposit_failure(dep: Deposit) kind empirical {
+    label en official "such failure occurs during the first quarter that such person was required to deposit any employment tax; or if such person is required to change the frequency of deposits of any employment tax, relates to the first deposit to which such change applies";
+}
+relation employment_tax_return_filed_by_due_date(dep: Deposit) kind empirical {
+    label en official "the return of such tax was filed on or before the due date";
+}
+relation deposit_is_employment_tax(dep: Deposit) kind institutional {
+    label en unofficial "the taxes imposed by subtitle C (section 6656(c)'s 'employment taxes')";
+}
+pub relation first_time_depositor_waiver_condition_met(dep: Deposit, p: Person) kind institutional {
+    label en unofficial "the section 6656(c) conditions for the Secretary's discretionary waiver are met (single atom for valid_when)";
+}
+@source(IRC_S6656_C, relation = formalizes, coverage = exact, quote = "The Secretary may waive the penalty imposed by subsection (a) on a person's inadvertent failure to deposit any employment tax if")
+rule FirstTimeDepositorWaiverConditionMet strict {
+    for dep: Deposit;
+    for p: Person;
+    when deposit_is_employment_tax(dep)
+        and meets_7430_c_4_a_ii_requirements(p)
+        and inadvertent_first_quarter_or_first_changed_deposit_failure(dep)
+        and employment_tax_return_filed_by_due_date(dep);
+    then first_time_depositor_waiver_condition_met(dep, p);
+}
+relation secretary_moves_to_waive_first_time_depositor_penalty(dep: Deposit) kind empirical {
+    label en unofficial "the exercise fact of the section 6656(c) waiver power";
+}
+@source(IRC_S6656_C, relation = formalizes, coverage = exact, quote = "The Secretary may waive the penalty imposed by subsection (a)")
+rule Section6656cWaiverPower strict {
+    for dep: Deposit;
+    for p: Person;
+    when secretary_moves_to_waive_first_time_depositor_penalty(dep)
+        and first_time_depositor_waiver_condition_met(dep, p);
+    then power WaiveFirstTimeDepositorPenalty {
+        holder Secretary;
+        over dep;
+        exercise secretary_moves_to_waive_first_time_depositor_penalty(dep);
+        valid_when first_time_depositor_waiver_condition_met(dep, p);
+        effect create(failure_to_deposit_penalty_waived(dep));
+        window [@1998-07-22, infinity);
+    };
+}
+pub relation failure_to_deposit_penalty_waived(dep: Deposit) kind institutional {
+    label en unofficial "the section 6656(a) penalty on this deposit is waived under section 6656(c)";
+}
+
+// --- (d): misdirected-deposit abatement power -------------------------------
+
+relation first_time_depositor_required_to_deposit(dep: Deposit, p: Person) kind empirical {
+    label en unofficial "the first time a depositor is required to make a deposit (section 6656(d))";
+}
+relation deposit_inadvertently_sent_to_secretary(dep: Deposit) kind empirical {
+    label en official "the amount required to be deposited is inadvertently sent to the Secretary instead of to the appropriate government depository";
+}
+pub relation misdirected_deposit_abatement_condition_met(dep: Deposit, p: Person) kind institutional {
+    label en unofficial "the section 6656(d) conditions for the Secretary's discretionary abatement are met";
+}
+@source(IRC_S6656_D, relation = formalizes, coverage = exact, quote = "The Secretary may abate the penalty imposed by subsection (a) with respect to the first time a depositor is required to make a deposit if the amount required to be deposited is inadvertently sent to the Secretary instead of to the appropriate government depository")
+rule MisdirectedDepositAbatementConditionMet strict {
+    for dep: Deposit;
+    for p: Person;
+    when first_time_depositor_required_to_deposit(dep, p) and deposit_inadvertently_sent_to_secretary(dep);
+    then misdirected_deposit_abatement_condition_met(dep, p);
+}
+relation secretary_moves_to_abate_misdirected_deposit_penalty(dep: Deposit) kind empirical {
+    label en unofficial "the exercise fact of the section 6656(d) abatement power";
+}
+@source(IRC_S6656_D, relation = formalizes, coverage = exact, quote = "The Secretary may abate the penalty imposed by subsection (a)")
+rule Section6656dAbatementPower strict {
+    for dep: Deposit;
+    for p: Person;
+    when secretary_moves_to_abate_misdirected_deposit_penalty(dep)
+        and misdirected_deposit_abatement_condition_met(dep, p);
+    then power AbateMisdirectedDepositPenalty {
+        holder Secretary;
+        over dep;
+        exercise secretary_moves_to_abate_misdirected_deposit_penalty(dep);
+        valid_when misdirected_deposit_abatement_condition_met(dep, p);
+        effect create(failure_to_deposit_penalty_abated(dep));
+        window [@1954-08-16, infinity);
+    };
+}
+pub relation failure_to_deposit_penalty_abated(dep: Deposit) kind institutional {
+    label en unofficial "the section 6656(a) penalty on this deposit is abated under section 6656(d)";
+}

@@ -1,0 +1,235 @@
+// Subchapter G general provisions: sections 4216 (determination of price)
+// and 4221 (tax-free sales). Priority list, IRC-13 stage 1.
+//
+// SCOPE (report this, corrected from an earlier draft of this comment that
+// overclaimed (b)): section 4216 has five subsections; this module
+// formalizes (a) (containers/packing/transportation) and (c) (partial
+// payments/leases) as EXECUTABLE. (b) "constructive sale price" is NOT
+// implemented this stage at all — classified EVALUATIVE (the statute directs
+// "as determined by the Secretary" for the non-arm's-length/retail baseline,
+// DECISION-0194) with the affiliated-group 90%/formula branches of
+// paragraphs (3)-(4) a further TECH_GAP (TECH-GAPS.md G122; arithmetic is a
+// straightforward percentage/ratio, but out of this stage's budget). (d)
+// (sale of installment accounts) and the paragraph-(2)/(3) aggregate-cap
+// machinery of (e) are TECH_GAP (G123/G124): both require a running ledger
+// of amounts already excluded/credited across a person's OTHER sales in the
+// same calendar quarter, which is either a self-recursive aggregate
+// (LDC-E4102 territory) or an aggregate over a DERIVED predicate (§111
+// runtime-subset limit).
+
+use self::{
+    ExciseEvent,
+    IRC_S4216_A,
+    IRC_S4216_C,
+    IRC_S4221_A,
+    IRC_S4221_B,
+    IRC_S4221_C,
+    IRC_S4221_E,
+    Person,
+    TireKind,
+    TireSaleEvent,
+    excise_tax_due,
+    liable_for_excise,
+    registration_satisfied_for_4221,
+    section_4216c_disapplied_after_account_sale,
+    tax_free_sale,
+    tire_sale,
+};
+
+pub entity PricedArticleSale : ExciseEvent;
+
+pub relation sale_amount_charged(a: PricedArticleSale, amount: Money) kind empirical {
+    label en unofficial "the amount for which the article is sold before section 4216 inclusions/exclusions";
+}
+pub relation container_and_packing_charge(a: PricedArticleSale, amount: Money) kind empirical {
+    label en unofficial "section 4216(a): any charge for coverings and containers of whatever nature, and any charge incident to placing the article in condition packed ready for shipment — always included";
+}
+pub relation transportation_or_similar_charge(a: PricedArticleSale, amount: Money) kind empirical {
+    label en unofficial "section 4216(a): a transportation, delivery, insurance, installation, or other charge separately stated, which is excluded from price ONLY if established to the Secretary's satisfaction";
+}
+pub relation transportation_charge_stated(a: PricedArticleSale) kind empirical {
+    label en unofficial "the case asserts that SOME transportation/delivery/insurance/installation charge was separately stated for this sale (kept apart from the amount so `not_known` can test its absence without an unbound amount variable, §190 range restriction)";
+}
+
+pub external judgment relation s4216_charge_established_to_secretary_satisfaction(a: PricedArticleSale) {
+    authority Secretary;
+    label en official "the amount [of the transportation, delivery, insurance, installation, or other charge] is established to the satisfaction of the Secretary in accordance with the regulations";
+}
+
+pub relation price_for_tax_purposes(a: PricedArticleSale, price: Money) kind institutional {
+    label en official "section 4216(a): the price for which an article is sold, for purposes of computing the tax imposed by this chapter";
+}
+
+@source(IRC_S4216_A, relation = formalizes, coverage = exact, quote = "there shall be included any charge for coverings and containers of whatever nature, and any charge incident to placing the article in condition packed ready for shipment, but there shall be excluded the amount of tax imposed by this chapter, whether or not stated as a separate charge")
+rule PriceExcludingEstablishedTransportationCharge(a: PricedArticleSale, amount: Money, container: Money, transport: Money) strict {
+    when sale_amount_charged(a, amount)
+        and container_and_packing_charge(a, container)
+        and transportation_or_similar_charge(a, transport)
+        and s4216_charge_established_to_secretary_satisfaction(a);
+    then price_for_tax_purposes(a, amount + container);
+}
+
+@source(IRC_S4216_A, relation = formalizes, coverage = exact, quote = "A transportation, delivery, insurance, installation, or other charge (not required by the foregoing sentence to be included) shall be excluded from the price only if the amount thereof is established to the satisfaction of the Secretary in accordance with the regulations.")
+rule PriceIncludingUnestablishedTransportationCharge(a: PricedArticleSale, amount: Money, container: Money, transport: Money) strict {
+    when sale_amount_charged(a, amount)
+        and container_and_packing_charge(a, container)
+        and transportation_or_similar_charge(a, transport)
+        and not_known(s4216_charge_established_to_secretary_satisfaction(a));
+    then price_for_tax_purposes(a, amount + container + transport);
+}
+
+@source(IRC_S4216_A, relation = formalizes, coverage = exact, quote = "there shall be included any charge for coverings and containers of whatever nature, and any charge incident to placing the article in condition packed ready for shipment")
+rule PriceWithNoSeparateTransportationCharge(a: PricedArticleSale, amount: Money, container: Money) strict {
+    when sale_amount_charged(a, amount)
+        and container_and_packing_charge(a, container)
+        and not_known(transportation_charge_stated(a));
+    then price_for_tax_purposes(a, amount + container);
+}
+
+// --- section 4216(c): partial payments (leases/installment/conditional sales) ---
+
+pub entity PartialPaymentInstallment : ExciseEvent;
+
+pub relation partial_payment(inst: PartialPaymentInstallment, amount: Money, due: Date) kind empirical {
+    label en unofficial "section 4216(c): one payment under a lease, installment sale, conditional sale, or chattel mortgage arrangement of a taxable article, with its due date";
+}
+pub relation rate_in_effect_on(due: Date, rate_percent: Decimal) kind empirical {
+    label en unofficial "the rate of tax in effect on the given date under the taxing chapter that reaches this article (case-supplied, since the applicable chapter and its own rate history vary by article)";
+}
+@source(IRC_S4216_C, relation = formalizes, coverage = exact, quote = "there shall be paid upon each payment with respect to the article a percentage of such payment equal to the rate of tax in effect on the date such payment is due")
+rule PartialPaymentTax(inst: PartialPaymentInstallment, amount: Money, due: Date, rate: Decimal) strict {
+    when partial_payment(inst, amount, due) and rate_in_effect_on(due, rate)
+        and not_known(section_4216c_disapplied_after_account_sale(inst));
+    then excise_tax_due(inst, round(amount * rate, 2, "HALF_UP"));
+}
+@source(IRC_S4216_C, relation = formalizes, coverage = exact, quote = "there shall be paid upon each payment with respect to the article a percentage of such payment equal to the rate of tax in effect on the date such payment is due")
+rule PartialPaymentLiability(inst: PartialPaymentInstallment, payer: Person, amount: Money) defeasible {
+    when partial_payment(inst, _, _) and excise_tax_due(inst, amount) and payer_of_partial_payment(inst, payer);
+    then liable_for_excise(payer, inst, amount);
+}
+pub relation payer_of_partial_payment(inst: PartialPaymentInstallment, payer: Person) kind empirical {
+    label en unofficial "the person obligated to pay this installment (the lessee/conditional buyer)";
+}
+
+// =====================================================================
+// Section 4221 — tax-free sales
+// =====================================================================
+
+pub enum TaxFreeSaleUse {
+    FurtherManufactureByPurchaser;
+    ResaleForFurtherManufactureBySecondPurchaser;
+    Export;
+    ResaleForExportBySecondPurchaser;
+    SuppliesForVesselsOrAircraft;
+    StateOrLocalGovernmentExclusiveUse;
+    NonprofitEducationalOrganizationExclusiveUse;
+    QualifiedBloodCollectorExclusiveUse;
+}
+
+// The event type this module reuses is the top `ExciseEvent`: any chapter's
+// taxable sale can qualify under section 4221, so the relations below range
+// over `ExciseEvent` directly rather than introducing a redundant subtype.
+
+pub relation sold_for_tax_free_use(e: ExciseEvent, use: TaxFreeSaleUse) kind empirical {
+    label en unofficial "section 4221(a): the article was sold by the manufacturer for one of the listed uses";
+}
+pub relation exportation_or_use_occurs_before_any_other_use(e: ExciseEvent) kind empirical {
+    label en unofficial "section 4221(a) flush language: the exportation or use for the qualifying purpose occurs before any other use of the article";
+}
+// Per-chapter carve-outs named in the flush language of (a): section 4064
+// (gas guzzler) never qualifies under paragraphs (4)-(6); sections 4051/4071
+// lose paragraphs (4)-(5) on and after October 1, 2028 (aligned with each
+// section's own termination date); section 4131 (vaccines, stage 2 in this
+// package) has its own narrower list.
+pub relation excise_event_taxed_under_section(e: ExciseEvent, section: Integer) kind empirical {
+    label en unofficial "which taxing section (4051, 4064, 4071, 4081, 4121, ...) this event's tax arises under — needed only to test the section 4221(a) flush-language carve-outs";
+}
+
+@source(IRC_S4221_A, relation = formalizes, coverage = exact, quote = "Paragraphs (4), (5), and (6) shall not apply to the tax imposed by section 4064.")
+rule GasGuzzlerNeverTaxFreeUnderStateLocalEdOrBlood(e: ExciseEvent, use: TaxFreeSaleUse) strict {
+    when excise_event_taxed_under_section(e, 4064)
+        and sold_for_tax_free_use(e, use)
+        and (use == StateOrLocalGovernmentExclusiveUse or use == NonprofitEducationalOrganizationExclusiveUse or use == QualifiedBloodCollectorExclusiveUse);
+    then s4221_carveout_applies(e);
+}
+pub relation s4221_carveout_applies(e: ExciseEvent) kind institutional {
+    label en official "a per-chapter carve-out in the section 4221(a) flush language removes this event from tax-free-sale eligibility notwithstanding an otherwise-qualifying use";
+}
+
+@source(IRC_S4221_A, relation = formalizes, coverage = exact, quote = "In the case of taxes imposed by section 4051 or 4071, paragraphs (4) and (5) shall not apply on and after October 1, 2028.")
+rule TruckOrTireStateLocalOrEdCarveoutAfter2028(e: ExciseEvent, use: TaxFreeSaleUse, on: Date) strict {
+    when (excise_event_taxed_under_section(e, 4051) or excise_event_taxed_under_section(e, 4071))
+        and sold_for_tax_free_use(e, use)
+        and (use == StateOrLocalGovernmentExclusiveUse or use == NonprofitEducationalOrganizationExclusiveUse)
+        and excise_event_sale_date(e, on)
+        and on >= @2028-10-01;
+    then s4221_carveout_applies(e);
+}
+pub relation excise_event_sale_date(e: ExciseEvent, on: Date) kind empirical {
+    label en unofficial "the date of this event's sale, asserted only when a section 4221 termination-aligned carve-out needs to be tested";
+}
+
+@source(IRC_S4221_A, relation = formalizes, coverage = exact, quote = "Under regulations prescribed by the Secretary, no tax shall be imposed under this chapter (other than under section 4121 or 4081) on the sale by the manufacturer (or under subchapter C of chapter 31 on the first retail sale) of an article")
+rule TaxFreeSaleClassification(e: ExciseEvent, use: TaxFreeSaleUse) defeasible {
+    when sold_for_tax_free_use(e, use)
+        and exportation_or_use_occurs_before_any_other_use(e)
+        and not_known(excise_event_taxed_under_section(e, 4121))
+        and not_known(excise_event_taxed_under_section(e, 4081))
+        and not_known(s4221_carveout_applies(e))
+        and registration_satisfied_for_4221(e);
+    then tax_free_sale(e);
+}
+
+// --- section 4221(b): proof of resale for further manufacture, or export ---
+
+pub relation manufacturer_received_proof_by(e: ExciseEvent, sale_date: Date) kind empirical {
+    label en unofficial "section 4221(b): the manufacturer received, within the 6-month window keyed to this sale date, proof that the article was exported or resold for use in further manufacture (the window comparison itself is asserted by the case, matching the pattern of other §190 range-restriction workarounds in this package)";
+}
+@source(IRC_S4221_B, relation = formalizes, coverage = exact, quote = "subsection (a) shall cease to apply in respect of such sale of such article unless, within the 6-month period which begins on the date of the sale by the manufacturer (or, if earlier, on the date of shipment by the manufacturer), the manufacturer receives proof that the article has been exported or resold for use in further manufacture")
+rule ProofNotReceivedInWindowReinstatesTax(e: ExciseEvent, use: TaxFreeSaleUse, saleDate: Date) defeasible {
+    when sold_for_tax_free_use(e, use)
+        and (use == ResaleForFurtherManufactureBySecondPurchaser or use == Export or use == ResaleForExportBySecondPurchaser)
+        and excise_event_sale_date(e, saleDate)
+        and not_known(manufacturer_received_proof_by(e, saleDate));
+    then s4221_carveout_applies(e);
+}
+
+// --- section 4221(c): manufacturer relieved from liability on good-faith
+// acceptance of a purchaser's certification (DECISION-0194: good faith is an
+// evaluative element channeled through an external judgment) ---
+
+pub external judgment relation s4221_certification_accepted_in_good_faith(e: ExciseEvent) {
+    authority Secretary;
+    label en official "section 4221(c): the manufacturer in good faith accepts a certification by the purchaser that the article will be used in accordance with the applicable provisions of law";
+}
+@source(IRC_S4221_C, relation = formalizes, coverage = exact, quote = "if the manufacturer in good faith accepts a certification by the purchaser that the article will be used in accordance with the applicable provisions of law, no tax shall thereafter be imposed under this chapter in respect of such sale by such manufacturer")
+rule ManufacturerImmuneOnGoodFaithCertification(e: ExciseEvent, manufacturer: Person, amount: Money) strict {
+    when s4221_certification_accepted_in_good_faith(e) and manufacturer_of_event(e, manufacturer) and excise_tax_due(e, amount);
+    then immunity S4221GoodFaithCertificationImmunity {
+        holder manufacturer;
+        protected_effect liable_for_excise(manufacturer, e, amount);
+        window [-infinity, infinity];
+    };
+}
+pub relation manufacturer_of_event(e: ExciseEvent, manufacturer: Person) kind empirical {
+    label en unofficial "the manufacturer who made this event's sale, for the section 4221(c) immunity's holder";
+}
+
+// --- section 4221(e)(2)/(3): tires special rules -----------------------
+
+pub relation tire_sold_for_use_on_another_taxable_article(e: TireSaleEvent, other_article_qualifies_tax_free: Boolean) kind empirical {
+    label en unofficial "section 4221(e)(2)(A): the tire is sold for use by the purchaser for sale on or in connection with another article the purchaser manufactures, and that other article's own sale would satisfy (or would satisfy but for not itself being taxable) one of the section 4221(a)(2)-(5) tax-free categories";
+}
+@source(IRC_S4221_E, relation = formalizes, coverage = exact, quote = "no tax shall be imposed under section 4071 on the sale by the manufacturer of a tire if")
+rule TireForIncorporationTaxFree(e: TireSaleEvent, qualifies: Boolean) strict {
+    when tire_sold_for_use_on_another_taxable_article(e, qualifies) and qualifies == true;
+    then tax_free_sale(e);
+}
+@source(IRC_S4221_E, relation = formalizes, coverage = exact, quote = "the tax imposed by section 4071 shall not apply in the case of tires sold for use by the purchaser on or in connection with a qualified bus")
+rule TireForQualifiedBusTaxFree(e: TireSaleEvent) strict {
+    when tire_sale(e, _, _, _) and tire_sold_for_qualified_bus(e);
+    then tax_free_sale(e);
+}
+pub relation tire_sold_for_qualified_bus(e: TireSaleEvent) kind empirical {
+    label en unofficial "section 4221(e)(3): the tire is sold for use by the purchaser on or in connection with a qualified bus (section 4221(d)(7))";
+}

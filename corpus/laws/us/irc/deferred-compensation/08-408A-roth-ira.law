@@ -1,0 +1,303 @@
+// Section 408A — Roth IRAs. Stage 1 (IRC-09), DECISION-0379. Priority:
+// (c) contribution limits and the MAGI phase-out (statutory base values),
+// (d) qualified distributions (5-year rule, age 59 1/2 / death / disability
+// / first-home, ordering rules, conversions (d)(3)).
+
+
+use self::{
+    Distribution,
+    IRC_S408A_C,
+    IRC_S408A_D,
+    IRC_S408A_E,
+    Individual,
+    IndividualRetirementAccount,
+    Person,
+    Plan,
+    TaxableYear,
+    ira_distribution,
+    ira_rollover_contribution_made,
+    ira_rollover_valid,
+};
+
+pub entity RothIRA : IndividualRetirementAccount {
+    label en official "Roth IRA (section 408A)";
+}
+
+// =====================================================================
+// (c) Treatment of contributions — contribution limit and MAGI phase-out
+// =====================================================================
+
+pub relation section219_deduction_amount(individual: Individual, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the maximum amount allowable as a deduction under section 219 for this individual and year, computed without regard to section 219(g) (cross-package dependency: section 219 is owned by `deductions`, pending — see .deps.json)";
+}
+
+pub relation contributions_to_other_iras(individual: Individual, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "aggregate contributions for the year to all individual retirement plans other than Roth IRAs, case-asserted";
+}
+
+pub relation section408Ac2_base_limit(individual: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 408A(c)(2): the section 219(b) amount reduced by contributions to non-Roth IRAs for the year (before the MAGI phase-out)";
+}
+
+@source(IRC_S408A_C, relation = formalizes, coverage = exact, quote = "maintained for the benefit of an individual shall not exceed the excess (if any) of—")
+rule Section408Ac2BaseLimit(individual: Individual, y: TaxableYear, base: Money, other_ira: Money) strict {
+    label en official "base limit = section 219(b) amount minus other-IRA contributions, floored implicitly by the excess-if-any wording (negative results are not a valid excess)";
+    when section219_deduction_amount(individual, y, base)
+        and contributions_to_other_iras(individual, y, other_ira)
+        and base > other_ira;
+    then section408Ac2_base_limit(individual, y, base - other_ira);
+}
+
+pub relation modified_agi(individual: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "modified adjusted gross income for section 408A(c)(3) purposes (adjusted gross income under section 219(g)(3), excluding conversion income under (d)(3)) — this package reads AGI from `us.irc.gross_income::adjusted_gross_income` and treats it as MAGI without the (B)(i) conversion-income backout (TECH_GAP: that backout is not separately modelled)";
+}
+
+pub relation section408Ac3_reduced_limit(individual: Individual, y: TaxableYear, filing: us.irc.income_individual::FilingStatus, amount: Money) kind institutional {
+    label en official "section 408A(c)(3)(A): the base limit reduced by the MAGI phase-out ratio";
+}
+
+@source(IRC_S408A_C, relation = formalizes, coverage = partial, quote = "reduced (but not below zero) by the amount which bears the same ratio to such amount as—")
+rule Section408Ac3ReducedLimitJoint(individual: Individual, y: TaxableYear, base: Money, magi: Money) strict {
+    label en official "joint/married-separate band divisor is $10,000; the applicable dollar amount for a joint return is $150,000 (statutory base)";
+    when modified_agi(individual, y, magi)
+        and us.irc.income_individual::filing_status(individual, y, us.irc.income_individual::Joint)
+        and section408Ac2_base_limit(individual, y, base)
+        and magi > ROTH_MAGI_PHASEOUT_JOINT_START;
+    then section408Ac3_reduced_limit(individual, y, us.irc.income_individual::Joint,
+        // One proportion, one rounding (TECH-GAPS G499, 26.09.2026).
+        max(0 USD, base - div_round(base * ((magi - ROTH_MAGI_PHASEOUT_JOINT_START) / 1.00 USD), 10000.0, 2, "HALF_UP")));
+}
+
+@source(IRC_S408A_C, relation = formalizes, coverage = exact, quote = "in the case of any other taxpayer (other than a married individual filing a separate return), $95,000")
+rule Section408Ac3ReducedLimitOther(individual: Individual, y: TaxableYear, base: Money, magi: Money) strict {
+    label en official "unmarried/head-of-household band divisor is $15,000; the applicable dollar amount for other taxpayers is $95,000 (statutory base)";
+    when modified_agi(individual, y, magi)
+        and (us.irc.income_individual::filing_status(individual, y, us.irc.income_individual::Unmarried)
+             or us.irc.income_individual::filing_status(individual, y, us.irc.income_individual::HeadOfHousehold))
+        and section408Ac2_base_limit(individual, y, base)
+        and magi > ROTH_MAGI_PHASEOUT_OTHER_START;
+    then section408Ac3_reduced_limit(individual, y, us.irc.income_individual::Unmarried,
+        // One proportion, one rounding (TECH-GAPS G499, 26.09.2026).
+        max(0 USD, base - div_round(base * ((magi - ROTH_MAGI_PHASEOUT_OTHER_START) / 1.00 USD), 15000.0, 2, "HALF_UP")));
+}
+
+@source(IRC_S408A_C, relation = formalizes, coverage = exact, quote = "in the case of a married individual filing a separate return, zero")
+rule Section408Ac3ReducedLimitMarriedSeparate(individual: Individual, y: TaxableYear) strict {
+    label en official "the applicable dollar amount for a married-filing-separate taxpayer is statutory zero — no Roth contribution is allowed above any positive MAGI";
+    when us.irc.income_individual::filing_status(individual, y, us.irc.income_individual::MarriedSeparate)
+        and modified_agi(individual, y, _)
+        and section408Ac2_base_limit(individual, y, _);
+    then section408Ac3_reduced_limit(individual, y, us.irc.income_individual::MarriedSeparate, 0 USD);
+}
+// ROTH_MAGI_PHASEOUT_JOINT_START ($150,000) and ROTH_MAGI_PHASEOUT_OTHER_START
+// ($95,000) are A3 parameters (statutory base values, inflation-adjusted
+// under (c)(3)(D) since 2007 with rounding to the nearest $1,000; only the
+// statutory base is pinned — SOURCE_GAP for the annually published amount).
+// The $10,000/$15,000 band divisors ARE statutory constants (not indexed)
+// and are written as literals per the pinned text.
+
+// =====================================================================
+// (d) Distribution rules
+// =====================================================================
+
+pub relation roth_ira_contribution_first_year(individual: Individual, first_year: Integer) kind empirical {
+    label en unofficial "the first taxable year for which the individual (or spouse, or SEP/SIMPLE employer) made a contribution to a Roth IRA established for the individual, case-asserted";
+}
+
+pub relation roth_ira_distribution(d: Distribution, roth: RothIRA, individual: Individual, on: Date) kind empirical {
+    label en unofficial "a payment or distribution from a Roth IRA, case-asserted";
+}
+
+pub relation nonexclusion_period_end(individual: Individual, first_year: Integer, end_date: Date) kind empirical {
+    label en unofficial "the last date of the section 408A(d)(2)(B) 5-taxable-year nonexclusion period (December 31 of the fifth year after the first Roth contribution year), case-asserted: no year-to-date constructor exists in the standard term library (core-surfaces.md; same gap as `required_beginning_date` in `02-401a-qualification.law`), so the case computes and asserts this boundary date directly rather than this package deriving it from the bare integer `first_year`";
+}
+
+pub relation five_year_period_satisfied(individual: Individual, on: Date, first_year: Integer) kind institutional {
+    label en official "section 408A(d)(2)(B): the distribution is NOT within the 5-taxable-year period beginning with the first taxable year for which a Roth contribution was made";
+}
+
+@source(IRC_S408A_D, relation = formalizes, coverage = exact, quote = "A payment or distribution from a Roth IRA shall not be treated as a qualified distribution under subparagraph (A) if such payment or distribution is made within the 5-taxable year period beginning with the first taxable year for which the individual made a contribution to a Roth IRA")
+rule FiveYearPeriodSatisfied(individual: Individual, d: Distribution, roth: RothIRA, on: Date, first_year: Integer, end_date: Date) strict {
+    label en official "a distribution strictly after the asserted nonexclusion-period end date satisfies (d)(2)(B) (exact boundary: 4 years 364 days fails, a date after the fifth full taxable year passes)";
+    when roth_ira_distribution(d, roth, individual, on)
+        and nonexclusion_period_end(individual, first_year, end_date)
+        and on > end_date;
+    then five_year_period_satisfied(individual, on, first_year);
+}
+
+pub relation age_59_and_half_or_older(individual: Individual, on: Date) kind empirical {
+    label en unofficial "the individual has attained age 59 1/2 as of this date, case-asserted (no fractional-age standard term; see `age_on` in `01-ontology.law`)";
+}
+
+pub relation death_of_individual(individual: Individual, on: Date, beneficiary: Person) kind empirical {
+    label en unofficial "the distribution is made to a beneficiary (or the estate) on or after the individual's death, case-asserted";
+}
+
+pub relation disabled_72m7(individual: Individual) kind empirical {
+    label en unofficial "the individual is disabled within the meaning of section 72(m)(7), case-asserted";
+}
+
+pub relation qualified_first_home_purchase_distribution(d: Distribution, individual: Individual) kind empirical {
+    label en unofficial "the distribution is a qualified special purpose distribution under section 72(t)(2)(F) (first-time homebuyer, up to $10,000 lifetime), case-asserted";
+}
+
+pub relation roth_qualified_distribution(d: Distribution, roth: RothIRA, individual: Individual, on: Date) kind institutional {
+    label en official "section 408A(d)(2)(A): a qualified distribution — outside the 5-year nonexclusion period AND on account of age 59 1/2, death, disability, or a qualified special purpose distribution";
+}
+
+@source(IRC_S408A_D, relation = formalizes, coverage = exact, quote = "made on or after the date on which the individual attains age 59½")
+rule RothQualifiedDistributionAge59Half(d: Distribution, roth: RothIRA, individual: Individual, on: Date, first_year: Integer) strict {
+    label en official "qualified: outside the 5-year period and the individual is 59 1/2 or older";
+    when roth_ira_distribution(d, roth, individual, on)
+        and five_year_period_satisfied(individual, on, first_year)
+        and age_59_and_half_or_older(individual, on);
+    then roth_qualified_distribution(d, roth, individual, on);
+}
+
+@source(IRC_S408A_D, relation = formalizes, coverage = exact, quote = "made to a beneficiary (or to the estate of the individual) on or after the death of the individual")
+rule RothQualifiedDistributionDeath(d: Distribution, roth: RothIRA, individual: Individual, on: Date, beneficiary: Person, first_year: Integer) strict {
+    label en official "qualified: outside the 5-year period and made on/after death to a beneficiary or the estate";
+    when roth_ira_distribution(d, roth, individual, on)
+        and five_year_period_satisfied(individual, on, first_year)
+        and death_of_individual(individual, on, beneficiary);
+    then roth_qualified_distribution(d, roth, individual, on);
+}
+
+@source(IRC_S408A_D, relation = formalizes, coverage = exact, quote = "attributable to the individual's being disabled (within the meaning of section 72(m)(7))")
+rule RothQualifiedDistributionDisability(d: Distribution, roth: RothIRA, individual: Individual, on: Date, first_year: Integer) strict {
+    label en official "qualified: outside the 5-year period and attributable to disability";
+    when roth_ira_distribution(d, roth, individual, on)
+        and five_year_period_satisfied(individual, on, first_year)
+        and disabled_72m7(individual);
+    then roth_qualified_distribution(d, roth, individual, on);
+}
+
+@source(IRC_S408A_D, relation = formalizes, coverage = exact, quote = "which is a qualified special purpose distribution")
+rule RothQualifiedDistributionFirstHome(d: Distribution, roth: RothIRA, individual: Individual, on: Date, first_year: Integer) strict {
+    label en official "qualified: outside the 5-year period and a qualified special purpose (first-home) distribution";
+    when roth_ira_distribution(d, roth, individual, on)
+        and five_year_period_satisfied(individual, on, first_year)
+        and qualified_first_home_purchase_distribution(d, individual);
+    then roth_qualified_distribution(d, roth, individual, on);
+}
+
+// -- Ordering rules (d)(4) -------------------------------------------------
+
+pub enum RothDistributionSource {
+    RegularContributions;
+    QualifiedRolloverContributionsIncludibleAmount;
+    QualifiedRolloverContributionsRemainder;
+    Earnings;
+}
+
+pub relation roth_distribution_allocated_source(d: Distribution, src_kind: RothDistributionSource, amount: Money) kind institutional {
+    label en unofficial "the ordering-rule allocation of a Roth IRA distribution to its source, per section 408A(d)(4)(B): (I) then (II) FIFO, earnings last";
+}
+// TECH_GAP: a full ordering computation needs the running lifetime totals of
+// each source across all prior distributions from all the individual's Roth
+// IRAs (aggregated per section 408(d)(2)(A) "1 contract" rule) — a
+// day-by-day ledger of the kind flagged as LDC-E4102 self-recursive
+// arithmetic in the compiler traps list. This relation records the legal
+// ORDER (regular contributions, then non-includible rollover principal,
+// then includible rollover principal FIFO, then earnings) as institutional
+// vocabulary for a case to assert consistently with; it is not itself
+// computed from a running ledger in this stage.
+
+// -- Conversions (d)(3) — brief -------------------------------------------
+
+pub relation ira_conversion_to_roth(individual: Individual, source_ira: IndividualRetirementAccount, roth: RothIRA, on: Date, amount: Money) kind empirical {
+    label en unofficial "the conversion of an individual retirement plan (other than a Roth IRA) to a Roth IRA, case-asserted";
+}
+
+pub relation conversion_includible_in_gross_income(individual: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 408A(d)(3)(A)(i)/(C): a conversion is treated as a distribution to which (d)(3) applies, includible in gross income to the extent it would be were it not part of a qualified rollover contribution";
+}
+
+@source(IRC_S408A_D, relation = formalizes, coverage = exact, quote = "The conversion of an individual retirement plan (other than a Roth IRA) to a Roth IRA shall be treated for purposes of this paragraph as a distribution to which this paragraph applies.")
+rule ConversionIncludibleInGrossIncome(individual: Individual, source_ira: IndividualRetirementAccount, roth: RothIRA, y: TaxableYear, on: Date, amount: Money) strict {
+    label en official "a conversion amount is includible in gross income under (d)(3), no section 72(t) additional tax applies to it";
+    when ira_conversion_to_roth(individual, source_ira, roth, on, amount)
+        and us.irc.core::year_of(individual, y);
+    then conversion_includible_in_gross_income(individual, y, amount);
+}
+
+// =====================================================================
+// STAGE 2b (25.09.2026): (c)(1)/(4)/(5) remaining contribution rules,
+// (d)(1) exclusion, (e) qualified rollover contribution definition.
+// =====================================================================
+
+pub relation roth_ira_contribution(roth: RothIRA, individual: Individual, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "a contribution to the Roth IRA, case-asserted";
+}
+
+pub relation roth_contribution_not_deductible(roth: RothIRA, individual: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 408A(c)(1): no section 219 deduction is allowed for a Roth IRA contribution";
+}
+
+@source(IRC_S408A_C, relation = formalizes, coverage = exact, quote = "No deduction shall be allowed under section 219 for a contribution to a Roth IRA.")
+rule RothContributionNotDeductible(roth: RothIRA, individual: Individual, y: TaxableYear, amount: Money) strict {
+    label en official "Roth contributions are categorically nondeductible";
+    when roth_ira_contribution(roth, individual, y, amount);
+    then roth_contribution_not_deductible(roth, individual, y, amount);
+}
+
+pub relation roth_ira_established_for(roth: RothIRA, individual: Individual) kind empirical {
+    label en unofficial "the Roth IRA is established for this individual, case-asserted";
+}
+
+pub relation roth_401a9a_inapplicable_before_death(roth: RothIRA, individual: Individual) kind institutional {
+    label en official "section 408A(c)(4)(A): section 401(a)(9)(A) (lifetime required minimum distributions) and the incidental-death-benefit requirements of section 401(a) do not apply to a Roth IRA before the owner's death";
+}
+
+@source(IRC_S408A_C, relation = formalizes, coverage = exact, quote = "Notwithstanding subsections (a)(6) and (b)(3) of section 408 (relating to required distributions), the following provisions shall not apply to any Roth IRA")
+rule Roth401a9aInapplicableBeforeDeath(roth: RothIRA, individual: Individual) strict {
+    label en official "immunity from lifetime RMDs and incidental-death-benefit rules";
+    when roth_ira_established_for(roth, individual);
+    then roth_401a9a_inapplicable_before_death(roth, individual);
+}
+
+pub relation qualified_rollover_contribution(individual: Individual, source_plan: Plan, roth: RothIRA, on: Date, amount: Money) kind institutional {
+    label en official "section 408A(e)(1): a rollover contribution to a Roth IRA from another Roth IRA, or from an eligible retirement plan meeting section 408(d)(3)/402(c)/403(b)(8)/457(e)(16), as applicable";
+}
+
+@source(IRC_S408A_E, relation = formalizes, coverage = partial, quote = "to a Roth IRA from another such account")
+rule QualifiedRolloverContributionFromRoth(individual: Individual, source_plan: RothIRA, roth: RothIRA, on: Date, amount: Money, d: Distribution) strict {
+    label en official "a Roth-to-Roth rollover is a qualified rollover contribution";
+    when ira_rollover_contribution_made(individual, d, roth, on, amount)
+        and ira_rollover_valid(individual, d, on)
+        and ira_distribution(d, source_plan, individual, amount, on);
+    then qualified_rollover_contribution(individual, source_plan, roth, on, amount);
+}
+
+pub relation roth_ira_rollover_requires_qualified(individual: Individual, source_plan: Plan, roth: RothIRA, on: Date, amount: Money) kind institutional {
+    label en official "section 408A(c)(5)(A): no rollover contribution may be made to a Roth IRA unless it is a qualified rollover contribution — the single valid_when atom";
+}
+
+@source(IRC_S408A_C, relation = formalizes, coverage = exact, quote = "No rollover contribution may be made to a Roth IRA unless it is a qualified rollover contribution.")
+rule RothIraRolloverRequiresQualified(individual: Individual, source_plan: Plan, roth: RothIRA, on: Date, amount: Money) strict {
+    label en official "the validity gate reduces to the (e)(1) qualified-rollover-contribution test";
+    when qualified_rollover_contribution(individual, source_plan, roth, on, amount);
+    then roth_ira_rollover_requires_qualified(individual, source_plan, roth, on, amount);
+}
+
+pub relation roth_qualified_distribution_excluded_from_gross_income(d: Distribution, roth: RothIRA, individual: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 408A(d)(1): a qualified distribution from a Roth IRA is excluded from gross income";
+}
+
+@source(IRC_S408A_D, relation = formalizes, coverage = exact, quote = "Any qualified distribution from a Roth IRA shall not be includible in gross income.")
+rule RothQualifiedDistributionExcludedFromGrossIncome(d: Distribution, roth: RothIRA, individual: Individual, on: Date, y: TaxableYear, amount: Money) strict {
+    label en official "the amount of a qualified distribution is not included in gross income";
+    when roth_qualified_distribution(d, roth, individual, on)
+        and roth_ira_distribution(d, roth, individual, on)
+        and us.irc.core::year_of(individual, y)
+        and ira_distribution(d, roth, individual, amount, on);
+    then roth_qualified_distribution_excluded_from_gross_income(d, roth, individual, y, amount);
+}
+// (c)(2)/(3)(D)-(E) inflation adjustment and qualified-tuition-program
+// transfer increase, (c)(5)(B)(ii)/(6), (d)(3)(D)-(F) reporting/2010-
+// averaging/section-72 special rules, (d)(4)(A) the Roth/non-Roth
+// aggregation split (the (d)(4)(B) FIFO ordering ITSELF stays TECH_GAP per
+// the note above), (d)(6)/(7) taxpayer-adjustment-before-due-date and due-
+// date definition, and (e)(2)/(3) military-death-gratuity and SIMPLE-
+// specific qualified-rollover-contribution branches are NOT modelled
+// (TECH_GAP, stage 2b).

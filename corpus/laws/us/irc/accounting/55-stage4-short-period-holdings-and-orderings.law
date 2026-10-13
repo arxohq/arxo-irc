@@ -1,0 +1,550 @@
+// Stage 4 (DECISION-0379 with deontics): the last TECH_GAP pass over
+// accounting, part 1 of 3. Sections 443(b)(2), 448(d)(4)(A), 458(c)(4),
+// 461(j)(4)(B)(ii)(I), 461(j)(5), 461(l)(4), and the orderings of 461(j)(7),
+// 461(l)(6), 470(e)(3) against section 469.
+//
+// Techniques (stated where used): a parallel rule set for the second tax
+// computation of section 443(b)(2); a five-year window of the section 461(j)
+// aggregates (bounded by the statute itself); case-supplied tax comparators
+// (the tax function belongs to the tax owner) marked JUDGMENT CALL; explicit
+// wiring of two owners' relations in this package.
+
+// ===================== 443(b)(2)(A): the alternative computation =====================
+//
+// The short-period tax of (b)(1) is REDUCED to the greater of (i) the tax on
+// the 12-month period's taxable income prorated by the ratio of the modified
+// taxable incomes and (ii) the tax computed on the modified taxable income of
+// the short period. The two taxes are the rate-schedule function of the tax
+// owners and are CASE-SUPPLIED comparators (the same channel as
+// `tax_computed_on_annualized_basis`); this package computes the ratio, the
+// greater, and the reduction. A reduction never raises the tax: the result is
+// the lesser of the (b)(1) tax and the greater of (i) and (ii) (JUDGMENT CALL
+// on "reduced to").
+
+use self::{
+    IRC_S443_B,
+    IRC_S448_D,
+    IRC_S458_C,
+    IRC_S461_J,
+    IRC_S461_L,
+    Person,
+    ReturnableMerchandise,
+    Secretary,
+    TaxableYear,
+    aggregate_farm_deductions_461j,
+    aggregate_farm_gross_income_461j,
+    aggregate_passive_activity_losses,
+    business_deductions_with_entity_shares,
+    elects_returns_exclusion_458,
+    farm_loss_threshold_amount,
+    farm_loss_threshold_base,
+    modified_taxable_income,
+    passive_activity_loss_disallowed,
+    preceding_taxable_year_465,
+    qualified_stockholder_448d2B,
+    returns_exclusion_election_in_effect_458,
+    secretary_consents_to_revocation_458,
+    section_481_adjustment_required,
+    short_period_return_required,
+    short_period_tax,
+    taxpayer_not_in_existence_or_disposed_of_substantially_all_assets_at_end_of_443b2Bi,
+};
+
+pub relation taxable_income_for_twelve_month_period_established_443b2A(p: Person, y_short: TaxableYear) kind empirical {
+    label en official "the taxpayer establishes the amount of its taxable income for the 12-month period of subparagraph (B), computed as if that period were a taxable year and under the law applicable to that year (section 443(b)(2)(A))";
+}
+pub relation application_made_in_time_443b2C(p: Person, y_short: TaxableYear) kind empirical {
+    label en official "the application for the benefits of paragraph (2) is made in the manner and at the time the regulations require, not later than the time (with extensions) for the return of the first taxable year ending on or after 12 months after the first day of the short period (section 443(b)(2)(C))";
+}
+pub relation applies_for_benefits_of_443b2(p: Person, y_short: TaxableYear) kind empirical {
+    label en official "the taxpayer applies for the benefits of section 443(b)(2)";
+}
+pub relation application_for_443b2_valid(p: Person, y_short: TaxableYear) kind institutional {
+    label en official "the application is valid: the 12-month income is established and the application is made in time (section 443(b)(2)(A), (C))";
+}
+rule ApplicationFor443b2ValidWhenEstablishedAndInTime(p: Person, y_short: TaxableYear) strict {
+    label en official "established 12-month income plus a timely application (section 443(b)(2)(A), (C))";
+    when taxable_income_for_twelve_month_period_established_443b2A(p, y_short);
+    when application_made_in_time_443b2C(p, y_short);
+    then application_for_443b2_valid(p, y_short);
+}
+pub relation benefits_of_443b2_granted(p: Person, y_short: TaxableYear) kind institutional {
+    label en official "the benefits of section 443(b)(2) apply to the short period";
+}
+@source(IRC_S443_B, quote = "If the taxpayer applies for the benefits of this paragraph and establishes the amount of this taxable income for the 12-month period described in subparagraph (B), computed as if that period were a taxable year and under the law applicable to that year, then the tax for the short period, computed under paragraph (1), shall be reduced to the greater of the following:")
+rule Section443b2ApplicationPower(p: Person, y_short: TaxableYear) strict {
+    label en official "the taxpayer may apply for the alternative computation; a valid application (established income, timely) brings the benefits (section 443(b)(2)(A), (C))";
+    when applies_for_benefits_of_443b2(p, y_short);
+    then power Section443b2ApplicationForBenefits {
+        holder p;
+        over y_short;
+        exercise applies_for_benefits_of_443b2(p, y_short);
+        valid_when application_for_443b2_valid(p, y_short);
+        effect create(benefits_of_443b2_granted(p, y_short));
+        window [@1954-08-16, infinity);
+    };
+}
+pub relation modified_taxable_income_of_twelve_month_period_443b2A(p: Person, y_short: TaxableYear, amount: Money) kind empirical {
+    label en official "the modified taxable income for the 12-month period of subparagraph (B), the denominator of the ratio of clause (i) (section 443(b)(2)(A)(i), (b)(3)); a case fact of the tax owner";
+}
+pub relation tax_on_taxable_income_of_twelve_month_period_443b2A(p: Person, y_short: TaxableYear, tax: Money) kind empirical {
+    label en official "the tax computed on the taxable income for the 12-month period (section 443(b)(2)(A)(i)); the rate-schedule function of the tax owner, supplied by the case";
+}
+pub relation tax_on_modified_taxable_income_of_short_period_443b2Aii(p: Person, y_short: TaxableYear, tax: Money) kind empirical {
+    label en official "the tax computed on the modified taxable income for the short period, not annualized (section 443(b)(2)(A)(ii)); the rate-schedule function of the tax owner, supplied by the case";
+}
+pub relation prorated_twelve_month_tax_443b2Ai(p: Person, y_short: TaxableYear, amount: Money) kind institutional {
+    label en official "clause (i): the tax on the 12-month taxable income times the ratio of the short period's modified taxable income to the 12-month period's, one exact division rounded to cents HALF_UP (JUDGMENT CALL)";
+}
+@source(IRC_S443_B, quote = "(i) an amount which bears the same ratio to the tax computed on the taxable income for the 12-month period as the modified taxable income computed on the basis of the short period bears to the modified taxable income for the 12-month period; or")
+rule ProratedTwelveMonthTax(p: Person, y_short: TaxableYear, tax12: Money, mti_short: Money, mti12: Money) defeasible {
+    label en official "tax12 x (short-period MTI / 12-month MTI) (section 443(b)(2)(A)(i))";
+    when tax_on_taxable_income_of_twelve_month_period_443b2A(p, y_short, tax12);
+    when modified_taxable_income(p, y_short, mti_short);
+    when modified_taxable_income_of_twelve_month_period_443b2A(p, y_short, mti12);
+    when mti12 > 0.00 USD;
+    then prorated_twelve_month_tax_443b2Ai(p, y_short, div_round(tax12 * (mti_short / 1.00 USD), mti12 / 1.00 USD, 2, "HALF_UP"));
+}
+pub relation greater_of_alternative_taxes_443b2A(p: Person, y_short: TaxableYear, amount: Money) kind institutional {
+    label en official "the greater of clause (i) and clause (ii)";
+}
+@source(IRC_S443_B, quote = "(ii) the tax computed on the modified taxable income for the short period.")
+rule GreaterOfTheTwoAlternativeTaxes(p: Person, y_short: TaxableYear, a: Money, b: Money) defeasible {
+    label en official "max of the prorated 12-month tax and the tax on the short period's modified income (section 443(b)(2)(A))";
+    when prorated_twelve_month_tax_443b2Ai(p, y_short, a);
+    when tax_on_modified_taxable_income_of_short_period_443b2Aii(p, y_short, b);
+    then greater_of_alternative_taxes_443b2A(p, y_short, max(a, b));
+}
+pub relation short_period_tax_under_443b2A(p: Person, y_short: TaxableYear, tax: Money) kind institutional {
+    label en official "the short-period tax reduced under paragraph (2): the lesser of the (b)(1) tax and the greater of clauses (i) and (ii) (JUDGMENT CALL: a reduction never raises the tax)";
+}
+@source(IRC_S443_B, quote = "then the tax for the short period, computed under paragraph (1), shall be reduced to the greater of the following:")
+rule ShortPeriodTaxReducedToTheGreater(p: Person, y_short: TaxableYear, general: Money, greater: Money) defeasible {
+    label en official "the (b)(1) tax reduced to the greater of (i) and (ii), when the benefits are granted (section 443(b)(2)(A))";
+    when benefits_of_443b2_granted(p, y_short);
+    when short_period_tax(p, y_short, general);
+    when greater_of_alternative_taxes_443b2A(p, y_short, greater);
+    then short_period_tax_under_443b2A(p, y_short, min(general, greater));
+}
+pub relation tax_and_return_computed_without_443b2_443b2A(p: Person, y_short: TaxableYear) kind empirical {
+    label en official "the taxpayer computed the tax and filed the return without the application of paragraph (2) (section 443(b)(2)(A), last sentence)";
+}
+@source(IRC_S443_B, quote = "The taxpayer (other than a taxpayer to whom subparagraph (B)(ii) applies) shall compute the tax and file his return without the application of this paragraph.")
+rule Section443b2ReturnWithoutParagraphDuty(p: Person, y_short: TaxableYear) defeasible {
+    label en official "a taxpayer other than one to whom (B)(ii) applies must compute the tax and file the return without paragraph (2) (section 443(b)(2)(A), last sentence)";
+    when short_period_return_required(p, y_short);
+    when not_known(taxpayer_not_in_existence_or_disposed_of_substantially_all_assets_at_end_of_443b2Bi(p, y_short));
+    then duty Section443b2AFileWithoutParagraph {
+        bearer p;
+        beneficiary Secretary;
+        goal achievement {
+            condition tax_and_return_computed_without_443b2_443b2A(p, y_short);
+            window [-infinity, infinity];
+        }
+    };
+}
+pub relation application_treated_as_refund_claim_443b2C(p: Person, y_short: TaxableYear) kind institutional {
+    label en official "an application filed after a return made without regard to paragraph (2) is considered a claim for credit or refund of the reduction (section 443(b)(2)(C), last sentence)";
+}
+@source(IRC_S443_B, quote = "Such application, in case the return was filed without regard to this paragraph, shall be considered a claim for credit or refund with respect to the amount by which the tax is reduced under this paragraph.")
+rule ApplicationAfterReturnIsRefundClaim(p: Person, y_short: TaxableYear) defeasible {
+    label en official "a valid application after a return filed without paragraph (2) is a refund claim (section 443(b)(2)(C))";
+    when benefits_of_443b2_granted(p, y_short);
+    when tax_and_return_computed_without_443b2_443b2A(p, y_short);
+    then application_treated_as_refund_claim_443b2C(p, y_short);
+}
+
+// ===================== 448(d)(4)(A): community property disregarded =====================
+//
+// Who holds stock is decided AS IF community property laws did not exist:
+// the holder of record counts for the whole holding, and a person whose
+// interest arises solely from a community property law holds nothing for the
+// (d)(2)(B) test. The aggregate "substantially all of the stock by value" stays
+// the adjudicated fact of module 45 (the language cannot sum a derived
+// relation); this rule fixes the per-holder input.
+
+pub relation stock_held_of_record_448d(corp: Person, holder: Person, share: Decimal) kind empirical {
+    label en official "the share of the corporation's stock held of record by the holder, before any community-property attribution (section 448(d)(2)(B))";
+}
+pub relation interest_solely_by_community_property_law_448d4A(corp: Person, holder: Person) kind empirical {
+    label en official "the holder's interest in the stock arises solely under a community property law";
+}
+pub relation stock_held_disregarding_community_property_448d4A(corp: Person, holder: Person, share: Decimal) kind institutional {
+    label en official "the holder's stock for section 448(d)(2)(B), determined with community property laws disregarded: the record share of a holder whose interest is not solely a community-property interest (section 448(d)(4)(A))";
+}
+@source(IRC_S448_D, quote = "(A) community property laws shall be disregarded,")
+rule CommunityPropertyLawsDisregardedInHolding(corp: Person, holder: Person, share: Decimal) defeasible {
+    label en official "a record holder counts for the whole holding; an interest arising solely from community property law does not count (section 448(d)(4)(A))";
+    when stock_held_of_record_448d(corp, holder, share);
+    when not_known(interest_solely_by_community_property_law_448d4A(corp, holder));
+    then stock_held_disregarding_community_property_448d4A(corp, holder, share);
+}
+pub relation qualified_stock_share_448d2B(corp: Person, holder: Person, on: Date, share: Decimal) kind institutional {
+    label en official "the share of stock a qualified stockholder holds on the test date, with community property laws disregarded (section 448(d)(2)(B), (d)(4)(A))";
+}
+rule QualifiedStockShareOfQualifiedStockholder(corp: Person, holder: Person, on: Date, share: Decimal) defeasible {
+    label en official "a qualified stockholder's counted share (section 448(d)(2)(B), (d)(4)(A))";
+    when qualified_stockholder_448d2B(corp, holder, on);
+    when stock_held_disregarding_community_property_448d4A(corp, holder, share);
+    then qualified_stock_share_448d2B(corp, holder, on, share);
+}
+
+// ===================== 458(c)(4): the election is a method of accounting =====================
+//
+// Wired to section 481: the year in which the returns exclusion election is
+// made, and the year in which the Secretary consents to its revocation, are
+// years of a change of method (section 481(a)); the election itself needs no
+// consent under 446(e) because (c)(1) says so ("except to the extent
+// inconsistent with the provisions of this section").
+
+pub relation election_computation_is_method_of_accounting_458c4(p: Person, y: TaxableYear, c: ReturnableMerchandise) kind institutional {
+    label en official "the computation of taxable income under the section 458 election is treated as a method of accounting for purposes of the subtitle (section 458(c)(4))";
+}
+@source(IRC_S458_C, quote = "the computation of taxable income under an election made under this section shall be treated as a method of accounting.")
+rule Section458ElectionComputationIsMethodOfAccounting(p: Person, y: TaxableYear, c: ReturnableMerchandise) defeasible {
+    label en official "an election in effect makes the computation a method of accounting (section 458(c)(4))";
+    when returns_exclusion_election_in_effect_458(p, y, c);
+    then election_computation_is_method_of_accounting_458c4(p, y, c);
+}
+@source(IRC_S458_C, quote = "the computation of taxable income under an election made under this section shall be treated as a method of accounting.")
+rule Section481AdjustmentOnSection458ElectionYear(p: Person, y: TaxableYear, c: ReturnableMerchandise) defeasible {
+    label en official "the year the section 458 election takes effect is the year of a change of method: the section 481(a) adjustment is required (section 458(c)(4), section 481(a))";
+    when elects_returns_exclusion_458(p, y, c);
+    when election_computation_is_method_of_accounting_458c4(p, y, c);
+    then section_481_adjustment_required(p, y);
+}
+rule Section481AdjustmentOnSection458Revocation(p: Person, y: TaxableYear, c: ReturnableMerchandise) defeasible {
+    label en official "the year the Secretary consents to revocation is the year of a change of method: the section 481(a) adjustment is required (section 458(c)(3)-(4), section 481(a))";
+    when secretary_consents_to_revocation_458(p, y, c);
+    then section_481_adjustment_required(p, y);
+}
+
+// ===================== 461(j)(4)(B)(ii)(I): the five-year window =====================
+//
+// The threshold amount of (j)(4)(B)(i)(II) compares the farm gross income of the
+// 5 consecutive preceding years with their farm deductions; a loss carried
+// forward under (j)(2) is counted in the FIRST year in which its deduction is
+// not disallowed, notwithstanding the disregard of (A)(i). Each preceding year
+// therefore counts its deductions (asserted "without regard to disallowance",
+// so that the deduction treated as arising under (j)(2) is in the year it
+// reappears) MINUS the excess farm loss disallowed in that same year.
+//
+// TECHNIQUE (stated): the window is exactly five years (bounded by the
+// statute), walked along `preceding_taxable_year_465`; the disallowed amount of
+// each preceding year is a CASE-SUPPLIED ledger input (JUDGMENT CALL): deriving
+// it from `excess_farm_loss_disallowed` of those years would make the
+// threshold of a year depend on the thresholds of earlier years (a predicate
+// cycle, LDC-E4102). Each of the five years needs its asserted aggregate
+// deductions and gross income (zero when none); a missing year gives NEITHER.
+// The derived aggregates are an ALTERNATIVE channel to
+// `prior_five_year_farm_gross_income` and `prior_five_year_farm_deductions`
+// (a case supplies either, never both).
+
+pub relation farm_loss_disallowed_in_earlier_year_461j4Bii(p: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the excess farm loss disallowed under (j)(1) for the earlier taxable year, whose deduction is counted only in the first year it is not disallowed (section 461(j)(4)(B)(ii)(I)); ledger input";
+}
+pub relation farm_loss_disallowed_in_earlier_year_present_461j4Bii(p: Person, y: TaxableYear) kind institutional {
+    label en official "a disallowed amount is asserted for the earlier year";
+}
+rule FarmLossDisallowedInEarlierYearPresent(p: Person, y: TaxableYear, amount: Money) defeasible {
+    label en official "bridge for the absence test";
+    when farm_loss_disallowed_in_earlier_year_461j4Bii(p, y, amount);
+    then farm_loss_disallowed_in_earlier_year_present_461j4Bii(p, y);
+}
+pub relation farm_deductions_counted_for_window_461j4Bii(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the farm deductions of an earlier year counted in the five-year aggregate: asserted deductions minus the excess farm loss disallowed in that year (section 461(j)(4)(A)(i), (B)(ii)(I))";
+}
+@source(IRC_S461_J, quote = "(I) notwithstanding the disregard in subparagraph (A)(i) of any disallowance under paragraph (1), in the case of any loss which is carried forward under paragraph (2) from any taxable year, such loss (or any portion thereof) shall be taken into account for the first taxable year in which a deduction for such loss (or portion) is not disallowed by reason of this subsection, and")
+rule FarmDeductionsCountedNetOfDisallowance(p: Person, y: TaxableYear, d: Money, dis: Money) defeasible {
+    label en official "deductions minus the amount disallowed in that year (section 461(j)(4)(B)(ii)(I))";
+    when aggregate_farm_deductions_461j(p, y, d);
+    when farm_loss_disallowed_in_earlier_year_461j4Bii(p, y, dis);
+    then farm_deductions_counted_for_window_461j4Bii(p, y, round(d - dis, 2, "HALF_UP"));
+}
+rule FarmDeductionsCountedWhenNothingDisallowed(p: Person, y: TaxableYear, d: Money) defeasible {
+    label en official "nothing disallowed in the year: the deductions count as they stand";
+    when aggregate_farm_deductions_461j(p, y, d);
+    when not_known(farm_loss_disallowed_in_earlier_year_present_461j4Bii(p, y));
+    then farm_deductions_counted_for_window_461j4Bii(p, y, d);
+}
+relation farm_window_level_1(p: Person, y: TaxableYear, w: TaxableYear) kind institutional {
+    label en official "the first preceding year of the five-year window";
+}
+@source(IRC_S461_J, quote = "the excess (if any) of the aggregate amounts described in subparagraph (A)(ii)(I) for the 5-consecutive taxable year period preceding the taxable year over the aggregate amounts described in subparagraph (A)(i) for such period.")
+rule FarmWindowLevel1(p: Person, y: TaxableYear, w: TaxableYear, base: Money) defeasible {
+    label en official "the year immediately before the taxable year";
+    when farm_loss_threshold_base(p, y, base);
+    when preceding_taxable_year_465(w, y);
+    then farm_window_level_1(p, y, w);
+}
+relation farm_window_sum_1(p: Person, y: TaxableYear, w: TaxableYear, income: Money, deductions: Money) kind institutional {
+    label en official "running sums through the first preceding year";
+}
+rule FarmWindowSum1(p: Person, y: TaxableYear, w: TaxableYear, g: Money, d: Money) defeasible {
+    label en official "sums of the first preceding year";
+    when farm_window_level_1(p, y, w);
+    when aggregate_farm_gross_income_461j(p, w, g);
+    when farm_deductions_counted_for_window_461j4Bii(p, w, d);
+    then farm_window_sum_1(p, y, w, g, d);
+}
+relation farm_window_sum_2(p: Person, y: TaxableYear, w: TaxableYear, income: Money, deductions: Money) kind institutional {
+    label en official "running sums through the second preceding year";
+}
+rule FarmWindowSum2(p: Person, y: TaxableYear, w1: TaxableYear, w: TaxableYear, si: Money, sd: Money, g: Money, d: Money) defeasible {
+    label en official "add the second preceding year";
+    when farm_window_sum_1(p, y, w1, si, sd);
+    when preceding_taxable_year_465(w, w1);
+    when aggregate_farm_gross_income_461j(p, w, g);
+    when farm_deductions_counted_for_window_461j4Bii(p, w, d);
+    then farm_window_sum_2(p, y, w, si + g, sd + d);
+}
+relation farm_window_sum_3(p: Person, y: TaxableYear, w: TaxableYear, income: Money, deductions: Money) kind institutional {
+    label en official "running sums through the third preceding year";
+}
+rule FarmWindowSum3(p: Person, y: TaxableYear, w1: TaxableYear, w: TaxableYear, si: Money, sd: Money, g: Money, d: Money) defeasible {
+    label en official "add the third preceding year";
+    when farm_window_sum_2(p, y, w1, si, sd);
+    when preceding_taxable_year_465(w, w1);
+    when aggregate_farm_gross_income_461j(p, w, g);
+    when farm_deductions_counted_for_window_461j4Bii(p, w, d);
+    then farm_window_sum_3(p, y, w, si + g, sd + d);
+}
+relation farm_window_sum_4(p: Person, y: TaxableYear, w: TaxableYear, income: Money, deductions: Money) kind institutional {
+    label en official "running sums through the fourth preceding year";
+}
+rule FarmWindowSum4(p: Person, y: TaxableYear, w1: TaxableYear, w: TaxableYear, si: Money, sd: Money, g: Money, d: Money) defeasible {
+    label en official "add the fourth preceding year";
+    when farm_window_sum_3(p, y, w1, si, sd);
+    when preceding_taxable_year_465(w, w1);
+    when aggregate_farm_gross_income_461j(p, w, g);
+    when farm_deductions_counted_for_window_461j4Bii(p, w, d);
+    then farm_window_sum_4(p, y, w, si + g, sd + d);
+}
+relation farm_window_sum_5(p: Person, y: TaxableYear, w: TaxableYear, income: Money, deductions: Money) kind institutional {
+    label en official "running sums through the fifth preceding year";
+}
+rule FarmWindowSum5(p: Person, y: TaxableYear, w1: TaxableYear, w: TaxableYear, si: Money, sd: Money, g: Money, d: Money) defeasible {
+    label en official "add the fifth preceding year";
+    when farm_window_sum_4(p, y, w1, si, sd);
+    when preceding_taxable_year_465(w, w1);
+    when aggregate_farm_gross_income_461j(p, w, g);
+    when farm_deductions_counted_for_window_461j4Bii(p, w, d);
+    then farm_window_sum_5(p, y, w, si + g, sd + d);
+}
+pub relation five_year_window_farm_income_and_deductions_461j4B(p: Person, y: TaxableYear, income: Money, deductions: Money) kind institutional {
+    label en official "the aggregate (A)(ii)(I) and (A)(i) amounts of the 5 consecutive taxable years preceding the taxable year, the carried loss counted in the first year it is not disallowed (section 461(j)(4)(B)(i)(II), (ii)(I))";
+}
+rule FiveYearWindowFromRunningSums(p: Person, y: TaxableYear, w: TaxableYear, si: Money, sd: Money) defeasible {
+    label en official "the five running sums are the window";
+    when farm_window_sum_5(p, y, w, si, sd);
+    then five_year_window_farm_income_and_deductions_461j4B(p, y, si, sd);
+}
+@source(IRC_S461_J, quote = "The term \"threshold amount\" means, with respect to any taxable year, the greater of—")
+rule FarmLossThresholdAmountFromDerivedWindow(p: Person, y: TaxableYear, base: Money, income: Money, ded: Money) defeasible {
+    label en official "threshold = max(base, five-year gross income - five-year counted deductions) (section 461(j)(4)(B)(i)); alternative channel to the asserted five-year aggregates";
+    when farm_loss_threshold_base(p, y, base);
+    when five_year_window_farm_income_and_deductions_461j4B(p, y, income, ded);
+    then farm_loss_threshold_amount(p, y, max(base, round(income - ded, 2, "HALF_UP")));
+}
+
+// ===================== 461(j)(5), 461(l)(4): partnerships and S corporations =====================
+//
+// The limitation is applied AT THE HOLDER LEVEL and each holder's share of the
+// entity's items is taken into account in the holder's taxable year with or
+// within which the entity's year ends. The allocation of the items (the share)
+// is the partnerships / S corporations owner's function and is a CASE-SUPPLIED
+// share; the holder's own aggregates (`aggregate_farm_deductions_461j`,
+// `aggregate_business_deductions_461l` ...) are asserted INCLUDING the shares
+// this module computes (a case does not assert both). For an S corporation the
+// share is the shareholder's pro rata share (461(l)(4), last sentence).
+
+pub relation entity_is_partnership_or_s_corporation_461_5(pte: Person) kind empirical {
+    label en official "the entity is a partnership or an S corporation (section 461(j)(5), (l)(4))";
+}
+pub relation entity_is_s_corporation_461l4(pte: Person) kind empirical {
+    label en official "the entity is an S corporation (section 461(l)(4), last sentence)";
+}
+pub relation holder_of_entity_461_5(pte: Person, holder: Person) kind empirical {
+    label en official "the holder is a partner or a shareholder of the entity";
+}
+pub relation subsection_applied_at_holder_level_461_5(pte: Person, holder: Person) kind institutional {
+    label en official "sections 461(j) and 461(l) are applied at the partner or shareholder level, not at the entity level (section 461(j)(5)(A), (l)(4)(A))";
+}
+@source(IRC_S461_J, quote = "(A) this subsection shall be applied at the partner or shareholder level, and")
+rule SubsectionAppliedAtHolderLevel(pte: Person, holder: Person) defeasible {
+    label en official "for a partnership or S corporation the subsection is applied to the holder (section 461(j)(5)(A), (l)(4)(A))";
+    when entity_is_partnership_or_s_corporation_461_5(pte);
+    when holder_of_entity_461_5(pte, holder);
+    then subsection_applied_at_holder_level_461_5(pte, holder);
+}
+pub relation subsection_not_applied_at_entity_level_461_5(pte: Person) kind institutional {
+    label en official "the entity itself is not the taxpayer to which sections 461(j) and 461(l) are applied";
+}
+rule SubsectionNotAppliedAtEntityLevel(pte: Person, holder: Person) defeasible {
+    label en official "the entity is not tested itself when a holder-level application exists (section 461(j)(5)(A), (l)(4)(A))";
+    when subsection_applied_at_holder_level_461_5(pte, holder);
+    then subsection_not_applied_at_entity_level_461_5(pte);
+}
+pub relation holder_year_contains_entity_year_end_461_5B(pte: Person, y_entity: TaxableYear, holder: Person, y_holder: TaxableYear) kind institutional {
+    label en official "the entity's taxable year ends with or within the holder's taxable year (section 461(j)(5)(B), (l)(4)(B))";
+}
+@source(IRC_S461_L, quote = "shall be taken into account by the partner or shareholder in applying this subsection to the taxable year of such partner or shareholder with or within which the taxable year of the partnership or S corporation ends.")
+rule HolderYearContainsEntityYearEnd(pte: Person, y_entity: TaxableYear, holder: Person, y_holder: TaxableYear, ends_on: Date, begins_h: Date, ends_h: Date) defeasible {
+    label en official "the holder's year begins on or before, and ends on or after, the entity's year end (section 461(j)(5)(B), (l)(4)(B))";
+    when holder_of_entity_461_5(pte, holder);
+    when us.irc.core::ends(y_entity, ends_on);
+    when us.irc.core::begins(y_holder, begins_h);
+    when us.irc.core::ends(y_holder, ends_h);
+    when begins_h <= ends_on;
+    when ends_on <= ends_h;
+    then holder_year_contains_entity_year_end_461_5B(pte, y_entity, holder, y_holder);
+}
+pub relation entity_farm_deductions_461j5B(pte: Person, y_entity: TaxableYear, amount: Money) kind empirical {
+    label en official "the entity's items of deduction from farming businesses for its taxable year (section 461(j)(5)(B))";
+}
+pub relation entity_farm_gross_income_461j5B(pte: Person, y_entity: TaxableYear, amount: Money) kind empirical {
+    label en official "the entity's items of income and gain from farming businesses for its taxable year (section 461(j)(5)(B))";
+}
+pub relation entity_business_deductions_461l4B(pte: Person, y_entity: TaxableYear, amount: Money) kind empirical {
+    label en official "the entity's items of deduction and loss from trades or businesses for its taxable year (section 461(l)(4)(B))";
+}
+pub relation entity_business_income_461l4B(pte: Person, y_entity: TaxableYear, amount: Money) kind empirical {
+    label en official "the entity's items of income and gain from trades or businesses for its taxable year (section 461(l)(4)(B))";
+}
+pub relation holder_proportionate_share_461_5B(pte: Person, y_entity: TaxableYear, holder: Person, share: Decimal) kind empirical {
+    label en official "the holder's proportionate share (partner: allocable share; S corporation shareholder: pro rata share) of the entity's items for the entity's year; the allocation is the owner's function and is supplied by the case (section 461(j)(5)(B), (l)(4)(B))";
+}
+pub relation holder_share_of_entity_farm_deductions_461j5B(holder: Person, y_holder: TaxableYear, pte: Person, amount: Money) kind institutional {
+    label en official "the holder's share of the entity's farm deductions, taken into account in the holder's year (section 461(j)(5)(B)); share x items, one rounding to cents HALF_UP (JUDGMENT CALL)";
+}
+@source(IRC_S461_J, quote = "(B) each partner's or shareholder's proportionate share of the items of income, gain, or deduction of the partnership or S corporation for any taxable year from farming businesses attributable to the partnership or S corporation, and of any applicable subsidies received by the partnership or S corporation during the taxable year, shall be taken into account by the partner or shareholder in applying this subsection")
+rule HolderShareOfEntityFarmDeductions(pte: Person, y_entity: TaxableYear, holder: Person, y_holder: TaxableYear, share: Decimal, items: Money) defeasible {
+    label en official "share x the entity's farm deductions, in the holder's year (section 461(j)(5)(B))";
+    when subsection_applied_at_holder_level_461_5(pte, holder);
+    when holder_year_contains_entity_year_end_461_5B(pte, y_entity, holder, y_holder);
+    when holder_proportionate_share_461_5B(pte, y_entity, holder, share);
+    when entity_farm_deductions_461j5B(pte, y_entity, items);
+    then holder_share_of_entity_farm_deductions_461j5B(holder, y_holder, pte, round(items * share, 2, "HALF_UP"));
+}
+pub relation holder_share_of_entity_farm_income_461j5B(holder: Person, y_holder: TaxableYear, pte: Person, amount: Money) kind institutional {
+    label en official "the holder's share of the entity's farm income and gain, taken into account in the holder's year (section 461(j)(5)(B))";
+}
+rule HolderShareOfEntityFarmIncome(pte: Person, y_entity: TaxableYear, holder: Person, y_holder: TaxableYear, share: Decimal, items: Money) defeasible {
+    label en official "share x the entity's farm income (section 461(j)(5)(B))";
+    when subsection_applied_at_holder_level_461_5(pte, holder);
+    when holder_year_contains_entity_year_end_461_5B(pte, y_entity, holder, y_holder);
+    when holder_proportionate_share_461_5B(pte, y_entity, holder, share);
+    when entity_farm_gross_income_461j5B(pte, y_entity, items);
+    then holder_share_of_entity_farm_income_461j5B(holder, y_holder, pte, round(items * share, 2, "HALF_UP"));
+}
+pub relation entity_applicable_subsidy_received_461j5B(pte: Person, y_entity: TaxableYear) kind empirical {
+    label en official "the entity received an applicable subsidy during its taxable year (section 461(j)(5)(B))";
+}
+pub relation holder_treated_as_receiving_applicable_subsidy_461j5B(holder: Person, y_holder: TaxableYear) kind institutional {
+    label en official "the holder takes the entity's applicable subsidy into account in the year with or within which the entity's year ends (section 461(j)(5)(B))";
+}
+rule HolderTakesEntitySubsidyIntoAccount(pte: Person, y_entity: TaxableYear, holder: Person, y_holder: TaxableYear) defeasible {
+    label en official "the entity's subsidy counts for the holder (section 461(j)(5)(B))";
+    when subsection_applied_at_holder_level_461_5(pte, holder);
+    when holder_year_contains_entity_year_end_461_5B(pte, y_entity, holder, y_holder);
+    when entity_applicable_subsidy_received_461j5B(pte, y_entity);
+    then holder_treated_as_receiving_applicable_subsidy_461j5B(holder, y_holder);
+}
+pub relation holder_share_of_entity_business_deductions_461l4B(holder: Person, y_holder: TaxableYear, pte: Person, amount: Money) kind institutional {
+    label en official "the holder's allocable (S corporation: pro rata) share of the entity's business deductions and losses, taken into account in the holder's year (section 461(l)(4)(B))";
+}
+@source(IRC_S461_L, quote = "(B) each partner's or shareholder's allocable share of the items of income, gain, deduction, or loss of the partnership or S corporation for any taxable year from trades or businesses attributable to the partnership or S corporation shall be taken into account by the partner or shareholder in applying this subsection")
+rule HolderShareOfEntityBusinessDeductions(pte: Person, y_entity: TaxableYear, holder: Person, y_holder: TaxableYear, share: Decimal, items: Money) defeasible {
+    label en official "share x the entity's business deductions (section 461(l)(4)(B))";
+    when subsection_applied_at_holder_level_461_5(pte, holder);
+    when holder_year_contains_entity_year_end_461_5B(pte, y_entity, holder, y_holder);
+    when holder_proportionate_share_461_5B(pte, y_entity, holder, share);
+    when entity_business_deductions_461l4B(pte, y_entity, items);
+    then holder_share_of_entity_business_deductions_461l4B(holder, y_holder, pte, round(items * share, 2, "HALF_UP"));
+}
+pub relation holder_share_of_entity_business_income_461l4B(holder: Person, y_holder: TaxableYear, pte: Person, amount: Money) kind institutional {
+    label en official "the holder's allocable (S corporation: pro rata) share of the entity's business income and gain, taken into account in the holder's year (section 461(l)(4)(B))";
+}
+rule HolderShareOfEntityBusinessIncome(pte: Person, y_entity: TaxableYear, holder: Person, y_holder: TaxableYear, share: Decimal, items: Money) defeasible {
+    label en official "share x the entity's business income (section 461(l)(4)(B))";
+    when subsection_applied_at_holder_level_461_5(pte, holder);
+    when holder_year_contains_entity_year_end_461_5B(pte, y_entity, holder, y_holder);
+    when holder_proportionate_share_461_5B(pte, y_entity, holder, share);
+    when entity_business_income_461l4B(pte, y_entity, items);
+    then holder_share_of_entity_business_income_461l4B(holder, y_holder, pte, round(items * share, 2, "HALF_UP"));
+}
+pub relation shareholder_pro_rata_share_used_461l4(pte: Person, holder: Person) kind institutional {
+    label en official "for an S corporation the allocable share is the shareholder's pro rata share of an item (section 461(l)(4), last sentence)";
+}
+@source(IRC_S461_L, quote = "For purposes of this paragraph, in the case of an S corporation, an allocable share shall be the shareholder's pro rata share of an item.")
+rule SCorporationAllocableShareIsProRataShare(pte: Person, holder: Person) defeasible {
+    label en official "an S corporation shareholder's allocable share is the pro rata share (section 461(l)(4))";
+    when entity_is_s_corporation_461l4(pte);
+    when holder_of_entity_461_5(pte, holder);
+    then shareholder_pro_rata_share_used_461l4(pte, holder);
+}
+
+// ===================== 461(j)(7), 461(l)(6), 470(e)(3): orderings against section 469 =====================
+//
+// Sections 461(j) and 470 are applied BEFORE section 469, and section 461(l)
+// AFTER it. The two directions are two relations: the passive losses that
+// section 469 looks at are the asserted aggregate MINUS the portion already
+// disallowed by 461(j), 461(l)(1) or 470(a) (the portion of a disallowance that
+// falls on passive activities is an allocation supplied by the case:
+// JUDGMENT CALL); and the business deductions that section 461(l) looks at are
+// the asserted aggregate MINUS the passive activity loss disallowed by 469.
+// Both replace a bare read of the asserted aggregate (modules 09 and 25 read
+// the new relations). The portion is an input, not derived from the (j) and
+// (l) results, so that no predicate cycle arises (LDC-E4102).
+
+pub relation passive_losses_disallowed_by_earlier_limitations_469(p: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the part of the aggregate passive losses already disallowed by section 461(j), 461(l)(1) or 470(a), which apply before section 469 (section 461(j)(7), 470(e)(3)); an allocation supplied by the case";
+}
+pub relation earlier_limitation_portion_present_469(p: Person, y: TaxableYear) kind institutional {
+    label en official "bridge: a portion is asserted for the year";
+}
+rule EarlierLimitationPortionPresent(p: Person, y: TaxableYear, amount: Money) defeasible {
+    label en official "bridge for the absence test";
+    when passive_losses_disallowed_by_earlier_limitations_469(p, y, amount);
+    then earlier_limitation_portion_present_469(p, y);
+}
+pub relation aggregate_passive_activity_losses_after_earlier_limitations(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the aggregate passive activity losses section 469 looks at: the asserted aggregate less the part already disallowed by the limitations applied before section 469, not below zero (section 461(j)(7), 470(e)(3))";
+}
+@source(IRC_S461_J, quote = "This subsection shall be applied before the application of section 469.")
+rule PassiveLossesAfterEarlierLimitations(p: Person, y: TaxableYear, losses: Money, portion: Money) defeasible {
+    label en official "sections 461(j) and 470 apply before section 469: their disallowed part is not a passive loss for section 469 (section 461(j)(7), 470(e)(3))";
+    when aggregate_passive_activity_losses(p, y, losses);
+    when passive_losses_disallowed_by_earlier_limitations_469(p, y, portion);
+    then aggregate_passive_activity_losses_after_earlier_limitations(p, y, max(0.00 USD, round(losses - portion, 2, "HALF_UP")));
+}
+rule PassiveLossesWithoutEarlierLimitations(p: Person, y: TaxableYear, losses: Money) defeasible {
+    label en official "no earlier limitation: the asserted aggregate stands";
+    when aggregate_passive_activity_losses(p, y, losses);
+    when not_known(earlier_limitation_portion_present_469(p, y));
+    then aggregate_passive_activity_losses_after_earlier_limitations(p, y, losses);
+}
+pub relation passive_loss_disallowed_present_461l6(p: Person, y: TaxableYear) kind institutional {
+    label en official "bridge: a passive activity loss is disallowed under section 469 for the year";
+}
+rule PassiveLossDisallowedPresent(p: Person, y: TaxableYear, amount: Money) defeasible {
+    label en official "bridge for the absence test";
+    when passive_activity_loss_disallowed(p, y, amount);
+    then passive_loss_disallowed_present_461l6(p, y);
+}
+pub relation aggregate_business_deductions_after_469_461l6(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the aggregate business deductions section 461(l) looks at: the asserted aggregate less the passive activity loss disallowed under section 469, which is applied first (section 461(l)(6))";
+}
+@source(IRC_S461_L, quote = "This subsection shall be applied after the application of section 469.")
+rule BusinessDeductionsAfterSection469(p: Person, y: TaxableYear, d: Money, dis: Money) defeasible {
+    label en official "section 461(l) applies after section 469: a loss disallowed by 469 is not counted (section 461(l)(6))";
+    when business_deductions_with_entity_shares(p, y, d);
+    when passive_activity_loss_disallowed(p, y, dis);
+    then aggregate_business_deductions_after_469_461l6(p, y, max(0.00 USD, round(d - dis, 2, "HALF_UP")));
+}
+rule BusinessDeductionsWithoutSection469Disallowance(p: Person, y: TaxableYear, d: Money) defeasible {
+    label en official "no section 469 disallowance: the asserted aggregate stands";
+    when business_deductions_with_entity_shares(p, y, d);
+    when not_known(passive_loss_disallowed_present_461l6(p, y));
+    then aggregate_business_deductions_after_469_461l6(p, y, d);
+}

@@ -1,0 +1,632 @@
+// 26 U.S.C. §2054 (losses), §2055(b)-(g) (charitable deduction: powers of
+// appointment, death taxes payable out of bequests, the limitation, the
+// disallowances and reformation procedures of (e), easements), §2058 (State
+// death tax deduction), and the wiring of the three deductions into the
+// taxable estate. Stage 2 (DECISION-0379 with deontics) of
+// `us.irc.estate_gift` (B01/IRC-11).
+//
+// WIRING. Stage 1 declared `EstateDeductionKind` with Losses, CharitableDeduction
+// and StateDeathTaxDeduction but produced only ExpensesIndebtednessAndTaxes and
+// MaritalDeduction. Each kind now has ONE producing rule fed by an estate-level
+// total (never one tuple per item: `total_estate_deductions` sums over the pair
+// (amount, kind), so equal amounts of the same kind would collapse).
+//
+// JUDGMENT CALLS
+//  - §2055(c): the death taxes payable out of the bequest depend on the deduction
+//    itself; the statute leaves the arithmetic to the executor. The amount is
+//    case-asserted (`death_taxes_payable_out_of_bequest`).
+//  - §2055(d): the cap is applied only when a `gross_estate_item` exists for the
+//    item; a case that supplies none is not capped (unknown is not negative).
+//  - §2055(e)(3): actuarial values of the reformable and qualified interests are
+//    case-asserted (section 7520 is owned by nobody in `us.irc.*`, TECH-GAPS G3607).
+//  - §2058(b): "before the later of" the period is read as "on or before".
+
+language "law.core" version "0.2";
+package us.irc.estate_gift version "0.1.1";
+namespace "urn:us:irc:estate_gift:clir";
+
+use self::{
+    Asset,
+    CharitableRecipientKind,
+    Estate,
+    EstateDeductionKind,
+    IRC_S2043_B,
+    IRC_S2054,
+    IRC_S2055_A,
+    IRC_S2055_B,
+    IRC_S2055_C,
+    IRC_S2055_D,
+    IRC_S2055_E,
+    IRC_S2055_F,
+    IRC_S2058_A,
+    IRC_S2058_B,
+    Person,
+    alternate_valuation_adjustment_2032b,
+    alternate_valuation_elected,
+    charitable_bequest,
+    charitable_deduction_2055,
+    claims_against_estate,
+    date_of_death,
+    deductible_administration_expense_2053,
+    deductible_claim_2053,
+    deductible_funeral_expense_2053,
+    deductible_indebtedness_2053,
+    deduction_barred_2053c1,
+    estate_deduction_allowed,
+    estate_return_due_date_with_extensions,
+    estate_return_filed_on,
+    executor_of,
+    gross_estate_item,
+    post_death_easement_deduction_barred_2031c9,
+    qualified_disclaimer,
+    split_interest_qualifies,
+    split_interest_qualifies_guaranteed_or_fixed_percentage,
+    split_interest_qualifies_remainder,
+    split_interest_transfer,
+};
+
+// =====================================================================
+// §2054 — losses during settlement of the estate
+// =====================================================================
+
+pub enum SettlementLossCause {
+    FireLoss;
+    StormLoss;
+    ShipwreckLoss;
+    OtherCasualtyLoss;
+    TheftLoss;
+}
+pub relation settlement_loss(e: Estate, n: Integer, cause: SettlementLossCause, amount: Money) kind empirical {
+    label en unofficial "a loss incurred during the settlement of the estate, arising from fire, storm, shipwreck or other casualty, or from theft (section 2054); n numbers the loss within the estate";
+}
+pub relation settlement_loss_compensation(e: Estate, n: Integer, amount: Money) kind empirical {
+    label en unofficial "the amount of loss n compensated for by insurance or otherwise (section 2054)";
+}
+@source(IRC_S2054, relation = formalizes, coverage = exact, quote = "losses incurred during the settlement of estates arising from fires, storms, shipwrecks, or other casualties, or from theft, when such losses are not compensated for by insurance or otherwise")
+pub relation uncompensated_settlement_loss(e: Estate, n: Integer, amount: Money) kind institutional {
+    label en official "the part of settlement loss n not compensated for by insurance or otherwise (section 2054)";
+}
+rule UncompensatedSettlementLossRule(e: Estate, n: Integer, loss: Money) defeasible {
+    label en official "a loss from casualty or theft during settlement is deductible to the extent not compensated (section 2054)";
+    when settlement_loss(e, n, _, loss);
+    then uncompensated_settlement_loss(e, n, max(0.00 USD, loss - sum(collect all c: Money where settlement_loss_compensation(e, n, c), empty: 0.00 USD)));
+}
+pub relation settlement_losses_deduction_2054(e: Estate, amount: Money) kind institutional {
+    label en official "the total section 2054 deduction";
+}
+rule SettlementLossesDeduction2054Rule(e: Estate) defeasible {
+    when uncompensated_settlement_loss(e, _, _);
+    then settlement_losses_deduction_2054(e, sum(collect all a: Money, n: Integer where uncompensated_settlement_loss(e, n, a), empty: 0.00 USD));
+}
+rule LossesEstateDeductionRule(e: Estate, total: Money) defeasible {
+    label en official "the total of the section 2054 losses enters the taxable estate as the Losses deduction (section 2051)";
+    when settlement_losses_deduction_2054(e, total);
+    then estate_deduction_allowed(e, Losses, total);
+}
+
+// =====================================================================
+// §2053 — one estate-level total for the four categories of subsection (a)
+// =====================================================================
+
+relation has_2053_item(e: Estate) kind institutional;
+rule Has2053ItemFuneralRule(e: Estate) defeasible { when deductible_funeral_expense_2053(e, _); then has_2053_item(e); }
+rule Has2053ItemAdministrationRule(e: Estate) defeasible { when deductible_administration_expense_2053(e, _); then has_2053_item(e); }
+rule Has2053ItemClaimsRule(e: Estate) defeasible { when deductible_claim_2053(e, _); then has_2053_item(e); }
+rule Has2053ItemIndebtednessRule(e: Estate) defeasible { when deductible_indebtedness_2053(e, _); then has_2053_item(e); }
+// A claim founded on a promise or agreement is deductible only to the extent
+// contracted bona fide for adequate and full consideration (2053(c)(1)(A));
+// section 2043(b)(2) deems a property settlement to satisfy that requirement.
+pub relation claim_is_property_settlement_2043b2(e: Estate, amount: Money) kind empirical {
+    label en unofficial "the claim arises from a transfer satisfying section 2516(1) (property settlement), deemed for adequate and full consideration for purposes of section 2053 (section 2043(b)(2))";
+}
+@source(IRC_S2043_B, relation = formalizes, coverage = exact, quote = "a transfer of property which satisfies the requirements of paragraph (1) of section 2516 (relating to certain property settlements) shall be considered to be made for an adequate and full consideration in money or money's worth")
+rule DeductibleClaimByPropertySettlementRule(e: Estate, a: Money) defeasible {
+    label en official "a property-settlement transfer is considered made for an adequate and full consideration for purposes of section 2053 (section 2043(b)(2))";
+    when claims_against_estate(e, a);
+    when claim_is_property_settlement_2043b2(e, a);
+    when not_known(deduction_barred_2053c1(e, a));
+    then deductible_claim_2053(e, a);
+}
+pub relation expenses_indebtedness_and_taxes_total_2053(e: Estate, amount: Money) kind institutional {
+    label en official "the section 2053(a) total: funeral expenses, administration expenses, deductible claims and unpaid mortgages or indebtedness";
+}
+relation section_2053a_gross_2053(e: Estate, amount: Money) kind institutional;
+rule ExpensesIndebtednessAndTaxesTotal2053Rule(e: Estate) defeasible {
+    when has_2053_item(e);
+    then section_2053a_gross_2053(e,
+        sum(collect all a: Money where deductible_funeral_expense_2053(e, a), empty: 0.00 USD)
+        + sum(collect all a: Money where deductible_administration_expense_2053(e, a), empty: 0.00 USD)
+        + sum(collect all a: Money where deductible_claim_2053(e, a), empty: 0.00 USD)
+        + sum(collect all a: Money where deductible_indebtedness_2053(e, a), empty: 0.00 USD));
+}
+rule Section2053EstateDeductionRule(e: Estate, total: Money) defeasible {
+    label en official "the section 2053(a) total enters the taxable estate (section 2051)";
+    when expenses_indebtedness_and_taxes_total_2053(e, total);
+    then estate_deduction_allowed(e, ExpensesIndebtednessAndTaxes, total);
+}
+
+// =====================================================================
+// §2055(b)-(d), (f) — what is a charitable transfer, and how much
+// =====================================================================
+
+pub relation section_2041_property_received_by_charitable_donee(e: Estate, item: Asset, kind: CharitableRecipientKind, value: Money) kind empirical {
+    label en unofficial "property includible in the decedent's gross estate under section 2041 is received by a donee described in section 2055(a), of the stated kind, at the stated value (section 2055(b))";
+}
+pub relation qualified_real_property_interest_transfer(e: Estate, item: Asset, value: Money) kind empirical {
+    label en unofficial "an irrevocable transfer of a qualified real property interest (section 170(h)(2)(C)) at the stated value (section 2055(f))";
+}
+pub relation transfer_meets_section_170h_without_4a(e: Estate, item: Asset) kind empirical {
+    label en unofficial "the transfer meets the requirements of section 170(h) without regard to paragraph (4)(A) thereof (section 2055(f)); section 170(h) is owned by another package";
+}
+pub relation charitable_transfer_2055(e: Estate, item: Asset, kind: CharitableRecipientKind, value: Money) kind institutional {
+    label en unofficial "a bequest, legacy, devise or transfer that counts as one to a recipient described in section 2055(a): asserted directly, received under a general power of appointment (2055(b)), or an easement transfer (2055(f))";
+}
+rule CharitableTransferFromBequestRule(e: Estate, item: Asset, kind: CharitableRecipientKind, value: Money) defeasible {
+    when charitable_bequest(e, item, kind, value);
+    when not_known(alternate_valuation_elected(e));
+    then charitable_transfer_2055(e, item, kind, value);
+}
+rule CharitableTransferFromBequestAlternateValuationRule(e: Estate, item: Asset, kind: CharitableRecipientKind, value: Money, inc: Money, dec: Money) defeasible {
+    label en official "under an alternate valuation election the bequest is valued at death with adjustment for the difference in value at the alternate date (section 2032(b)(1))";
+    when charitable_bequest(e, item, kind, value);
+    when alternate_valuation_adjustment_2032b(e, item, inc, dec);
+    then charitable_transfer_2055(e, item, kind, max(0.00 USD, value + inc - dec));
+}
+@source(IRC_S2055_B, relation = formalizes, coverage = exact, quote = "Property includible in the decedent's gross estate under section 2041 (relating to powers of appointment) received by a donee described in this section shall, for purposes of this section, be considered a bequest of such decedent.")
+rule CharitableTransferFromPowerOfAppointmentRule(e: Estate, item: Asset, kind: CharitableRecipientKind, value: Money) defeasible {
+    label en official "section 2041 property received by a section 2055 donee is a bequest of the decedent (section 2055(b))";
+    when section_2041_property_received_by_charitable_donee(e, item, kind, value);
+    then charitable_transfer_2055(e, item, kind, value);
+}
+@source(IRC_S2055_F, relation = formalizes, coverage = exact, quote = "A deduction shall be allowed under subsection (a) in respect of any transfer of a qualified real property interest (as defined in section 170(h)(2)(C)) which meets the requirements of section 170(h) (without regard to paragraph (4)(A) thereof).")
+rule CharitableTransferOfEasementRule(e: Estate, item: Asset, value: Money) defeasible {
+    label en official "a deduction is allowed for an irrevocable transfer of a qualified real property interest meeting section 170(h) without regard to (4)(A) (section 2055(f))";
+    when qualified_real_property_interest_transfer(e, item, value);
+    when transfer_meets_section_170h_without_4a(e, item);
+    when not_known(post_death_easement_deduction_barred_2031c9(e, item));
+    then charitable_transfer_2055(e, item, QualifiedRealPropertyInterestTransfer, value);
+}
+
+pub relation death_taxes_payable_out_of_bequest(e: Estate, item: Asset, amount: Money) kind empirical {
+    label en unofficial "the tax imposed by section 2001, or estate, succession, legacy or inheritance taxes, payable in whole or in part out of the bequest, by the terms of the will or the law of the jurisdiction, in the stated amount (section 2055(c))";
+}
+@source(IRC_S2055_C, relation = formalizes, coverage = exact, quote = "then the amount deductible under this section shall be the amount of such bequests, legacies, or devises reduced by the amount of such taxes")
+pub relation charitable_transfer_net_of_death_taxes_2055c(e: Estate, item: Asset, amount: Money) kind institutional {
+    label en official "the transfer reduced by the death taxes payable out of it (section 2055(c))";
+}
+rule CharitableTransferNetOfDeathTaxesRule(e: Estate, item: Asset, value: Money) defeasible {
+    when charitable_transfer_2055(e, item, _, value);
+    then charitable_transfer_net_of_death_taxes_2055c(e, item, max(0.00 USD, value - sum(collect all t: Money where death_taxes_payable_out_of_bequest(e, item, t), empty: 0.00 USD)));
+}
+relation gross_estate_item_present(e: Estate, item: Asset) kind institutional;
+rule GrossEstateItemPresentRule(e: Estate, item: Asset) defeasible {
+    when gross_estate_item(e, item, _);
+    then gross_estate_item_present(e, item);
+}
+@source(IRC_S2055_D, relation = formalizes, coverage = exact, quote = "The amount of the deduction under this section for any transfer shall not exceed the value of the transferred property required to be included in the gross estate.")
+pub relation charitable_transfer_capped_2055d(e: Estate, item: Asset, amount: Money) kind institutional {
+    label en official "the deduction for the transfer, not exceeding the value of the transferred property included in the gross estate (section 2055(d))";
+}
+rule CharitableTransferCappedByGrossEstateRule(e: Estate, item: Asset, net: Money, included: Money) defeasible {
+    when charitable_transfer_net_of_death_taxes_2055c(e, item, net);
+    when gross_estate_item(e, item, included);
+    then charitable_transfer_capped_2055d(e, item, min(net, included));
+}
+rule CharitableTransferUncappedNoInclusionRecordedRule(e: Estate, item: Asset, net: Money) defeasible {
+    label en unofficial "no gross_estate_item recorded for the item: the case does not ask the cap (module header)";
+    when charitable_transfer_net_of_death_taxes_2055c(e, item, net);
+    when not_known(gross_estate_item_present(e, item));
+    then charitable_transfer_capped_2055d(e, item, net);
+}
+rule CharitableDeductionEstateDeductionRule(e: Estate, total: Money) defeasible {
+    label en official "the total section 2055 deduction enters the taxable estate as the CharitableDeduction (section 2051)";
+    when charitable_deduction_2055(e, total);
+    then estate_deduction_allowed(e, CharitableDeduction, total);
+}
+
+// (a), last paragraph: complete termination before the return date of a power
+// to consume, invade or appropriate is deemed a qualified disclaimer.
+pub relation power_to_consume_terminated_on(e: Estate, item: Asset, p: Person, d: Date) kind empirical {
+    label en unofficial "the power of p to consume, invade or appropriate the item for the benefit of an individual was completely terminated, before being exercised, on the stated date (section 2055(a), last paragraph)";
+}
+@source(IRC_S2055_A, relation = formalizes, coverage = exact, quote = "the complete termination before the date prescribed for the filing of the estate tax return of a power to consume, invade, or appropriate property for the benefit of an individual before such power has been exercised by reason of the death of such individual or for any other reason shall be considered and deemed to be a qualified disclaimer")
+rule PowerToConsumeTerminationDeemedQualifiedDisclaimerRule(e: Estate, item: Asset, p: Person, ended: Date, due: Date) defeasible {
+    label en official "the complete termination, before the return date, of an unexercised power to consume is deemed a qualified disclaimer (section 2055(a))";
+    when power_to_consume_terminated_on(e, item, p, ended);
+    when estate_return_due_date_with_extensions(e, due) and ended <= due;
+    then qualified_disclaimer(p, item);
+}
+
+// (e)(1): organizations described in sections 508(d) or 4948(c)(4).
+pub relation transfer_to_508d_or_4948c4_organization_subject_to_conditions(e: Estate, item: Asset) kind empirical {
+    label en unofficial "the transfer is to or for the use of an organization or trust described in section 508(d) or 4948(c)(4), subject to the conditions specified in those sections";
+}
+@source(IRC_S2055_E, relation = formalizes, coverage = exact, quote = "No deduction shall be allowed under this section for a transfer to or for the use of an organization or trust described in section 508(d) or 4948(c)(4) subject to the conditions specified in such sections.")
+pub relation charitable_deduction_disallowed_2055e1(e: Estate, item: Asset) kind institutional {
+    label en official "no deduction for a transfer to a section 508(d) or 4948(c)(4) organization subject to their conditions (section 2055(e)(1))";
+}
+rule CharitableDeductionDisallowed2055e1Rule(e: Estate, item: Asset) defeasible {
+    when transfer_to_508d_or_4948c4_organization_subject_to_conditions(e, item);
+    then charitable_deduction_disallowed_2055e1(e, item);
+}
+
+// (e)(5): donor advised funds.
+pub relation contribution_to_donor_advised_fund(e: Estate, item: Asset) kind empirical {
+    label en unofficial "the contribution is to a donor advised fund (section 4966(d)(2))";
+}
+pub relation sponsoring_organization_described_in_2055a3_or_a4(e: Estate, item: Asset) kind empirical {
+    label en unofficial "the sponsoring organization is described in paragraph (3) or (4) of subsection (a)";
+}
+pub relation sponsoring_organization_type_iii_not_functionally_integrated(e: Estate, item: Asset) kind empirical {
+    label en unofficial "the sponsoring organization is a type III supporting organization (section 4943(f)(5)(A)) that is not functionally integrated (section 4943(f)(5)(B))";
+}
+pub relation written_acknowledgment_of_exclusive_legal_control_obtained(e: Estate, item: Asset) kind empirical {
+    label en unofficial "a contemporaneous written acknowledgment is obtained from the sponsoring organization that it has exclusive legal control over the assets contributed";
+}
+relation daf_conditions_met_2055e5(e: Estate, item: Asset) kind institutional;
+rule DafConditionsMet2055e5Rule(e: Estate, item: Asset) defeasible {
+    when contribution_to_donor_advised_fund(e, item);
+    when written_acknowledgment_of_exclusive_legal_control_obtained(e, item);
+    when not_known(sponsoring_organization_described_in_2055a3_or_a4(e, item));
+    when not_known(sponsoring_organization_type_iii_not_functionally_integrated(e, item));
+    then daf_conditions_met_2055e5(e, item);
+}
+@source(IRC_S2055_E, relation = formalizes, coverage = exact, quote = "A deduction otherwise allowed under subsection (a) for any contribution to a donor advised fund (as defined in section 4966(d)(2)) shall only be allowed if")
+pub relation charitable_deduction_disallowed_daf_2055e5(e: Estate, item: Asset) kind institutional {
+    label en official "a contribution to a donor advised fund is deductible only if the sponsor is not a (a)(3)/(a)(4) organization or a non-integrated type III supporting organization and the written acknowledgment is obtained (section 2055(e)(5))";
+}
+rule CharitableDeductionDisallowedDaf2055e5Rule(e: Estate, item: Asset) defeasible {
+    when contribution_to_donor_advised_fund(e, item);
+    when not_known(daf_conditions_met_2055e5(e, item));
+    then charitable_deduction_disallowed_daf_2055e5(e, item);
+}
+
+// (e)(4): a work of art and its copyright are separate properties.
+pub relation work_of_art_with_federal_copyright(e: Estate, item: Asset) kind empirical {
+    label en unofficial "the item is tangible personal property with respect to which there is a copyright under Federal law (section 2055(e)(4)(B))";
+}
+pub relation use_of_property_related_to_exemption_purpose(e: Estate, item: Asset) kind empirical {
+    label en unofficial "the use of the property by the organization is related to the purpose or function constituting the basis for its exemption under section 501 (section 2055(e)(4)(C))";
+}
+pub relation transferee_is_501c3_organization(e: Estate, item: Asset) kind empirical {
+    label en unofficial "the transferee is an organization described in section 501(c)(3)";
+}
+pub relation transferee_is_private_foundation(e: Estate, item: Asset) kind empirical {
+    label en unofficial "the transferee is a private foundation (section 509)";
+}
+pub relation transferee_is_private_operating_foundation(e: Estate, item: Asset) kind empirical {
+    label en unofficial "the transferee is a private operating foundation (section 4942(j)(3)), not treated as a private foundation for this purpose";
+}
+relation qualified_organization_2055e4(e: Estate, item: Asset) kind institutional;
+rule QualifiedOrganization2055e4NotPrivateFoundationRule(e: Estate, item: Asset) defeasible {
+    when transferee_is_501c3_organization(e, item);
+    when not_known(transferee_is_private_foundation(e, item));
+    then qualified_organization_2055e4(e, item);
+}
+rule QualifiedOrganization2055e4OperatingFoundationRule(e: Estate, item: Asset) defeasible {
+    when transferee_is_501c3_organization(e, item);
+    when transferee_is_private_operating_foundation(e, item);
+    then qualified_organization_2055e4(e, item);
+}
+@source(IRC_S2055_E, relation = formalizes, coverage = exact, quote = "In the case of a qualified contribution of a work of art, the work of art and the copyright on such work of art shall be treated as separate properties for purposes of paragraph (2).")
+pub relation separate_properties_art_and_copyright_2055e4(e: Estate, item: Asset) kind institutional {
+    label en official "the work of art and its copyright are separate properties for the split-interest rule of paragraph (2) (section 2055(e)(4))";
+}
+rule SeparatePropertiesArtAndCopyrightRule(e: Estate, item: Asset) defeasible {
+    when work_of_art_with_federal_copyright(e, item);
+    when use_of_property_related_to_exemption_purpose(e, item);
+    when qualified_organization_2055e4(e, item);
+    then separate_properties_art_and_copyright_2055e4(e, item);
+}
+
+// (e)(3): qualified reformations.
+relation split_interest_qualifies_as_written(e: Estate, item: Asset) kind institutional;
+rule SplitInterestQualifiesAsWrittenRemainderRule(e: Estate, item: Asset) defeasible {
+    when split_interest_qualifies_remainder(e, item);
+    then split_interest_qualifies_as_written(e, item);
+}
+rule SplitInterestQualifiesAsWrittenOtherRule(e: Estate, item: Asset) defeasible {
+    when split_interest_qualifies_guaranteed_or_fixed_percentage(e, item);
+    then split_interest_qualifies_as_written(e, item);
+}
+pub relation reformable_interest_payments_fixed(e: Estate, item: Asset) kind empirical {
+    label en unofficial "before the remainder vests in possession, all payments to persons other than a section 2055(a) organization are expressed in specified dollar amounts or a fixed percentage of the fair market value of the property (section 2055(e)(3)(C)(ii))";
+}
+pub relation reformation_proceeding_commenced_on_2055(e: Estate, item: Asset, d: Date) kind empirical {
+    label en unofficial "a judicial proceeding to change the interest into a qualified interest was commenced on the stated date";
+}
+pub relation no_estate_tax_return_required(e: Estate) kind empirical {
+    label en unofficial "no estate tax return is required to be filed (section 2055(e)(3)(C)(iii)(II))";
+}
+pub relation trust_first_income_tax_return_due_date_with_extensions(e: Estate, item: Asset, d: Date) kind empirical {
+    label en unofficial "the last date (including extensions) for filing the income tax return for the first taxable year for which the trust is required to file one";
+}
+pub relation governing_instrument_executed_on(e: Estate, item: Asset, d: Date) kind empirical {
+    label en unofficial "the will was executed, or the trust created, on the stated date (section 2055(e)(3)(C)(iv))";
+}
+relation reformation_proceeding_within_90_days(e: Estate, item: Asset) kind institutional;
+rule ReformationProceedingWithin90DaysRule(e: Estate, item: Asset, started: Date, due: Date) defeasible {
+    label en official "the proceeding is commenced not later than the 90th day after the last date (including extensions) for filing the estate tax return (section 2055(e)(3)(C)(iii)(I))";
+    when reformation_proceeding_commenced_on_2055(e, item, started);
+    when estate_return_due_date_with_extensions(e, due) and started <= add_calendar_period(due, 90 calendar_day);
+    when not_known(no_estate_tax_return_required(e));
+    then reformation_proceeding_within_90_days(e, item);
+}
+rule ReformationProceedingWithin90DaysNoReturnRule(e: Estate, item: Asset, started: Date, due: Date) defeasible {
+    label en official "where no estate tax return is required: the 90th day after the last date for the trust's first income tax return (section 2055(e)(3)(C)(iii)(II))";
+    when reformation_proceeding_commenced_on_2055(e, item, started);
+    when no_estate_tax_return_required(e);
+    when trust_first_income_tax_return_due_date_with_extensions(e, item, due) and started <= add_calendar_period(due, 90 calendar_day);
+    then reformation_proceeding_within_90_days(e, item);
+}
+@source(IRC_S2055_E, relation = formalizes, coverage = exact, quote = "The term \"reformable interest\" means any interest for which a deduction would be allowable under subsection (a) at the time of the decedent's death but for paragraph (2).")
+pub relation reformable_interest_2055e3(e: Estate, item: Asset) kind institutional {
+    label en official "an interest that would be deductible but for the split-interest rule of paragraph (2), whose non-charitable payments are fixed, or a timely proceeding was commenced, or the instrument predates 1979 (section 2055(e)(3)(C))";
+}
+rule ReformableInterestFixedPaymentsRule(e: Estate, item: Asset) defeasible {
+    when charitable_transfer_2055(e, item, _, _);
+    when split_interest_transfer(e, item);
+    when not_known(split_interest_qualifies_as_written(e, item));
+    when reformable_interest_payments_fixed(e, item);
+    then reformable_interest_2055e3(e, item);
+}
+rule ReformableInterestTimelyProceedingRule(e: Estate, item: Asset) defeasible {
+    when charitable_transfer_2055(e, item, _, _);
+    when split_interest_transfer(e, item);
+    when not_known(split_interest_qualifies_as_written(e, item));
+    when reformation_proceeding_within_90_days(e, item);
+    then reformable_interest_2055e3(e, item);
+}
+rule ReformableInterestPre1979InstrumentRule(e: Estate, item: Asset, executed: Date) defeasible {
+    label en official "in the case of an interest passing under a will executed, or a trust created, before January 1, 1979, clause (ii) does not apply (section 2055(e)(3)(C)(iv))";
+    when charitable_transfer_2055(e, item, _, _);
+    when split_interest_transfer(e, item);
+    when not_known(split_interest_qualifies_as_written(e, item));
+    when governing_instrument_executed_on(e, item, executed) and executed < @1979-01-01;
+    then reformable_interest_2055e3(e, item);
+}
+
+pub relation reformation_changes_reformable_into_qualified_interest(e: Estate, item: Asset) kind empirical {
+    label en unofficial "a change of the governing instrument by reformation, amendment, construction or otherwise changes a reformable interest into a qualified interest (section 2055(e)(3)(B))";
+}
+pub relation reformable_interest_actuarial_value(e: Estate, item: Asset, value: Money) kind empirical {
+    label en unofficial "the actuarial value, determined as of the date of death, of the reformable interest (section 2055(e)(3)(B)(i)(II)); section 7520 is not owned by any us.irc package";
+}
+pub relation qualified_interest_actuarial_value(e: Estate, item: Asset, value: Money) kind empirical {
+    label en unofficial "the actuarial value, determined as of the date of death, of the qualified interest (section 2055(e)(3)(B)(i)(I))";
+}
+pub relation charitable_remainder_interest_reformed(e: Estate, item: Asset) kind empirical {
+    label en unofficial "the reformable interest is a charitable remainder interest (section 2055(e)(3)(B)(ii)(I))";
+}
+pub relation nonremainder_interest_terminated_same_time_after_reformation(e: Estate, item: Asset) kind empirical {
+    label en unofficial "the nonremainder interest, before and after the reformation, terminated at the same time";
+}
+pub relation reformable_and_qualified_interest_same_period(e: Estate, item: Asset) kind empirical {
+    label en unofficial "the reformable interest and the qualified interest are for the same period (section 2055(e)(3)(B)(ii)(II))";
+}
+pub relation nonremainder_term_over_20_years_reformed_to_20(e: Estate, item: Asset) kind empirical {
+    label en unofficial "a nonremainder interest for a term of years in excess of 20 years is, after reformation, for a term of 20 years";
+}
+pub relation reformation_effective_as_of_date_of_death(e: Estate, item: Asset) kind empirical {
+    label en unofficial "the change is effective as of the date of the decedent's death (section 2055(e)(3)(B)(iii))";
+}
+relation reformation_within_five_percent(e: Estate, item: Asset) kind institutional;
+rule ReformationWithinFivePercentRule(e: Estate, item: Asset, qualified: Money, reformable: Money) defeasible {
+    label en official "any difference between the actuarial values does not exceed 5 percent of the actuarial value of the reformable interest (section 2055(e)(3)(B)(i))";
+    when qualified_interest_actuarial_value(e, item, qualified);
+    when reformable_interest_actuarial_value(e, item, reformable);
+    when abs(qualified - reformable) <= 0.05 * reformable;
+    then reformation_within_five_percent(e, item);
+}
+relation reformation_duration_condition_met(e: Estate, item: Asset) kind institutional;
+rule ReformationDurationConditionRemainderRule(e: Estate, item: Asset) defeasible {
+    when charitable_remainder_interest_reformed(e, item);
+    when nonremainder_interest_terminated_same_time_after_reformation(e, item);
+    then reformation_duration_condition_met(e, item);
+}
+rule ReformationDurationConditionSamePeriodRule(e: Estate, item: Asset) defeasible {
+    when reformable_and_qualified_interest_same_period(e, item);
+    then reformation_duration_condition_met(e, item);
+}
+rule ReformationDurationCondition20YearsRule(e: Estate, item: Asset) defeasible {
+    label en official "a term of years over 20 satisfies subclause (I) if, after reformation, it is for 20 years (section 2055(e)(3)(B), flush sentence)";
+    when charitable_remainder_interest_reformed(e, item);
+    when nonremainder_term_over_20_years_reformed_to_20(e, item);
+    then reformation_duration_condition_met(e, item);
+}
+@source(IRC_S2055_E, relation = formalizes, coverage = exact, quote = "A deduction shall be allowed under subsection (a) in respect of any qualified reformation.")
+pub relation qualified_reformation_2055e3(e: Estate, item: Asset) kind institutional {
+    label en official "a qualified reformation: a reformable interest changed into a qualified interest within 5 percent of actuarial value, with the same duration, effective as of the date of death (section 2055(e)(3)(A)-(B))";
+}
+rule QualifiedReformation2055e3Rule(e: Estate, item: Asset) defeasible {
+    when reformable_interest_2055e3(e, item);
+    when reformation_changes_reformable_into_qualified_interest(e, item);
+    when reformation_within_five_percent(e, item);
+    when reformation_duration_condition_met(e, item);
+    when reformation_effective_as_of_date_of_death(e, item);
+    then qualified_reformation_2055e3(e, item);
+}
+pub relation reformable_interest_wholly_charitable_by_return_due_date(e: Estate, item: Asset) kind empirical {
+    label en unofficial "by reason of the death of an individual, or by termination or distribution of the trust under its terms, by the return due date (with extensions) the reformable interest is in a wholly charitable trust or passes directly to a section 2055(a) recipient (section 2055(e)(3)(F))";
+}
+pub relation insufficient_remainder_trust_reformed_to_664d(e: Estate, item: Asset) kind empirical {
+    label en unofficial "a trust failing the remainder-value requirement of section 664(d)(1)(D) or (2)(D) is changed by reformation to reduce the payout rate or duration so as to satisfy it (section 2055(e)(3)(J)(ii))";
+}
+pub relation trust_declared_null_and_void_ab_initio(e: Estate, item: Asset) kind empirical {
+    label en unofficial "the trust is declared null and void ab initio in a proceeding commenced within the (C)(iii) period (section 2055(e)(3)(J)(i))";
+}
+rule SplitInterestQualifiesByReformationRule(e: Estate, item: Asset) defeasible {
+    when qualified_reformation_2055e3(e, item);
+    then split_interest_qualifies(e, item);
+}
+rule SplitInterestQualifiesWhollyCharitableByDueDateRule(e: Estate, item: Asset) defeasible {
+    label en official "a reformable interest that by the return due date is in a wholly charitable trust or passes directly is treated as meeting paragraph (2) at death (section 2055(e)(3)(F))";
+    when reformable_interest_2055e3(e, item);
+    when reformable_interest_wholly_charitable_by_return_due_date(e, item);
+    then split_interest_qualifies(e, item);
+}
+rule SplitInterestQualifiesByInsufficientRemainderReformationRule(e: Estate, item: Asset) defeasible {
+    label en official "a trust failing the section 664(d) remainder requirement may be reformed by reducing payout or duration, by a proceeding timely commenced (section 2055(e)(3)(J)(ii))";
+    when reformable_interest_2055e3(e, item);
+    when insufficient_remainder_trust_reformed_to_664d(e, item);
+    when reformation_proceeding_within_90_days(e, item);
+    then split_interest_qualifies(e, item);
+}
+@source(IRC_S2055_E, relation = formalizes, coverage = exact, quote = "no deduction shall be allowed under this title for any transfer to the trust")
+pub relation charitable_deduction_disallowed_void_trust_2055e3j(e: Estate, item: Asset) kind institutional {
+    label en official "a trust declared null and void ab initio: no deduction under this title for any transfer to it (section 2055(e)(3)(J)(i)); the attribution of the trust's transactions to the transferor is TECH-GAPS G3608";
+}
+rule CharitableDeductionDisallowedVoidTrustRule(e: Estate, item: Asset) defeasible {
+    when trust_declared_null_and_void_ab_initio(e, item);
+    when reformation_proceeding_within_90_days(e, item);
+    then charitable_deduction_disallowed_void_trust_2055e3j(e, item);
+}
+pub relation secretary_notified_of_reformation_2055_on(e: Estate, item: Asset, d: Date) kind empirical {
+    label en unofficial "the Secretary is notified that the reformation (or other proceeding under (J)) has occurred, on the stated date (section 2055(e)(3)(G))";
+}
+@source(IRC_S2055_E, relation = formalizes, coverage = exact, quote = "The period for assessing any deficiency of any tax attributable to the application of this paragraph shall not expire before the date 1 year after the date on which the Secretary is notified that such reformation")
+pub relation deficiency_assessment_period_floor_2055e3g(e: Estate, item: Asset, floor_date: Date) kind institutional {
+    label en official "the period for assessing a deficiency attributable to paragraph (3) does not expire before this date: 1 year after the notice to the Secretary (a lower bound only; the section 6501 period is owned by us.irc.assessment)";
+}
+rule DeficiencyAssessmentPeriodFloor2055e3gRule(e: Estate, item: Asset, notified: Date) defeasible {
+    when secretary_notified_of_reformation_2055_on(e, item, notified);
+    then deficiency_assessment_period_floor_2055e3g(e, item, add_calendar_period(notified, 1 calendar_year));
+}
+
+// =====================================================================
+// §2058 — State death tax deduction
+// =====================================================================
+
+pub relation state_death_tax_paid(e: Estate, n: Integer, jurisdiction: Text, amount: Money) kind empirical {
+    label en unofficial "estate, inheritance, legacy or succession tax number n actually paid to the named jurisdiction, in the stated amount (section 2058(a))";
+}
+pub relation state_death_tax_paid_on(e: Estate, n: Integer, d: Date) kind empirical {
+    label en unofficial "the date on which the State death tax was actually paid";
+}
+pub relation state_death_tax_deduction_claimed_on(e: Estate, n: Integer, d: Date) kind empirical {
+    label en unofficial "the date on which a deduction for the tax was claimed";
+}
+pub relation jurisdiction_is_state_or_district_of_columbia(name: Text) kind empirical {
+    label en unofficial "the named jurisdiction is a State or the District of Columbia";
+}
+pub relation state_death_tax_in_respect_of_gross_estate_property(e: Estate, n: Integer) kind empirical {
+    label en unofficial "the tax is in respect of property included in the gross estate";
+}
+pub relation state_death_tax_is_on_estate_of_other_person(e: Estate, n: Integer) kind empirical {
+    label en unofficial "the tax was paid with respect to the estate of a person other than the decedent (excluded by section 2058(a))";
+}
+// (b): the deduction covers only taxes paid and claimed before the LATER of
+// four years after the return and the applicable event of (2)(A)-(C).
+pub relation tax_court_decision_final_on(e: Estate, d: Date) kind empirical {
+    label en unofficial "the decision of the Tax Court on a petition for redetermination filed within the time of section 6213(a) becomes final on the stated date";
+}
+pub relation payment_extension_expires_on(e: Estate, d: Date) kind empirical {
+    label en unofficial "an extension of time under section 6161 or 6166 for payment of the tax shown on the return, or of a deficiency, expires on the stated date";
+}
+pub relation refund_claim_disallowance_notice_mailed_on(e: Estate, d: Date) kind empirical {
+    label en unofficial "the Secretary mails by certified or registered mail notice of disallowance of any part of a timely refund claim (section 2058(b)(2)(C)(i))";
+}
+pub relation refund_suit_decision_final_on(e: Estate, d: Date) kind empirical {
+    label en unofficial "a decision of a court of competent jurisdiction becomes final in a timely suit on the refund claim (section 2058(b)(2)(C)(ii))";
+}
+pub relation waiver_of_disallowance_filed_on(e: Estate, d: Date) kind empirical {
+    label en unofficial "a notice of waiver of disallowance is filed under section 6532(a)(3) (section 2058(b)(2)(C)(iii))";
+}
+relation state_tax_deadline_candidate_2058(e: Estate, d: Date) kind institutional;
+rule StateTaxDeadlineFourYearsRule(e: Estate, filed: Date) defeasible {
+    label en official "4 years after the filing of the return required by section 6018 (section 2058(b)(1))";
+    when estate_return_filed_on(e, filed);
+    then state_tax_deadline_candidate_2058(e, add_calendar_period(filed, 4 calendar_year));
+}
+rule StateTaxDeadlineTaxCourtRule(e: Estate, final_on: Date) defeasible {
+    label en official "60 days after the Tax Court decision becomes final (section 2058(b)(2)(A))";
+    when tax_court_decision_final_on(e, final_on);
+    then state_tax_deadline_candidate_2058(e, add_calendar_period(final_on, 60 calendar_day));
+}
+rule StateTaxDeadlineExtensionRule(e: Estate, expires: Date) defeasible {
+    label en official "the date the extension of time to pay expires (section 2058(b)(2)(B))";
+    when payment_extension_expires_on(e, expires);
+    then state_tax_deadline_candidate_2058(e, expires);
+}
+rule StateTaxDeadlineDisallowanceNoticeRule(e: Estate, mailed: Date) defeasible {
+    when refund_claim_disallowance_notice_mailed_on(e, mailed);
+    then state_tax_deadline_candidate_2058(e, add_calendar_period(mailed, 60 calendar_day));
+}
+rule StateTaxDeadlineRefundSuitRule(e: Estate, final_on: Date) defeasible {
+    when refund_suit_decision_final_on(e, final_on);
+    then state_tax_deadline_candidate_2058(e, add_calendar_period(final_on, 60 calendar_day));
+}
+rule StateTaxDeadlineWaiverRule(e: Estate, filed: Date) defeasible {
+    when waiver_of_disallowance_filed_on(e, filed);
+    then state_tax_deadline_candidate_2058(e, add_calendar_period(filed, 2 calendar_year));
+}
+relation later_state_tax_deadline_candidate_exists(e: Estate, d: Date) kind institutional;
+rule LaterStateTaxDeadlineCandidateExistsRule(e: Estate, d: Date, d2: Date) defeasible {
+    when state_tax_deadline_candidate_2058(e, d);
+    when state_tax_deadline_candidate_2058(e, d2) and d2 > d;
+    then later_state_tax_deadline_candidate_exists(e, d);
+}
+@source(IRC_S2058_B, relation = formalizes, coverage = exact, quote = "before the later of")
+pub relation state_tax_deduction_deadline_2058(e: Estate, d: Date) kind institutional {
+    label en official "the later of 4 years after the return and the applicable event of paragraph (2): the last day on which the tax may be paid and the deduction claimed (section 2058(b))";
+}
+rule StateTaxDeductionDeadlineRule(e: Estate, d: Date) defeasible {
+    when state_tax_deadline_candidate_2058(e, d);
+    unless later_state_tax_deadline_candidate_exists(e, d);
+    then state_tax_deduction_deadline_2058(e, d);
+}
+@source(IRC_S2058_A, relation = formalizes, coverage = exact, quote = "the amount of any estate, inheritance, legacy, or succession taxes actually paid to any State or the District of Columbia, in respect of any property included in the gross estate")
+pub relation state_death_tax_deductible_item_2058(e: Estate, n: Integer, amount: Money) kind institutional {
+    label en official "State death tax n actually paid to a State or the District of Columbia, in respect of gross estate property, not the tax of another person's estate, paid and claimed by the deadline of subsection (b)";
+}
+rule StateDeathTaxDeductibleItem2058Rule(e: Estate, n: Integer, name: Text, amount: Money, paid: Date, claimed: Date, deadline: Date, dod: Date) defeasible {
+    label en official "section 2058(a)-(b); applicable to estates of decedents dying after December 31, 2004 (Pub. L. 107-16 §532(d))";
+    when state_death_tax_paid(e, n, name, amount);
+    when jurisdiction_is_state_or_district_of_columbia(name);
+    when state_death_tax_in_respect_of_gross_estate_property(e, n);
+    when not_known(state_death_tax_is_on_estate_of_other_person(e, n));
+    when date_of_death(e, dod) and dod > @2004-12-31;
+    when state_death_tax_paid_on(e, n, paid) and state_death_tax_deduction_claimed_on(e, n, claimed);
+    when state_tax_deduction_deadline_2058(e, deadline) and paid <= deadline and claimed <= deadline;
+    then state_death_tax_deductible_item_2058(e, n, amount);
+}
+pub relation state_death_tax_deduction_2058(e: Estate, amount: Money) kind institutional {
+    label en official "the total section 2058 deduction";
+}
+rule StateDeathTaxDeduction2058Rule(e: Estate) defeasible {
+    when state_death_tax_deductible_item_2058(e, _, _);
+    then state_death_tax_deduction_2058(e, sum(collect all a: Money, n: Integer where state_death_tax_deductible_item_2058(e, n, a), empty: 0.00 USD));
+}
+rule StateDeathTaxEstateDeductionRule(e: Estate, total: Money) defeasible {
+    label en official "the total State death tax deduction enters the taxable estate (section 2051)";
+    when state_death_tax_deduction_2058(e, total);
+    then estate_deduction_allowed(e, StateDeathTaxDeduction, total);
+}
+
+// (b), last two sentences: refund based on the deduction, without interest.
+pub relation state_tax_refund_claim_filed_on(e: Estate, x: Person, d: Date) kind empirical {
+    label en unofficial "a claim for refund based on the section 2058 deduction is filed on the stated date";
+}
+relation state_tax_refund_claim_within_period(e: Estate) kind institutional;
+rule StateTaxRefundClaimWithinPeriodRule(e: Estate, x: Person, filed: Date, deadline: Date) defeasible {
+    when state_tax_refund_claim_filed_on(e, x, filed);
+    when state_tax_deduction_deadline_2058(e, deadline) and filed <= deadline;
+    then state_tax_refund_claim_within_period(e);
+}
+pub relation state_tax_deduction_refund_allowed_without_interest(e: Estate) kind institutional {
+    label en official "a refund based on the section 2058 deduction may be made notwithstanding sections 6511 and 6512, without interest (section 2058(b), last two sentences)";
+}
+@source(IRC_S2058_B, relation = formalizes, coverage = exact, quote = "Notwithstanding sections 6511 and 6512, refund based on the deduction may be made if the claim for refund is filed within the period provided in the preceding sentence.")
+rule StateTaxRefundClaimPower(e: Estate, x: Person, w: Interval<Instant>, filed: Date) strict {
+    label en official "the executor may claim a refund based on the deduction within the section 2058(b) period, notwithstanding sections 6511 and 6512";
+    when executor_of(e, x, w);
+    when state_tax_refund_claim_filed_on(e, x, filed);
+    then power StateTaxDeductionRefundClaim {
+        holder x;
+        over e;
+        exercise state_tax_refund_claim_filed_on(e, x, filed);
+        valid_when state_tax_refund_claim_within_period(e);
+        effect create(state_tax_deduction_refund_allowed_without_interest(e));
+        window w;
+    };
+}

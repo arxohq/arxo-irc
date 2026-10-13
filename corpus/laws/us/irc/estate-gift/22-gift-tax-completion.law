@@ -1,0 +1,614 @@
+// 26 U.S.C. chapter 12 completion: §2501(a)(2)-(6), (b), (c); §2503(c), (e),
+// (f), (g); §2513(b), (c); §2514(a), (c), (d), (f); §2515; §2518(c); §2505(b);
+// §2010(b); §2001(d), (e); §2524 and the wiring of the deductions into the
+// taxable gifts. Stage 2 (DECISION-0379 with deontics) of `us.irc.estate_gift`
+// (B01/IRC-11).
+//
+// WHAT WAS NOT WIRED IN STAGE 1 and is now:
+//  - `taxable_gifts` did not subtract the section 2522 and 2523 deductions
+//    although its label said so; it does now, capped by section 2524.
+//  - `gift_to_donee_during_year` fed the annual exclusion and the taxable gift
+//    directly; the amount now passes through `gift_to_donee_subject_to_tax`,
+//    which removes transfers that are not gifts (political organizations,
+//    section 501(c)(4)-(6) organizations, tuition and medical payments,
+//    waivers of survivor benefits, loans of works of art) and the gift-splitting
+//    and future-interest gates are derived where the statute derives them.
+//  - The $100,000 annual exclusion for gifts to a noncitizen spouse of section
+//    2523(i)(2) was a constant only; it is applied.
+//
+// JUDGMENT CALLS
+//  - §2524 is applied to the year's total (deductions cannot exceed the taxable
+//    gifts before deductions); linking each deduction to the gift item and
+//    donee it concerns is TECH-GAPS G3611.
+//  - §2513(b)(2): "at any time after the close of the calendar year" is applied
+//    as written: the consent date must follow the close of the year.
+//  - §2523(i)(2)'s substituted $100,000 is the pinned statutory figure; the
+//    indexed amount follows the annual exclusion's indexing and is not pinned.
+
+language "law.core" version "0.2";
+package us.irc.estate_gift version "0.1.1";
+namespace "urn:us:irc:estate_gift:clir";
+
+use self::{
+    Asset,
+    GstTransfer,
+    GstTransferKind,
+    IRC_S2501_A,
+    IRC_S2501_B,
+    IRC_S2501_C,
+    IRC_S2503_A,
+    IRC_S2503_C,
+    IRC_S2503_E,
+    IRC_S2503_F,
+    IRC_S2503_G,
+    IRC_S2513_B,
+    IRC_S2513_C,
+    IRC_S2514_A,
+    IRC_S2514_C,
+    IRC_S2514_D,
+    IRC_S2514_F,
+    IRC_S2515,
+    IRC_S2518_C,
+    IRC_S2523_I,
+    Individual,
+    NoncitizenSpouseAnnualExclusion,
+    Person,
+    TaxableYear,
+    general_power_exercise_or_release_is_transfer,
+    gift_donor_nonresident_not_citizen,
+    gift_is_future_interest,
+    gift_splitting_consent_timely,
+    gift_splitting_elected,
+    gift_tax_before_credit,
+    gift_to_donee_during_year,
+    gift_to_spouse,
+    gst_tax,
+    gst_transfer_kind,
+    marital_deduction_disallowed_noncitizen_spouse_2523,
+    qualified_disclaimer,
+    spouse_of,
+};
+
+// =====================================================================
+// §2501(b), (c): residents of possessions
+// =====================================================================
+
+pub relation donor_citizen_and_resident_of_possession(donor: Individual) kind empirical {
+    label en unofficial "the donor is a citizen of the United States and a resident of a possession thereof (section 2501(b)-(c))";
+}
+pub relation citizenship_acquired_solely_by_possession_status(donor: Individual) kind empirical {
+    label en unofficial "the donor acquired United States citizenship solely by reason of (1) being a citizen of the possession or (2) birth or residence within the possession";
+}
+@source(IRC_S2501_B, relation = formalizes, coverage = exact, quote = "A donor who is a citizen of the United States and a resident of a possession thereof shall, for purposes of the tax imposed by this chapter, be considered a \"citizen\" of the United States")
+pub relation possession_resident_treated_as_citizen_2501b(donor: Individual) kind institutional {
+    label en official "a citizen of the United States resident in a possession is a citizen for chapter 12 unless citizenship was acquired solely through the possession (section 2501(b))";
+}
+rule PossessionResidentTreatedAsCitizenRule(donor: Individual) defeasible {
+    when donor_citizen_and_resident_of_possession(donor);
+    when not_known(citizenship_acquired_solely_by_possession_status(donor));
+    then possession_resident_treated_as_citizen_2501b(donor);
+}
+@source(IRC_S2501_C, relation = formalizes, coverage = exact, quote = "but only if such donor acquired his United States citizenship solely by reason of")
+pub relation possession_resident_treated_as_nonresident_not_citizen_2501c(donor: Individual) kind institutional {
+    label en official "a citizen resident in a possession is a nonresident not a citizen for chapter 12 only if citizenship was acquired solely through the possession (section 2501(c))";
+}
+rule PossessionResidentTreatedAsNonresidentRule(donor: Individual) defeasible {
+    when donor_citizen_and_resident_of_possession(donor);
+    when citizenship_acquired_solely_by_possession_status(donor);
+    then possession_resident_treated_as_nonresident_not_citizen_2501c(donor);
+}
+pub relation donor_nonresident_not_citizen_chapter12(donor: Individual) kind institutional {
+    label en unofficial "the donor is a nonresident not a citizen for chapter 12: asserted directly, or a possession resident of section 2501(c)";
+}
+rule DonorNonresidentChapter12AssertedRule(donor: Individual) defeasible {
+    when gift_donor_nonresident_not_citizen(donor);
+    then donor_nonresident_not_citizen_chapter12(donor);
+}
+rule DonorNonresidentChapter12PossessionRule(donor: Individual) defeasible {
+    when possession_resident_treated_as_nonresident_not_citizen_2501c(donor);
+    then donor_nonresident_not_citizen_chapter12(donor);
+}
+
+// =====================================================================
+// §2501(a)(2)-(6): intangible property, political and exempt organizations, stock
+// =====================================================================
+
+pub relation gift_item_is_intangible_property(item: Asset) kind empirical {
+    label en unofficial "the property transferred is intangible property (section 2501(a)(2))";
+}
+pub relation donor_subject_to_877b_on_transfer_date(donor: Individual) kind empirical {
+    label en unofficial "section 877(b) applies to the donor for the taxable year that includes the date of the transfer (section 2501(a)(3)(A)); section 877 is owned by us.irc.international";
+}
+@source(IRC_S2501_A, relation = formalizes, coverage = exact, quote = "paragraph (1) shall not apply to the transfer of intangible property by a nonresident not a citizen of the United States")
+pub relation intangible_gift_by_nonresident_not_taxed_2501a2(donor: Individual, item: Asset) kind institutional {
+    label en official "a transfer of intangible property by a nonresident not a citizen is not taxed, unless section 877(b) applies to the donor (section 2501(a)(2)-(3)(A))";
+}
+rule IntangibleGiftByNonresidentNotTaxedRule(donor: Individual, item: Asset) defeasible {
+    when donor_nonresident_not_citizen_chapter12(donor);
+    when gift_item_is_intangible_property(item);
+    when not_known(donor_subject_to_877b_on_transfer_date(donor));
+    then intangible_gift_by_nonresident_not_taxed_2501a2(donor, item);
+}
+pub relation foreign_gift_tax_paid_on_877b_intangible_gift(donor: Individual, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "gift tax actually paid to a foreign country in respect of a gift taxable under section 2501 solely by reason of paragraph (3) (section 2501(a)(3)(B))";
+}
+@source(IRC_S2501_A, relation = formalizes, coverage = exact, quote = "The tax imposed by this section solely by reason of this paragraph shall be credited with the amount of any gift tax actually paid to any foreign country in respect of any gift which is taxable under this section solely by reason of this paragraph.")
+pub relation foreign_gift_tax_credit_2501a3b(donor: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the credit for foreign gift tax on a gift taxable solely by reason of paragraph (3), not exceeding the tax before credit (section 2501(a)(3)(B))";
+}
+rule ForeignGiftTaxCredit2501a3bRule(donor: Individual, y: TaxableYear, paid: Money, before: Money) defeasible {
+    when foreign_gift_tax_paid_on_877b_intangible_gift(donor, y, paid);
+    when donor_subject_to_877b_on_transfer_date(donor);
+    when gift_tax_before_credit(donor, y, before);
+    then foreign_gift_tax_credit_2501a3b(donor, y, min(paid, before));
+}
+pub relation donee_is_political_organization_527e1(donee: Person) kind empirical {
+    label en unofficial "the donee is a political organization within the meaning of section 527(e)(1)";
+}
+pub relation donee_is_exempt_501c4_5_or_6_organization(donee: Person) kind empirical {
+    label en unofficial "the donee is an organization described in paragraph (4), (5) or (6) of section 501(c) and exempt from tax under section 501(a)";
+}
+// (a)(5): transfers of stock of certain foreign corporations by 877(b) donors.
+pub relation donor_share_of_foreign_corporation_voting_power(donor: Individual, corp: Person, share: Decimal) kind empirical {
+    label en unofficial "the share of the total combined voting power owned by the donor within the meaning of section 958(a) at the time of the transfer";
+}
+pub relation donor_share_of_foreign_corporation_votes_or_value_958b(donor: Individual, corp: Person, share: Decimal) kind empirical {
+    label en unofficial "the greater of the share of voting power and the share of value that the donor owned within the meaning of section 958(a) or is considered to own under section 958(b) at the time of the transfer (attribution asserted, TECH-GAPS G3609)";
+}
+@source(IRC_S2501_A, relation = formalizes, coverage = exact, quote = "A foreign corporation is described in this subparagraph with respect to a donor if")
+pub relation foreign_corporation_described_2501a5b(donor: Individual, corp: Person) kind institutional {
+    label en official "the donor owned at least 10 percent of the voting power (958(a)) and more than 50 percent of voting power or value (958(a)-(b)) (section 2501(a)(5)(B))";
+}
+rule ForeignCorporationDescribed2501a5bRule(donor: Individual, corp: Person, direct: Decimal, total: Decimal) defeasible {
+    when donor_share_of_foreign_corporation_voting_power(donor, corp, direct) and direct >= 0.10;
+    when donor_share_of_foreign_corporation_votes_or_value_958b(donor, corp, total) and total > 0.50;
+    then foreign_corporation_described_2501a5b(donor, corp);
+}
+pub relation foreign_corporation_us_asset_value(corp: Person, us_assets: Money, all_assets: Money) kind empirical {
+    label en unofficial "the fair market value at the time of transfer of the assets of the foreign corporation situated in the United States, and of all its assets (section 2501(a)(5)(C)(i)-(ii))";
+}
+pub relation gift_stock_fair_market_value(donor: Individual, corp: Person, value: Money) kind empirical {
+    label en unofficial "the fair market value of the transferred stock at the time of transfer";
+}
+@source(IRC_S2501_A, relation = formalizes, coverage = exact, quote = "the U.S.-asset value of stock shall be the amount which bears the same ratio to the fair market value of such stock at the time of transfer as")
+pub relation us_asset_value_of_transferred_stock_2501a5c(donor: Individual, corp: Person, value: Money) kind institutional {
+    label en official "the value for chapter 12 of the stock of a described foreign corporation transferred by a 877(b) donor: the stock's value times the ratio of U.S. assets to all assets (section 2501(a)(5))";
+}
+rule UsAssetValueOfTransferredStockRule(donor: Individual, corp: Person, stock_value: Money, us_assets: Money, all_assets: Money) defeasible {
+    when donor_subject_to_877b_on_transfer_date(donor);
+    when foreign_corporation_described_2501a5b(donor, corp);
+    when gift_stock_fair_market_value(donor, corp, stock_value);
+    when foreign_corporation_us_asset_value(corp, us_assets, all_assets) and all_assets > 0.00 USD;
+    then us_asset_value_of_transferred_stock_2501a5c(donor, corp, div_round(stock_value * (us_assets / 1.00 USD), all_assets / 1.00 USD, 2, "HALF_UP"));
+}
+
+// =====================================================================
+// §2503(c), (e), (f), (g): what is not a gift, what is not a future interest
+// =====================================================================
+
+pub enum NongiftKind {
+    PoliticalOrganizationTransfer;     // 2501(a)(4)
+    ExemptOrganizationTransfer;        // 2501(a)(6)
+    TuitionOrMedicalTransfer;          // 2503(e)
+    SurvivorBenefitWaiver;             // 2503(f)
+    QualifiedWorkOfArtLoan;            // 2503(g)
+    QtipRetainedInterestTransfer;      // 2523(f)(5)(A)(ii)
+}
+pub relation nongift_transfer_amount(donor: Individual, y: TaxableYear, donee: Person, kind: NongiftKind, amount: Money) kind institutional {
+    label en unofficial "the part of the amount transferred to the donee that is not a transfer by gift for chapter 12: transfers to political organizations and section 501(c)(4)-(6) organizations, qualified tuition and medical payments, waivers of survivor benefits, and loans of qualified works of art";
+}
+@source(IRC_S2501_A, relation = formalizes, coverage = exact, quote = "Paragraph (1) shall not apply to the transfer of money or other property to a political organization (within the meaning of section 527(e)(1)) for the use of such organization.")
+rule PoliticalOrganizationTransferNotGiftRule(donor: Individual, y: TaxableYear, donee: Person, amount: Money) defeasible {
+    label en official "a transfer to a political organization for its use is not taxed (section 2501(a)(4))";
+    when gift_to_donee_during_year(donor, y, donee, amount);
+    when donee_is_political_organization_527e1(donee);
+    then nongift_transfer_amount(donor, y, donee, PoliticalOrganizationTransfer, amount);
+}
+@source(IRC_S2501_A, relation = formalizes, coverage = exact, quote = "Paragraph (1) shall not apply to the transfer of money or other property to an organization described in paragraph (4), (5), or (6) of section 501(c) and exempt from tax under section 501(a), for the use of such organization.")
+rule ExemptOrganizationTransferNotGiftRule(donor: Individual, y: TaxableYear, donee: Person, amount: Money) defeasible {
+    label en official "a transfer to a section 501(c)(4), (5) or (6) organization exempt under section 501(a) for its use is not taxed (section 2501(a)(6))";
+    when gift_to_donee_during_year(donor, y, donee, amount);
+    when donee_is_exempt_501c4_5_or_6_organization(donee);
+    then nongift_transfer_amount(donor, y, donee, ExemptOrganizationTransfer, amount);
+}
+pub relation tuition_paid_to_educational_organization_on_behalf_of(donor: Individual, y: TaxableYear, individual: Person, amount: Money) kind empirical {
+    label en unofficial "an amount paid as tuition to an educational organization described in section 170(b)(1)(A)(ii) for the education or training of the individual (section 2503(e)(2)(A))";
+}
+pub relation payment_for_medical_care_on_behalf_of(donor: Individual, y: TaxableYear, individual: Person, amount: Money) kind empirical {
+    label en unofficial "an amount paid to a person who provides medical care (section 213(d)) with respect to the individual, as payment for that care (section 2503(e)(2)(B))";
+}
+@source(IRC_S2503_E, relation = formalizes, coverage = exact, quote = "Any qualified transfer shall not be treated as a transfer of property by gift for purposes of this chapter.")
+rule TuitionTransferNotGiftRule(donor: Individual, y: TaxableYear, individual: Person, amount: Money) defeasible {
+    label en official "tuition paid to an educational organization for the individual is not a gift (section 2503(e))";
+    when tuition_paid_to_educational_organization_on_behalf_of(donor, y, individual, amount);
+    then nongift_transfer_amount(donor, y, individual, TuitionOrMedicalTransfer, amount);
+}
+rule MedicalTransferNotGiftRule(donor: Individual, y: TaxableYear, individual: Person, amount: Money) defeasible {
+    label en official "payment to a provider of medical care for the individual is not a gift (section 2503(e))";
+    when payment_for_medical_care_on_behalf_of(donor, y, individual, amount);
+    then nongift_transfer_amount(donor, y, individual, TuitionOrMedicalTransfer, amount);
+}
+pub relation survivor_benefit_waiver_before_participant_death(donor: Individual, y: TaxableYear, donee: Person, amount: Money) kind empirical {
+    label en unofficial "the individual waives, before the death of a participant, a survivor benefit or right to it under section 401(a)(11) or 417, the value being as stated";
+}
+@source(IRC_S2503_F, relation = formalizes, coverage = exact, quote = "such waiver shall not be treated as a transfer of property by gift for purposes of this chapter")
+rule SurvivorBenefitWaiverNotGiftRule(donor: Individual, y: TaxableYear, donee: Person, amount: Money) defeasible {
+    label en official "a waiver, before the participant's death, of a survivor benefit under section 401(a)(11) or 417 is not a gift (section 2503(f))";
+    when survivor_benefit_waiver_before_participant_death(donor, y, donee, amount);
+    then nongift_transfer_amount(donor, y, donee, SurvivorBenefitWaiver, amount);
+}
+pub relation art_loan_to_organization(donor: Individual, y: TaxableYear, donee: Person, amount: Money) kind empirical {
+    label en unofficial "a loan of a work of art to the donee, whose value would otherwise be treated as transferred, in the stated amount";
+}
+pub relation work_of_art_is_archaeological_historic_or_creative(donee: Person) kind empirical {
+    label en unofficial "the loaned property is archaeological, historic or creative tangible personal property (section 2503(g)(2)(A)); keyed by the borrower for the loan";
+}
+pub relation borrower_is_501c3_not_private_foundation(donee: Person) kind empirical {
+    label en unofficial "the borrower is an organization described in section 501(c)(3) and exempt from tax under section 501(c), other than a private foundation (section 509), a private operating foundation not being treated as a private foundation (section 2503(g)(2)(B))";
+}
+pub relation borrower_use_related_to_exemption_purpose(donee: Person) kind empirical {
+    label en unofficial "the use of the work by the borrower is related to the purpose or function constituting the basis for its exemption under section 501 (section 2503(g)(1)(B))";
+}
+@source(IRC_S2503_G, relation = formalizes, coverage = exact, quote = "any loan of a qualified work of art shall not be treated as a transfer (and the value of such qualified work of art shall be determined as if such loan had not been made)")
+rule QualifiedWorkOfArtLoanNotTransferRule(donor: Individual, y: TaxableYear, donee: Person, amount: Money) defeasible {
+    label en official "a loan of a qualified work of art to a 501(c)(3) organization for a related use is not a transfer (section 2503(g))";
+    when art_loan_to_organization(donor, y, donee, amount);
+    when work_of_art_is_archaeological_historic_or_creative(donee);
+    when borrower_is_501c3_not_private_foundation(donee);
+    when borrower_use_related_to_exemption_purpose(donee);
+    then nongift_transfer_amount(donor, y, donee, QualifiedWorkOfArtLoan, amount);
+}
+@source(IRC_S2503_A, relation = formalizes, coverage = partial, quote = "means the total amount of gifts made during the calendar year, less the deductions provided in subchapter C")
+pub relation gift_to_donee_subject_to_tax(donor: Individual, y: TaxableYear, donee: Person, amount: Money) kind institutional {
+    label en official "the gifts to the donee for the year that are transfers by gift: the amount asserted, less the amounts of nongift_transfer_amount (sections 2501(a)(4), (a)(6), 2503(e)-(g))";
+}
+rule GiftToDoneeSubjectToTaxRule(donor: Individual, y: TaxableYear, donee: Person, gift: Money) defeasible {
+    when gift_to_donee_during_year(donor, y, donee, gift);
+    then gift_to_donee_subject_to_tax(donor, y, donee, max(0.00 USD, gift - sum(collect all a: Money, k: NongiftKind where nongift_transfer_amount(donor, y, donee, k, a), empty: 0.00 USD)));
+}
+
+// (c): transfers for the benefit of a minor
+pub relation donee_date_of_birth(donee: Person, born: Date) kind empirical {
+    label en unofficial "the date of birth of the donee";
+}
+pub relation gift_transfer_date(donor: Individual, y: TaxableYear, donee: Person, on: Date) kind empirical {
+    label en unofficial "the date of the transfer";
+}
+pub relation minor_gift_property_and_income_expendable_before_21(donor: Individual, y: TaxableYear, donee: Person) kind empirical {
+    label en unofficial "the property and the income may be expended by, or for the benefit of, the donee before attaining age 21 (section 2503(c)(1))";
+}
+pub relation minor_gift_remainder_passes_at_21(donor: Individual, y: TaxableYear, donee: Person) kind empirical {
+    label en unofficial "to the extent not expended, the property passes to the donee on attaining age 21 (section 2503(c)(2)(A))";
+}
+pub relation minor_gift_payable_to_estate_or_under_general_power_on_death(donor: Individual, y: TaxableYear, donee: Person) kind empirical {
+    label en unofficial "if the donee dies before 21, the property is payable to the donee's estate or as the donee may appoint under a general power of appointment as defined in section 2514(c) (section 2503(c)(2)(B))";
+}
+@source(IRC_S2503_C, relation = formalizes, coverage = exact, quote = "No part of a gift to an individual who has not attained the age of 21 years on the date of such transfer shall be considered a gift of a future interest in property for purposes of subsection (b)")
+pub relation gift_not_future_interest_2503c(donor: Individual, y: TaxableYear, donee: Person) kind institutional {
+    label en official "a gift to an individual under 21 is not a gift of a future interest if the property and its income may be expended for the donee before 21 and pass at 21 or to the estate or under a general power (section 2503(c))";
+}
+rule GiftNotFutureInterest2503cRule(donor: Individual, y: TaxableYear, donee: Person, born: Date, on: Date) defeasible {
+    when donee_date_of_birth(donee, born);
+    when gift_transfer_date(donor, y, donee, on) and on < add_calendar_period(born, 21 calendar_year);
+    when minor_gift_property_and_income_expendable_before_21(donor, y, donee);
+    when minor_gift_remainder_passes_at_21(donor, y, donee);
+    when minor_gift_payable_to_estate_or_under_general_power_on_death(donor, y, donee);
+    then gift_not_future_interest_2503c(donor, y, donee);
+}
+pub relation gift_is_future_interest_effective(donor: Individual, y: TaxableYear, donee: Person) kind institutional {
+    label en unofficial "the gift is of a future interest for the annual exclusion: asserted so, and not saved by section 2503(c)";
+}
+rule GiftIsFutureInterestEffectiveRule(donor: Individual, y: TaxableYear, donee: Person) defeasible {
+    when gift_is_future_interest(donor, y, donee);
+    when not_known(gift_not_future_interest_2503c(donor, y, donee));
+    then gift_is_future_interest_effective(donor, y, donee);
+}
+
+// (b)(2)-(i): the annual exclusion for gifts to a noncitizen spouse
+@source(IRC_S2523_I, relation = formalizes, coverage = exact, quote = "section 2503(b) shall be applied with respect to gifts which are made by the donor to such spouse and with respect to which a deduction would be allowable under this section but for paragraph (1) by substituting \"$100,000\" for \"$10,000\"")
+pub relation noncitizen_spouse_annual_exclusion_2523i2(donor: Individual, y: TaxableYear, donee: Individual, amount: Money) kind institutional {
+    label en official "the annual exclusion for a gift to a noncitizen spouse that would be deductible but for section 2523(i)(1): the statutory $100,000 (the indexed amount follows section 2503(b)(2) and is not pinned)";
+}
+rule NoncitizenSpouseAnnualExclusionRule(donor: Individual, y: TaxableYear, donee: Individual, n: Integer, gift: Money) defeasible {
+    when gift_to_donee_subject_to_tax(donor, y, donee, gift);
+    when us.irc.core::calendar_year_of(y, n);
+    when gift_to_spouse(donor, donee, _, n, _);
+    when marital_deduction_disallowed_noncitizen_spouse_2523(donor, donee);
+    when not_known(gift_is_future_interest_effective(donor, y, donee));
+    then noncitizen_spouse_annual_exclusion_2523i2(donor, y, donee, min(gift, NoncitizenSpouseAnnualExclusion));
+}
+relation donee_is_noncitizen_spouse_recipient(donor: Individual, y: TaxableYear, donee: Person) kind institutional;
+rule DoneeIsNoncitizenSpouseRecipientRule(donor: Individual, y: TaxableYear, donee: Individual, n: Integer) defeasible {
+    when us.irc.core::calendar_year_of(y, n);
+    when gift_to_spouse(donor, donee, _, n, _);
+    when marital_deduction_disallowed_noncitizen_spouse_2523(donor, donee);
+    then donee_is_noncitizen_spouse_recipient(donor, y, donee);
+}
+
+// =====================================================================
+// §2513(b), (c): the consent to split gifts
+// =====================================================================
+
+pub relation gift_splitting_consent_date(spouse_of_donor: Individual, y: TaxableYear, d: Date) kind empirical {
+    label en unofficial "the date on which the consent of section 2513(a)(2) is signified";
+}
+pub relation gift_tax_return_filed_by_spouse_on(p: Individual, y: TaxableYear, d: Date) kind empirical {
+    label en unofficial "a return for the calendar year is filed by the spouse on the stated date (either spouse's return counts under section 2513(b)(2)(A))";
+}
+pub relation notice_of_deficiency_sent_to_spouse_on(p: Individual, y: TaxableYear, d: Date) kind empirical {
+    label en unofficial "a notice of deficiency with respect to the tax for the year is sent to the spouse under section 6212(a)";
+}
+relation consent_april_15_of_following_year(y: TaxableYear, d: Date) kind institutional;
+rule ConsentApril15Rule(y: TaxableYear, close: Date) defeasible {
+    when us.irc.core::ends(y, close);
+    then consent_april_15_of_following_year(y, add_calendar_period(add_calendar_period(add_calendar_period(close, 1 calendar_day), 3 calendar_month), 14 calendar_day));
+}
+relation consent_after_year_close(spouse: Individual, y: TaxableYear) kind institutional;
+rule ConsentAfterYearCloseRule(spouse: Individual, y: TaxableYear, d: Date, close: Date) defeasible {
+    when gift_splitting_consent_date(spouse, y, d) and us.irc.core::ends(y, close) and d > close;
+    then consent_after_year_close(spouse, y);
+}
+relation return_filed_by_either_spouse_on_or_before_april_15(donor: Individual, spouse: Individual, y: TaxableYear) kind institutional;
+rule ReturnFiledByEitherOnOrBeforeApril15Rule(a: Individual, b: Individual, y: TaxableYear, filed: Date, apr: Date) defeasible {
+    when spouse_of(a, b);
+    when gift_tax_return_filed_by_spouse_on(a, y, filed);
+    when consent_april_15_of_following_year(y, apr) and filed <= apr;
+    then return_filed_by_either_spouse_on_or_before_april_15(a, b, y);
+}
+rule ReturnFiledByEitherOnOrBeforeApril15SpouseRule(a: Individual, b: Individual, y: TaxableYear, filed: Date, apr: Date) defeasible {
+    when spouse_of(a, b);
+    when gift_tax_return_filed_by_spouse_on(b, y, filed);
+    when consent_april_15_of_following_year(y, apr) and filed <= apr;
+    then return_filed_by_either_spouse_on_or_before_april_15(a, b, y);
+}
+relation consent_barred_by_return_or_deficiency_notice(a: Individual, b: Individual, y: TaxableYear) kind institutional;
+rule ConsentBarredByLaterReturnRule(a: Individual, b: Individual, y: TaxableYear, d: Date, filed: Date) defeasible {
+    label en official "after April 15 the consent may not be signified after a return for the year is filed by either spouse (section 2513(b)(2)(A))";
+    when spouse_of(a, b);
+    when gift_splitting_consent_date(a, y, d);
+    when gift_tax_return_filed_by_spouse_on(a, y, filed) and d > filed;
+    then consent_barred_by_return_or_deficiency_notice(a, b, y);
+}
+rule ConsentBarredByLaterReturnOfSpouseRule(a: Individual, b: Individual, y: TaxableYear, d: Date, filed: Date) defeasible {
+    when spouse_of(a, b);
+    when gift_splitting_consent_date(a, y, d);
+    when gift_tax_return_filed_by_spouse_on(b, y, filed) and d > filed;
+    then consent_barred_by_return_or_deficiency_notice(a, b, y);
+}
+rule ConsentBarredByDeficiencyNoticeRule(a: Individual, b: Individual, y: TaxableYear, d: Date, notice: Date) defeasible {
+    label en official "the consent may not be signified after a notice of deficiency for the year has been sent to either spouse (section 2513(b)(2)(B))";
+    when spouse_of(a, b);
+    when gift_splitting_consent_date(a, y, d);
+    when notice_of_deficiency_sent_to_spouse_on(a, y, notice) and d > notice;
+    then consent_barred_by_return_or_deficiency_notice(a, b, y);
+}
+rule ConsentBarredByDeficiencyNoticeToSpouseRule(a: Individual, b: Individual, y: TaxableYear, d: Date, notice: Date) defeasible {
+    when spouse_of(a, b);
+    when gift_splitting_consent_date(a, y, d);
+    when notice_of_deficiency_sent_to_spouse_on(b, y, notice) and d > notice;
+    then consent_barred_by_return_or_deficiency_notice(a, b, y);
+}
+@source(IRC_S2513_B, relation = formalizes, coverage = exact, quote = "Such consent may be so signified at any time after the close of the calendar year in which the gift was made, subject to the following limitations")
+rule GiftSplittingConsentTimelyByAprilRule(a: Individual, b: Individual, y: TaxableYear, d: Date, apr: Date) defeasible {
+    label en official "a consent signified after the close of the year and on or before April 15 following it is timely, unless a notice of deficiency was sent (section 2513(b)(2))";
+    when spouse_of(a, b);
+    when consent_after_year_close(a, y);
+    when gift_splitting_consent_date(a, y, d);
+    when consent_april_15_of_following_year(y, apr) and d <= apr;
+    when not_known(consent_barred_by_return_or_deficiency_notice(a, b, y));
+    then gift_splitting_consent_timely(a, y);
+}
+rule GiftSplittingConsentTimelyAfterAprilRule(a: Individual, b: Individual, y: TaxableYear, d: Date, apr: Date) defeasible {
+    label en official "after April 15 a consent is timely only if no return was filed by either spouse on or before April 15 and none has been filed before the consent (section 2513(b)(2)(A))";
+    when spouse_of(a, b);
+    when consent_after_year_close(a, y);
+    when gift_splitting_consent_date(a, y, d);
+    when consent_april_15_of_following_year(y, apr) and d > apr;
+    when not_known(return_filed_by_either_spouse_on_or_before_april_15(a, b, y));
+    when not_known(consent_barred_by_return_or_deficiency_notice(a, b, y));
+    then gift_splitting_consent_timely(a, y);
+}
+// (c): revocation of the consent
+pub relation gift_splitting_consent_revoked_on(spouse: Individual, y: TaxableYear, d: Date) kind empirical {
+    label en unofficial "the spouse revokes the consent previously signified, on the stated date";
+}
+relation revocation_right_exists_2513c(spouse: Individual, y: TaxableYear) kind institutional;
+rule RevocationRightExistsRule(spouse: Individual, y: TaxableYear, signified: Date, revoked: Date, apr: Date) defeasible {
+    label en official "the right to revoke does not exist after April 15 following the year if the consent was signified on or before it, and does not exist at all if it was signified later (section 2513(c))";
+    when gift_splitting_consent_date(spouse, y, signified);
+    when gift_splitting_consent_revoked_on(spouse, y, revoked);
+    when consent_april_15_of_following_year(y, apr) and signified <= apr and revoked <= apr;
+    then revocation_right_exists_2513c(spouse, y);
+}
+pub relation gift_splitting_consent_revoked_effective(spouse: Individual, y: TaxableYear) kind institutional {
+    label en official "the consent is effectively revoked (section 2513(c))";
+}
+@source(IRC_S2513_C, relation = formalizes, coverage = exact, quote = "Revocation of a consent previously signified shall be made in such manner as in provided under regulations prescribed by the Secretary, but the right to revoke a consent previously signified with respect to a calendar year")
+rule GiftSplittingConsentRevocationPower(donor: Individual, spouse: Individual, y: TaxableYear, revoked: Date) strict {
+    label en official "the spouse who signified consent may revoke it, but only up to April 15 following the year and only if the consent itself was signified by then (section 2513(c))";
+    when gift_splitting_elected(donor, spouse, y);
+    when gift_splitting_consent_revoked_on(spouse, y, revoked);
+    then power GiftSplittingConsentRevocation {
+        holder spouse;
+        over y;
+        exercise gift_splitting_consent_revoked_on(spouse, y, revoked);
+        valid_when revocation_right_exists_2513c(spouse, y);
+        effect create(gift_splitting_consent_revoked_effective(spouse, y));
+        window [@1976-01-01, infinity);
+    };
+}
+
+// =====================================================================
+// §2514(a), (c), (d), (f): powers of appointment for the gift tax
+// =====================================================================
+
+pub relation gift_power_creation_date(p: Individual, power_id: Integer, d: Date) kind empirical {
+    label en unofficial "the date the power of appointment was created (for a power created by will, the date the will was executed)";
+}
+pub relation gift_power_created_by_will(p: Individual, power_id: Integer) kind empirical {
+    label en unofficial "the power was created by a will";
+}
+pub relation gift_power_testator_died_on(p: Individual, power_id: Integer, d: Date) kind empirical {
+    label en unofficial "the person executing the will creating the power died on the stated date";
+}
+pub relation gift_power_will_republished_after_1942(p: Individual, power_id: Integer) kind empirical {
+    label en unofficial "the will was republished, by codicil or otherwise, after October 21, 1942";
+}
+@source(IRC_S2514_F, relation = formalizes, coverage = exact, quote = "a power of appointment created by a will executed on or before October 21, 1942, shall be considered a power created on or before such date if the person executing such will dies before July 1, 1949, without having republished such will, by codicil or otherwise, after October 21, 1942")
+pub relation gift_power_created_on_or_before_1942(p: Individual, power_id: Integer) kind institutional {
+    label en official "the power is one created on or before October 21, 1942 (section 2514(f))";
+}
+rule GiftPowerCreatedOnOrBefore1942ByDateRule(p: Individual, power_id: Integer, d: Date) defeasible {
+    when gift_power_creation_date(p, power_id, d) and d <= @1942-10-21;
+    when not_known(gift_power_created_by_will(p, power_id));
+    then gift_power_created_on_or_before_1942(p, power_id);
+}
+rule GiftPowerCreatedOnOrBefore1942ByWillRule(p: Individual, power_id: Integer, d: Date, died: Date) defeasible {
+    when gift_power_created_by_will(p, power_id);
+    when gift_power_creation_date(p, power_id, d) and d <= @1942-10-21;
+    when gift_power_testator_died_on(p, power_id, died) and died < @1949-07-01;
+    when not_known(gift_power_will_republished_after_1942(p, power_id));
+    then gift_power_created_on_or_before_1942(p, power_id);
+}
+// (c): the definition of a general power of appointment
+pub relation gift_power_limited_by_ascertainable_standard(p: Individual, power_id: Integer) kind empirical {
+    label en unofficial "the power to consume, invade or appropriate property for the possessor's benefit is limited by an ascertainable standard relating to health, education, support or maintenance (section 2514(c)(1))";
+}
+pub relation gift_power_only_in_conjunction(p: Individual, power_id: Integer) kind empirical {
+    label en unofficial "the power is exercisable by the possessor only in conjunction with another person";
+}
+pub relation gift_power_conjunction_only_with_creator(p: Individual, power_id: Integer) kind empirical {
+    label en unofficial "the power is not exercisable by the possessor except in conjunction with the creator of the power (section 2514(c)(3)(A))";
+}
+pub relation gift_power_conjunction_only_with_adverse_person(p: Individual, power_id: Integer) kind empirical {
+    label en unofficial "the power is not exercisable except in conjunction with a person having a substantial adverse interest; a person who after the possessor's death may exercise a power in his own favor is deemed adverse (section 2514(c)(3)(B))";
+}
+pub relation gift_power_persons_in_favor_count(p: Individual, power_id: Integer, count_including_possessor: Integer) kind empirical {
+    label en unofficial "the number of persons, including the possessor, in favor of whom the power is exercisable (section 2514(c)(3)(C))";
+}
+relation gift_power_excluded_from_general_2514c(p: Individual, power_id: Integer) kind institutional;
+rule GiftPowerExcludedByAscertainableStandardRule(p: Individual, power_id: Integer) defeasible {
+    when gift_power_limited_by_ascertainable_standard(p, power_id);
+    then gift_power_excluded_from_general_2514c(p, power_id);
+}
+rule GiftPowerExcludedPre1943ConjunctionRule(p: Individual, power_id: Integer) defeasible {
+    label en official "a pre-1943 power exercisable only in conjunction with another person is not general (section 2514(c)(2))";
+    when gift_power_created_on_or_before_1942(p, power_id);
+    when gift_power_only_in_conjunction(p, power_id);
+    then gift_power_excluded_from_general_2514c(p, power_id);
+}
+rule GiftPowerExcludedConjunctionWithCreatorRule(p: Individual, power_id: Integer) defeasible {
+    when gift_power_conjunction_only_with_creator(p, power_id);
+    then gift_power_excluded_from_general_2514c(p, power_id);
+}
+rule GiftPowerExcludedConjunctionWithAdverseRule(p: Individual, power_id: Integer) defeasible {
+    when gift_power_conjunction_only_with_adverse_person(p, power_id);
+    then gift_power_excluded_from_general_2514c(p, power_id);
+}
+@source(IRC_S2514_C, relation = formalizes, coverage = exact, quote = "such power shall be deemed a general power of appointment only in respect of a fractional part of the property subject to such power")
+pub relation gift_power_fraction_2514c3c(p: Individual, power_id: Integer, fraction: Rational) kind institutional {
+    label en official "a general power exercisable also in favor of other persons is general only as to the fraction 1/n, n counting the possessor (section 2514(c)(3)(C))";
+}
+rule GiftPowerFraction2514c3cRule(p: Individual, power_id: Integer, n: Integer) defeasible {
+    when gift_power_persons_in_favor_count(p, power_id, n) and n >= 2;
+    then gift_power_fraction_2514c3c(p, power_id, 1 / n);
+}
+// (a): pre-1943 powers: the exercise is a transfer; a failure to exercise or a
+// complete release is not an exercise; two partial-release exceptions.
+pub relation gift_pre_1943_power_exercised(p: Individual, power_id: Integer, on: Date) kind empirical {
+    label en unofficial "the possessor exercised the general power of appointment created on or before October 21, 1942 (a failure to exercise or a complete release is not an exercise)";
+}
+pub relation gift_pre_1943_power_partially_released_on(p: Individual, power_id: Integer, d: Date) kind empirical {
+    label en unofficial "the power was partially released so that it is no longer a general power, on the stated date";
+}
+pub relation gift_donee_under_legal_disability_until(p: Individual, power_id: Integer, ended: Date) kind empirical {
+    label en unofficial "the donee was under a legal disability to release the power on October 21, 1942; the disability ended on the stated date";
+}
+relation gift_pre_1943_partial_release_exception(p: Individual, power_id: Integer) kind institutional;
+rule GiftPre1943PartialReleaseBefore1951Rule(p: Individual, power_id: Integer, d: Date) defeasible {
+    when gift_pre_1943_power_partially_released_on(p, power_id, d) and d < @1951-11-01;
+    then gift_pre_1943_partial_release_exception(p, power_id);
+}
+rule GiftPre1943PartialReleaseAfterDisabilityRule(p: Individual, power_id: Integer, d: Date, ended: Date) defeasible {
+    when gift_pre_1943_power_partially_released_on(p, power_id, d);
+    when gift_power_donee_disability_ended(p, power_id, ended) and d <= add_calendar_period(ended, 6 calendar_month);
+    then gift_pre_1943_partial_release_exception(p, power_id);
+}
+relation gift_power_donee_disability_ended(p: Individual, power_id: Integer, ended: Date) kind institutional;
+rule GiftPowerDoneeDisabilityEndedRule(p: Individual, power_id: Integer, ended: Date) defeasible {
+    when gift_donee_under_legal_disability_until(p, power_id, ended);
+    then gift_power_donee_disability_ended(p, power_id, ended);
+}
+@source(IRC_S2514_A, relation = formalizes, coverage = exact, quote = "An exercise of a general power of appointment created on or before October 21, 1942, shall be deemed a transfer of property by the individual possessing such power")
+rule Pre1943GeneralPowerExerciseIsTransferRule(p: Individual, power_id: Integer, on: Date) defeasible {
+    label en official "the exercise of a pre-1943 general power is a transfer by its possessor, absent the partial-release exceptions (section 2514(a))";
+    when gift_power_created_on_or_before_1942(p, power_id);
+    when gift_pre_1943_power_exercised(p, power_id, on);
+    when not_known(gift_pre_1943_partial_release_exception(p, power_id));
+    when not_known(gift_power_excluded_from_general_2514c(p, power_id));
+    then general_power_exercise_or_release_is_transfer(p, power_id, on);
+}
+// (d): exercise by creating a postponing power
+pub relation gift_second_power_created_by_exercise(p: Individual, power_id: Integer, on: Date) kind empirical {
+    label en unofficial "the possessor exercised a power created after October 21, 1942 by creating another power of appointment (section 2514(d))";
+}
+pub relation gift_second_power_can_postpone_vesting_under_local_law(p: Individual, power_id: Integer) kind empirical {
+    label en unofficial "under the applicable local law the second power can be validly exercised so as to postpone vesting, or suspend absolute ownership or the power of alienation, for a period ascertainable without regard to the date of creation of the first power; a local-law determination with an adjudicated origin";
+}
+@source(IRC_S2514_D, relation = formalizes, coverage = exact, quote = "such exercise of the first power shall, to the extent of the property subject to the second power, be deemed a transfer of property by the individual possessing such power")
+pub relation postponing_power_exercise_is_transfer_2514d(p: Individual, power_id: Integer, on: Date) kind institutional {
+    label en official "the exercise of a post-1942 power by creating a postponing second power is deemed a transfer, to the extent of the property subject to the second power (section 2514(d))";
+}
+rule PostponingPowerExerciseIsTransferRule(p: Individual, power_id: Integer, on: Date) defeasible {
+    when not_known(gift_power_created_on_or_before_1942(p, power_id));
+    when gift_second_power_created_by_exercise(p, power_id, on);
+    when gift_second_power_can_postpone_vesting_under_local_law(p, power_id);
+    then postponing_power_exercise_is_transfer_2514d(p, power_id, on);
+}
+
+// =====================================================================
+// §2515: the GST tax on a direct skip enlarges the taxable gift
+// =====================================================================
+
+pub relation direct_skip_gift(t: GstTransfer, donor: Individual, y: TaxableYear, donee: Person) kind empirical {
+    label en unofficial "the generation-skipping transfer t is a taxable gift that is a direct skip made by the donor in the calendar year to the donee";
+}
+@source(IRC_S2515, relation = formalizes, coverage = exact, quote = "the amount of such gift shall be increased by the amount of any tax imposed on the transferor under chapter 13 with respect to such gift")
+pub relation gift_increase_for_gst_tax_2515(donor: Individual, y: TaxableYear, donee: Person, amount: Money) kind institutional {
+    label en official "the taxable gift that is a direct skip is increased by the chapter 13 tax imposed on the transferor with respect to it (section 2515)";
+}
+rule GiftIncreaseForGstTax2515Rule(donor: Individual, y: TaxableYear, donee: Person) defeasible {
+    when direct_skip_gift(_, donor, y, donee);
+    then gift_increase_for_gst_tax_2515(donor, y, donee, sum(collect all a: Money, t: GstTransfer where direct_skip_gift(t, donor, y, donee) and gst_transfer_kind(t, DirectSkip) and gst_tax(t, a), empty: 0.00 USD));
+}
+
+// =====================================================================
+// §2518(c): the other qualified disclaimers
+// =====================================================================
+
+pub relation disclaimer_of_undivided_portion_meets_requirements(p: Person, item: Asset) kind empirical {
+    label en unofficial "the disclaimer with respect to an undivided portion of an interest meets the requirements of the preceding sentence of section 2518(b) (section 2518(c)(1))";
+}
+pub relation written_transfer_of_entire_interest(p: Person, item: Asset) kind empirical {
+    label en unofficial "a written transfer of the transferor's entire interest in the property (section 2518(c)(3))";
+}
+pub relation transfer_meets_2518b2_and_b3_like_requirements(p: Person, item: Asset) kind empirical {
+    label en unofficial "the transfer meets requirements similar to those of paragraphs (2) and (3) of section 2518(b): received within the time, and no acceptance of benefits";
+}
+pub relation transfer_is_to_persons_who_would_have_received_on_disclaimer(p: Person, item: Asset) kind empirical {
+    label en unofficial "the transfer is to the person or persons who would have received the property had the transferor made a qualified disclaimer";
+}
+@source(IRC_S2518_C, relation = formalizes, coverage = exact, quote = "A disclaimer with respect to an undivided portion of an interest which meets the requirements of the preceding sentence shall be treated as a qualified disclaimer of such portion of the interest.")
+rule QualifiedDisclaimerOfUndividedPortionRule(p: Person, item: Asset) defeasible {
+    label en official "a disclaimer of an undivided portion that meets the requirements is a qualified disclaimer of that portion (section 2518(c)(1))";
+    when disclaimer_of_undivided_portion_meets_requirements(p, item);
+    then qualified_disclaimer(p, item);
+}
+@source(IRC_S2518_C, relation = formalizes, coverage = exact, quote = "shall be treated as a qualified disclaimer.")
+rule WrittenTransferTreatedAsQualifiedDisclaimerRule(p: Person, item: Asset) defeasible {
+    label en official "a written transfer of the entire interest, meeting requirements similar to (b)(2)-(3), to those who would have taken on a disclaimer, is a qualified disclaimer (section 2518(c)(3))";
+    when written_transfer_of_entire_interest(p, item);
+    when transfer_meets_2518b2_and_b3_like_requirements(p, item);
+    when transfer_is_to_persons_who_would_have_received_on_disclaimer(p, item);
+    then qualified_disclaimer(p, item);
+}

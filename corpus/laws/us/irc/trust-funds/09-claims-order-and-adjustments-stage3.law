@@ -1,0 +1,257 @@
+// Stage 3 (TECH_GAP reduction): the order-of-payment rules of §9507(e)(3), §9508(d)(3), §9509(e)(3) and §9510(d)(3),
+// and the estimate/adjustment mechanism of §9510(c)(2)(B).
+//
+// The order of payment is written WITHOUT a running fund balance or a claim-priority queue ledger:
+//  - the insufficiency of funds at a date is a case fact (`fund_insufficient_to_pay_all_claims`), because the fund
+//    balance history is not this package's subject (the statute's rule starts from "if at any time the fund has
+//    insufficient funds"); for the Oil Spill fund the inability "by reason of subsection (c)(2)" is a second source of
+//    the same insufficiency;
+//  - the head of the queue is the earliest finally-determined claim still unpaid at that date (candidates + "no
+//    strictly earlier candidate", the earliest-of pattern of TECH-GAPS G136);
+//  - paying a claim while an earlier-determined claim of the same fund is unpaid is the conduct the prohibition
+//    forbids; the duty is to pay the head-of-queue claim in full.
+//
+// JUDGMENT CALLS
+//  - Claims with the same final-determination date are both heads of the queue (the text gives no tie-break).
+//  - "Paid in full" is a case fact per claim with its payment date; a payment on the same date as the test date counts
+//    as made.
+//  - §9510(c)(2)(B): "proper adjustments" is read as carrying the whole difference (required minus estimated) of each
+//    prior period that the case links to the next period into that next transfer; sums are over recorded per-period
+//    items (empirical relations).
+
+language "law.core" version "0.2";
+package us.irc.trust_funds version "0.1.1";
+namespace "urn:us:irc:trust_funds:clir";
+
+use self::{
+    FundClaim,
+    HazardousSubstanceSuperfund,
+    IRC_S9507_E,
+    IRC_S9508_D,
+    IRC_S9509_E,
+    IRC_S9510_C,
+    IRC_S9510_D,
+    LeakingUndergroundStorageTankTrustFund,
+    OilSpillLiabilityTrustFund,
+    TrustFund,
+    VaccineInjuryCompensationTrustFund,
+    claim_against_fund,
+};
+
+// =====================================================================
+// Order in which unpaid claims are paid
+// =====================================================================
+
+relation claim_finally_determined_on(c: FundClaim, d: Date) kind empirical {
+    label en unofficial "the date on which the claim was finally determined";
+}
+relation claim_paid_in_full_on(c: FundClaim, d: Date) kind empirical {
+    label en unofficial "the claim was paid in full on the date";
+}
+relation fund_insufficient_to_pay_all_claims(f: TrustFund, d: Date) kind institutional {
+    label en unofficial "at the date the trust fund has insufficient funds to pay all of the claims payable out of it at that time";
+}
+relation oil_spill_fund_unable_by_reason_of_9509c2(d: Date) kind empirical {
+    label en unofficial "the Oil Spill Liability Trust Fund is unable by reason of subsection (c)(2) (the per-incident and per-claim limitations) to pay all of the claims at the date";
+}
+@source(IRC_S9509_E, relation = formalizes, coverage = exact, quote = "has insufficient funds (or is unable by reason of subsection (c)(2))")
+rule S9509eInabilityCountsAsInsufficiency strict {
+    for d: Date;
+    when oil_spill_fund_unable_by_reason_of_9509c2(d);
+    then fund_insufficient_to_pay_all_claims(OilSpillLiabilityTrustFund, d);
+}
+relation claim_paid_in_full_by(c: FundClaim, f: TrustFund, d: Date) kind institutional {
+    label en unofficial "the claim against the fund was paid in full on or before the date (tested at the dates when the fund is insufficient)";
+}
+rule ClaimPaidInFullByDate strict {
+    for c: FundClaim;
+    for f: TrustFund;
+    for paid: Date;
+    for d: Date;
+    when fund_insufficient_to_pay_all_claims(f, d) and claim_against_fund(c, f, _) and claim_paid_in_full_on(c, paid) and paid <= d;
+    then claim_paid_in_full_by(c, f, d);
+}
+relation payment_out_of_order(c: FundClaim, f: TrustFund, paid: Date) kind institutional {
+    label en unofficial "the claim is paid in full at a date when the fund is insufficient for all claims and an earlier-finally-determined claim of the same fund is still unpaid";
+}
+rule PaymentOutOfOrder strict {
+    for c: FundClaim;
+    for f: TrustFund;
+    for c0: FundClaim;
+    for paid: Date;
+    for dc: Date;
+    for d0: Date;
+    when fund_insufficient_to_pay_all_claims(f, paid)
+        and claim_against_fund(c, f, _) and claim_paid_in_full_on(c, paid) and claim_finally_determined_on(c, dc)
+        and claim_against_fund(c0, f, _) and claim_finally_determined_on(c0, d0) and d0 < dc
+        and not_known(claim_paid_in_full_by(c0, f, paid));
+    then payment_out_of_order(c, f, paid);
+}
+relation queue_candidate(f: TrustFund, c: FundClaim, d: Date) kind institutional {
+    label en unofficial "the claim is finally determined, unpaid and payable at the date when the fund is insufficient for all claims";
+}
+rule QueueCandidate strict {
+    for f: TrustFund;
+    for c: FundClaim;
+    for d: Date;
+    for dc: Date;
+    when fund_insufficient_to_pay_all_claims(f, d) and claim_against_fund(c, f, _) and claim_finally_determined_on(c, dc) and dc <= d and not_known(claim_paid_in_full_by(c, f, d));
+    then queue_candidate(f, c, d);
+}
+relation has_earlier_queue_candidate(f: TrustFund, c: FundClaim, d: Date) kind institutional;
+rule HasEarlierQueueCandidate strict {
+    for f: TrustFund;
+    for c: FundClaim;
+    for c2: FundClaim;
+    for d: Date;
+    for dc: Date;
+    for dc2: Date;
+    when queue_candidate(f, c, d) and queue_candidate(f, c2, d) and claim_finally_determined_on(c, dc) and claim_finally_determined_on(c2, dc2) and dc2 < dc;
+    then has_earlier_queue_candidate(f, c, d);
+}
+relation head_of_queue(f: TrustFund, c: FundClaim, d: Date) kind institutional {
+    label en unofficial "the claim is the earliest finally-determined unpaid claim at the date, so it is the next to be paid in full";
+}
+rule HeadOfQueue strict {
+    for f: TrustFund;
+    for c: FundClaim;
+    for d: Date;
+    when queue_candidate(f, c, d) and not_known(has_earlier_queue_candidate(f, c, d));
+    then head_of_queue(f, c, d);
+}
+relation claim_paid_in_full(c: FundClaim) kind empirical;
+
+// One prohibition and one duty per fund, each with the section's own quote.
+
+@source(IRC_S9507_E, relation = formalizes, coverage = exact, quote = "such claims shall, to the extent permitted under paragraph (1), be paid in full in the order in which they were finally determined.")
+rule S9507e3NoOutOfOrderPayment defeasible {
+    for c: FundClaim;
+    for paid: Date;
+    when payment_out_of_order(c, HazardousSubstanceSuperfund, paid);
+    then prohibition S9507e3NoPaymentOutOfOrder {
+        bearer us.irc.core::Secretary;
+        action payment_out_of_order(c, HazardousSubstanceSuperfund, paid);
+        window [-infinity, infinity];
+    };
+}
+rule S9507e3PayNextClaim defeasible {
+    for c: FundClaim;
+    for d: Date;
+    when head_of_queue(HazardousSubstanceSuperfund, c, d);
+    then duty S9507e3PayHeadOfQueueInFull {
+        bearer us.irc.core::Secretary;
+        goal achievement {
+            condition claim_paid_in_full(c);
+            window [d, infinity];
+        }
+    };
+}
+@source(IRC_S9508_D, relation = formalizes, coverage = exact, quote = "such claims shall, to the extent permitted under paragraph (1), be paid in full in the order in which they were finally determined.")
+rule S9508d3NoOutOfOrderPayment defeasible {
+    for c: FundClaim;
+    for paid: Date;
+    when payment_out_of_order(c, LeakingUndergroundStorageTankTrustFund, paid);
+    then prohibition S9508d3NoPaymentOutOfOrder {
+        bearer us.irc.core::Secretary;
+        action payment_out_of_order(c, LeakingUndergroundStorageTankTrustFund, paid);
+        window [-infinity, infinity];
+    };
+}
+rule S9508d3PayNextClaim defeasible {
+    for c: FundClaim;
+    for d: Date;
+    when head_of_queue(LeakingUndergroundStorageTankTrustFund, c, d);
+    then duty S9508d3PayHeadOfQueueInFull {
+        bearer us.irc.core::Secretary;
+        goal achievement {
+            condition claim_paid_in_full(c);
+            window [d, infinity];
+        }
+    };
+}
+@source(IRC_S9509_E, relation = formalizes, coverage = exact, quote = "such claims shall, to the extent permitted under paragraph (1) and such subsection, be paid in full in the order in which they were finally determined.")
+rule S9509e3NoOutOfOrderPayment defeasible {
+    for c: FundClaim;
+    for paid: Date;
+    when payment_out_of_order(c, OilSpillLiabilityTrustFund, paid);
+    then prohibition S9509e3NoPaymentOutOfOrder {
+        bearer us.irc.core::Secretary;
+        action payment_out_of_order(c, OilSpillLiabilityTrustFund, paid);
+        window [-infinity, infinity];
+    };
+}
+rule S9509e3PayNextClaim defeasible {
+    for c: FundClaim;
+    for d: Date;
+    when head_of_queue(OilSpillLiabilityTrustFund, c, d);
+    then duty S9509e3PayHeadOfQueueInFull {
+        bearer us.irc.core::Secretary;
+        goal achievement {
+            condition claim_paid_in_full(c);
+            window [d, infinity];
+        }
+    };
+}
+@source(IRC_S9510_D, relation = formalizes, coverage = exact, quote = "such claims shall, to the extent permitted under paragraph (1) be paid in full in the order in which they are finally determined.")
+rule S9510d3NoOutOfOrderPayment defeasible {
+    for c: FundClaim;
+    for paid: Date;
+    when payment_out_of_order(c, VaccineInjuryCompensationTrustFund, paid);
+    then prohibition S9510d3NoPaymentOutOfOrder {
+        bearer us.irc.core::Secretary;
+        action payment_out_of_order(c, VaccineInjuryCompensationTrustFund, paid);
+        window [-infinity, infinity];
+    };
+}
+rule S9510d3PayNextClaim defeasible {
+    for c: FundClaim;
+    for d: Date;
+    when head_of_queue(VaccineInjuryCompensationTrustFund, c, d);
+    then duty S9510d3PayHeadOfQueueInFull {
+        bearer us.irc.core::Secretary;
+        goal achievement {
+            condition claim_paid_in_full(c);
+            window [d, infinity];
+        }
+    };
+}
+
+// =====================================================================
+// §9510(c)(2)(B): transfers on estimates, with adjustments
+// =====================================================================
+
+relation vaccine_transfer_estimate(period: Text, amount: Money) kind empirical {
+    label en unofficial "the Secretary's estimate of the amount to be transferred for the period under section 9510(c)(2)(A)";
+}
+relation vaccine_transfer_required(period: Text, amount: Money) kind empirical {
+    label en unofficial "the amount actually required to be transferred for the period (known after the estimate)";
+}
+relation vaccine_estimate_adjusted_into(period: Text, next_period: Text) kind empirical {
+    label en unofficial "the difference between the required amount and the estimate of the period is adjusted in the transfer of the next period";
+}
+relation vaccine_transfer_amount_for_period(period: Text, amount: Money) kind institutional {
+    label en unofficial "section 9510(c)(2)(B): the transfer for the period = its estimate plus the excess of required over estimated (negative when estimates were too high) of the prior periods adjusted into it";
+}
+@source(IRC_S9510_C, relation = formalizes, coverage = exact, quote = "and proper adjustments shall be made in the amounts subsequently transferred to the extent prior estimates were in excess of or less than the amounts required to be transferred.")
+rule S9510c2BTransferWithAdjustments strict {
+    for next: Text;
+    for estimate: Money;
+    when vaccine_transfer_estimate(next, estimate);
+    then vaccine_transfer_amount_for_period(next, estimate
+        + sum(collect all r: Money, p1: Text where vaccine_transfer_required(p1, r) and vaccine_estimate_adjusted_into(p1, next), empty: 0.00 USD)
+        - sum(collect all e: Money, p2: Text where vaccine_transfer_estimate(p2, e) and vaccine_estimate_adjusted_into(p2, next), empty: 0.00 USD));
+}
+relation vaccine_period_transfer_made(period: Text, amount: Money) kind empirical;
+@source(IRC_S9510_C, relation = formalizes, coverage = exact, quote = "Transfers under subparagraph (A) shall be made on the basis of estimates by the Secretary")
+rule S9510c2BTransferDuty defeasible {
+    for period: Text;
+    for amount: Money;
+    when vaccine_transfer_amount_for_period(period, amount);
+    then duty S9510c2BTransferOnEstimate {
+        bearer us.irc.core::Secretary;
+        goal achievement {
+            condition vaccine_period_transfer_made(period, amount);
+            window [-infinity, infinity];
+        }
+    };
+}

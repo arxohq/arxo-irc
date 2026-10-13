@@ -1,0 +1,179 @@
+// Sections 1352-1355 (Subchapter R, alternative tax on qualifying shipping
+// activities: the tax itself, notional shipping income per qualifying
+// vessel at the pinned $0.40/$0.20-per-100-net-tons rates, the election as
+// a power, and the qualifying-vessel-operator/qualifying-vessel
+// definitions). Stage 2b (IRC-09 stage 2b, A12).
+//
+// METHOD: section 1353(c)'s daily notional shipping income is computed
+// exactly from the pinned per-100-net-ton dollar rates (40 cents up to
+// 25,000 net tons, 20 cents above), using `div_round(Decimal, Decimal, ...)`
+// for the tons-per-100 division (a Decimal/Decimal divisible pair) and then
+// `Money * Decimal` for the dollar amount — never an invented per-ton rate.
+// Section 1353(b)(1) then multiplies by the number of qualifying days
+// (`Money * Integer`, exact scaling). Section 1353(b)(2) (the section 883
+// partial-exclusion ratio) and (d) (multiple-operator allocation) are NOT
+// modeled — narrower branches outside this pass's core arithmetic. Section
+// 1354's election is modeled as a `power`; the (b) timely-filing deadline,
+// (c) controlled-group consistency, and (d)-(e) revocation/termination/
+// re-election-bar machinery are NOT modeled (each is its own self-contained
+// sub-rule, out of budget alongside the rest of this stage's scope).
+// Section 1355(a)'s definitions (qualifying vessel operator, qualifying
+// vessel, United States flag vessel, domestic/foreign trade) are folded
+// into case-asserted classification switches rather than separately
+// derived; section 1355(b)-(h) (the shipping activity requirement, and the
+// remaining special rules) are NOT modeled this pass. Sections 1356-1359
+// (the exclusion of items not subject to this subchapter's ordinary income
+// rules, allocation of credits/deductions, and the remaining definitions)
+// are NOT reached this pass either — the task's own priority list stopped
+// at section 1355.
+
+// ---- Section 1353(c): daily notional shipping income ----
+
+use self::{
+    Corporation,
+    IRC_S1352,
+    IRC_S1353_B,
+    IRC_S1353_C,
+    IRC_S1354_A,
+    IRC_S1355_A,
+    TaxableYear,
+    eligible_to_elect_tonnage_tax_1354,
+    notional_shipping_income_1353a,
+};
+
+@source(IRC_S1355_A, quote = "The term \"qualifying vessel\" means a self-propelled (or a combination self-propelled and non-self-propelled) United States flag vessel of not less than 6,000 deadweight tons used exclusively in the United States foreign trade during the period that the election under this subchapter is in effect.")
+pub relation qualifying_vessel(v: us.irc.core::Asset, y: TaxableYear) kind empirical {
+    label en unofficial "the vessel is a qualifying vessel for the taxable year, per section 1355(a)(4) (a case-asserted classification; the deadweight-tonnage/flag/exclusive-use tests are not separately derived)";
+}
+@source(IRC_S1353_C, quote = "40 cents for each 100 tons of so much of the net tonnage of the vessel as does not exceed 25,000 net tons")
+pub relation net_tonnage_of_vessel(v: us.irc.core::Asset, tons: Decimal) kind empirical {
+    label en unofficial "the net tonnage of the qualifying vessel, per section 1353(c)";
+}
+@source(IRC_S1353_C, quote = "40 cents for each 100 tons of so much of the net tonnage of the vessel as does not exceed 25,000 net tons")
+pub relation daily_notional_shipping_income_low_tier(v: us.irc.core::Asset, amount: Money) kind institutional {
+    label en official "section 1353(c)(1): 40 cents per 100 net tons, up to 25,000 net tons";
+}
+rule Section1353c1LowTier(v: us.irc.core::Asset, tons: Decimal) strict {
+    label en official "section 1353(c)(1): 40 cents per 100 net tons of the vessel's net tonnage up to 25,000 net tons";
+    when net_tonnage_of_vessel(v, tons);
+    when tons <= 25000.0;
+    // One proportion, one rounding (TECH-GAPS G499, 26.09.2026).
+    then daily_notional_shipping_income_low_tier(v, div_round(0.40 USD * tons, 100.0, 2, "HALF_UP"));
+}
+rule Section1353c1LowTierCappedAt25000(v: us.irc.core::Asset, tons: Decimal) strict {
+    label en official "section 1353(c)(1): 40 cents per 100 net tons, capped at the first 25,000 net tons, for a vessel exceeding that tonnage";
+    when net_tonnage_of_vessel(v, tons);
+    when tons > 25000.0;
+    // One proportion, one rounding (TECH-GAPS G499, 26.09.2026).
+    then daily_notional_shipping_income_low_tier(v, div_round(0.40 USD * 25000.0, 100.0, 2, "HALF_UP"));
+}
+@source(IRC_S1353_C, quote = "20 cents for each 100 tons of so much of the net tonnage of the vessel as exceeds 25,000 net tons")
+pub relation daily_notional_shipping_income_high_tier(v: us.irc.core::Asset, amount: Money) kind institutional {
+    label en official "section 1353(c)(2): 20 cents per 100 net tons of net tonnage exceeding 25,000 net tons";
+}
+rule Section1353c2HighTier(v: us.irc.core::Asset, tons: Decimal) strict {
+    label en official "section 1353(c)(2): 20 cents per 100 net tons of the excess over 25,000 net tons";
+    when net_tonnage_of_vessel(v, tons);
+    when tons > 25000.0;
+    // One proportion, one rounding (TECH-GAPS G499, 26.09.2026).
+    then daily_notional_shipping_income_high_tier(v, div_round(0.20 USD * (tons - 25000.0), 100.0, 2, "HALF_UP"));
+}
+@source(IRC_S1353_C, quote = "the daily notional shipping income from the operation of a qualifying vessel is—\n(1) 40 cents for each 100 tons of so much of the net tonnage of the vessel as does not exceed 25,000 net tons, and\n(2) 20 cents for each 100 tons of so much of the net tonnage of the vessel as exceeds 25,000 net tons.")
+pub relation daily_notional_shipping_income_1353c(v: us.irc.core::Asset, amount: Money) kind institutional {
+    label en official "section 1353(c): the daily notional shipping income for the vessel (both tiers combined)";
+}
+rule Section1353cCombinedAboveTwentyFiveThousand(v: us.irc.core::Asset, low: Money, high: Money) strict {
+    label en official "section 1353(c): combined daily notional shipping income, both tiers, for a vessel exceeding 25,000 net tons";
+    when daily_notional_shipping_income_low_tier(v, low);
+    when daily_notional_shipping_income_high_tier(v, high);
+    then daily_notional_shipping_income_1353c(v, low + high);
+}
+rule Section1353cLowTierOnlyAtOrBelowTwentyFiveThousand(v: us.irc.core::Asset, tons: Decimal, low: Money) strict {
+    label en official "section 1353(c): daily notional shipping income is the low-tier amount alone, for a vessel at or below 25,000 net tons";
+    when net_tonnage_of_vessel(v, tons);
+    when tons <= 25000.0;
+    when daily_notional_shipping_income_low_tier(v, low);
+    then daily_notional_shipping_income_1353c(v, low);
+}
+
+// ---- Section 1353(a)-(b)(1): notional shipping income per vessel and total ----
+
+@source(IRC_S1353_B, quote = "the number of days during the taxable year that the electing corporation operated such vessel as a qualifying vessel in United States foreign trade")
+pub relation days_operated_as_qualifying_vessel(c: Corporation, v: us.irc.core::Asset, y: TaxableYear, days: Integer) kind empirical {
+    label en unofficial "the number of days during the taxable year the electing corporation operated the vessel as a qualifying vessel in United States foreign trade, per section 1353(b)(1)(B)";
+}
+@source(IRC_S1353_B, quote = "the amount of notional shipping income of an electing corporation for each qualifying vessel for the taxable year shall equal the product of—\n(A) the daily notional shipping income, and\n(B) the number of days during the taxable year that the electing corporation operated such vessel as a qualifying vessel in United States foreign trade")
+pub relation notional_shipping_income_per_vessel_1353b1(c: Corporation, v: us.irc.core::Asset, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 1353(b)(1): notional shipping income per vessel = daily notional shipping income times qualifying days";
+}
+rule Section1353b1PerVesselIncome(c: Corporation, v: us.irc.core::Asset, y: TaxableYear, daily: Money, days: Integer) strict {
+    label en official "section 1353(b)(1): per-vessel notional shipping income = daily amount times qualifying days";
+    when qualifying_vessel(v, y);
+    when daily_notional_shipping_income_1353c(v, daily);
+    when days_operated_as_qualifying_vessel(c, v, y, days);
+    then notional_shipping_income_per_vessel_1353b1(c, v, y, round(daily * days, 2, "HALF_UP"));
+}
+// Section 1353(a)'s "sum for each qualifying vessel operated" is NOT summed
+// across a corporation's whole fleet here (a variable-arity aggregate over
+// a derived predicate, same §111 runtime-subset limitation class as this
+// registry's other "sum over derived" gaps); the per-vessel figure above is
+// exposed, and a single-vessel case can feed it directly into the tax rule
+// below.
+
+// ---- Section 1352: the alternative tax ----
+
+pub relation section_11_tax_after_subchapter_r_1352(c: Corporation, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the tax imposed by section 11, determined after the application of this subchapter (i.e., excluding qualifying shipping activity income), per section 1352(1)";
+}
+// WIRE-4: the rules that carry a taxable year (sections 835(e), 856(c)(7)(C), 857(b)(3)(C), 857(b)(4)(A),
+// 860E(e)(6)(A), 860G(c)(1)) read us.irc.corporations::maximum_section_11b_rate; this case fact remains
+// only for the rules without a year variable (sections 851(d)(2)(C) and 860E(e)(2)).
+@source(IRC_S1352, quote = "the highest rate of tax specified in section 11")
+pub relation highest_rate_of_tax_section_11(rate: Decimal) kind empirical {
+    label en unofficial "the highest rate of tax specified in section 11, per section 1352(2)(A) (this package's own us.irc.corporations::corporate_tax_rate is a single FLAT rate under current law, not a graduated schedule with a distinct 'highest rate' — a case supplies the applicable rate directly rather than this package re-deriving 'highest' from a schedule it does not own)";
+}
+@source(IRC_S1352, quote = "In the case of an electing corporation, the tax imposed by section 11 shall be the amount equal to the sum of—\n(1) the tax imposed by section 11 determined after the application of this subchapter, and\n(2) a tax equal to—\n(A) the highest rate of tax specified in section 11, multiplied by\n(B) the notional shipping income for the taxable year.")
+pub relation tonnage_tax(c: Corporation, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 1352: the section 11 tax for an electing corporation — the ordinary section 11 tax on non-qualifying income, plus the highest section 11 rate applied to notional shipping income";
+}
+rule Section1352AlternativeTax(c: Corporation, y: TaxableYear, ordinary_tax: Money, rate: Decimal, notional_income: Money) strict {
+    label en official "section 1352: tonnage tax = ordinary section 11 tax (after subchapter R) plus (highest section 11 rate times notional shipping income)";
+    when elects_tonnage_tax_1354(c, y);
+    when section_11_tax_after_subchapter_r_1352(c, y, ordinary_tax);
+    // Stage 3 (26.09.2026): the highest section 11 rate is DERIVED from
+    // us.irc.corporations (pub maximum_section_11b_rate, keyed by the year
+    // alone; a year beginning before 2018 gives no rate, TECH-GAPS G3300)
+    // instead of the local case fact `highest_rate_of_tax_section_11`.
+    when us.irc.corporations::maximum_section_11b_rate(y, rate);
+    when notional_shipping_income_1353a(c, y, notional_income);
+    then tonnage_tax(c, y, ordinary_tax + round(notional_income * rate, 2, "HALF_UP"));
+}
+
+// ---- Section 1354(a)-(b): the election ----
+
+@source(IRC_S1354_A, quote = "A qualifying vessel operator may elect the application of this subchapter.")
+pub relation elects_tonnage_tax_1354(c: Corporation, y: TaxableYear) kind empirical {
+    label en unofficial "the qualifying vessel operator's election of the application of subchapter R, per section 1354(a) (the (b) timely-filing deadline, (c) controlled-group consistency requirement, and (d)-(e) revocation/termination/re-election bar are not separately modeled)";
+}
+@source(IRC_S1355_A, quote = "The term \"qualifying vessel operator\" means any corporation—\n(A) who operates one or more qualifying vessels, and\n(B) who meets the shipping activity requirement in subsection (c).")
+pub relation qualifying_vessel_operator_1355a3(c: Corporation) kind empirical {
+    label en unofficial "the corporation is a qualifying vessel operator, per section 1355(a)(3) (the (c) shipping activity requirement is not separately derived — a case asserts this classification directly)";
+}
+pub relation electing_corporation_1355a1(c: Corporation, y: TaxableYear) kind institutional {
+    label en official "section 1355(a)(1): a corporation for which a section 1354(a) election is in effect for the taxable year";
+}
+rule Section1355a1ElectingCorporation(c: Corporation, y: TaxableYear) strict {
+    label en official "section 1355(a)(1): the election is in effect for a qualifying vessel operator that has elected";
+    when qualifying_vessel_operator_1355a3(c);
+    when elects_tonnage_tax_1354(c, y);
+    // Stage 2c: eligibility also excludes the section 1354(e) re-election bar
+    // (module 16).
+    then power TonnageTaxElection {
+        holder c;
+        over c;
+        exercise elects_tonnage_tax_1354(c, y);
+        valid_when eligible_to_elect_tonnage_tax_1354(c, y);
+        effect create(electing_corporation_1355a1(c, y));
+        window [@2004-10-23, infinity);
+    };
+}

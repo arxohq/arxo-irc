@@ -1,0 +1,559 @@
+// §6071 (time for filing, general rule), §6072 (time for filing income tax
+// returns), §6081 (extension of time), §6091 (place for filing).
+//
+// This module defines `statutory_due_date`, the shared relation
+// `02-persons-required-to-file.law`, `03-joint-returns.law`, and
+// `04-signing-and-self-employment.law` read for their duties' filing
+// windows. Every computed date here is the PRE-rollover statutory date:
+// §7503's Saturday/Sunday/legal-holiday rollover is `administration`'s own
+// norm (already pending in DEPENDENCIES.json; see also
+// `corpus/laws/us/irc/administration/02-weekend-holiday-rollover.law`,
+// `pub relation last_day_rolled(base, rolled)`), which this package does
+// not invoke — a consumer combines the two.
+//
+// JUDGMENT CALLS AND GAPS (see report):
+//  - "The 15th day of the Nth month following the close of the [year]" is
+//    computed inline as `add_calendar_period(add_calendar_period(
+//    add_calendar_period(close, 1 calendar_day), (N-1) calendar_month), 14
+//    calendar_day)`: one day past the close lands on the first day of the
+//    following month; stepping (N-1) more months reaches the first day of
+//    the Nth month; 14 more days reaches its 15th day. Verified against the
+//    task's own worked examples (calendar year 2025 -> April 15, 2026;
+//    fiscal year ending June 30 -> October 15). The three intermediate
+//    steps are nested directly in the head's argument position (matching
+//    `corpus/laws/us/constitution/01-congress.law`'s idiom), not bound via
+//    `==` to named variables: the checker's range-restriction pass (§190)
+//    does not treat an `==`-computed variable as an established positive
+//    binder, only relation atoms and nested terms are.
+//  - Category-specific due dates (partnership/S-corp, DISC, nonresident
+//    alien/foreign corporation, cooperative, exempt organization) are kept
+//    OUT of the general (a) rule via `unless` on the general rule itself,
+//    rather than via `priority`, because the categories are the general
+//    rule's own textual exceptions ("except as otherwise provided in the
+//    following subsections") — the general/self-employment split is by
+//    `TaxKind` literal instead of a `k` variable, because an unconstrained
+//    `TaxKind` quantifier has no finite positive source to range over
+//    (§190) and `k == IncomeCh1 or k == SelfEmploymentCh2` does not bind it.
+//  - §6072(b)'s "S corporations under sections 6012 and 6037" reuses
+//    `us.irc.core::Corporation` with a pending classification predicate
+//    `is_s_corporation` (owner: `s-corporations`, not this package).
+//  - §6081(b)'s transitional 5-month/7-month substitutions for C corporation
+//    taxable years ending Dec 31/June 30 and beginning before 2026 are
+//    modeled as their own `effective`-windowed rules (§32 amendments
+//    method), each producing `statutory_due_date`-shaped extension dates
+//    directly rather than through a variable "months" quantity (the
+//    compiler's `add_calendar_period` requires argument 2 to be a literal
+//    `Quantity`, not an `Integer` variable — §84.2/E-0108).
+//  - §6091's "internal revenue district" and "service center" designations
+//    are the Secretary's own regulatory choices (place, not a substantive
+//    condition this package tests); modeled as classification rules that
+//    select WHICH §6091 branch governs a return, not the literal address.
+
+language "law.core" version "0.2";
+package us.irc.returns version "0.1.1";
+namespace "urn:us:irc:returns:clir";
+
+use self::{
+    Corporation,
+    FiledDocument,
+    IRC_S6071_A,
+    IRC_S6071_B,
+    IRC_S6071_C,
+    IRC_S6072_A,
+    IRC_S6072_B,
+    IRC_S6072_C,
+    IRC_S6072_D,
+    IRC_S6072_E,
+    IRC_S6081_A,
+    IRC_S6081_B,
+    IRC_S6091_A,
+    IRC_S6091_B,
+    Individual,
+    Organ,
+    Partnership,
+    Person,
+    Return,
+    Secretary,
+    TaxableYear,
+    disc_return_required,
+    nonresident_alien,
+    nonresident_alien_in_taxable_year,
+    self_employment_filing_required,
+    subject_to_chapter24_wage_withholding_in_taxable_year,
+};
+
+// ============================================================================
+// §6071 — Time for filing returns and other documents (general rule)
+// ============================================================================
+
+relation time_for_filing_not_otherwise_provided(doc: FiledDocument) kind institutional {
+    label en unofficial "no other provision of Title 26 fixes the filing time for this return, statement, or other document";
+}
+relation prescribes_time_for_filing(committee: Organ, doc: FiledDocument) kind empirical;
+@source(IRC_S6071_A, relation = formalizes, coverage = exact, quote = "When not otherwise provided for by this title, the Secretary shall by regulations prescribe the time for filing any return, statement, or other document required by this title or by regulations.")
+rule S6071PrescribeTimeForFiling defeasible {
+    for doc: FiledDocument;
+    when time_for_filing_not_otherwise_provided(doc);
+    then duty PrescribeTimeForFilingByRegulation {
+        bearer Secretary;
+        goal maintenance {
+            condition prescribes_time_for_filing(Secretary, doc);
+            window [-infinity, infinity];
+        }
+    };
+}
+
+relation is_form_w2_or_w3(doc: FiledDocument) kind institutional {
+    label en unofficial "the document is a Form W-2 or Form W-3 (pending: `employment`, not this package's norm)";
+}
+relation reports_nonemployee_compensation(doc: FiledDocument) kind institutional {
+    label en unofficial "the document is a return or statement the Secretary requires to report nonemployee compensation (pending: `information-reporting`, not this package's norm)";
+}
+relation document_filed_electronically(doc: FiledDocument) kind empirical;
+relation due_date_of_document(doc: FiledDocument, d: Date) kind institutional;
+@source(IRC_S6071_C, relation = formalizes, coverage = exact, quote = "Forms W–2 and W–3 and any returns or statements required by the Secretary to report nonemployee compensation shall be filed on or before January 31 of the year following the calendar year to which such returns relate.")
+rule S6071JanuaryThirtyFirstDeadlineW2 strict {
+    for doc: FiledDocument;
+    when is_form_w2_or_w3(doc);
+    then due_date_of_document(doc, @2026-01-31);
+}
+@source(IRC_S6071_B, relation = formalizes, coverage = exact, quote = "Returns made under subpart B of part III of this subchapter (other than returns and statements required to be filed with respect to nonemployee compensation) which are filed electronically shall be filed on or before March 31 of the year following the calendar year to which such returns relate.")
+rule S6071MarchThirtyFirstElectronicInformationReturns defeasible {
+    for doc: FiledDocument;
+    when reports_nonemployee_compensation(doc) and document_filed_electronically(doc);
+    then due_date_of_document(doc, @2026-03-31);
+    unless is_form_w2_or_w3(doc);
+}
+
+// (d) is a pure cross-reference to §§4901/5732 (special-occupational-tax
+// payment, owned by `alcohol`/`excise-entities`) — NON_NORMATIVE here.
+
+// ============================================================================
+// §6072 — Time for filing income tax returns
+// ============================================================================
+
+pub relation statutory_due_date(p: Person, y: TaxableYear, k: us.irc.core::TaxKind, d: Date) kind institutional {
+    label en unofficial "the §6072 statutory due date (before any §6081 extension and before any §7503 weekend/holiday rollover) for the person's return of this tax kind for the taxable year";
+}
+
+// --- (b) Returns of partnerships and S corporations; DISC returns; (c)
+//     nonresident alien individuals/foreign corporations; (d) cooperative
+//     associations; (e) §501(a) exempt organizations — each excludes the
+//     general (a) rule below via `unless`. -------------------------------
+
+relation is_s_corporation(c: Corporation) kind institutional {
+    label en unofficial "the corporation has a valid S election in effect (pending: `s-corporations`, not this package's norm)";
+}
+relation is_s_corporation_or_partnership(p: Person) kind institutional;
+relation partnership_of_record(p: Partnership) kind empirical {
+    label en unofficial "the partnership is a party to the case (positive anchor, §190 range restriction)";
+}
+@source(IRC_S6072_B, relation = formalizes, coverage = contextual, quote = "Returns of partnerships under section 6031")
+rule S6072IsPartnershipForDueDate strict {
+    for p: Partnership;
+    when partnership_of_record(p);
+    then is_s_corporation_or_partnership(p);
+}
+@source(IRC_S6072_B, relation = formalizes, coverage = contextual, quote = "returns of S corporations under sections 6012 and 6037")
+rule S6072IsSCorpForDueDate strict {
+    for c: Corporation;
+    when is_s_corporation(c);
+    then is_s_corporation_or_partnership(c);
+}
+
+relation is_exempt_cooperative_association(o: Person) kind institutional {
+    label en unofficial "the organization is an exempt cooperative association described in §1381(a)(1), or a §1381(a)(2) organization meeting the §6072(d)(2) patronage-dividend obligation (pending: not this package's norm)";
+}
+relation is_foreign_corporation(c: Corporation) kind institutional {
+    label en unofficial "the corporation is a foreign corporation (pending: `definitions`, §7701(a)(5), not this package's norm)";
+}
+relation has_us_office_or_place_of_business(c: Corporation) kind empirical;
+relation subject_to_chapter24_wage_withholding(p: Individual) kind institutional {
+    label en unofficial "the individual's wages are subject to withholding under chapter 24 (pending: `employment`, not this package's norm)";
+}
+relation is_section_501a_exempt_organization(o: Person) kind institutional {
+    label en unofficial "the organization is exempt from taxation under §501(a), other than a §401(a) employees' trust (pending: `exempt-organizations`, not this package's norm)";
+}
+
+// --- (a) General rule: individuals, estates, trusts (income tax) ----------
+
+pub relation income_tax_filer_of_record(p: Person, y: TaxableYear) kind empirical {
+    label en unofficial "positive anchor (§190): the person's §6072 income-tax due date for the taxable year is at issue in the case — asserted independently of whether a duty to file has already been derived, to avoid a cycle through `required_to_file_income_tax_return`/`statutory_due_date`";
+}
+relation general_income_due_date_rule_applies(p: Person, y: TaxableYear) kind institutional {
+    label en unofficial "§6072(a)'s general due-date rule governs this person's income-tax return for the year (none of (b)-(e)'s special categories apply)";
+}
+@source(IRC_S6072_A, relation = formalizes, coverage = contextual, quote = "except as otherwise provided in the following subsections of this section.")
+rule S6072GeneralRuleApplies defeasible {
+    for p: Person;
+    for y: TaxableYear;
+    when income_tax_filer_of_record(p, y);
+    then general_income_due_date_rule_applies(p, y);
+    unless is_s_corporation_or_partnership(p)
+        or disc_return_required(p, y)
+        or is_exempt_cooperative_association(p)
+        or is_foreign_corporation(p)
+        or is_section_501a_exempt_organization(p)
+        or nonresident_alien(p)
+        or nonresident_alien_in_taxable_year(p, y);
+}
+@source(IRC_S6072_A, relation = formalizes, coverage = exact, quote = "In the case of returns under section 6012, 6013, or 6017 (relating to income tax under subtitle A), returns made on the basis of the calendar year shall be filed on or before the 15th day of April following the close of the calendar year and returns made on the basis of a fiscal year shall be filed on or before the 15th day of the fourth month following the close of the fiscal year, except as otherwise provided in the following subsections of this section.")
+rule S6072GeneralIncomeDueDate defeasible {
+    for p: Person;
+    for y: TaxableYear;
+    for closeDate: Date;
+    when general_income_due_date_rule_applies(p, y) and us.irc.core::ends(y, closeDate);
+    then statutory_due_date(p, y, us.irc.core::IncomeCh1,
+        add_calendar_period(add_calendar_period(add_calendar_period(closeDate, 1 calendar_day), 3 calendar_month), 14 calendar_day));
+}
+
+// --- (b) Returns of partnerships and S corporations ------------------------
+
+@source(IRC_S6072_B, relation = formalizes, coverage = exact, quote = "Returns of partnerships under section 6031 and returns of S corporations under sections 6012 and 6037 made on the basis of the calendar year shall be filed on or before the 15th day of March following the close of the calendar year, and such returns made on the basis of a fiscal year shall be filed on or before the 15th day of the third month following the close of the fiscal year.")
+rule S6072PartnershipOrSCorpDueDate strict {
+    for p: Person;
+    for y: TaxableYear;
+    for closeDate: Date;
+    when is_s_corporation_or_partnership(p) and us.irc.core::ends(y, closeDate);
+    then statutory_due_date(p, y, us.irc.core::IncomeCh1,
+        add_calendar_period(add_calendar_period(add_calendar_period(closeDate, 1 calendar_day), 2 calendar_month), 14 calendar_day));
+}
+
+@source(IRC_S6072_B, relation = formalizes, coverage = exact, quote = "Returns required for a taxable year by section 6011(c)(2) (relating to returns of a DISC) shall be filed on or before the fifteenth day of the ninth month following the close of the taxable year.")
+rule S6072DiscReturnDueDate strict {
+    for p: Person;
+    for y: TaxableYear;
+    for closeDate: Date;
+    when disc_return_required(p, y) and us.irc.core::ends(y, closeDate);
+    then statutory_due_date(p, y, us.irc.core::IncomeCh1,
+        add_calendar_period(add_calendar_period(add_calendar_period(closeDate, 1 calendar_day), 8 calendar_month), 14 calendar_day));
+}
+
+// --- (c) Nonresident alien individuals and foreign corporations -----------
+
+@source(IRC_S6072_C, relation = formalizes, coverage = exact, quote = "Returns made by nonresident alien individuals (other than those whose wages are subject to withholding under chapter 24) and foreign corporations (other than those having an office or place of business in the United States or a former FSC (as defined in section 922 as in effect before its repeal by the FSC Repeal and Extraterritorial Income Exclusion Act of 2000)) under section 6012 on the basis of a calendar year shall be filed on or before the 15th day of June following the close of the calendar year and such returns made on the basis of a fiscal year shall be filed on or before the 15th day of the 6th month following the close of the fiscal year.")
+rule S6072NonresidentAlienIndividualDueDate strict {
+    for p: Individual;
+    for y: TaxableYear;
+    for closeDate: Date;
+    when (nonresident_alien(p) or nonresident_alien_in_taxable_year(p, y)) and not_known(subject_to_chapter24_wage_withholding(p))
+        and not_known(subject_to_chapter24_wage_withholding_in_taxable_year(p, y)) and us.irc.core::ends(y, closeDate);
+    then statutory_due_date(p, y, us.irc.core::IncomeCh1,
+        add_calendar_period(add_calendar_period(add_calendar_period(closeDate, 1 calendar_day), 5 calendar_month), 14 calendar_day));
+}
+@source(IRC_S6072_C, relation = formalizes, coverage = exact, quote = "Returns made by nonresident alien individuals (other than those whose wages are subject to withholding under chapter 24) and foreign corporations (other than those having an office or place of business in the United States or a former FSC (as defined in section 922 as in effect before its repeal by the FSC Repeal and Extraterritorial Income Exclusion Act of 2000)) under section 6012 on the basis of a calendar year shall be filed on or before the 15th day of June following the close of the calendar year and such returns made on the basis of a fiscal year shall be filed on or before the 15th day of the 6th month following the close of the fiscal year.")
+rule S6072ForeignCorporationDueDate strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    for closeDate: Date;
+    when is_foreign_corporation(c) and not_known(has_us_office_or_place_of_business(c)) and us.irc.core::ends(y, closeDate);
+    then statutory_due_date(c, y, us.irc.core::IncomeCh1,
+        add_calendar_period(add_calendar_period(add_calendar_period(closeDate, 1 calendar_day), 5 calendar_month), 14 calendar_day));
+}
+
+// --- (d) Cooperative associations ------------------------------------------
+
+@source(IRC_S6072_D, relation = formalizes, coverage = partial, quote = "a return made on the basis of a calendar year shall be filed on or before the 15th day of September following the close of the calendar year, and a return made on the basis of a fiscal year shall be filed on or before the 15th day of the 9th month following the close of the fiscal year.")
+rule S6072CooperativeDueDate strict {
+    for o: Person;
+    for y: TaxableYear;
+    for closeDate: Date;
+    when is_exempt_cooperative_association(o) and us.irc.core::ends(y, closeDate);
+    then statutory_due_date(o, y, us.irc.core::IncomeCh1,
+        add_calendar_period(add_calendar_period(add_calendar_period(closeDate, 1 calendar_day), 8 calendar_month), 14 calendar_day));
+}
+
+// --- (e) §501(a) exempt organizations ---------------------------------------
+
+@source(IRC_S6072_E, relation = formalizes, coverage = exact, quote = "In the case of an income tax return of an organization exempt from taxation under section 501(a) (other than an employees' trust described in section 401(a)), a return shall be filed on or before the 15th day of the 5th month following the close of the taxable year.")
+rule S6072ExemptOrganizationDueDate strict {
+    for o: Person;
+    for y: TaxableYear;
+    for closeDate: Date;
+    when is_section_501a_exempt_organization(o) and us.irc.core::ends(y, closeDate);
+    then statutory_due_date(o, y, us.irc.core::IncomeCh1,
+        add_calendar_period(add_calendar_period(add_calendar_period(closeDate, 1 calendar_day), 4 calendar_month), 14 calendar_day));
+}
+
+// --- (a) General rule extended to §6017 self-employment returns -----------
+
+@source(IRC_S6072_A, relation = formalizes, coverage = exact, quote = "In the case of returns under section 6012, 6013, or 6017 (relating to income tax under subtitle A), returns made on the basis of the calendar year shall be filed on or before the 15th day of April following the close of the calendar year and returns made on the basis of a fiscal year shall be filed on or before the 15th day of the fourth month following the close of the fiscal year, except as otherwise provided in the following subsections of this section.")
+rule S6072GeneralSelfEmploymentDueDate defeasible {
+    for p: Individual;
+    for y: TaxableYear;
+    for closeDate: Date;
+    when self_employment_filing_required(p, y) and us.irc.core::ends(y, closeDate);
+    then statutory_due_date(p, y, us.irc.core::SelfEmploymentCh2,
+        add_calendar_period(add_calendar_period(add_calendar_period(closeDate, 1 calendar_day), 3 calendar_month), 14 calendar_day));
+}
+
+// ============================================================================
+// §6081 — Extension of time for filing returns
+// ============================================================================
+
+// --- (a) General rule: Secretary's discretionary extension, capped at 6
+//     months except for taxpayers abroad ------------------------------------
+
+pub relation taxpayer_abroad(p: Person) kind empirical {
+    label en unofficial "the taxpayer is abroad, removing §6081(a)'s 6-month cap on the length of the extension";
+}
+pub relation requests_extension(p: Person, r: Return, until: Date) kind empirical;
+relation extension_length_valid(p: Person, r: Return, until: Date) kind institutional {
+    label en unofficial "single-atom `valid_when` helper (§201): either the requested extension date is no more than 6 months after the statutory due date, or the taxpayer is abroad (§6081(a)'s own exception to the 6-month cap)";
+}
+@source(IRC_S6081_A, relation = formalizes, coverage = partial, quote = "Except in the case of taxpayers who are abroad, no such extension shall be for more than 6 months.")
+rule S6081ExtensionWithinSixMonths defeasible {
+    for p: Person;
+    for y: TaxableYear;
+    for k: us.irc.core::TaxKind;
+    for r: Return;
+    for due: Date;
+    for until: Date;
+    when statutory_due_date(p, y, k, due)
+        and us.irc.core::return_of(r, p, y, k)
+        and requests_extension(p, r, until)
+        and until <= add_calendar_period(due, 6 calendar_month);
+    then extension_length_valid(p, r, until);
+}
+@source(IRC_S6081_A, relation = formalizes, coverage = partial, quote = "Except in the case of taxpayers who are abroad, no such extension shall be for more than 6 months.")
+rule S6081ExtensionValidForTaxpayerAbroad strict {
+    for p: Person;
+    for r: Return;
+    for until: Date;
+    when taxpayer_abroad(p) and requests_extension(p, r, until);
+    then extension_length_valid(p, r, until);
+}
+@source(IRC_S6081_A, relation = formalizes, coverage = exact, quote = "The Secretary may grant a reasonable extension of time for filing any return, declaration, statement, or other document required by this title or by regulations. Except in the case of taxpayers who are abroad, no such extension shall be for more than 6 months.")
+rule S6081GrantExtension strict {
+    for p: Person;
+    for r: Return;
+    for until: Date;
+    when requests_extension(p, r, until) and extension_length_valid(p, r, until);
+    then power S6081GrantExtensionPower {
+        holder Secretary;
+        over p;
+        exercise requests_extension(p, r, until);
+        valid_when extension_length_valid(p, r, until);
+        effect create(us.irc.core::extension_granted(r, until));
+    };
+}
+
+// --- (b) Automatic extension for corporation income tax returns -----------
+
+relation files_extension_form(c: Corporation, r: Return) kind empirical;
+relation pays_properly_estimated_tax_by_due_date(c: Corporation, r: Return) kind empirical;
+relation automatic_extension_conditions_met(c: Corporation, r: Return) kind institutional;
+@source(IRC_S6081_B, relation = formalizes, coverage = partial, quote = "An extension of 6 months for the filing of the return of income taxes imposed by subtitle A shall be allowed any corporation if, in such manner and at such time as the Secretary may by regulations prescribe, there is filed on behalf of such corporation the form prescribed by the Secretary, and if such corporation pays, on or before the date prescribed for payment of the tax, the amount properly estimated as its tax")
+rule S6081AutomaticExtensionConditionsMet strict {
+    for c: Corporation;
+    for r: Return;
+    when files_extension_form(c, r) and pays_properly_estimated_tax_by_due_date(c, r);
+    then automatic_extension_conditions_met(c, r);
+}
+
+relation ends_december_31_before_2026(y: TaxableYear) kind institutional {
+    label en unofficial "the C corporation's taxable year ends on December 31 and begins before January 1, 2026 (§6081(b) transitional rule)";
+}
+relation ends_june_30_before_2026(y: TaxableYear) kind institutional {
+    label en unofficial "the C corporation's taxable year ends on June 30 and begins before January 1, 2026 (§6081(b) transitional rule)";
+}
+
+@source(IRC_S6081_B, relation = formalizes, coverage = partial, quote = "An extension of 6 months for the filing of the return of income taxes imposed by subtitle A shall be allowed any corporation")
+rule S6081AutomaticExtensionSixMonthsGeneral strict {
+    for c: Corporation;
+    for r: Return;
+    for y: TaxableYear;
+    for due: Date;
+    when automatic_extension_conditions_met(c, r) and statutory_due_date(c, y, us.irc.core::IncomeCh1, due);
+    then power S6081AutomaticExtensionPower {
+        holder c;
+        exercise files_extension_form(c, r);
+        valid_when automatic_extension_conditions_met(c, r);
+        effect create(us.irc.core::extension_granted(r, add_calendar_period(due, 6 calendar_month)));
+    };
+}
+@source(IRC_S6081_B, relation = formalizes, coverage = exact, quote = "In the case of any return for a taxable year of a C corporation which ends on December 31 and begins before January 1, 2026, the first sentence of this subsection shall be applied by substituting \"5 months\" for \"6 months\".")
+rule S6081AutomaticExtensionFiveMonthsDecember31 strict {
+    effective [@2015-07-31, @2026-01-01);
+    for c: Corporation;
+    for r: Return;
+    for y: TaxableYear;
+    for due: Date;
+    when automatic_extension_conditions_met(c, r) and ends_december_31_before_2026(y) and statutory_due_date(c, y, us.irc.core::IncomeCh1, due);
+    then power S6081AutomaticExtensionFiveMonthsPower {
+        holder c;
+        exercise files_extension_form(c, r);
+        valid_when automatic_extension_conditions_met(c, r);
+        effect create(us.irc.core::extension_granted(r, add_calendar_period(due, 5 calendar_month)));
+    };
+}
+@source(IRC_S6081_B, relation = formalizes, coverage = exact, quote = "In the case of any return for a taxable year of a C corporation which ends on June 30 and begins before January 1, 2026, the first sentence of this subsection shall be applied by substituting \"7 months\" for \"6 months\".")
+rule S6081AutomaticExtensionSevenMonthsJune30 strict {
+    effective [@2015-07-31, @2026-01-01);
+    for c: Corporation;
+    for r: Return;
+    for y: TaxableYear;
+    for due: Date;
+    when automatic_extension_conditions_met(c, r) and ends_june_30_before_2026(y) and statutory_due_date(c, y, us.irc.core::IncomeCh1, due);
+    then power S6081AutomaticExtensionSevenMonthsPower {
+        holder c;
+        exercise files_extension_form(c, r);
+        valid_when automatic_extension_conditions_met(c, r);
+        effect create(us.irc.core::extension_granted(r, add_calendar_period(due, 7 calendar_month)));
+    };
+}
+
+priority TransitionalFiveMonthsOverGeneralSix {
+    prefer S6081AutomaticExtensionFiveMonthsDecember31 over S6081AutomaticExtensionSixMonthsGeneral;
+    reason lex_specialis;
+}
+priority TransitionalSevenMonthsOverGeneralSix {
+    prefer S6081AutomaticExtensionSevenMonthsJune30 over S6081AutomaticExtensionSixMonthsGeneral;
+    reason lex_specialis;
+}
+
+relation secretary_mails_termination_notice(c: Corporation, r: Return, terminationDate: Date, mailedDate: Date) kind empirical;
+relation termination_notice_timely(c: Corporation, r: Return, mailedDate: Date, terminationDate: Date) kind institutional {
+    label en unofficial "the termination notice is mailed at least 10 days prior to the termination date fixed in it";
+}
+@source(IRC_S6081_B, relation = formalizes, coverage = exact, quote = "but this extension may be terminated at any time by the Secretary by mailing to the taxpayer notice of such termination at least 10 days prior to the date for termination fixed in such notice.")
+rule S6081TerminationNoticeTimely strict {
+    for c: Corporation;
+    for r: Return;
+    for mailedDate: Date;
+    for terminationDate: Date;
+    when secretary_mails_termination_notice(c, r, terminationDate, mailedDate)
+        and add_calendar_period(mailedDate, 10 calendar_day) <= terminationDate;
+    then termination_notice_timely(c, r, mailedDate, terminationDate);
+}
+@source(IRC_S6081_B, relation = formalizes, coverage = exact, quote = "but this extension may be terminated at any time by the Secretary by mailing to the taxpayer notice of such termination at least 10 days prior to the date for termination fixed in such notice.")
+rule S6081TerminateAutomaticExtension strict {
+    for c: Corporation;
+    for r: Return;
+    for terminationDate: Date;
+    for mailedDate: Date;
+    when secretary_mails_termination_notice(c, r, terminationDate, mailedDate) and termination_notice_timely(c, r, mailedDate, terminationDate);
+    then power S6081TerminateAutomaticExtensionPower {
+        holder Secretary;
+        over c;
+        exercise secretary_mails_termination_notice(c, r, terminationDate, mailedDate);
+        valid_when termination_notice_timely(c, r, mailedDate, terminationDate);
+        effect create(us.irc.core::extension_granted(r, terminationDate));
+    };
+}
+
+// (c) is a pure cross-reference to §§7508/7508A (war/disaster postponement,
+// owned by `administration`) — NON_NORMATIVE here.
+
+// ============================================================================
+// §6091 — Place for filing returns or other documents
+// ============================================================================
+
+relation place_for_filing_not_otherwise_provided(doc: FiledDocument) kind institutional {
+    label en unofficial "no other provision of Title 26 fixes the place for filing this return, declaration, statement, or other document";
+}
+relation prescribes_place_for_filing(committee: Organ, doc: FiledDocument) kind empirical;
+@source(IRC_S6091_A, relation = formalizes, coverage = exact, quote = "When not otherwise provided for by this title, the Secretary shall by regulations prescribe the place for the filing of any return, declaration, statement, or other document, or copies thereof, required by this title or by regulations.")
+rule S6091PrescribePlaceForFiling defeasible {
+    for doc: FiledDocument;
+    when place_for_filing_not_otherwise_provided(doc);
+    then duty PrescribePlaceForFilingByRegulation {
+        bearer Secretary;
+        goal maintenance {
+            condition prescribes_place_for_filing(Secretary, doc);
+            window [-infinity, infinity];
+        }
+    };
+}
+
+enum FilingPlaceException {
+    NoResidenceOrPrincipalPlaceOfBusiness;
+    CitizenAbroad;
+    ClaimsSection911Or931Or933Benefits;
+    NonresidentAlien;
+    TerminationAssessmentMade;
+}
+relation individual_filing_place_exception(p: Individual, y: TaxableYear, exc: FilingPlaceException) kind institutional {
+    label en unofficial "one of §6091(b)(1)(B)'s five exceptions applies to the individual's return for the taxable year, so the general internal-revenue-district rule of (b)(1)(A) does not govern the place of filing";
+}
+relation files_at_secretary_designated_place(p: Person, y: TaxableYear) kind empirical;
+relation files_in_own_district_or_service_center(p: Person, y: TaxableYear) kind empirical;
+relation filed_at_correct_place(p: Person, y: TaxableYear) kind institutional;
+
+@source(IRC_S6091_B, relation = formalizes, coverage = partial, quote = "Except as provided in subparagraph (B), a return (other than a corporation return) shall be made to the Secretary—")
+rule S6091IndividualGeneralPlaceOfFiling defeasible {
+    for p: Individual;
+    for y: TaxableYear;
+    when files_in_own_district_or_service_center(p, y);
+    then filed_at_correct_place(p, y);
+    unless individual_filing_place_exception(p, y, NoResidenceOrPrincipalPlaceOfBusiness)
+        or individual_filing_place_exception(p, y, CitizenAbroad)
+        or individual_filing_place_exception(p, y, ClaimsSection911Or931Or933Benefits)
+        or individual_filing_place_exception(p, y, NonresidentAlien)
+        or individual_filing_place_exception(p, y, TerminationAssessmentMade)
+        or hand_carries_return(p, y);
+}
+@source(IRC_S6091_B, relation = formalizes, coverage = partial, quote = "nonresident alien persons, and")
+rule S6091IndividualExceptionPlaceOfFiling strict {
+    for p: Individual;
+    for y: TaxableYear;
+    for exc: FilingPlaceException;
+    when individual_filing_place_exception(p, y, exc) and files_at_secretary_designated_place(p, y);
+    then filed_at_correct_place(p, y);
+}
+
+relation corporation_filing_place_exception(c: Corporation, y: TaxableYear) kind institutional {
+    label en unofficial "one of §6091(b)(2)(B)'s three exceptions applies (no U.S. principal place of business/office, foreign corporation, or a §6851(a) termination assessment), so the general district rule of (b)(2)(A) does not govern";
+}
+@source(IRC_S6091_B, relation = formalizes, coverage = partial, quote = "Except as provided in subparagraph (B), a return of a corporation shall be made to the Secretary—")
+rule S6091CorporationGeneralPlaceOfFiling defeasible {
+    for c: Corporation;
+    for y: TaxableYear;
+    when files_in_own_district_or_service_center(c, y);
+    then filed_at_correct_place(c, y);
+    unless corporation_filing_place_exception(c, y) or hand_carries_return(c, y);
+}
+@source(IRC_S6091_B, relation = formalizes, coverage = partial, quote = "foreign corporations, and")
+rule S6091CorporationExceptionPlaceOfFiling strict {
+    for c: Corporation;
+    for y: TaxableYear;
+    when corporation_filing_place_exception(c, y) and files_at_secretary_designated_place(c, y);
+    then filed_at_correct_place(c, y);
+}
+
+relation hand_carries_return(p: Person, y: TaxableYear) kind empirical {
+    label en unofficial "the person makes the return to the Secretary by handcarrying it, notwithstanding paragraph (1), (2), or (3)";
+}
+@source(IRC_S6091_B, relation = formalizes, coverage = exact, quote = "Notwithstanding paragraph (1), (2), or (3), a return to which paragraph (1)(A), (2)(A), or (3)(A) would apply, but for this paragraph, which is made to the Secretary by handcarrying shall, under regulations prescribed by the Secretary, be made in the internal revenue district referred to in paragraph (1)(A)(i), (2)(A)(i), or (3)(A)(i), as the case may be.")
+rule S6091HandCarriedReturnFiledInOwnDistrict strict {
+    for p: Person;
+    for y: TaxableYear;
+    when hand_carries_return(p, y) and files_in_own_district_or_service_center(p, y);
+    then filed_at_correct_place(p, y);
+}
+
+relation secretary_permits_any_district(p: Person, y: TaxableYear) kind empirical;
+@source(IRC_S6091_B, relation = formalizes, coverage = exact, quote = "Notwithstanding paragraph (1), (2), (3), or (4) of this subsection, the Secretary may permit a return to be filed in any internal revenue district, and may require the return of any officer or employee of the Treasury Department to be filed in any internal revenue district selected by the Secretary.")
+rule S6091SecretaryPermitsFilingInAnyDistrict strict {
+    for p: Person;
+    for y: TaxableYear;
+    when secretary_permits_any_district(p, y);
+    then power S6091PermitAnyDistrictPower {
+        holder Secretary;
+        over p;
+        exercise secretary_permits_any_district(p, y);
+        valid_when secretary_permits_any_district(p, y);
+        effect create(filed_at_correct_place(p, y));
+    };
+}
+
+relation subject_to_section_4181_or_subtitle_e_tax(p: Person, y: TaxableYear) kind institutional {
+    label en unofficial "the return is of tax imposed by §4181 or subtitle E (alcohol, tobacco, and firearms taxes) — pending, owner `alcohol`/`tobacco-firearms`";
+}
+@source(IRC_S6091_B, relation = formalizes, coverage = exact, quote = "In the case of any return of tax imposed by section 4181 or subtitle E (relating to taxes on alcohol, tobacco, and firearms), subsection (a) shall apply (and this subsection shall not apply).")
+rule S6091AlcoholTobaccoFirearmsUsesGeneralRule strict {
+    for p: Person;
+    for y: TaxableYear;
+    when subject_to_section_4181_or_subtitle_e_tax(p, y) and files_at_secretary_designated_place(p, y);
+    then filed_at_correct_place(p, y);
+}

@@ -1,0 +1,164 @@
+// Chapter 52, subchapter A: section 5701 (rate of tax on tobacco products
+// and cigarette papers and tubes) and section 5702 (definitions used
+// throughout the chapter, wired in here because 5701's rate rules read them
+// directly: "cigar", "cigarette", "smokeless tobacco", "pipe tobacco",
+// "roll-your-own tobacco", "removal"). Priority section, IRC-14 stage 1.
+//
+// JUDGMENT CALL: rates are pinned as `.lawparam.json` A3 datasets with a
+// single value window starting 2009-04-01 (SCHIP Pub. L. 111-3 increase),
+// the one effective date anchored in the pinned text itself
+// (`IRC_S5701_NOTE_4`: "amendments...apply to articles removed...after
+// March 31, 2009"). Earlier historical rates are NOT pinned in this
+// package's owned text and are therefore not modeled (a removal dated
+// before 2009-04-01 falls outside this dataset's coverage window, which the
+// engine reports as a missing parameter value rather than a wrong number).
+
+// =====================================================================
+// Section 5702 — definitions (wired directly into the rate machinery)
+// =====================================================================
+
+use self::{
+    IRC_S5701_A,
+    IRC_S5701_B,
+    IRC_S5701_C,
+    IRC_S5701_D,
+    IRC_S5701_E,
+    IRC_S5701_F,
+    IRC_S5701_G,
+    IRC_S5702,
+    Person,
+    large_cigar_price_basis,
+};
+
+pub enum TobaccoProductKind {
+    Cigar;
+    Cigarette;
+    SmokelessTobacco;
+    PipeTobacco;
+    RollYourOwnTobacco;
+}
+// section 5702(c) "tobacco products" is formalized directly as the closed
+// enum above (`TobaccoProductKind`), not as a separate computed relation;
+// see the coverage row for `26/5702/c/u1`.
+
+pub enum CigarWeightClass { SmallCigar; LargeCigar; }
+pub enum CigaretteWeightClass { SmallCigarette; LargeCigarette; }
+pub enum SmokelessTobaccoKind { Snuff; ChewingTobacco; }
+
+// section 5702(j): "removal" or "remove" — the taxable event trigger. The
+// definition also reaches smuggling/unlawful importation; that branch is
+// case-asserted as `unlawful_importation(e)` rather than derived (no
+// customs-entry classification machinery in this package).
+pub entity TobaccoRemovalEvent : ExciseEvent;
+
+@source(IRC_S5702, relation = formalizes, coverage = partial, quote = "\"Removal\" or \"remove\" means the removal of tobacco products or cigarette papers or tubes, or any processed tobacco, from the factory or from internal revenue bond under section 5704")
+pub relation tobacco_removal(e: TobaccoRemovalEvent, on: Date, responsible: Person) kind empirical {
+    label en unofficial "section 5702(j): the case-asserted removal of a tobacco product or cigarette paper/tube from the factory or from bond, or release from customs custody, on the given date, by the manufacturer or importer the statute looks to for liability";
+}
+pub relation unlawful_importation(e: TobaccoRemovalEvent) kind empirical {
+    label en unofficial "section 5702(j): smuggling or other unlawful importation into the United States is itself treated as a 'removal' triggering tax";
+}
+
+// -- cigars (section 5701(a); definitions in 5702(a),(l)) --------------
+
+pub relation cigar_removal(e: TobaccoRemovalEvent, weight_class: CigarWeightClass, count: Decimal, price_per_cigar: Money) kind empirical {
+    label en unofficial "section 5701(a): a removal of cigars, by weight class (not more than / more than 3 pounds per thousand), the number of cigars removed, and (for large cigars) the price for which each cigar is sold — section 5702(l) price-determination rules (include readying charges, exclude the chapter's own tax and separately stated retail sales tax) are taken as already reflected in this asserted price";
+}
+pub relation cigar_not_intended_for_sale(e: TobaccoRemovalEvent) kind empirical {
+    label en unofficial "section 5701(a)(2) last sentence: cigars removed but not intended for sale are taxed at the rate for similar cigars removed for sale — the case supplies the equivalent price_per_cigar a similar cigar would command";
+}
+
+@source(IRC_S5701_A, relation = formalizes, coverage = exact, quote = "On cigars, weighing not more than 3 pounds per thousand, $50.33 per thousand;")
+rule SmallCigarTax(e: TobaccoRemovalEvent, count: Decimal) strict {
+    when cigar_removal(e, SmallCigar, count, _);
+    then us.irc.excise_goods::excise_tax_due(e, round(SmallCigarRatePerThousand * count / 1000.00, 2, "HALF_UP"));
+}
+
+pub relation large_cigar_percentage_amount(e: TobaccoRemovalEvent, amount: Money) kind institutional {
+    label en official "section 5701(a)(2): 52.75 percent of the price for which sold, before the per-cigar cap";
+}
+pub relation large_cigar_cap_amount(e: TobaccoRemovalEvent, amount: Money) kind institutional {
+    label en official "section 5701(a)(2): the 40.26-cents-per-cigar cap times the number of cigars removed";
+}
+@source(IRC_S5701_A, relation = formalizes, coverage = exact, quote = "a tax equal to 52.75 percent of the price for which sold but not more than 40.26 cents per cigar")
+rule LargeCigarPercentageAmount(e: TobaccoRemovalEvent, count: Decimal, price: Money) strict {
+    when cigar_removal(e, LargeCigar, count, _) and large_cigar_price_basis(e, price);
+    then large_cigar_percentage_amount(e, round(price * LargeCigarPercentageRate * count, 2, "HALF_UP"));
+}
+@source(IRC_S5701_A, relation = formalizes, coverage = exact, quote = "a tax equal to 52.75 percent of the price for which sold but not more than 40.26 cents per cigar")
+rule LargeCigarCapAmount(e: TobaccoRemovalEvent, count: Decimal) strict {
+    when cigar_removal(e, LargeCigar, count, _);
+    then large_cigar_cap_amount(e, round(LargeCigarCapPerCigar * count, 2, "HALF_UP"));
+}
+@source(IRC_S5701_A, relation = formalizes, coverage = exact, quote = "a tax equal to 52.75 percent of the price for which sold but not more than 40.26 cents per cigar")
+rule LargeCigarTax(e: TobaccoRemovalEvent, pct: Money, cap: Money) strict {
+    when large_cigar_percentage_amount(e, pct) and large_cigar_cap_amount(e, cap);
+    then us.irc.excise_goods::excise_tax_due(e, min(pct, cap));
+}
+
+// -- cigarettes (section 5701(b)) ---------------------------------------
+
+pub relation cigarette_removal(e: TobaccoRemovalEvent, weight_class: CigaretteWeightClass, count: Decimal) kind empirical {
+    label en unofficial "section 5701(b): a removal of cigarettes, by weight class and count. The length-based recount rule of 5701(b)(2) (more than 6.5 inches -> count each 2.75 inches as one cigarette) is applied by the case supplying the already-recounted `count`, not by this package (no length-to-count conversion is wired; see TECH-GAPS)";
+}
+@source(IRC_S5701_B, relation = formalizes, coverage = exact, quote = "On cigarettes, weighing not more than 3 pounds per thousand, $50.33 per thousand;")
+rule SmallCigaretteTax(e: TobaccoRemovalEvent, count: Decimal) strict {
+    when cigarette_removal(e, SmallCigarette, count);
+    then us.irc.excise_goods::excise_tax_due(e, round(SmallCigaretteRatePerThousand * count / 1000.00, 2, "HALF_UP"));
+}
+@source(IRC_S5701_B, relation = formalizes, coverage = exact, quote = "On cigarettes, weighing more than 3 pounds per thousand, $105.69 per thousand")
+rule LargeCigaretteTax(e: TobaccoRemovalEvent, count: Decimal) strict {
+    when cigarette_removal(e, LargeCigarette, count);
+    then us.irc.excise_goods::excise_tax_due(e, round(LargeCigaretteRatePerThousand * count / 1000.00, 2, "HALF_UP"));
+}
+
+// -- cigarette papers and tubes (section 5701(c),(d)) --------------------
+
+pub relation cigarette_paper_removal(e: TobaccoRemovalEvent, count: Decimal) kind empirical {
+    label en unofficial "section 5701(c): a removal of cigarette papers, already recounted for length under the same 6.5-inch/2.75-inch rule as cigarettes";
+}
+pub relation cigarette_tube_removal(e: TobaccoRemovalEvent, count: Decimal) kind empirical {
+    label en unofficial "section 5701(d): a removal of cigarette tubes, same length-recount convention";
+}
+@source(IRC_S5701_C, relation = formalizes, coverage = exact, quote = "a tax of 3.15 cents for each 50 papers or fractional part thereof")
+rule CigarettePaperTax(e: TobaccoRemovalEvent, count: Decimal) strict {
+    when cigarette_paper_removal(e, count);
+    then us.irc.excise_goods::excise_tax_due(e, round(CigarettePaperRatePer50 * count / 50.00, 2, "HALF_UP"));
+}
+@source(IRC_S5701_D, relation = formalizes, coverage = exact, quote = "a tax of 6.30 cents for each 50 tubes or fractional part thereof")
+rule CigaretteTubeTax(e: TobaccoRemovalEvent, count: Decimal) strict {
+    when cigarette_tube_removal(e, count);
+    then us.irc.excise_goods::excise_tax_due(e, round(CigaretteTubeRatePer50 * count / 50.00, 2, "HALF_UP"));
+}
+
+// -- smokeless tobacco (section 5701(e); definitions 5702(m)) ------------
+
+pub relation smokeless_tobacco_removal(e: TobaccoRemovalEvent, kind: SmokelessTobaccoKind, pounds: Decimal) kind empirical {
+    label en unofficial "section 5701(e): a removal of snuff or chewing tobacco, in pounds (fractional pounds taxed proportionately, expressed directly as a Decimal quantity)";
+}
+@source(IRC_S5701_E, relation = formalizes, coverage = exact, quote = "On snuff, $1.51 per pound and a proportionate tax at the like rate on all fractional parts of a pound.")
+rule SnuffTax(e: TobaccoRemovalEvent, pounds: Decimal) strict {
+    when smokeless_tobacco_removal(e, Snuff, pounds);
+    then us.irc.excise_goods::excise_tax_due(e, round(SnuffRatePerPound * pounds, 2, "HALF_UP"));
+}
+@source(IRC_S5701_E, relation = formalizes, coverage = exact, quote = "On chewing tobacco, 50.33 cents per pound and a proportionate tax at the like rate on all fractional parts of a pound.")
+rule ChewingTobaccoTax(e: TobaccoRemovalEvent, pounds: Decimal) strict {
+    when smokeless_tobacco_removal(e, ChewingTobacco, pounds);
+    then us.irc.excise_goods::excise_tax_due(e, round(ChewingTobaccoRatePerPound * pounds, 2, "HALF_UP"));
+}
+
+// -- pipe tobacco and roll-your-own (section 5701(f),(g)) ----------------
+
+pub relation pipe_tobacco_removal(e: TobaccoRemovalEvent, pounds: Decimal) kind empirical;
+pub relation royo_tobacco_removal(e: TobaccoRemovalEvent, pounds: Decimal) kind empirical;
+
+@source(IRC_S5701_F, relation = formalizes, coverage = exact, quote = "a tax of $2.8311 cents per pound (and a proportionate tax at the like rate on all fractional parts of a pound)")
+rule PipeTobaccoTax(e: TobaccoRemovalEvent, pounds: Decimal) strict {
+    when pipe_tobacco_removal(e, pounds);
+    then us.irc.excise_goods::excise_tax_due(e, round(PipeTobaccoRatePerPound * pounds, 2, "HALF_UP"));
+}
+@source(IRC_S5701_G, relation = formalizes, coverage = exact, quote = "a tax of $24.78 per pound (and a proportionate tax at the like rate on all fractional parts of a pound)")
+rule RollYourOwnTobaccoTax(e: TobaccoRemovalEvent, pounds: Decimal) strict {
+    when royo_tobacco_removal(e, pounds);
+    then us.irc.excise_goods::excise_tax_due(e, round(RollYourOwnTobaccoRatePerPound * pounds, 2, "HALF_UP"));
+}

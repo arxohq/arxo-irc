@@ -1,0 +1,139 @@
+// Section 45S — Employer credit for paid family and medical leave. Stage 2c
+// (IRC-06 stage 2c, DECISION-0379). Priority list item: §45S (12.5% + 0.25
+// point per point over 50%, up to 25%, the 12-week cap, PL 119-21
+// permanence via temporal).
+//
+// Judgment calls / scope:
+// * §45S(i) ("Termination": no credit for wages paid in taxable years
+//   beginning after December 31, 2025) is NOT modelled as a gating
+//   condition on the credit rule. `us.irc.temporal::PL119_21_S70304`
+//   (pinned, read directly) section (a)(5) "by striking subsection (i)",
+//   with its OWN effective-date clause (c): "The amendments made by this
+//   section shall apply to taxable years beginning after December 31,
+//   2025" — the IDENTICAL boundary the termination itself uses. The
+//   repeal therefore takes effect for EXACTLY the years the termination
+//   would otherwise have blocked: there is no taxable year, before or
+//   after enactment, for which the credit is actually unavailable under
+//   (i). This is a genuine finding, not an assumption — both dates are
+//   read verbatim from pinned sources (`IRC_S45S_I` for the base 2024-
+//   edition termination text, `PL119_21_S70304` for the repeal and its own
+//   effective date). Recorded in the coverage row for §45S(i) as
+//   NON_NORMATIVE (repealed, never actually binding), not silently omitted.
+// * PL 119-21 §70304 ALSO rewrites (a)(1) (adds an insurance-premium
+//   alternative), adds (a)(3), reworks (b)(1), replaces (c)(3)-(4) with a
+//   new aggregation rule and a state/local-mandated-leave carve-out, and
+//   amends (d) (the 1-year/6-month election and the annualized-
+//   compensation test) — NONE of these are modelled this pass (TECH-GAPS
+//   G391): only the permanence finding above (which needed no arithmetic
+//   change) was reached. This module therefore implements the BASE
+//   (pre-PL-119-21) (a)-(h) computation only.
+// * (c) (eligible employer's written-policy requirements, including the
+//   2-week/pro-rata part-time test and the (c)(2) anti-retaliation policy)
+//   and (d) (qualifying employee: 1-year tenure, compensation <=60% of the
+//   section 414(q)(1)(B)(i) HCE threshold) are case-asserted classification
+//   inputs — EXTERNAL_DEPENDENCY (the section 414(q) HCE threshold is not
+//   imported here).
+// * (e) (family and medical leave, cross-referencing the Family and Medical
+//   Leave Act of 1993 section 102(a)) is a case-asserted classification.
+// * (f) (Secretary's determination authority) is NON_NORMATIVE (procedural
+//   delegation, no independent taxpayer-facing rule).
+// * (g) ("wages" meaning given by section 3306(b), the FUTA wage
+//   definition) is EXTERNAL_DEPENDENCY — `us.irc.employment` (chapter 23,
+//   FUTA) is not imported into this package.
+// * (h) (election not to have the section apply) is modelled as a POWER,
+//   mirroring section 45E(e)(3)'s and section 51(j)'s own idiom (the (h)(2)
+//   cross-reference to section 51(j)(2)-(3) itself is NOT separately
+//   derived — TECH_GAP).
+
+use self::{
+    IRC_S45P_C,
+    IRC_S45S_A,
+    IRC_S45S_H,
+    Individual,
+    Person,
+    TaxableYear,
+    compensation_credit_reduction_45p,
+    compensation_credit_reduction_45p_present,
+};
+
+pub relation qualifying_employee_45s(employee: Individual, employer: Person, y: TaxableYear) kind empirical {
+    label en official "employee is a 'qualifying employee' under section 45S(d): 1 year or more of employment and prior-year compensation not exceeding 60 percent of the section 414(q)(1)(B)(i) amount — case-asserted, EXTERNAL_DEPENDENCY on section 414(q)";
+}
+pub relation eligible_employer_45s(employer: Person, y: TaxableYear) kind empirical {
+    label en official "employer has in place a written policy meeting the section 45S(c) requirements (minimum paid leave, the 50-percent-of-wages payment-rate floor, and the anti-retaliation terms) — case-asserted";
+}
+pub relation wages_paid_during_leave_45s(employer: Person, employee: Individual, y: TaxableYear, amount: Money) kind empirical {
+    label en official "wages (section 3306(b) meaning, section 45S(g)) paid to the qualifying employee during a period of family and medical leave (section 45S(e)) for the taxable year, ALREADY subject to the section 45S(b)(3) 12-week cap and the (b)(1)/(2) normal-hourly-wage-rate limitation — case-asserted, EXTERNAL_DEPENDENCY on section 3306(b)";
+}
+pub relation rate_of_payment_45s(employer: Person, employee: Individual, y: TaxableYear, rate: Decimal) kind empirical {
+    label en official "the rate of payment under the employer's paid-leave program, as a fraction of the employee's normal wages, within the meaning of section 45S(c)(1)(B) — case-asserted, no less than 0.50";
+}
+
+pub relation applicable_percentage_45s(employer: Person, employee: Individual, y: TaxableYear, pct: Decimal) kind institutional {
+    label en official "section 45S(a)(2): 12.5 percent increased by 0.25 percentage points for each percentage point the rate of payment exceeds 50 percent, capped at 25 percent";
+}
+@source(IRC_S45S_A, quote = "the term \"applicable percentage\" means 12.5 percent increased (but not above 25 percent) by 0.25 percentage points for each percentage point by which the rate of payment (as described under subsection (c)(1)(B)) exceeds 50 percent")
+rule ApplicablePercentage45sRule(employer: Person, employee: Individual, y: TaxableYear, rate: Decimal) strict {
+    when rate_of_payment_45s(employer, employee, y, rate);
+    then applicable_percentage_45s(employer, employee, y, min(0.25, 0.125 + 0.0025 * round((rate - 0.50) * 100.0, 2, "HALF_UP")));
+}
+
+pub relation paid_family_medical_leave_credit_per_employee(employer: Person, employee: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 45S(a)(1): the applicable percentage of wages paid to a qualifying employee during family and medical leave, per employee";
+}
+@source(IRC_S45S_A, quote = "For purposes of section 38, in the case of an eligible employer, the paid family and medical leave credit is an amount equal to the applicable percentage of the amount of wages paid to qualifying employees during any period in which such employees are on family and medical leave.")
+rule PaidFamilyMedicalLeaveCreditPerEmployeeRule(employer: Person, employee: Individual, y: TaxableYear, pct: Decimal, wages: Money) strict {
+    when eligible_employer_45s(employer, y);
+    when qualifying_employee_45s(employee, employer, y);
+    when applicable_percentage_45s(employer, employee, y, pct);
+    when wages_paid_during_leave_45s(employer, employee, y, wages);
+    then paid_family_medical_leave_credit_per_employee_before_45p(employer, employee, y, round(pct * wages, 2, "HALF_UP"));
+}
+pub relation paid_family_medical_leave_credit_per_employee_before_45p(employer: Person, employee: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the per-employee amount before the section 45P(c) reduction (final TECH_GAP pass, 26.09.2026)";
+}
+@source(IRC_S45P_C, quote = "The amount of credit otherwise allowable under this chapter with respect to compensation paid to any employee shall be reduced by the credit determined under this section with respect to such employee.")
+rule PaidFamilyMedicalLeaveCreditReducedBy45pRule(employer: Person, employee: Individual, y: TaxableYear, before: Money, reduction: Money) defeasible {
+    label en official "the per-employee section 45S amount less the section 45P credit for the same employee, not below zero (section 45P(c); JUDGMENT CALL: each credit is reduced by the full 45P credit of the employee, the text does not allocate it among credits)";
+    when paid_family_medical_leave_credit_per_employee_before_45p(employer, employee, y, before);
+    when compensation_credit_reduction_45p(employer, employee, y, reduction);
+    then paid_family_medical_leave_credit_per_employee(employer, employee, y, max(0 USD, before - reduction));
+}
+rule PaidFamilyMedicalLeaveCreditNotReducedBy45pRule(employer: Person, employee: Individual, y: TaxableYear, before: Money) defeasible {
+    label en official "no section 45P credit for the employee: the amount stands";
+    when paid_family_medical_leave_credit_per_employee_before_45p(employer, employee, y, before);
+    when not_known(compensation_credit_reduction_45p_present(employee, employer, y));
+    then paid_family_medical_leave_credit_per_employee(employer, employee, y, before);
+}
+
+pub relation paid_family_medical_leave_credit(employer: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the section 45S employer credit for paid family and medical leave determined under section 38 for the taxable year: the sum of the per-employee amounts";
+}
+@source(IRC_S45S_A, quote = "the paid family and medical leave credit is an amount equal to the applicable percentage of the amount of wages paid to qualifying employees during any period in which such employees are on family and medical leave")
+rule PaidFamilyMedicalLeaveCreditRule(employer: Person, y: TaxableYear) defeasible {
+    label en official "summed across all qualifying employees; not gated by section 45S(i)'s termination — see module header, the repeal by PL 119-21 section 70304(a)(5) takes effect for the identical taxable-year boundary the termination itself uses, so the termination never actually applies to any taxable year";
+    when eligible_employer_45s(employer, y);
+    then paid_family_medical_leave_credit(employer, y,
+        sum all amount: Money for employee: Individual where paid_family_medical_leave_credit_per_employee(employer, employee, y, amount));
+}
+
+// --- §45S(h): election not to have the section apply ---------------------------
+
+pub relation elects_out_of_section_45s(employer: Person, y: TaxableYear) kind empirical {
+    label en official "the employer's exercise of the section 45S(h)(1) election to have this section not apply for the taxable year";
+}
+pub relation section_45s_does_not_apply(employer: Person, y: TaxableYear) kind institutional {
+    label en official "section 45S(h)(1): this section does not apply to the employer for the taxable year (a valid election-out)";
+}
+@source(IRC_S45S_H, quote = "A taxpayer may elect to have this section not apply for any taxable year.")
+rule ElectOutOf45sRule(employer: Person, y: TaxableYear) strict {
+    when eligible_employer_45s(employer, y);
+    then power Section45sH1ElectOut {
+        holder employer;
+        over employer;
+        exercise elects_out_of_section_45s(employer, y);
+        valid_when eligible_employer_45s(employer, y);
+        effect create(section_45s_does_not_apply(employer, y));
+        window [@2018-01-01, infinity);
+    };
+}

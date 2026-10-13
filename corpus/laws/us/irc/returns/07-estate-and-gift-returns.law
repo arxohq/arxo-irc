@@ -1,0 +1,300 @@
+// STAGE 2 — §6018 (estate tax returns), §6019 (gift tax returns), §6075
+// (time for filing estate and gift tax returns).
+//
+// JUDGMENT CALLS AND GAPS:
+//  - §6018(a)(1)/(2) thresholds (basic exclusion amount / $60,000) are
+//    `duty` triggers; the basic exclusion amount itself is
+//    `us.irc.estate_gift::basic_exclusion_amount_for_year` — a typed
+//    institutional dependency contract (that package is concurrent, not
+//    imported).
+//  - §6018(a)(3)'s reduction for adjusted taxable gifts is a `classification`
+//    computing the effective threshold, not a separate duty.
+//  - §6018(b) (returns by beneficiaries) is a `power` of the Secretary
+//    (notice) coupled with a resulting `duty` of the beneficiary, since the
+//    beneficiary's obligation is CONDITIONED on the Secretary's notice, not
+//    self-executing on the executor's incompleteness alone.
+//  - §6019's three exceptions ((1) §2503(b)/(e) exclusions, (2) §2523
+//    marital deduction, (3) §2522 charitable deduction with the (A)/(B)
+//    sub-conditions) are `unless` defeaters on the general duty.
+//  - §6075(a) (9 months) and (b) (April 15, with the (2) income-tax-
+//    extension deemer and (3) coordination-with-estate-return cap) use
+//    exact calendar-period arithmetic per module 05's `statutory_due_date`
+//    convention.
+
+language "law.core" version "0.2";
+package us.irc.returns version "0.1.1";
+namespace "urn:us:irc:returns:clir";
+
+use self::{
+    IRC_S6018_A,
+    IRC_S6018_B,
+    IRC_S6019,
+    IRC_S6075_A,
+    IRC_S6075_B,
+    Individual,
+    Person,
+    Secretary,
+    TaxableYear,
+};
+
+// ============================================================================
+// §6018 — Estate tax returns
+// ============================================================================
+
+relation gross_estate_amount(decedent: Person, amount: Money) kind institutional {
+    label en unofficial "the gross estate of the decedent (pending: us.irc.estate_gift owns §2031 gross estate)";
+}
+relation is_citizen_or_resident_decedent(decedent: Person) kind empirical;
+relation is_nonresident_not_citizen_decedent(decedent: Person) kind empirical;
+relation gross_estate_situated_in_us(decedent: Person, amount: Money) kind institutional;
+relation basic_exclusion_amount_for_year(y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "the basic exclusion amount in effect under §2010(c) for the calendar year including the date of death (pending: us.irc.estate_gift owns §2010(c))";
+}
+relation adjusted_taxable_gifts_after_1976(decedent: Person, amount: Money) kind institutional {
+    label en unofficial "adjusted taxable gifts within the meaning of §2001(b) made after December 31, 1976 (pending: us.irc.estate_gift)";
+}
+relation section_2521_specific_exemption_after_1976_09_08(decedent: Person, amount: Money) kind institutional {
+    label en unofficial "the aggregate former-§2521 specific exemption allowed for gifts made after September 8, 1976 (pending: us.irc.estate_gift)";
+}
+relation s6018a_effective_threshold(decedent: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "the §6018(a)(1) threshold reduced (not below zero) by §6018(a)(3)'s adjusted-gift add-back";
+}
+@source(IRC_S6018_A, relation = formalizes, coverage = exact, quote = "shall each be reduced (but not below zero) by the sum of")
+rule S6018aEffectiveThresholdCitizenOrResident strict {
+    for decedent: Person;
+    for y: TaxableYear;
+    for base: Money;
+    for gifts: Money;
+    for exemption: Money;
+    when basic_exclusion_amount_for_year(y, base)
+        and adjusted_taxable_gifts_after_1976(decedent, gifts)
+        and section_2521_specific_exemption_after_1976_09_08(decedent, exemption);
+    then s6018a_effective_threshold(decedent, y, max(0.00 USD, round(base - gifts - exemption, 2, "HALF_UP")));
+}
+relation estate_tax_return_required(decedent: Person, y: TaxableYear) kind institutional {
+    label en unofficial "the executor is required to make an estate tax return under §6018(a)";
+}
+@source(IRC_S6018_A, relation = formalizes, coverage = exact, quote = "In all cases where the gross estate at the death of a citizen or resident exceeds the basic exclusion amount in effect under section 2010(c) for the calendar year which includes the date of death, the executor shall make a return with respect to the estate tax imposed by subtitle B.")
+rule S6018aCitizenOrResidentReturnRequired strict {
+    for decedent: Person;
+    for y: TaxableYear;
+    for estate: Money;
+    for threshold: Money;
+    when is_citizen_or_resident_decedent(decedent)
+        and gross_estate_amount(decedent, estate)
+        and s6018a_effective_threshold(decedent, y, threshold)
+        and estate > threshold;
+    then estate_tax_return_required(decedent, y);
+}
+@source(IRC_S6018_A, relation = formalizes, coverage = exact, quote = "In the case of the estate of every nonresident not a citizen of the United States if that part of the gross estate which is situated in the United States exceeds $60,000, the executor shall make a return with respect to the estate tax imposed by subtitle B.")
+rule S6018aNonresidentReturnRequired strict {
+    for decedent: Person;
+    for y: TaxableYear;
+    for situated: Money;
+    for gifts: Money;
+    for exemption: Money;
+    when is_nonresident_not_citizen_decedent(decedent)
+        and gross_estate_situated_in_us(decedent, situated)
+        and adjusted_taxable_gifts_after_1976(decedent, gifts)
+        and section_2521_specific_exemption_after_1976_09_08(decedent, exemption)
+        and situated > max(0.00 USD, round(60000.00 USD - gifts - exemption, 2, "HALF_UP"))
+        and us.irc.core::year_of(decedent, y);
+    then estate_tax_return_required(decedent, y);
+}
+
+relation executor_of(executor: Person, decedent: Person) kind institutional;
+relation estate_return_filed(executor: Person, decedent: Person, y: TaxableYear) kind empirical;
+@source(IRC_S6018_A, relation = formalizes, coverage = partial, quote = "the executor shall make a return with respect to the estate tax imposed by subtitle B.")
+rule S6018aExecutorDuty strict {
+    for executor: Person;
+    for decedent: Person;
+    for y: TaxableYear;
+    for d1: Date;
+    for d2: Date;
+    when estate_tax_return_required(decedent, y)
+        and executor_of(executor, decedent)
+        and decedent_date_of_death(decedent, d1)
+        and estate_tax_return_due_date(decedent, d2);
+    then duty MakeEstateTaxReturn {
+        bearer executor;
+        beneficiary Secretary;
+        goal achievement {
+            condition estate_return_filed(executor, decedent, y);
+            window [d1, d2];
+        }
+    };
+}
+
+relation decedent_date_of_death(decedent: Person, d: Date) kind empirical;
+relation gross_estate_part_incomplete(decedent: Person, description: Integer) kind empirical {
+    label en unofficial "the executor is unable to make a complete return as to a described part of the gross estate (§6018(b))";
+}
+relation holds_interest_in_incomplete_part(decedent: Person, description: Integer, holder: Person) kind empirical;
+relation secretary_notifies_beneficiary(decedent: Person, description: Integer, holder: Person) kind empirical;
+relation beneficiary_return_required(decedent: Person, description: Integer, holder: Person) kind institutional {
+    label en unofficial "the person with an interest in the incomplete part is required, upon notice, to make a return as to that part (§6018(b))";
+}
+@source(IRC_S6018_B, relation = formalizes, coverage = exact, quote = "Upon notice from the Secretary such person shall in like manner make a return as to such part of the gross estate.")
+rule S6018bSecretaryNoticePower strict {
+    for decedent: Person;
+    for description: Integer;
+    for holder: Person;
+    when secretary_notifies_beneficiary(decedent, description, holder);
+    then power S6018bRequireBeneficiaryReturn {
+        holder Secretary;
+        over holder;
+        exercise secretary_notifies_beneficiary(decedent, description, holder);
+        valid_when holds_interest_in_incomplete_part(decedent, description, holder);
+        effect create(beneficiary_return_required(decedent, description, holder));
+    };
+}
+relation beneficiary_part_return_filed(decedent: Person, description: Integer, holder: Person) kind empirical;
+@source(IRC_S6018_B, relation = formalizes, coverage = exact, quote = "such person shall in like manner make a return as to such part of the gross estate.")
+rule S6018bBeneficiaryDuty strict {
+    for decedent: Person;
+    for description: Integer;
+    for holder: Person;
+    when beneficiary_return_required(decedent, description, holder);
+    then duty MakeBeneficiaryPartReturn {
+        bearer holder;
+        beneficiary Secretary;
+        goal achievement {
+            condition beneficiary_part_return_filed(decedent, description, holder);
+            window [-infinity, infinity];
+        }
+    };
+}
+
+// ============================================================================
+// §6019 — Gift tax returns
+// ============================================================================
+
+relation makes_gift_transfer(donor: Individual, y: TaxableYear, transfer: Integer) kind empirical;
+relation transfer_excluded_2503(donor: Individual, transfer: Integer) kind empirical {
+    label en unofficial "the transfer is excluded from total gifts under §2503(b) or (e) (annual exclusion / qualified transfers) (§6019(1))";
+}
+relation transfer_2523_marital_deduction_interest(donor: Individual, transfer: Integer) kind empirical {
+    label en unofficial "the transfer is of an interest for which a §2523 marital deduction is allowed (§6019(2))";
+}
+relation transfer_entire_interest(donor: Individual, transfer: Integer) kind empirical {
+    label en unofficial "the transfer is of the donor's entire interest in the property (§6019(3)(A)(i))";
+}
+relation no_other_interest_transferred_for_inadequate_consideration(donor: Individual, transfer: Integer) kind empirical {
+    label en unofficial "no other interest in the property is or has been transferred for less than full consideration to a non-§2522(a)/(b) person or use (§6019(3)(A)(ii))";
+}
+relation transfer_2522_d_described(donor: Individual, transfer: Integer) kind empirical {
+    label en unofficial "the transfer is described in §2522(d) (§6019(3)(B))";
+}
+relation transfer_2522_charitable_deduction_qualifying(donor: Individual, transfer: Integer) kind institutional;
+@source(IRC_S6019, relation = formalizes, coverage = exact, quote = "such transfer is of the donor's entire interest in the property transferred, and")
+rule S6019CharitableDeductionQualifyingByEntireInterest strict {
+    for donor: Individual;
+    for transfer: Integer;
+    when transfer_entire_interest(donor, transfer) and no_other_interest_transferred_for_inadequate_consideration(donor, transfer);
+    then transfer_2522_charitable_deduction_qualifying(donor, transfer);
+}
+@source(IRC_S6019, relation = formalizes, coverage = exact, quote = "such transfer is described in section 2522(d),")
+rule S6019CharitableDeductionQualifyingBy2522d strict {
+    for donor: Individual;
+    for transfer: Integer;
+    when transfer_2522_d_described(donor, transfer);
+    then transfer_2522_charitable_deduction_qualifying(donor, transfer);
+}
+relation gift_tax_return_required_for_transfer(donor: Individual, y: TaxableYear, transfer: Integer) kind institutional;
+@source(IRC_S6019, relation = formalizes, coverage = exact, quote = "Any individual who in any calendar year makes any transfer by gift")
+rule S6019GiftTaxReturnRequiredForTransfer defeasible {
+    for donor: Individual;
+    for y: TaxableYear;
+    for transfer: Integer;
+    when makes_gift_transfer(donor, y, transfer);
+    then gift_tax_return_required_for_transfer(donor, y, transfer);
+    unless (transfer_excluded_2503(donor, transfer)
+        or transfer_2523_marital_deduction_interest(donor, transfer)
+        or transfer_2522_charitable_deduction_qualifying(donor, transfer))
+        and makes_gift_transfer(donor, y, transfer);
+}
+relation gift_tax_return_required(donor: Individual, y: TaxableYear) kind institutional {
+    label en unofficial "the donor must make a §6019 gift tax return for the calendar year (at least one non-excepted transfer exists)";
+}
+rule S6019GiftTaxReturnRequiredYear defeasible {
+    for donor: Individual;
+    for y: TaxableYear;
+    for transfer: Integer;
+    when gift_tax_return_required_for_transfer(donor, y, transfer);
+    then gift_tax_return_required(donor, y);
+}
+relation gift_tax_return_filed(donor: Individual, y: TaxableYear) kind empirical;
+@source(IRC_S6019, relation = formalizes, coverage = partial, quote = "shall make a return for such year with respect to the gift tax imposed by subtitle B.")
+rule S6019GiftTaxReturnDuty strict {
+    for donor: Individual;
+    for y: TaxableYear;
+    for d1: Date;
+    for d2: Date;
+    when gift_tax_return_required(donor, y)
+        and us.irc.core::ends(y, d1)
+        and gift_tax_return_due_date(donor, y, d2);
+    then duty FileGiftTaxReturn {
+        bearer donor;
+        beneficiary Secretary;
+        goal achievement {
+            condition gift_tax_return_filed(donor, y);
+            window [d1, d2];
+        }
+    };
+}
+
+// ============================================================================
+// §6075 — Time for filing estate and gift tax returns
+// ============================================================================
+
+pub relation estate_tax_return_due_date(decedent: Person, d: Date) kind institutional {
+    label en unofficial "the §6075(a) statutory due date for the §6018(a) estate tax return — 9 months after death";
+}
+@source(IRC_S6075_A, relation = formalizes, coverage = exact, quote = "Returns made under section 6018(a) (relating to estate taxes) shall be filed within 9 months after the date of the decedent's death.")
+rule S6075aEstateTaxReturnDueDate strict {
+    for decedent: Person;
+    for death: Date;
+    when decedent_date_of_death(decedent, death);
+    then estate_tax_return_due_date(decedent, add_calendar_period(death, 9 calendar_month));
+}
+
+relation income_tax_extension_calendar_year(donor: Individual, y: TaxableYear, until: Date) kind institutional {
+    label en unofficial "an extension of time granted the taxpayer for filing the income tax return for a taxable year that is a calendar year (pending: module 05 owns §6081 extensions)";
+}
+pub relation gift_tax_return_due_date(donor: Individual, y: TaxableYear, d: Date) kind institutional {
+    label en unofficial "the §6075(b)(1) statutory due date for the §6019 gift tax return — April 15 following the close of the calendar year (before the (2) extension-deemer and (3) estate-return cap, modeled as separate relations below)";
+}
+@source(IRC_S6075_B, relation = formalizes, coverage = exact, quote = "Returns made under section 6019 (relating to gift taxes) shall be filed on or before the 15th day of April following the close of the calendar year.")
+rule S6075bGiftTaxReturnGeneralDueDate defeasible {
+    for donor: Individual;
+    for y: TaxableYear;
+    for closeDate: Date;
+    when gift_tax_return_required(donor, y) and us.irc.core::ends(y, closeDate);
+    then gift_tax_return_due_date(donor, y,
+        add_calendar_period(add_calendar_period(add_calendar_period(closeDate, 1 calendar_day), 3 calendar_month), 14 calendar_day));
+}
+pub relation gift_tax_return_extended_due_date(donor: Individual, y: TaxableYear, until: Date) kind institutional {
+    label en unofficial "the §6075(b)(2) deemed extension of the gift tax return due date, equal to any income-tax extension for the same calendar year";
+}
+@source(IRC_S6075_B, relation = formalizes, coverage = exact, quote = "Any extension of time granted the taxpayer for filing the return of income taxes imposed by subtitle A for any taxable year which is a calendar year shall be deemed to be also an extension of time granted the taxpayer for filing the return under section 6019 for such calendar year.")
+rule S6075bGiftTaxReturnDueDateWithIncomeTaxExtension strict {
+    for donor: Individual;
+    for y: TaxableYear;
+    for until: Date;
+    when income_tax_extension_calendar_year(donor, y, until);
+    then gift_tax_return_extended_due_date(donor, y, until);
+}
+pub relation gift_tax_return_due_date_capped_by_estate_return(donor: Individual, y: TaxableYear, d: Date) kind institutional {
+    label en unofficial "the §6075(b)(3) cap: for the calendar year of the donor's death, the gift tax return due date (including extensions) is no later than the §6018 estate tax return due date";
+}
+@source(IRC_S6075_B, relation = formalizes, coverage = exact, quote = "the time for filing the return made under section 6019 for the calendar year which includes the date of death of the donor shall not be later than the time (including extensions) for filing the return made under section 6018 (relating to estate tax returns) with respect to such donor.")
+rule S6075bGiftTaxReturnCoordinationWithEstateReturn strict {
+    for donor: Individual;
+    for y: TaxableYear;
+    for death: Date;
+    for estate_due: Date;
+    when decedent_date_of_death(donor, death)
+        and us.irc.core::year_of(donor, y)
+        and estate_tax_return_due_date(donor, estate_due);
+    then gift_tax_return_due_date_capped_by_estate_return(donor, y, estate_due);
+}

@@ -1,0 +1,626 @@
+// Section 408 — individual retirement accounts. Stage 1 (IRC-09),
+// DECISION-0379. Priority: (a) requirements, (d) distributions including
+// (d)(3) rollover (60 days / once per 12 months). Also modelled briefly:
+// (k) SEP, (o) nondeductible contributions. (p) SIMPLE and (b)/(c)/(e)-(q)
+// otherwise are NOT modelled in this stage (TECH_GAP / stage 2).
+
+
+use self::{
+    Distribution,
+    IRC_S402_H,
+    IRC_S408_A,
+    IRC_S408_D,
+    IRC_S408_E,
+    IRC_S408_K,
+    IRC_S408_M,
+    IRC_S408_O,
+    IRC_S408_P,
+    IRC_S408_Q,
+    Individual,
+    Person,
+    Plan,
+    TaxableYear,
+    section219_deduction_amount,
+};
+
+pub entity IndividualRetirementAccount : Plan {
+    label en official "individual retirement account (section 408(a))";
+}
+
+// =====================================================================
+// (a) Individual retirement account — requirements
+// =====================================================================
+
+pub relation ira_contribution_in_cash(ira: IndividualRetirementAccount, amount: Money) kind empirical {
+    label en unofficial "a contribution to the account, case-asserted with whether it was in cash";
+}
+
+pub relation ira_contribution_is_rollover(ira: IndividualRetirementAccount, amount: Money) kind empirical {
+    label en unofficial "the contribution is a rollover contribution described in section 408(d)(3) or in section 402(c)/403(a)(4)/403(b)(8)/457(e)(16), case-asserted";
+}
+
+pub relation ira_aggregate_nonrollover_contributions(ira: IndividualRetirementAccount, individual: Individual, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "aggregate non-rollover contributions for the taxable year, case-asserted";
+}
+
+pub relation meets_408a1_contribution_requirement(ira: IndividualRetirementAccount, individual: Individual, y: TaxableYear) kind institutional {
+    label en official "section 408(a)(1): contributions accepted only in cash (except rollovers) and not in excess of the section 219(b)(1)(A) amount";
+}
+
+@source(IRC_S408_A, relation = formalizes, coverage = exact, quote = "Except in the case of a rollover contribution described in subsection (d)(3) or in section 402(c), 403(a)(4), 403(b)(8), or 457(e)(16), no contribution will be accepted unless it is in cash, and contributions will not be accepted for the taxable year on behalf of any individual in excess of the amount in effect for such taxable year under section 219(b)(1)(A)")
+rule Meets408a1ContributionRequirement(ira: IndividualRetirementAccount, individual: Individual, y: TaxableYear, total: Money, limit: Money) strict {
+    label en official "requirement met when the aggregate non-rollover contribution does not exceed the section 219(b)(1)(A) amount (cross-package dependency: section 219 is owned by `deductions`, pending — reused here via `section219_deduction_amount`, see .deps.json)";
+    when ira_aggregate_nonrollover_contributions(ira, individual, y, total)
+        and section219_deduction_amount(individual, y, limit)
+        and total <= limit;
+    then meets_408a1_contribution_requirement(ira, individual, y);
+}
+
+pub relation ira_interest_forfeitable(ira: IndividualRetirementAccount, individual: Individual) kind empirical {
+    label en unofficial "the governing instrument allows the individual's interest in the account balance to be forfeited (violates section 408(a)(4)), case-asserted";
+}
+
+pub relation ira_established_for(ira: IndividualRetirementAccount, individual: Individual) kind empirical {
+    label en unofficial "the account is established for the benefit of this individual, case-asserted";
+}
+
+pub relation meets_408a4_nonforfeitability(ira: IndividualRetirementAccount, individual: Individual) kind institutional {
+    label en official "section 408(a)(4): the individual's interest in the account balance is nonforfeitable";
+}
+
+@source(IRC_S408_A, relation = formalizes, coverage = exact, quote = "The interest of an individual in the balance in his account is nonforfeitable.")
+rule Meets408a4Nonforfeitability(ira: IndividualRetirementAccount, individual: Individual) strict {
+    label en official "nonforfeitability holds unless the governing instrument allows forfeiture";
+    when ira_established_for(ira, individual) and not ira_interest_forfeitable(ira, individual);
+    then meets_408a4_nonforfeitability(ira, individual);
+}
+
+// =====================================================================
+// (d) Tax treatment of distributions
+// =====================================================================
+
+pub relation ira_distribution(d: Distribution, ira: IndividualRetirementAccount, payee: Person, amount: Money, on: Date) kind empirical {
+    label en unofficial "a payment or distribution out of an individual retirement plan, case-asserted";
+}
+
+pub relation ira_distribution_includible_section72(d: Distribution, payee: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "the section 72 amount for an IRA distribution (input from the pending gross-income Part II contract, same as section 402(a) above)";
+}
+
+pub relation section408d1_includible_in_gross_income(d: Distribution, payee: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 408(d)(1): any amount paid or distributed out of an individual retirement plan is included in gross income under section 72, except as excluded by a valid rollover";
+}
+
+@source(IRC_S408_D, relation = formalizes, coverage = exact, quote = "Except as otherwise provided in this subsection, any amount paid or distributed out of an individual retirement plan shall be included in gross income by the payee or distributee, as the case may be, in the manner provided under section 72.")
+rule Section408d1Inclusion(d: Distribution, ira: IndividualRetirementAccount, payee: Person, y: TaxableYear, on: Date, amount: Money) defeasible {
+    label en official "IRA distributions are included in gross income under section 72, unless a valid rollover excludes them";
+    when ira_distribution(d, ira, payee, amount, on)
+        and us.irc.core::year_of(payee, y)
+        and ira_distribution_includible_section72(d, payee, y, amount)
+        and not_known(ira_rollover_excluded_from_income(d));
+    then section408d1_includible_in_gross_income(d, payee, y, amount);
+}
+
+pub relation ira_rollover_excluded_from_income(d: Distribution) kind institutional {
+    label en unofficial "this IRA distribution (or the transferred portion) is excluded from gross income under section 408(d)(3) by reason of a valid rollover";
+}
+
+// -- (d)(3) Rollover contribution: 60-day rule and once-per-12-months ----
+
+pub relation ira_rollover_contribution_made(individual: Individual, d: Distribution, target: IndividualRetirementAccount, on: Date, amount: Money) kind empirical {
+    label en unofficial "the entire amount received is paid into an individual retirement account or annuity for the benefit of the individual, case-asserted";
+}
+
+pub relation ira_rollover_timely(individual: Individual, d: Distribution, distributed_on: Date, transferred_on: Date) kind institutional {
+    label en official "section 408(d)(3)(A)(i): the entire amount received is paid into an IRA not later than the 60th day after the day the individual receives the payment or distribution";
+}
+
+@source(IRC_S408_D, relation = formalizes, coverage = exact, quote = "the entire amount received (including money and any other property) is paid into an individual retirement account or individual retirement annuity (other than an endowment contract) for the benefit of such individual not later than the 60th day after the day on which he receives the payment or distribution")
+rule IraRolloverTimely(individual: Individual, d: Distribution, target: IndividualRetirementAccount, distributed_on: Date, transferred_on: Date, amount: Money) strict {
+    label en official "timely at exactly day 60; day 61 is untimely — exact boundary";
+    when ira_rollover_contribution_made(individual, d, target, transferred_on, amount)
+        and ira_distribution(d, _, individual, _, distributed_on)
+        and transferred_on <= add_calendar_period(distributed_on, 60 calendar_day);
+    then ira_rollover_timely(individual, d, distributed_on, transferred_on);
+}
+
+pub relation ira_other_rollover_received_within_1_year(individual: Individual, d: Distribution, received_on: Date) kind empirical {
+    label en unofficial "the individual received another amount described in section 408(d)(3)(A)(i) from an IRA within the 1-year period ending on the day of receipt of THIS distribution, and it was excluded from gross income by section 408(d)(3), case-asserted";
+}
+
+pub relation has_other_rollover_received_within_1_year(individual: Individual, d: Distribution) kind institutional {
+    label en unofficial "boolean helper: some other rollover was received within the 1-year period (avoids a free variable inside a negative literal, LDC-E4101)";
+}
+
+@source(IRC_S408_D, relation = formalizes, coverage = contextual, quote = "if at any time during the 1-year period ending on the day of such receipt such individual received any other amount described in that subparagraph")
+rule HasOtherRolloverReceivedWithin1Year(individual: Individual, d: Distribution, received_on: Date) strict {
+    label en unofficial "derives the boolean helper from any ira_other_rollover_received_within_1_year fact";
+    when ira_other_rollover_received_within_1_year(individual, d, received_on);
+    then has_other_rollover_received_within_1_year(individual, d);
+}
+
+pub relation ira_rollover_once_per_12_months_satisfied(individual: Individual, d: Distribution) kind institutional {
+    label en official "section 408(d)(3)(B): this distribution is not disqualified by the once-per-12-months limitation";
+}
+
+@source(IRC_S408_D, relation = formalizes, coverage = exact, quote = "if at any time during the 1-year period ending on the day of such receipt such individual received any other amount described in that subparagraph from an individual retirement account or an individual retirement annuity which was not includible in his gross income because of the application of this paragraph")
+rule IraRolloverOncePer12MonthsSatisfied(individual: Individual, d: Distribution, target: IndividualRetirementAccount, transferred_on: Date, amount: Money) strict {
+    label en official "satisfied when no other section 408(d)(3)(A)(i) rollover was received in the preceding 12 months";
+    when ira_rollover_contribution_made(individual, d, target, transferred_on, amount)
+        and not_known(has_other_rollover_received_within_1_year(individual, d));
+    then ira_rollover_once_per_12_months_satisfied(individual, d);
+}
+
+pub relation ira_rollover_valid(individual: Individual, d: Distribution, transferred_on: Date) kind institutional {
+    label en official "the single valid_when atom combining timeliness and the once-per-12-months condition (a `power`'s valid_when takes exactly one atom, core-surfaces.md/rights-positions.md)";
+}
+
+@source(IRC_S408_D, relation = formalizes, coverage = partial, quote = "An amount is described in this paragraph as a rollover contribution if it meets the requirements of subparagraphs (A) and (B).")
+rule IraRolloverValid(individual: Individual, d: Distribution, distributed_on: Date, transferred_on: Date) strict {
+    label en official "valid when both the 60-day rule and the once-per-12-months rule are satisfied";
+    when ira_rollover_timely(individual, d, distributed_on, transferred_on)
+        and ira_rollover_once_per_12_months_satisfied(individual, d);
+    then ira_rollover_valid(individual, d, transferred_on);
+}
+
+@source(IRC_S408_D, relation = formalizes, coverage = exact, quote = "An amount is described in this paragraph as a rollover contribution if it meets the requirements of subparagraphs (A) and (B).")
+rule IraRolloverElectionPower(individual: Individual, d: Distribution, ira: IndividualRetirementAccount, target: IndividualRetirementAccount, on: Date, amount: Money) strict {
+    label en official "section 408(d)(3): a timely rollover, not more than once every 12 months, excludes the transferred amount from gross income";
+    when ira_distribution(d, ira, individual, _, _) and ira_rollover_contribution_made(individual, d, target, on, amount);
+    then power IraRolloverElection {
+        holder individual;
+        over d;
+        exercise ira_rollover_contribution_made(individual, d, target, on, amount);
+        valid_when ira_rollover_valid(individual, d, on);
+        effect ira_rollover_excluded_from_income(d);
+    };
+}
+// The denial-of-rollover-treatment for inherited IRAs (C), partial
+// rollovers (D), the section 402(c)(7) frozen-deposit incorporation (F),
+// and SIMPLE-account rollovers (G) are NOT modelled in this stage
+// (TECH_GAP / stage 2).
+
+// =====================================================================
+// (k) Simplified employee pension — brief
+// =====================================================================
+pub relation sep_employer_contribution(employer: Person, employee: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "employer contributions on behalf of an employee to an individual retirement plan pursuant to a simplified employee pension (section 408(k)), case-asserted";
+}
+pub relation sep_treated_as_employer_contribution(employer: Person, employee: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 402(h)(1): SEP contributions are not treated as distributed, made available, or contributed by the employee";
+}
+@source(IRC_S402_H, relation = formalizes, coverage = exact, quote = "shall not be treated as distributed or made available to the employee or as contributions made by the employee")
+rule SepTreatedAsEmployerContribution(employer: Person, employee: Person, y: TaxableYear, amount: Money) strict {
+    label en official "SEP contributions stay employer contributions for gross-income purposes";
+    when sep_employer_contribution(employer, employee, y, amount);
+    then sep_treated_as_employer_contribution(employer, employee, y, amount);
+}
+
+// =====================================================================
+// (o) Nondeductible contributions — brief
+// =====================================================================
+pub relation ira_nondeductible_contribution_designated(individual: Individual, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the individual designates a contribution as nondeductible under section 408(o), case-asserted";
+}
+pub relation ira_designated_nondeductible_contribution(individual: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 408(o)(1): a designated contribution is treated as a nondeductible contribution and is not deductible under section 219";
+}
+@source(IRC_S408_O, relation = formalizes, coverage = exact, quote = "Subject to the provisions of this subsection, designated nondeductible contributions may be made on behalf of an individual to an individual retirement plan.")
+rule IraDesignatedNondeductibleContribution(individual: Individual, y: TaxableYear, amount: Money) strict {
+    label en official "brief stub: a designated contribution is a nondeductible contribution (the section 408(o)(4) basis-recovery/reporting rules are stage 2)";
+    when ira_nondeductible_contribution_designated(individual, y, amount);
+    then ira_designated_nondeductible_contribution(individual, y, amount);
+}
+
+// =====================================================================
+// STAGE 2b (25.09.2026): (d)(3)(C)/(I) rollover refinements, (d)(4)/(5)
+// contribution-return carve-outs, (d)(8) qualified charitable
+// distributions.
+// =====================================================================
+
+pub relation ira_inherited(ira: IndividualRetirementAccount, beneficiary: Individual, decedent: Individual) kind empirical {
+    label en unofficial "this account was acquired by the beneficiary by reason of the decedent's death, and the beneficiary was not the decedent's surviving spouse, case-asserted (section 408(d)(3)(C)(ii))";
+}
+
+pub relation ira_rollover_denied_inherited(ira: IndividualRetirementAccount, beneficiary: Individual) kind institutional {
+    label en official "section 408(d)(3)(C)(i): rollover treatment is denied for amounts received from an inherited IRA (other than by the decedent's surviving spouse)";
+}
+
+@source(IRC_S408_D, relation = formalizes, coverage = exact, quote = "this paragraph shall not apply to any amount received by an individual from such an account or annuity (and no amount transferred from such account or annuity to another individual retirement account or annuity shall be excluded from gross income by reason of such transfer)")
+rule IraRolloverDeniedInherited(ira: IndividualRetirementAccount, beneficiary: Individual, decedent: Individual) strict {
+    label en official "an inherited IRA (other than a surviving spouse's) cannot be the source of a valid rollover";
+    when ira_inherited(ira, beneficiary, decedent);
+    then ira_rollover_denied_inherited(ira, beneficiary);
+}
+
+pub relation secretary_waives_60_day_requirement(individual: Individual, d: Distribution) kind empirical {
+    label en unofficial "the Secretary waives the 60-day rollover requirement because failure to waive it would be against equity or good conscience, case-asserted (section 408(d)(3)(I))";
+}
+
+pub relation ira_rollover_timely_or_waived(individual: Individual, d: Distribution, distributed_on: Date, transferred_on: Date) kind institutional {
+    label en official "section 408(d)(3)(I): the 60-day timeliness requirement is satisfied either by meeting the deadline or by the Secretary's equity-and-good-conscience waiver";
+}
+
+@source(IRC_S408_D, relation = formalizes, coverage = exact, quote = "The Secretary may waive the 60-day requirement under subparagraphs (A) and (D) where the failure to waive such requirement would be against equity or good conscience, including casualty, disaster, or other events beyond the reasonable control of the individual subject to such requirement.")
+rule IraRolloverTimelyOrWaived(individual: Individual, d: Distribution, target: IndividualRetirementAccount, distributed_on: Date, transferred_on: Date) defeasible {
+    label en official "a Secretary waiver substitutes for the 60-day deadline";
+    when secretary_waives_60_day_requirement(individual, d)
+        and ira_distribution(d, _, individual, _, distributed_on)
+        and ira_rollover_contribution_made(individual, d, target, transferred_on, _);
+    then ira_rollover_timely_or_waived(individual, d, distributed_on, transferred_on);
+}
+// (d)(3)(D) partial rollovers, (F) frozen-deposit incorporation (already
+// modelled directly for the rollover's own timeliness pattern in
+// `04-402-distributions.law`'s `frozen_deposit_period`, not re-imported
+// here), (G) SIMPLE-account rollovers, and (H) the separate-section-72
+// computation for a partial rollover to a Roth-type plan are NOT modelled
+// (TECH_GAP, stage 2b).
+
+pub relation ira_contribution_returned_before_due_date(individual: Individual, ira: IndividualRetirementAccount, contributed_in: TaxableYear, distributed_on: Date, filing_deadline: Date, amount: Money, net_income: Money) kind empirical {
+    label en unofficial "a contribution paid during `contributed_in` was distributed back on or before the filing deadline (including extensions) for that year's return, accompanied by allocable net income, case-asserted";
+}
+
+pub relation section219_deduction_claimed(individual: Individual, contributed_in: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "whether a section 219 deduction was claimed with respect to this contribution, case-asserted (the (d)(4)(B) condition — no deduction allowed)";
+}
+
+pub relation ira_returned_contribution_excluded_from_408d1(individual: Individual, ira: IndividualRetirementAccount, contributed_in: TaxableYear, distributed_on: Date, amount: Money) kind institutional {
+    label en official "section 408(d)(4): a timely-returned, non-deducted contribution (with its allocable net income) is not includible under (d)(1)";
+}
+
+@source(IRC_S408_D, relation = formalizes, coverage = exact, quote = "Paragraph (1) does not apply to the distribution of any contribution paid during a taxable year to an individual retirement account or for an individual retirement annuity if")
+rule IraContributionReturnedBeforeDueDate(individual: Individual, ira: IndividualRetirementAccount, contributed_in: TaxableYear, distributed_on: Date, filing_deadline: Date, amount: Money, net_income: Money) strict {
+    label en official "the (d)(4) carve-out applies when returned by the filing deadline, not deducted, and accompanied by net income";
+    when ira_contribution_returned_before_due_date(individual, ira, contributed_in, distributed_on, filing_deadline, amount, net_income)
+        and distributed_on <= filing_deadline
+        and not_known(section219_deduction_claimed(individual, contributed_in, amount));
+    then ira_returned_contribution_excluded_from_408d1(individual, ira, contributed_in, distributed_on, amount);
+}
+
+pub relation ira_aggregate_nonrollover_contributions_within_219_limit(individual: Individual, contributed_in: TaxableYear, total: Money, limit: Money) kind empirical {
+    label en unofficial "the individual's aggregate non-rollover IRA contributions for the year do not exceed the section 219(b)(1)(A) dollar amount, case-asserted (the (d)(5)(A) gating condition)";
+}
+
+pub relation ira_excess_over_219_deduction(individual: Individual, ira: IndividualRetirementAccount, contributed_in: TaxableYear, amount: Money, deductible: Money) kind empirical {
+    label en unofficial "the contribution amount and the amount actually allowable as a section 219 deduction for it, case-asserted";
+}
+
+pub relation ira_excess_distributed_after_due_date(individual: Individual, ira: IndividualRetirementAccount, contributed_in: TaxableYear, distributed_on: Date, filing_deadline: Date) kind empirical {
+    label en unofficial "the excess contribution was distributed on this date, after the section 408(d)(4) filing-deadline date for the contribution year, case-asserted";
+}
+
+pub relation ira_excess_contribution_after_due_date_excluded(individual: Individual, ira: IndividualRetirementAccount, contributed_in: TaxableYear, distributed_on: Date, amount: Money) kind institutional {
+    label en official "section 408(d)(5)(A): a post-due-date distribution of the non-deducted excess (over the section 219 deductible amount) is excluded from (d)(1) inclusion";
+}
+
+@source(IRC_S408_D, relation = formalizes, coverage = partial, quote = "paragraph (1) shall not apply to the distribution of any such contribution to the extent that such contribution exceeds the amount allowable as a deduction under section 219 for the taxable year for which the contribution was paid")
+rule IraExcessContributionAfterDueDateExcluded(individual: Individual, ira: IndividualRetirementAccount, contributed_in: TaxableYear, distributed_on: Date, filing_deadline: Date, amount: Money, deductible: Money, total: Money, limit219: Money) strict {
+    label en official "excluded to the extent the contribution exceeds the allowable section 219 deduction, distributed after the (d)(4) due date, and not otherwise deducted";
+    when ira_aggregate_nonrollover_contributions_within_219_limit(individual, contributed_in, total, limit219)
+        and total <= limit219
+        and ira_excess_over_219_deduction(individual, ira, contributed_in, amount, deductible)
+        and amount > deductible
+        and ira_excess_distributed_after_due_date(individual, ira, contributed_in, distributed_on, filing_deadline)
+        and distributed_on > filing_deadline
+        and not_known(section219_deduction_claimed(individual, contributed_in, amount));
+    then ira_excess_contribution_after_due_date_excluded(individual, ira, contributed_in, distributed_on, deductible);
+}
+// (5)(B) the erroneous-information dollar-limit increase is NOT modelled
+// (TECH_GAP, stage 2b — an EVALUATIVE "reasonably relies" channel plus an
+// arithmetic increase, DECISION-0194).
+
+pub relation qcd_made(ira: IndividualRetirementAccount, individual: Individual, y: TaxableYear, charity: Person, amount: Money, on: Date) kind empirical {
+    label en unofficial "a distribution made directly by the IRA trustee to a section 170(b)(1)(A) organization (not a 509(a)(3) organization or 4966(d)(2) fund), on or after the individual attains age 70½, case-asserted (section 408(d)(8)(B))";
+}
+
+pub relation individual_age_70_and_half_or_older(individual: Individual, on: Date) kind empirical {
+    label en unofficial "the individual has attained age 70½ as of this date, case-asserted (no half-year-of-age standard term exists; the case supplies the boundary directly)";
+}
+
+pub relation qcd_aggregate_for_year(ira: IndividualRetirementAccount, individual: Individual, y: TaxableYear, total: Money) kind empirical {
+    label en unofficial "the aggregate amount of qualified charitable distributions with respect to this taxpayer for the taxable year, case-asserted";
+}
+
+pub relation qcd_excluded_from_gross_income(individual: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 408(d)(8)(A): so much of the aggregate QCD amount as does not exceed the statutory dollar cap is excluded from gross income (the (a)(1) reduction for post-age-70½ section 219 deductions taken is NOT modelled — TECH_GAP)";
+}
+
+@source(IRC_S408_D, relation = formalizes, coverage = partial, quote = "So much of the aggregate amount of qualified charitable distributions with respect to a taxpayer made during any taxable year which does not exceed $100,000 shall not be includible in gross income of such taxpayer for such taxable year.")
+rule QcdExcludedFromGrossIncome(individual: Individual, y: TaxableYear, total: Money) strict {
+    label en official "excluded amount = min(aggregate QCD, $100,000 statutory base); the section 1(f)(3)-indexed amount for years after 2023 is NOT pinned in this package (SOURCE_GAP — see .lawparam.json note)";
+    when qcd_aggregate_for_year(_, individual, y, total);
+    then qcd_excluded_from_gross_income(individual, y, min(total, QCD_STATUTORY_BASE));
+}
+
+@source(IRC_S408_D, relation = formalizes, coverage = exact, quote = "which is made on or after the date that the individual for whose benefit the plan is maintained has attained age 70½")
+rule QcdMadeRequiresAge70Half(ira: IndividualRetirementAccount, individual: Individual, y: TaxableYear, charity: Person, amount: Money, on: Date) strict {
+    label en official "a distribution before age 70½ is not a qualified charitable distribution";
+    when qcd_made(ira, individual, y, charity, amount, on) and individual_age_70_and_half_or_older(individual, on);
+    then qcd_aggregate_for_year(ira, individual, y, amount);
+}
+// QCD_STATUTORY_BASE is an A3 parameter (section-408d8-qcd-limit.
+// lawparam.json): the $100,000 statutory base only (section 408(d)(8)(A));
+// the post-2023 section 1(f)(3) indexed amount is NOT pinned by
+// `us.irc.inflation_adjustments` (checked: neither Rev. Proc. 2024-40 nor
+// 2025-32 covers a retirement-plan/QCD dollar amount) — SOURCE_GAP for
+// every year after 2023. (8)(C)-(G) (deductibility coordination, the
+// split-interest-entity one-time election, the inflation-adjustment
+// mechanics themselves) are NOT modelled (TECH_GAP, stage 2b). (d)(6)
+// transfer incident to divorce, (d)(7) SEP/SIMPLE special rules, (d)(9)
+// HSA funding distributions are NOT modelled (TECH_GAP, stage 2b).
+
+// =====================================================================
+// STAGE 2b: (e) Tax treatment of accounts and annuities — prohibited
+// transactions, borrowing, and pledging.
+// =====================================================================
+
+pub relation ira_engages_in_prohibited_transaction(ira: IndividualRetirementAccount, individual: Individual, y: TaxableYear) kind empirical {
+    label en unofficial "the individual (or beneficiary) engaged in a transaction prohibited by section 4975 with respect to this account during this taxable year, case-asserted (section 4975 itself is owned elsewhere; only the section 408(e)(2) EFFECT is modelled here)";
+}
+
+pub relation ira_ceases_to_be_ira(ira: IndividualRetirementAccount, y: TaxableYear) kind institutional {
+    label en official "section 408(e)(2)(A): the account ceases to be an individual retirement account as of the first day of the taxable year in which the prohibited transaction occurred";
+}
+
+@source(IRC_S408_E, relation = formalizes, coverage = exact, quote = "such account ceases to be an individual retirement account as of the first day of such taxable year")
+rule IraCeasesToBeIra(ira: IndividualRetirementAccount, individual: Individual, y: TaxableYear) strict {
+    label en official "a prohibited transaction disqualifies the account from the first day of the year";
+    when ira_engages_in_prohibited_transaction(ira, individual, y);
+    then ira_ceases_to_be_ira(ira, y);
+}
+
+pub relation ira_fair_market_value_on_first_day(ira: IndividualRetirementAccount, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the fair market value of all assets in the account on the first day of the taxable year, case-asserted";
+}
+
+pub relation ira_deemed_distributed_all_assets(ira: IndividualRetirementAccount, individual: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 408(e)(2)(B): a disqualified account is treated as having distributed all its assets at fair market value on the first day of the year";
+}
+
+@source(IRC_S408_E, relation = formalizes, coverage = exact, quote = "paragraph (1) of subsection (d) applies as if there were a distribution on such first day in an amount equal to the fair market value (on such first day) of all assets in the account (on such first day)")
+rule IraDeemedDistributedAllAssets(ira: IndividualRetirementAccount, individual: Individual, y: TaxableYear, amount: Money) strict {
+    label en official "the deemed distribution equals the account's first-day fair market value";
+    when ira_ceases_to_be_ira(ira, y)
+        and ira_fair_market_value_on_first_day(ira, y, amount)
+        and ira_engages_in_prohibited_transaction(ira, individual, y);
+    then ira_deemed_distributed_all_assets(ira, individual, y, amount);
+}
+
+pub relation ira_annuity_owner_borrows(ira: IndividualRetirementAccount, owner: Individual, y: TaxableYear) kind empirical {
+    label en unofficial "the owner of an individual retirement annuity borrows money under or by use of the contract during this taxable year, case-asserted (section 408(e)(3))";
+}
+
+pub relation ira_annuity_fair_market_value_on_first_day(ira: IndividualRetirementAccount, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the fair market value of the annuity contract as of the first day of the taxable year, case-asserted";
+}
+
+pub relation ira_annuity_borrowing_included_in_gross_income(owner: Individual, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 408(e)(3): borrowing under an IRA annuity disqualifies the contract and includes its first-day fair market value in the owner's gross income for the year";
+}
+
+@source(IRC_S408_E, relation = formalizes, coverage = exact, quote = "Such owner shall include in gross income for such year an amount equal to the fair market value of such contract as of such first day.")
+rule IraAnnuityBorrowingIncludedInGrossIncome(ira: IndividualRetirementAccount, owner: Individual, y: TaxableYear, amount: Money) strict {
+    label en official "the borrowing-disqualified annuity's first-day value is included in gross income";
+    when ira_annuity_owner_borrows(ira, owner, y) and ira_annuity_fair_market_value_on_first_day(ira, y, amount);
+    then ira_annuity_borrowing_included_in_gross_income(owner, y, amount);
+}
+
+pub relation ira_used_as_loan_security(ira: IndividualRetirementAccount, individual: Individual, y: TaxableYear, portion: Money) kind empirical {
+    label en unofficial "the individual uses the account (or a portion of it) as security for a loan during this taxable year, case-asserted (section 408(e)(4))";
+}
+
+pub relation ira_pledged_portion_treated_as_distributed(ira: IndividualRetirementAccount, individual: Individual, y: TaxableYear, portion: Money) kind institutional {
+    label en official "section 408(e)(4): the pledged portion of the account is treated as distributed to the individual";
+}
+
+@source(IRC_S408_E, relation = formalizes, coverage = exact, quote = "the portion so used is treated as distributed to that individual")
+rule IraPledgedPortionTreatedAsDistributed(ira: IndividualRetirementAccount, individual: Individual, y: TaxableYear, portion: Money) strict {
+    label en official "the pledged portion becomes a deemed distribution, without regard to actual payout";
+    when ira_used_as_loan_security(ira, individual, y, portion);
+    then ira_pledged_portion_treated_as_distributed(ira, individual, y, portion);
+}
+// (e)(1) the default tax exemption and its section 511 UBTI carve-out,
+// (e)(5) endowment-contract purchase treatment, and (e)(6) common-trust-
+// fund commingling are NOT modelled (TECH_GAP, stage 2b — narrow
+// classification follow-ups, no new compiler class).
+
+// =====================================================================
+// STAGE 2b: (k) Simplified employee pension — participation test
+// (3-of-5-years / minimum-compensation) exact computation.
+// =====================================================================
+
+pub relation sep_employee_attained_age_21(employee: Person, employer: Person, y: TaxableYear) kind empirical {
+    label en unofficial "the employee has attained age 21, case-asserted (section 408(k)(2)(A))";
+}
+
+pub relation sep_years_of_service_in_preceding_5(employee: Person, employer: Person, y: TaxableYear, years: Integer) kind empirical {
+    label en unofficial "the number of the immediately preceding 5 years in which the employee performed service for the employer, case-asserted (section 408(k)(2)(B))";
+}
+
+pub relation sep_compensation_for_year(employee: Person, employer: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the employee's compensation (within the meaning of section 414(q)(4)) from the employer for the year, case-asserted (section 408(k)(2)(C))";
+}
+
+pub relation sep_participation_requirement_met(employee: Person, employer: Person, y: TaxableYear) kind institutional {
+    label en official "section 408(k)(2): the employer must contribute to the SEP of each employee meeting the age-21, 3-of-5-years, and minimum-compensation conditions";
+}
+
+@source(IRC_S408_K, relation = formalizes, coverage = exact, quote = "has performed service for the employer during at least 3 of the immediately preceding 5 years")
+rule SepParticipationRequirementMet(employee: Person, employer: Person, y: TaxableYear, years: Integer, comp: Money) strict {
+    label en official "exact boundary: 3 years of the preceding 5 satisfies (B); below 3 does not";
+    when sep_employee_attained_age_21(employee, employer, y)
+        and sep_years_of_service_in_preceding_5(employee, employer, y, years) and years >= 3
+        and sep_compensation_for_year(employee, employer, y, comp) and comp >= SEP_MINIMUM_COMPENSATION;
+    then sep_participation_requirement_met(employee, employer, y);
+}
+// SEP_MINIMUM_COMPENSATION is an A3 parameter (section-408k2c-sep-min-
+// compensation.lawparam.json): the $450 statutory base only (section
+// 408(k)(2)(C), unchanged since the 1996 revision reflected in the 2024
+// edition); the annually cost-of-living-adjusted amount (section
+// 408(k)(9), rounded to the next lowest $50) is NOT pinned by
+// `us.irc.inflation_adjustments` (checked: not covered by Rev. Proc.
+// 2024-40 or 2025-32) — SOURCE_GAP for every year the statutory base was
+// last set. (k)(3) nondiscrimination (EVALUATIVE/aggregate-over-census,
+// same class as G64), (k)(4) withdrawal-must-be-permitted, (k)(5) written
+// allocation formula, (k)(6) salary-reduction SEP (a historical, mostly
+// terminated arrangement per (k)(6)(H) — not modelled), (k)(7) Roth SEP
+// election, (k)(8) definitions, (k)(9) the C-O-L-A mechanics themselves are
+// NOT modelled (TECH_GAP, stage 2b).
+
+// =====================================================================
+// STAGE 2b: (m) Investment in collectibles treated as a distribution.
+// =====================================================================
+
+pub entity Collectible {
+    label en unofficial "a work of art, rug, antique, metal, gem, stamp, coin, alcoholic beverage, or other tangible personal property the Secretary specifies (section 408(m)(2))";
+}
+
+pub relation ira_acquires_collectible(ira: IndividualRetirementAccount, item: Collectible, cost: Money, on: Date) kind empirical {
+    label en unofficial "the account acquires this collectible at this cost, case-asserted";
+}
+
+pub relation collectible_within_coin_bullion_exception(item: Collectible) kind empirical {
+    label en unofficial "this item is a coin or bullion described in section 408(m)(3)(A)-(B) (excepted from \"collectible\"), case-asserted";
+}
+
+pub relation collectible_acquisition_treated_as_distribution(ira: IndividualRetirementAccount, item: Collectible, cost: Money, on: Date) kind institutional {
+    label en official "section 408(m)(1): acquiring a collectible is treated as a distribution equal to its cost to the account, unless the (m)(3) coin/bullion exception applies";
+}
+
+@source(IRC_S408_M, relation = formalizes, coverage = exact, quote = "The acquisition by an individual retirement account or by an individually-directed account under a plan described in section 401(a) of any collectible shall be treated (for purposes of this section and section 402) as a distribution from such account in an amount equal to the cost to such account of such collectible.")
+rule CollectibleAcquisitionTreatedAsDistribution(ira: IndividualRetirementAccount, item: Collectible, cost: Money, on: Date) defeasible {
+    label en official "deemed distribution unless the coin/bullion exception applies";
+    when ira_acquires_collectible(ira, item, cost, on) and not_known(collectible_within_coin_bullion_exception(item));
+    then collectible_acquisition_treated_as_distribution(ira, item, cost, on);
+}
+
+// =====================================================================
+// STAGE 2b: (p) Simple retirement accounts — eligible-employer test,
+// matching-contribution formula, vesting, and participation test.
+// =====================================================================
+
+pub entity SimpleRetirementAccount : IndividualRetirementAccount {
+    label en official "a simple retirement account (section 408(p))";
+}
+
+pub relation employer_employee_count_with_5000_comp_preceding_year(employer: Person, y: TaxableYear, count: Integer) kind empirical {
+    label en unofficial "the number of employees who received at least $5,000 of compensation from the employer for the preceding year, case-asserted (section 408(p)(2)(C)(i)(I))";
+}
+
+pub relation eligible_employer_408p(employer: Person, y: TaxableYear) kind institutional {
+    label en official "section 408(p)(2)(C)(i)(I): an eligible employer had no more than 100 such employees for the preceding year (the (C)(i)(II) 2-year grace period is NOT modelled — TECH_GAP)";
+}
+
+@source(IRC_S408_P, relation = formalizes, coverage = exact, quote = "an employer which had no more than 100 employees who received at least $5,000 of compensation from the employer for the preceding year")
+rule EligibleEmployer408p(employer: Person, y: TaxableYear, count: Integer) strict {
+    label en official "exact boundary: 100 employees is eligible, 101 is not";
+    when employer_employee_count_with_5000_comp_preceding_year(employer, y, count) and count <= 100;
+    then eligible_employer_408p(employer, y);
+}
+
+pub relation simple_elective_contribution_amount(employee: Person, employer: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the employee's elective contribution under the qualified salary reduction arrangement for the year, case-asserted";
+}
+
+pub relation simple_employee_compensation(employee: Person, employer: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the employee's compensation for the year within the meaning of section 408(p)(6)(A), case-asserted";
+}
+
+pub relation simple_applicable_percentage(employer: Person, y: TaxableYear, pct: Decimal) kind empirical {
+    label en unofficial "the applicable percentage in effect for the employer for the year (statutory default 3 percent, or a lower elected percentage not below 1 percent under (p)(2)(C)(ii)(II)), case-asserted";
+}
+
+pub relation simple_matching_contribution_required(employee: Person, employer: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 408(p)(2)(A)(iii): the employer must match the employee's elective contribution up to the applicable percentage of compensation";
+}
+
+@source(IRC_S408_P, relation = formalizes, coverage = exact, quote = "the employer is required to make a matching contribution to the simple retirement account for any year in an amount equal to so much of the amount the employee elects under clause (i)(I) as does not exceed the applicable percentage of compensation for the year")
+rule SimpleMatchingContributionRequired(employee: Person, employer: Person, y: TaxableYear, elective: Money, comp: Money, pct: Decimal) strict {
+    label en official "required match = min(elective contribution, applicable percentage of compensation)";
+    when simple_elective_contribution_amount(employee, employer, y, elective)
+        and simple_employee_compensation(employee, employer, y, comp)
+        and simple_applicable_percentage(employer, y, pct);
+    then simple_matching_contribution_required(employee, employer, y, min(elective, round(comp * pct, 2, "HALF_UP")));
+}
+
+pub relation simple_2pct_nonelective_election(employer: Person, y: TaxableYear) kind empirical {
+    label en unofficial "the employer elects the 2-percent nonelective contribution alternative in lieu of matching, case-asserted (section 408(p)(2)(B))";
+}
+
+pub relation simple_nonelective_contribution_required(employee: Person, employer: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "section 408(p)(2)(B)(i): on election, the employer makes a 2-percent-of-compensation nonelective contribution instead of matching";
+}
+
+@source(IRC_S408_P, relation = formalizes, coverage = exact, quote = "the employer elects to make nonelective contributions of 2 percent of compensation for each employee who is eligible to participate in the arrangement and who has at least $5,000 of compensation from the employer for the year")
+rule SimpleNonelectiveContributionRequired(employee: Person, employer: Person, y: TaxableYear, comp: Money) strict {
+    label en official "the 2 percent nonelective alternative to matching (the larger-employer 3 percent substitution of (C)(iii) is NOT modelled — TECH_GAP)";
+    when simple_2pct_nonelective_election(employer, y) and simple_employee_compensation(employee, employer, y, comp) and comp >= 5000 USD;
+    then simple_nonelective_contribution_required(employee, employer, y, round(comp * 0.02, 2, "HALF_UP"));
+}
+
+pub relation simple_account_established_for(account: SimpleRetirementAccount, employee: Person) kind empirical {
+    label en unofficial "the simple retirement account is established for this employee, case-asserted";
+}
+
+pub relation simple_vesting_nonforfeitable(account: SimpleRetirementAccount, employee: Person) kind institutional {
+    label en official "section 408(p)(3): the employee's rights to any contribution are immediately nonforfeitable";
+}
+
+@source(IRC_S408_P, relation = formalizes, coverage = exact, quote = "The requirements of this paragraph are met with respect to a simple retirement account if the employee's rights to any contribution to the simple retirement account are nonforfeitable.")
+rule SimpleVestingNonforfeitable(account: SimpleRetirementAccount, employee: Person) strict {
+    label en official "SIMPLE contributions vest immediately, unconditionally";
+    when simple_account_established_for(account, employee);
+    then simple_vesting_nonforfeitable(account, employee);
+}
+
+pub relation employee_5000_comp_in_2_preceding_years(employee: Person, employer: Person, y: TaxableYear) kind empirical {
+    label en unofficial "the employee received at least $5,000 in compensation from the employer during any 2 preceding years, case-asserted (section 408(p)(4)(A)(i))";
+}
+
+pub relation employee_reasonably_expected_5000_comp_this_year(employee: Person, employer: Person, y: TaxableYear) kind empirical {
+    label en unofficial "the employee is reasonably expected to receive at least $5,000 in compensation during the year, case-asserted (section 408(p)(4)(A)(ii))";
+}
+
+pub relation simple_participation_requirement_met(employee: Person, employer: Person, y: TaxableYear) kind institutional {
+    label en official "section 408(p)(4)(A): the employee must be eligible to elect or receive the nonelective contribution once both the 2-preceding-years and reasonably-expected-this-year compensation tests are met";
+}
+
+@source(IRC_S408_P, relation = formalizes, coverage = partial, quote = "received at least $5,000 in compensation from the employer during any 2 preceding years, and")
+rule SimpleParticipationRequirementMet(employee: Person, employer: Person, y: TaxableYear) strict {
+    label en official "both prongs of the participation test must hold";
+    when employee_5000_comp_in_2_preceding_years(employee, employer, y)
+        and employee_reasonably_expected_5000_comp_this_year(employee, employer, y);
+    then simple_participation_requirement_met(employee, employer, y);
+}
+// (p)(2)(A)(iv)/(D)/(E)-(H) nonelective-contribution ceiling and
+// applicable-dollar-amount mechanics, (p)(4)(B) excludable-employees
+// election, (p)(5) administrative timing, (p)(6) definitions beyond
+// compensation, (p)(7)-(11) designated-institution/coordination/self-
+// employed/acquisition rules, and (p)(12) Roth election are NOT modelled
+// (TECH_GAP, stage 2b).
+
+// =====================================================================
+// STAGE 2b: (q) Deemed IRAs under qualified employer plans.
+// =====================================================================
+
+pub relation qualified_employer_plan_elects_voluntary_contributions(plan: Plan) kind empirical {
+    label en unofficial "the qualified employer plan elects to allow employees to make voluntary employee contributions to a separate account or annuity established under the plan, case-asserted (section 408(q)(1)(A))";
+}
+
+pub relation separate_account_meets_408_or_408a_requirements(plan: Plan) kind empirical {
+    label en unofficial "the separate account or annuity meets the applicable requirements of section 408 or 408A for an IRA (other than the exclusive-benefit requirement of (a)(5)), case-asserted (section 408(q)(1)(B))";
+}
+
+pub relation deemed_ira_treatment(plan: Plan) kind institutional {
+    label en official "section 408(q)(1): the separate account is treated as an individual retirement plan, not as part of the qualified employer plan";
+}
+
+@source(IRC_S408_Q, relation = formalizes, coverage = exact, quote = "then such account or annuity shall be treated for purposes of this title in the same manner as an individual retirement plan and not as a qualified employer plan (and contributions to such account or annuity as contributions to an individual retirement plan and not to the qualified employer plan)")
+rule DeemedIraTreatment(plan: Plan) strict {
+    label en official "a compliant voluntary-contribution sub-account is deemed its own IRA";
+    when qualified_employer_plan_elects_voluntary_contributions(plan)
+        and separate_account_meets_408_or_408a_requirements(plan);
+    then deemed_ira_treatment(plan);
+}
+// (q)(2) the qualified-employer-plan's own-qualification immunity and
+// (q)(3) the definitions are NOT modelled (TECH_GAP, stage 2b).

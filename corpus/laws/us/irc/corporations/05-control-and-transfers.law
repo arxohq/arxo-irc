@@ -1,0 +1,174 @@
+// Section 368(c) (definition of "control", used by part I other than
+// section 304, part II, part III, and part V) and section 351 (transfer to
+// controlled corporation). Stage 1 (IRC-08 stage 1, A06), priority
+// sections.
+
+
+// --- Section 368(c): control defined ----------------------------------------
+
+use self::{
+    Corporation,
+    IRC_S351_A,
+    IRC_S351_B,
+    IRC_S351_D,
+    IRC_S368_C,
+    Person,
+    section_351_excluded_351e,
+};
+
+pub relation voting_power_share(person: Person, corp: Corporation, share: Decimal) kind empirical {
+    label en unofficial "person's share of the total combined voting power of all classes of stock of the corporation entitled to vote, for purposes of section 368(c)";
+}
+pub relation other_classes_share(person: Person, corp: Corporation, share: Decimal) kind empirical {
+    label en unofficial "person's share of the total number of shares of all OTHER (non-voting-power) classes of stock of the corporation, for purposes of section 368(c)";
+}
+
+pub relation controls_80(person: Person, corp: Corporation) kind institutional {
+    label en official "person has \"control\" of the corporation within the meaning of section 368(c): at least 80 percent of total combined voting power of all voting classes, and at least 80 percent of the total number of shares of all other classes";
+}
+@source(IRC_S368_C, quote = "the term \"control\" means the ownership of stock possessing at least 80 percent of the total combined voting power of all classes of stock entitled to vote and at least 80 percent of the total number of shares of all other classes of stock of the corporation.")
+rule Controls80Rule(person: Person, corp: Corporation, voting: Decimal, other: Decimal) strict {
+    label en official "section 368(c): control is 80% of voting power AND 80% of every other class's share count";
+    when voting_power_share(person, corp, voting);
+    when other_classes_share(person, corp, other);
+    when voting >= 0.80;
+    when other >= 0.80;
+    then controls_80(person, corp);
+}
+// A corporation with only one class of voting stock and no other classes:
+// the "other classes" test is vacuously met. This stage requires the case
+// to assert `other_classes_share(person, corp, 1.0)` explicitly for a
+// single-class corporation (a judgment call, recorded in the report) rather
+// than defaulting an absent fact to 1.0, since an absent fact is
+// UNDETERMINED, not "no other classes exist" — a real gap for a
+// single-class scenario unless the case asserts the convention.
+
+// --- Section 351(a): nonrecognition on transfer to a controlled corporation --
+
+pub entity ControlledTransfer { label en unofficial "a transfer of property to a corporation solely in exchange for stock in that corporation, tested against section 351(a)"; }
+pub relation transfer_to_corporation(t: ControlledTransfer, transferor: Person, corp: Corporation) kind empirical {
+    label en official "a transfer of property to a corporation by one or more persons, for purposes of section 351(a)";
+}
+pub relation solely_for_stock(t: ControlledTransfer, transferor: Person) kind empirical {
+    label en official "the transferor receives solely stock in the transferee corporation in exchange for the property transferred (section 351(a))";
+}
+pub relation controls_immediately_after(t: ControlledTransfer, transferor: Person, corp: Corporation) kind institutional {
+    label en unofficial "immediately after the exchange, the transferor (aggregated with other transferors in the same exchange per section 351(a) \"one or more persons\") is in control (section 368(c)) of the corporation";
+}
+@source(IRC_S351_A, quote = "immediately after the exchange such person or persons are in control (as defined in section 368(c)) of the corporation")
+rule ControlsImmediatelyAfterFromControls80Rule(t: ControlledTransfer, transferor: Person, corp: Corporation) defeasible {
+    label en unofficial "bridges the transaction-scoped 'immediately after' control test to the section 368(c) control relation for the single-transferor case; a multi-transferor aggregate control fact is asserted directly where several transferors must be combined (TECH_GAP: this module does not itself sum several transferors' shares into one aggregate)";
+    when transfer_to_corporation(t, transferor, corp);
+    when controls_80(transferor, corp);
+    then controls_immediately_after(t, transferor, corp);
+}
+
+pub relation section_351_nonrecognition(t: ControlledTransfer, transferor: Person) kind institutional {
+    label en official "no gain or loss is recognized to the transferor on the transfer (section 351(a))";
+}
+@source(IRC_S351_A, quote = "No gain or loss shall be recognized if property is transferred to a corporation by one or more persons solely in exchange for stock in such corporation and immediately after the exchange such person or persons are in control (as defined in section 368(c)) of the corporation.")
+rule Section351NonrecognitionRule(t: ControlledTransfer, transferor: Person, corp: Corporation) defeasible {
+    label en official "section 351(a): nonrecognition when the transfer is solely for stock and control exists immediately after";
+    when transfer_to_corporation(t, transferor, corp);
+    when solely_for_stock(t, transferor);
+    when controls_immediately_after(t, transferor, corp);
+    when not_known(section_351_excluded_351e(t, transferor));
+    then section_351_nonrecognition(t, transferor);
+}
+
+// --- Section 351(b): boot ----------------------------------------------------
+
+pub relation money_received_in_transfer(t: ControlledTransfer, transferor: Person, amount: Money) kind empirical {
+    label en official "money received by the transferor in addition to permitted stock (section 351(b)(1)(A))";
+}
+pub relation other_property_received_in_transfer(t: ControlledTransfer, transferor: Person, fmv: Money) kind empirical {
+    label en official "the fair market value of other (non-stock) property received by the transferor in addition to permitted stock (section 351(b)(1)(B))";
+}
+pub relation transfer_realized_gain(t: ControlledTransfer, transferor: Person, amount: Money) kind empirical {
+    label en unofficial "the gain the transferor would realize on the exchange absent section 351 (feeds the section 351(b)(1) boot-recognition ceiling; asserted here as a case fact — the underlying realized-gain computation is section 1001, `property-transactions`)";
+}
+pub relation transfer_boot_recognized_gain(t: ControlledTransfer, transferor: Person, amount: Money) kind institutional {
+    label en official "gain recognized to the transferor because boot was received, not in excess of the money plus FMV of other property received (section 351(b)(1))";
+}
+@source(IRC_S351_B, quote = "gain (if any) to such recipient shall be recognized, but not in excess of—")
+rule BootGainCappedByBootRule(t: ControlledTransfer, transferor: Person, money: Money, other_fmv: Money, realized: Money) defeasible {
+    label en official "section 351(b)(1): boot-triggered gain is capped at the amount of money plus FMV of other property received, when realized gain is at least that much";
+    when money_received_in_transfer(t, transferor, money);
+    when other_property_received_in_transfer(t, transferor, other_fmv);
+    when transfer_realized_gain(t, transferor, realized);
+    when realized >= (money + other_fmv);
+    then transfer_boot_recognized_gain(t, transferor, money + other_fmv);
+}
+@source(IRC_S351_B, quote = "gain (if any) to such recipient shall be recognized, but not in excess of—")
+rule BootGainCappedByRealizedGainRule(t: ControlledTransfer, transferor: Person, money: Money, other_fmv: Money, realized: Money) defeasible {
+    label en official "section 351(b)(1): boot-triggered gain cannot exceed the gain actually realized on the exchange";
+    when money_received_in_transfer(t, transferor, money);
+    when other_property_received_in_transfer(t, transferor, other_fmv);
+    when transfer_realized_gain(t, transferor, realized);
+    when (money + other_fmv) > realized;
+    then transfer_boot_recognized_gain(t, transferor, realized);
+}
+pub relation transfer_no_loss_recognized(t: ControlledTransfer, transferor: Person) kind institutional {
+    label en official "no loss to the transferor is recognized on a section 351 exchange with boot (section 351(b)(2))";
+}
+@source(IRC_S351_B, quote = "no loss to such recipient shall be recognized.")
+rule NoLossOnBootExchangeRule(t: ControlledTransfer, transferor: Person, money: Money) defeasible {
+    label en official "section 351(b)(2): no loss recognized to a transferor who received boot in the exchange";
+    when money_received_in_transfer(t, transferor, money);
+    then transfer_no_loss_recognized(t, transferor);
+}
+
+// --- Section 351(d): stock issued for services/indebtedness is not "property" --
+
+pub relation stock_issued_for_services(t: ControlledTransfer, recipient: Person) kind empirical {
+    label en official "stock was issued to the recipient for services (section 351(d)(1)) — not considered issued in return for property";
+}
+pub relation stock_issued_for_transferee_indebtedness_not_a_security(t: ControlledTransfer, recipient: Person) kind empirical {
+    label en official "stock was issued for indebtedness of the transferee corporation not evidenced by a security (section 351(d)(2)) — not considered issued in return for property";
+}
+pub relation stock_issued_for_accrued_interest_on_transferee_debt(t: ControlledTransfer, recipient: Person) kind empirical {
+    label en official "stock was issued for interest on indebtedness of the transferee corporation that accrued on or after the beginning of the transferor's holding period for the debt (section 351(d)(3)) — not considered issued in return for property";
+}
+pub relation stock_not_issued_for_property(t: ControlledTransfer, recipient: Person) kind institutional {
+    label en official "stock issued to the recipient is NOT considered issued in return for property, for purposes of section 351 (section 351(d))";
+}
+@source(IRC_S351_D, quote = "For purposes of this section, stock issued for—")
+rule StockForServicesNotPropertyRule(t: ControlledTransfer, recipient: Person) defeasible {
+    label en official "section 351(d)(1): stock issued for services is not issued in return for property";
+    when stock_issued_for_services(t, recipient);
+    then stock_not_issued_for_property(t, recipient);
+}
+@source(IRC_S351_D, quote = "indebtedness of the transferee corporation which is not evidenced by a security")
+rule StockForNonSecurityDebtNotPropertyRule(t: ControlledTransfer, recipient: Person) defeasible {
+    label en official "section 351(d)(2): stock issued for non-security indebtedness of the transferee is not issued in return for property";
+    when stock_issued_for_transferee_indebtedness_not_a_security(t, recipient);
+    then stock_not_issued_for_property(t, recipient);
+}
+@source(IRC_S351_D, quote = "interest on indebtedness of the transferee corporation which accrued on or after the beginning of the transferor's holding period for the debt")
+rule StockForAccruedInterestNotPropertyRule(t: ControlledTransfer, recipient: Person) defeasible {
+    label en official "section 351(d)(3): stock issued for post-holding-period-start accrued interest on transferee debt is not issued in return for property";
+    when stock_issued_for_accrued_interest_on_transferee_debt(t, recipient);
+    then stock_not_issued_for_property(t, recipient);
+}
+// Practical effect (not a separate rule): a transferor whose ONLY
+// consideration is stock the (d) list disqualifies has, for section
+// 351(a) purposes, received no qualifying stock at all — `solely_for_stock`
+// is a case-level aggregate this module reads directly rather than
+// deriving from `stock_not_issued_for_property`, since section 351(a)'s
+// "solely in exchange for stock" already requires the case to characterize
+// what was actually received; TECH_GAP for a consumer that wants the two
+// connected automatically rather than asserted consistently by the case.
+
+// NOT DONE this stage: section 351(c) (distributing corporate transferor's
+// own stock disregarded in determining control; section 355/356
+// coordination) — TECH_GAP; section 351(e) (investment company exclusion;
+// title 11 debtor exclusion) — TECH_GAP, needs the diversification/
+// investment-company classification test; section 351(f) (section 311
+// cross-reference to the controlled corporation's own distribution) —
+// covered by module 02's section 311 rules directly, not repeated here;
+// section 351(g) (nonqualified preferred stock treated as boot) — TECH_GAP,
+// not modelled (a real evaluative/classification test of its own, with the
+// 20-year-window and de minimis-contingency carve-outs); section 351(h)
+// (cross-references to sections 357, 358, 362, 2501, 61(a)(1), 304(b)(3))
+// — NON_NORMATIVE pointers, sections 357/358/362 are separate TECH_GAPs
+// (not reached this stage — see the report).

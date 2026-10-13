@@ -1,0 +1,129 @@
+// Shared ontology for Subtitle B (chapters 11-15): type aliases onto
+// `us.irc.core`, and the small vocabulary every later module needs (date of
+// death, generation assignment, skip/non-skip person) that is genuinely
+// common to the estate, gift and GST computation chains rather than local to
+// one section.
+//
+// JUDGMENT CALL: `us.irc.core` gives no dedicated "decedent" shape. Chapter
+// 11's own `Estate : Person` (CONTRACT.md) is used AS the taxpayer every
+// estate-tax relation (`gross_estate`, `taxable_estate`, `estate_tax`, …) is
+// keyed on, exactly as `us.irc.trusts_estates` keys §641 on `Estate`/`Trust`
+// directly. `date_of_death`, citizenship and residency (imported from
+// `us.irc.definitions`, which types its tests over `Person`) are asserted on
+// that same `Estate` value as a proxy for "the decedent" — the decedent does
+// not outlive the moment of death to be asserted about directly, and the
+// estate is the one `Person` instance chapter 11 already requires a case to
+// name. This is recorded as a judgment call, not hidden: an owner needing a
+// separate pre-death `Individual` identity for the same decedent (e.g. to
+// read the decedent's own prior gift-tax filings under `us.irc.estate_gift`
+// chapter 12) asserts `decedent_individual(e: Estate, p: Individual)` below
+// and gets both identities linked.
+
+language "law.core" version "0.2";
+package us.irc.estate_gift version "0.1.1";
+namespace "urn:us:irc:estate_gift:clir";
+
+import us.irc.core version "0.1.1";
+import us.irc.definitions version "0.1.1";
+import us.irc.income_individual version "0.1.1";
+import us.irc.temporal version "0.1.1";
+// Indexed values of `.lawparam.json` rows anchor on the Revenue Procedure
+// fragments of this package (TECH-GAPS G80/G81).
+import us.irc.inflation_adjustments version "0.1.1";
+import us.irc.international version "0.1.1";
+
+use self::{
+    IRC_S2001_A,
+    IRC_S2613_A,
+    generation_assignment_effective,
+    possession_decedent_treated_as_nonresident_2209,
+};
+
+type Person = us.irc.core::Person;
+type Individual = us.irc.core::Individual;
+type Estate = us.irc.core::Estate;
+type Trust = us.irc.core::Trust;
+type TaxableYear = us.irc.core::TaxableYear;
+type Election = us.irc.core::Election;
+type Asset = us.irc.core::Asset;
+type Organ = us.irc.core::Organ;
+
+const Secretary: Organ = us.irc.core::Secretary;
+
+// --- Decedent identity (see judgment call above) ----------------------------
+
+pub relation decedent_individual(e: Estate, p: Individual) kind empirical {
+    label en unofficial "the individual whose death created this estate";
+}
+
+@source(IRC_S2001_A, quote = "every decedent who is a citizen or resident of the United States")
+pub relation decedent_citizen_or_resident(e: Estate) kind institutional {
+    label en official "the decedent is a citizen or resident of the United States (section 2001(a))";
+}
+rule DecedentCitizen(e: Estate) defeasible {
+    when us.irc.definitions::citizen_of_united_states(e);
+    when not_known(possession_decedent_treated_as_nonresident_2209(e));
+    then decedent_citizen_or_resident(e);
+}
+rule DecedentResident(e: Estate) defeasible {
+    when us.irc.definitions::resident_of_united_states(e);
+    then decedent_citizen_or_resident(e);
+}
+
+// --- Date of death: the single fact almost every chapter-11 window reads ---
+
+pub relation date_of_death(e: Estate, d: Date) kind empirical {
+    label en unofficial "the date of the decedent's death";
+}
+
+// --- Spousal relationship (chapter 11 marital deduction, chapter 12 gift-
+// splitting, chapter 13 generation assignment all read it) -----------------
+
+pub relation spouse_of(a: Person, b: Person) kind empirical {
+    label en unofficial "a is married to b (section 7703 marital-status test is imported where the distinction between spouse and former spouse matters; this relation is the bare fact two people are married to each other at the relevant time)";
+}
+pub relation surviving_spouse_of(e: Estate, s: Individual) kind empirical {
+    label en unofficial "s is the decedent's surviving spouse for purposes of this estate";
+}
+
+// --- Generation-skipping vocabulary shared by chapter 13's own modules and
+// by chapter 11 (section 2032A, section 2057(e)(3) cross-references) --------
+
+pub relation generation_assignment(p: Person, transferor: Person, generation: Integer) kind institutional {
+    label en official "the generation to which a person (other than the transferor) belongs, determined under section 2651";
+}
+
+@source(IRC_S2613_A, quote = "a natural person assigned to a generation which is 2 or more generations below the generation assignment of the transferor")
+pub relation skip_person_natural(p: Individual, transferor: Person) kind institutional {
+    label en official "section 2613(a)(1): a natural person assigned to a generation 2 or more generations below the transferor";
+}
+rule SkipPersonNaturalRule(p: Individual, transferor: Person, g: Integer) defeasible {
+    label en official "a natural person assigned to a generation which is 2 or more generations below the generation assignment of the transferor";
+    when generation_assignment_effective(p, transferor, g) and g >= 2;
+    then skip_person_natural(p, transferor);
+}
+
+// section 2613(a)(2) (trust is a skip person) needs the trust's own interest-
+// holder enumeration; modelled in 06-gst-tax.law next to taxable_termination,
+// which is the only place the interest-holder case facts are asserted.
+
+// --- Non-skip person (section 2613(b)): every other person -----------------
+//
+// "Any person who is not a skip person" is the complement of a classification
+// this package can only test for NATURAL persons and (in 06-gst-tax.law) for
+// trusts whose interest-holders are all asserted in the case; there is no
+// closed enumeration of every Person a case could name, so a blanket
+// `unless skip_person...` derivation would silently treat an unrelated,
+// un-asserted Person as non-skip by default rather than leaving the question
+// open. Each downstream rule that needs "immediately after such termination,
+// a non-skip person has an interest" (section 2612(a)(1)(A)) reads the
+// specific case-asserted interest-holder and tests
+// `not_known(skip_person_natural(holder, transferor))` there (06-gst-tax.law)
+// instead of a general-purpose relation. TECH_GAP: a genuinely general
+// `non_skip_person` derivation needs the same aggregate-over-derived-
+// predicates machinery flagged for other packages' `total_constructive_
+// ownership_share`-style sums (§111 runtime subset limitation) — recorded in
+// TECH-GAPS.md.
+pub relation non_skip_person(p: Person, transferor: Person) kind empirical {
+    label en unofficial "the case asserts directly that p is a non-skip person with respect to transferor (used only where the natural-person/trust tests below do not apply, e.g. an organization within section 2651(f)(3))";
+}

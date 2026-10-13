@@ -1,0 +1,289 @@
+// Section 121 — Exclusion of gain from sale of principal residence. Stage 2b
+// (IRC-06). Scope per task: (a)-(d) incl. the 2-of-5-years test, the
+// once-every-2-years rule, the pro rata reduced exclusion, and (d)(6).
+//
+// JUDGMENT CALL: "the 5-year period ending on the date of the sale",
+// "periods aggregating 2 years or more", and the "2-year period ending on
+// the date of such sale" are modelled as empirical DAY-COUNT facts a case
+// asserts directly (`ownership_and_use_aggregate_days_5yr`, day counts for
+// the (c)/(b)(5) ratios, etc.), not derived from raw `Date` ranges by this
+// package's own arithmetic — consistent with this package's `custody_days`/
+// `full_time_student_month` day/period-count convention (s151-152) and
+// avoiding both a `min(Date,Date)`-style limitation (TECH-GAPS G210/G225)
+// and a running-ledger day-by-day computation (LDC-E4102 class). "2 years"
+// is read as 730 days (2 x 365); the exact leap-year boundary is a genuine
+// edge case this simplification does not resolve — recorded, not silently
+// treated as always correct.
+// JUDGMENT CALL: (b)(5)'s nonqualified-use ratio and (c)'s pro rata ratio
+// are each computed as a single division (Money/Integer or Integer/Integer
+// -> Decimal, per the `Money / Money -> Decimal` precedent already used in
+// this package for the section 105(h) fraction), not composed with the
+// (b)(1)/(2) dollar cap and the (d)(6) depreciation carve-out in one nested
+// expression: each adjustment is its own rule producing an intermediate
+// relation, consistent with the "sequential deductions each named" style of
+// `s63-taxable-income.law`.
+
+use self::{
+    IRC_S121_A,
+    IRC_S121_B,
+    IRC_S121_C,
+    IRC_S121_D,
+    Individual,
+    section_121a_barred_by_1031_acquisition_121d10,
+};
+
+pub relation sale_or_exchange_of_property(p: Individual, asset: us.irc.core::Asset, sale_date: Date, gain: Money) kind empirical {
+    label en official "a sale or exchange of property, and the gain realized (section 121(a))";
+}
+
+// --- §121(d)(6): depreciation carve-out (applied first, per (b)(5)(D)) -------
+
+relation post_may_1997_depreciation_adjustments(p: Individual, asset: us.irc.core::Asset, sale_date: Date, amount: Money) kind empirical {
+    label en official "the portion of section 1250(b)(3) depreciation adjustments attributable to periods after May 6, 1997 with respect to the property (section 121(d)(6))";
+}
+pub relation gain_after_depreciation_carveout_121d6(p: Individual, asset: us.irc.core::Asset, sale_date: Date, amount: Money) kind institutional {
+    label en official "gain eligible for the section 121(a) exclusion after subtracting the (d)(6) depreciation-attributable portion (which is never excludable)";
+}
+@source(IRC_S121_D, quote = "Subsection (a) shall not apply to so much of the gain from the sale of any property as does not exceed the portion of the depreciation adjustments (as defined in section 1250(b)(3)) attributable to periods after May 6, 1997, in respect of such property.")
+rule GainAfterDepreciationCarveout(p: Individual, asset: us.irc.core::Asset, sale_date: Date, gain: Money, depreciation: Money) strict {
+    label en official "the depreciation-attributable portion of gain is carved out before any (a)/(b)(5) computation";
+    when sale_or_exchange_of_property(p, asset, sale_date, gain);
+    when post_may_1997_depreciation_adjustments(p, asset, sale_date, depreciation);
+    when gain > depreciation;
+    then gain_after_depreciation_carveout_121d6(p, asset, sale_date, round(gain - depreciation, 2, "HALF_UP"));
+}
+relation no_depreciation_adjustments(p: Individual, asset: us.irc.core::Asset, sale_date: Date) kind empirical {
+    label en official "there are no post-May-6-1997 section 1250(b)(3) depreciation adjustments with respect to the property";
+}
+@source(IRC_S121_D, quote = "Subsection (a) shall not apply to so much of the gain from the sale of any property as does not exceed the portion of the depreciation adjustments (as defined in section 1250(b)(3)) attributable to periods after May 6, 1997, in respect of such property.")
+rule GainAfterDepreciationCarveoutNone(p: Individual, asset: us.irc.core::Asset, sale_date: Date, gain: Money) strict {
+    label en official "absent depreciation adjustments, the full gain remains eligible";
+    when sale_or_exchange_of_property(p, asset, sale_date, gain);
+    when no_depreciation_adjustments(p, asset, sale_date);
+    then gain_after_depreciation_carveout_121d6(p, asset, sale_date, gain);
+}
+
+// --- §121(b)(5): exclusion of gain allocated to nonqualified use -------------
+
+relation nonqualified_use_days(p: Individual, asset: us.irc.core::Asset, sale_date: Date, days: Integer) kind empirical {
+    label en official "the aggregate periods of nonqualified use during the period the taxpayer owned the property (section 121(b)(5)(B)(i), (C)) — a case asserting this fact already excludes the (b)(5)(C)(ii) exceptions (post-last-residence-use portion, qualified extended duty up to 10 years, temporary absence up to 2 years) from the count";
+}
+relation total_ownership_days(p: Individual, asset: us.irc.core::Asset, sale_date: Date, days: Integer) kind empirical {
+    label en official "the period the property was owned by the taxpayer, in days (section 121(b)(5)(B)(ii))";
+}
+pub relation gain_after_nonqualified_use_allocation_121b5(p: Individual, asset: us.irc.core::Asset, sale_date: Date, amount: Money) kind institutional {
+    label en official "gain eligible for the section 121(a) exclusion after excluding the portion allocated to nonqualified use (section 121(b)(5))";
+}
+@source(IRC_S121_B, quote = "gain shall be allocated to periods of nonqualified use based on the ratio which—")
+rule GainAfterNonqualifiedUseAllocation(p: Individual, asset: us.irc.core::Asset, sale_date: Date, gain: Money, nonqualified_days: Integer, ownership_days: Integer) strict {
+    label en official "the gain allocated to nonqualified use (gain times the nonqualified-days-to-ownership-days ratio) is subtracted from the depreciation-adjusted gain";
+    when gain_after_depreciation_carveout_121d6(p, asset, sale_date, gain);
+    when nonqualified_use_days(p, asset, sale_date, nonqualified_days);
+    when total_ownership_days(p, asset, sale_date, ownership_days);
+    when ownership_days > 0;
+    then gain_after_nonqualified_use_allocation_121b5(p, asset, sale_date, round(gain - round(gain * (nonqualified_days / ownership_days), 2, "HALF_UP"), 2, "HALF_UP"));
+}
+relation no_nonqualified_use(p: Individual, asset: us.irc.core::Asset, sale_date: Date) kind empirical {
+    label en official "there is no period of nonqualified use with respect to the property";
+}
+@source(IRC_S121_B, quote = "Subsection (a) shall not apply to so much of the gain from the sale or exchange of property as is allocated to periods of nonqualified use.")
+rule GainAfterNonqualifiedUseAllocationNone(p: Individual, asset: us.irc.core::Asset, sale_date: Date, gain: Money) strict {
+    label en official "absent nonqualified use, the full depreciation-adjusted gain remains eligible";
+    when gain_after_depreciation_carveout_121d6(p, asset, sale_date, gain);
+    when no_nonqualified_use(p, asset, sale_date);
+    then gain_after_nonqualified_use_allocation_121b5(p, asset, sale_date, gain);
+}
+
+// --- §121(a): the 2-of-5-years ownership-and-use test -------------------------
+
+pub relation ownership_and_use_aggregate_days_5yr(p: Individual, asset: us.irc.core::Asset, sale_date: Date, days: Integer) kind empirical {
+    label en official "the aggregate number of days, during the 5-year period ending on the date of sale, the property was owned and used by the taxpayer (or, per (d)(1)/(2), either spouse / a deceased spouse) as the taxpayer's principal residence (section 121(a), (d)(1), (d)(2))";
+}
+pub relation meets_ownership_and_use_requirement_121a(p: Individual, asset: us.irc.core::Asset, sale_date: Date) kind institutional {
+    label en official "owned and used as the taxpayer's principal residence for periods aggregating 2 years (730 days) or more during the 5-year period ending on the sale date (section 121(a))";
+}
+@source(IRC_S121_A, quote = "such property has been owned and used by the taxpayer as the taxpayer's principal residence for periods aggregating 2 years or more")
+rule MeetsOwnershipAndUseRequirement(p: Individual, asset: us.irc.core::Asset, sale_date: Date, days: Integer) strict {
+    label en official "2 years (730 days) or more of aggregate ownership-and-use satisfies (a); per (d)(1), either spouse's qualifying days (for a joint return) or, per (d)(2), a deceased spouse's tacked days (for the surviving spouse) are read into this same day-count fact";
+    when ownership_and_use_aggregate_days_5yr(p, asset, sale_date, days);
+    when days >= 730;
+    then meets_ownership_and_use_requirement_121a(p, asset, sale_date);
+}
+
+// --- §121(b)(3): once-every-2-years -------------------------------------------
+
+pub relation prior_121a_sale_within_2_years(p: Individual, asset: us.irc.core::Asset, sale_date: Date) kind empirical {
+    label en official "during the 2-year period ending on the date of this sale, there was another sale or exchange by the taxpayer to which section 121(a) applied (section 121(b)(3))";
+}
+
+// --- §121(b)(1)/(2)/(4): dollar limitation ------------------------------------
+
+pub relation section_121_dollar_limitation_unmarried(p: Individual, sale_date: Date, amount: Money) kind institutional {
+    label en official "the dollar limitation on excluded gain for an unmarried taxpayer, or as if unmarried for the (b)(2)(B) sum-of-separate-limitations rule (section 121(b)(1), (b)(4))";
+}
+@source(IRC_S121_B, quote = "The amount of gain excluded from gross income under subsection (a) with respect to any sale or exchange shall not exceed $250,000.")
+rule DollarLimitationBase250k(p: Individual, asset: us.irc.core::Asset, sale_date: Date, gain: Money) strict {
+    label en official "the base dollar limitation is $250,000";
+    when sale_or_exchange_of_property(p, asset, sale_date, gain);
+    when not_known(days_since_spouse_death_within_2_years_121b4(p, sale_date));
+    then section_121_dollar_limitation_unmarried(p, sale_date, 250000.00 USD);
+}
+relation days_since_spouse_death_within_2_years_121b4(p: Individual, sale_date: Date) kind empirical {
+    label en official "the sale occurs not later than 2 years after the date of death of the taxpayer's deceased spouse, and the (b)(2)(A) joint-500k conditions were met immediately before that death (section 121(b)(4)) — the two (b)(4) preconditions are folded into one fact per this package's glossary-folding convention";
+}
+@source(IRC_S121_B, quote = "In the case of a sale or exchange of property by an unmarried individual whose spouse is deceased on the date of such sale, paragraph (1) shall be applied by substituting \"$500,000\" for \"$250,000\" if such sale occurs not later than 2 years after the date of death of such spouse and the requirements of paragraph (2)(A) were met immediately before such date of death.")
+rule DollarLimitationSurvivingSpouse500k(p: Individual, sale_date: Date) strict {
+    label en official "section 121(b)(4): a qualifying surviving spouse gets the $500,000 limitation in place of $250,000";
+    when days_since_spouse_death_within_2_years_121b4(p, sale_date);
+    then section_121_dollar_limitation_unmarried(p, sale_date, 500000.00 USD);
+}
+
+pub relation section_121_dollar_limitation_joint(p: Individual, spouse: Individual, sale_date: Date, amount: Money) kind institutional {
+    label en official "the dollar limitation on excluded gain applicable to a joint return (section 121(b)(2))";
+}
+relation joint_return_for_year_of_sale(p: Individual, spouse: Individual, sale_date: Date) kind empirical {
+    label en official "a husband and wife make a joint return for the taxable year of the sale or exchange (section 121(b)(2))";
+}
+relation dollar_limitation_joint_500k_conditions_met(p: Individual, spouse: Individual, asset: us.irc.core::Asset, sale_date: Date) kind empirical {
+    label en official "either spouse meets the (a) ownership requirement, both spouses meet the (a) use requirement, and neither spouse is (b)(3)-ineligible (section 121(b)(2)(A)(i)-(iii)) — folded into one fact per this package's glossary-folding convention";
+}
+@source(IRC_S121_B, quote = "Paragraph (1) shall be applied by substituting \"$500,000\" for \"$250,000\" if—")
+rule DollarLimitationJoint500k(p: Individual, spouse: Individual, asset: us.irc.core::Asset, sale_date: Date) strict {
+    label en official "the $500,000 joint limitation applies when the (b)(2)(A)(i)-(iii) conditions are all met";
+    when joint_return_for_year_of_sale(p, spouse, sale_date);
+    when dollar_limitation_joint_500k_conditions_met(p, spouse, asset, sale_date);
+    then section_121_dollar_limitation_joint(p, spouse, sale_date, 500000.00 USD);
+}
+relation dollar_limitation_joint_500k_conditions_met_for_some_asset(p: Individual, spouse: Individual, sale_date: Date) kind institutional {
+    label en official "helper: the (b)(2)(A) 500k conditions are met with respect to at least one property — avoids an unbound `asset` inside a negative literal (§190)";
+}
+rule DollarLimitationJoint500kConditionsMetForSomeAsset(p: Individual, spouse: Individual, asset: us.irc.core::Asset, sale_date: Date) strict {
+    label en official "existential helper binding out `asset`";
+    when dollar_limitation_joint_500k_conditions_met(p, spouse, asset, sale_date);
+    then dollar_limitation_joint_500k_conditions_met_for_some_asset(p, spouse, sale_date);
+}
+@source(IRC_S121_B, quote = "the limitation under paragraph (1) shall be the sum of the limitations under paragraph (1) to which each spouse would be entitled if such spouses had not been married")
+rule DollarLimitationJointOtherSumOfSeparate(p: Individual, spouse: Individual, sale_date: Date, limit_p: Money, limit_spouse: Money) strict {
+    label en official "absent the (b)(2)(A) conditions, a joint return's limitation is the sum of what each spouse would separately be entitled to";
+    when joint_return_for_year_of_sale(p, spouse, sale_date);
+    when section_121_dollar_limitation_unmarried(p, sale_date, limit_p);
+    when section_121_dollar_limitation_unmarried(spouse, sale_date, limit_spouse);
+    when not_known(dollar_limitation_joint_500k_conditions_met_for_some_asset(p, spouse, sale_date));
+    then section_121_dollar_limitation_joint(p, spouse, sale_date, limit_p + limit_spouse);
+}
+
+// --- §121(a) exclusion, gated by (b)(3), capped by (b) limitation ------------
+
+pub relation gain_excluded_121a(p: Individual, asset: us.irc.core::Asset, sale_date: Date, amount: Money) kind institutional {
+    label en official "gain excluded from gross income under section 121(a), after the (b) dollar limitation, the (b)(3) once-every-2-years rule, the (b)(5) nonqualified-use allocation, and the (d)(6) depreciation carve-out";
+}
+@source(IRC_S121_A, quote = "Gross income shall not include gain from the sale or exchange of property if, during the 5-year period ending on the date of the sale or exchange, such property has been owned and used by the taxpayer as the taxpayer's principal residence for periods aggregating 2 years or more.")
+rule GainExcludedUnmarried(p: Individual, asset: us.irc.core::Asset, sale_date: Date, adjusted_gain: Money, limit: Money) strict {
+    label en official "for an unmarried taxpayer (or joint filer under the (b)(1) base limit) meeting (a) and not barred by (b)(3), the depreciation/nonqualified-use-adjusted gain is excluded up to the (b)(1)/(b)(4) limitation";
+    when meets_ownership_and_use_requirement_121a(p, asset, sale_date);
+    when not_known(prior_121a_sale_within_2_years(p, asset, sale_date));
+    when not_known(section_121a_barred_by_1031_acquisition_121d10(p, asset, sale_date));
+    when gain_after_nonqualified_use_allocation_121b5(p, asset, sale_date, adjusted_gain);
+    when section_121_dollar_limitation_unmarried(p, sale_date, limit);
+    then gain_excluded_121a(p, asset, sale_date, min(adjusted_gain, limit));
+}
+@source(IRC_S121_A, quote = "Gross income shall not include gain from the sale or exchange of property if, during the 5-year period ending on the date of the sale or exchange, such property has been owned and used by the taxpayer as the taxpayer's principal residence for periods aggregating 2 years or more.")
+rule GainExcludedJoint(p: Individual, spouse: Individual, asset: us.irc.core::Asset, sale_date: Date, adjusted_gain: Money, limit: Money) strict {
+    label en official "for a joint return meeting (a) (per (d)(1), through either spouse) and not barred by (b)(3), the adjusted gain is excluded up to the (b)(2) joint limitation";
+    when meets_ownership_and_use_requirement_121a(p, asset, sale_date);
+    when not_known(prior_121a_sale_within_2_years(p, asset, sale_date));
+    when not_known(section_121a_barred_by_1031_acquisition_121d10(p, asset, sale_date));
+    when gain_after_nonqualified_use_allocation_121b5(p, asset, sale_date, adjusted_gain);
+    when section_121_dollar_limitation_joint(p, spouse, sale_date, limit);
+    then gain_excluded_121a(p, asset, sale_date, min(adjusted_gain, limit));
+}
+
+// --- §121(c): reduced exclusion for taxpayers failing to meet requirements ---
+
+relation sale_by_reason_of_employment_health_or_unforeseen_circumstances(p: Individual, asset: us.irc.core::Asset, sale_date: Date) kind empirical {
+    label en official "the sale or exchange is by reason of a change in place of employment, health, or (to the extent provided in regulations) unforeseen circumstances (section 121(c)(2)(B))";
+}
+pub relation section_121c_applies(p: Individual, asset: us.irc.core::Asset, sale_date: Date) kind institutional {
+    label en official "section 121(c) applies: (a) would not otherwise apply for failure to meet the ownership/use requirement or the (b)(3) rule, but the sale is by reason of employment/health/unforeseen circumstances (section 121(c)(2))";
+}
+@source(IRC_S121_C, quote = "such sale or exchange is by reason of a change in place of employment, health, or, to the extent provided in regulations, unforeseen circumstances")
+rule Section121cAppliesForFailedOwnershipOrUse(p: Individual, asset: us.irc.core::Asset, sale_date: Date) strict {
+    label en official "(c) applies where the ownership/use test fails but the qualifying-reason test is met";
+    when sale_by_reason_of_employment_health_or_unforeseen_circumstances(p, asset, sale_date);
+    when not_known(meets_ownership_and_use_requirement_121a(p, asset, sale_date));
+    then section_121c_applies(p, asset, sale_date);
+}
+@source(IRC_S121_C, quote = "such sale or exchange is by reason of a change in place of employment, health, or, to the extent provided in regulations, unforeseen circumstances")
+rule Section121cAppliesForBarredByOnceEvery2Years(p: Individual, asset: us.irc.core::Asset, sale_date: Date) strict {
+    label en official "(c) applies where (b)(3)'s once-every-2-years rule would otherwise bar (a), but the qualifying-reason test is met";
+    when sale_by_reason_of_employment_health_or_unforeseen_circumstances(p, asset, sale_date);
+    when prior_121a_sale_within_2_years(p, asset, sale_date);
+    then section_121c_applies(p, asset, sale_date);
+}
+
+pub relation section_121c_ratio_numerator_days(p: Individual, asset: us.irc.core::Asset, sale_date: Date, days: Integer) kind institutional {
+    label en official "the lesser of the aggregate ownership-and-use days during the 5-year period, or the days since the most recent prior qualifying sale — the (c)(1)(B) ratio numerator";
+}
+@source(IRC_S121_C, quote = "the shorter of—")
+rule Section121cRatioNumeratorAggregateDaysShorter(p: Individual, asset: us.irc.core::Asset, sale_date: Date, aggregate_days: Integer, days_since_prior_sale: Integer) strict {
+    label en official "the aggregate ownership-and-use days govern when shorter than (or equal to) the days since the prior qualifying sale";
+    when section_121c_applies(p, asset, sale_date);
+    when ownership_and_use_aggregate_days_5yr(p, asset, sale_date, aggregate_days);
+    when days_since_prior_121a_sale_121c(p, asset, sale_date, days_since_prior_sale);
+    when aggregate_days <= days_since_prior_sale;
+    then section_121c_ratio_numerator_days(p, asset, sale_date, aggregate_days);
+}
+@source(IRC_S121_C, quote = "the period after the date of the most recent prior sale or exchange by the taxpayer to which subsection (a) applied and before the date of such sale or exchange, bears to")
+rule Section121cRatioNumeratorDaysSincePriorSaleShorter(p: Individual, asset: us.irc.core::Asset, sale_date: Date, aggregate_days: Integer, days_since_prior_sale: Integer) strict {
+    label en official "the days since the prior qualifying sale govern when shorter than the aggregate ownership-and-use days";
+    when section_121c_applies(p, asset, sale_date);
+    when ownership_and_use_aggregate_days_5yr(p, asset, sale_date, aggregate_days);
+    when days_since_prior_121a_sale_121c(p, asset, sale_date, days_since_prior_sale);
+    when days_since_prior_sale < aggregate_days;
+    then section_121c_ratio_numerator_days(p, asset, sale_date, days_since_prior_sale);
+}
+relation days_since_prior_121a_sale_121c(p: Individual, asset: us.irc.core::Asset, sale_date: Date, days: Integer) kind empirical {
+    label en official "days between the most recent prior sale to which section 121(a) applied and this sale (section 121(c)(1)(B)(ii))";
+}
+
+pub relation gain_excluded_121c_reduced(p: Individual, asset: us.irc.core::Asset, sale_date: Date, amount: Money) kind institutional {
+    label en official "the reduced (pro rata) exclusion under section 121(c): the applicable (b) dollar limitation multiplied by the ratio of the (c)(1)(B) numerator to 730 days (2 years)";
+}
+@source(IRC_S121_C, quote = "the amount which bears the same ratio to such limitation (determined without regard to this paragraph) as")
+rule Section121cReducedExclusionUnmarried(p: Individual, asset: us.irc.core::Asset, sale_date: Date, numerator_days: Integer, limit: Money, adjusted_gain: Money) strict {
+    label en official "the reduced exclusion is the (b)(1)/(b)(4) limitation times (numerator days / 730), capped at the adjusted gain";
+    when section_121c_ratio_numerator_days(p, asset, sale_date, numerator_days);
+    when not_known(section_121a_barred_by_1031_acquisition_121d10(p, asset, sale_date));
+    when section_121_dollar_limitation_unmarried(p, sale_date, limit);
+    when gain_after_nonqualified_use_allocation_121b5(p, asset, sale_date, adjusted_gain);
+    then gain_excluded_121c_reduced(p, asset, sale_date, min(adjusted_gain, round(limit * (numerator_days / 730), 2, "HALF_UP")));
+}
+@source(IRC_S121_C, quote = "the amount which bears the same ratio to such limitation (determined without regard to this paragraph) as")
+rule Section121cReducedExclusionJoint(p: Individual, spouse: Individual, asset: us.irc.core::Asset, sale_date: Date, numerator_days: Integer, limit: Money, adjusted_gain: Money) strict {
+    label en official "the reduced exclusion for a joint return is the (b)(2) joint limitation times (numerator days / 730), capped at the adjusted gain";
+    when section_121c_ratio_numerator_days(p, asset, sale_date, numerator_days);
+    when not_known(section_121a_barred_by_1031_acquisition_121d10(p, asset, sale_date));
+    when section_121_dollar_limitation_joint(p, spouse, sale_date, limit);
+    when gain_after_nonqualified_use_allocation_121b5(p, asset, sale_date, adjusted_gain);
+    then gain_excluded_121c_reduced(p, asset, sale_date, min(adjusted_gain, round(limit * (numerator_days / 730), 2, "HALF_UP")));
+}
+
+// --- §121(d): other special rules folded above, or not modelled this pass ----
+//
+// (d)(1) (joint returns: either spouse meeting the ownership-and-use
+// requirement suffices) and (d)(2) (a surviving spouse's period includes
+// the deceased spouse's period) are folded into the SAME `ownership_and_
+// use_aggregate_days_5yr` case fact per the module-header convention: a
+// case for a joint return or a surviving spouse asserts the already-tacked/
+// either-spouse-qualifying day count directly. (d)(6) is implemented above.
+// (d)(3) (property transferred incident to divorce / used by a former
+// spouse under a divorce instrument), (d)(4) (cooperative housing
+// tenant-stockholders), (d)(5) (involuntary conversions), (d)(7)
+// (out-of-residence care for the incapacitated), (d)(8) (remainder-interest
+// sales), (d)(9)/(12) (suspension of the 5-year period for uniformed
+// services/Foreign Service/intelligence community/Peace Corps duty — a
+// genuine `power`-shaped election with its own multi-year suspension
+// mechanics), and (d)(10) (like-kind-exchange property) are each a
+// self-contained special rule keyed to definitions or elections this
+// package does not model this pass — TECH_GAP/EXTERNAL_DEPENDENCY, per the
+// coverage row for each.

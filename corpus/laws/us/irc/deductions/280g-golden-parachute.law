@@ -1,0 +1,97 @@
+// Section 280G — golden parachute payments. Stage 2b. Scope: (b)(1)-(3)
+// excess parachute payment, parachute payment classification (the 3x
+// base-amount test), and the base-amount allocation, WITH intermediate
+// values (base amount, aggregate present value, the 3x test, the
+// allocation ratio). NOT done: (a)'s "no deduction" consequence is not
+// wired into `deduction_allowed` (this module only classifies and computes
+// the excess amount — TECH_GAP/scope decision); (b)(2)(B)-(C) securities-
+// law-violation payments and the 1-year-lookback agreement rule; (b)(4)
+// reasonable-compensation reduction (an evaluative/burden-of-proof
+// question under DECISION-0194, not modelled); (b)(5)-(6) exceptions
+// (small business corporations, S corporations, exempt organizations,
+// EBSA-qualified plans); (c) disqualified individual sub-definitions
+// (`disqualified_individual` is taken as an empirical classification).
+
+use self::{
+    IRC_S280G_B,
+    Person,
+    payment_exempt_from_parachute_treatment,
+    present_value_for_280g,
+};
+
+pub relation disqualified_individual(p: Person, corp: Person) kind institutional {
+    label en official "the individual is a disqualified individual with respect to the corporation for purposes of section 280G (section 280G(c); the sub-definitions — officer, shareholder, highly-compensated individual thresholds — are not derived, TECH_GAP)";
+}
+pub relation payment_contingent_on_change_in_control(p: Person, corp: Person, item: Integer, amount: Money) kind empirical {
+    label en official "a payment in the nature of compensation to (or for the benefit of) the individual that is contingent on a change in ownership or effective control of the corporation, or in the ownership of a substantial portion of its assets (section 280G(b)(2)(A)(i))";
+}
+pub relation present_value_of_payment(p: Person, corp: Person, item: Integer, amount: Money) kind empirical {
+    label en official "the present value of the contingent payment, for the section 280G(b)(2)(A)(ii) 3-times-base-amount test and the (b)(3)(B) allocation ratio";
+}
+pub relation aggregate_present_value_contingent_payments(p: Person, corp: Person, amount: Money) kind institutional {
+    label en official "the aggregate present value of all payments in the nature of compensation to the individual which are contingent on the change (section 280G(b)(2)(A)(ii))";
+}
+pub relation base_amount(p: Person, corp: Person, amount: Money) kind institutional {
+    label en official "the individual's annualized includible compensation for the base period (section 280G(b)(3)(A))";
+}
+
+pub relation three_times_base_amount_test_met(p: Person, corp: Person) kind institutional {
+    label en official "the aggregate present value of the contingent payments equals or exceeds 3 times the base amount (section 280G(b)(2)(A)(ii))";
+}
+@source(IRC_S280G_B, quote = "the aggregate present value of the payments in the nature of compensation to (or for the benefit of) such individual which are contingent on such change equals or exceeds an amount equal to 3 times the base amount")
+rule ThreeTimesBaseAmountTest(p: Person, corp: Person, aggregate: Money, base: Money) strict {
+    label en official "the 3-times-base-amount test of section 280G(b)(2)(A)(ii)";
+    when aggregate_present_value_contingent_payments(p, corp, aggregate);
+    when base_amount(p, corp, base);
+    when aggregate >= 3.0 * base;
+    then three_times_base_amount_test_met(p, corp);
+}
+
+pub relation parachute_payment(p: Person, corp: Person, item: Integer, amount: Money) kind institutional {
+    label en official "the payment is a parachute payment (section 280G(b)(2)(A))";
+}
+@source(IRC_S280G_B, quote = "means any payment in the nature of compensation to (or for the benefit of) a disqualified individual")
+rule ParachutePaymentClassification(p: Person, corp: Person, item: Integer, amount: Money) defeasible {
+    label en official "a contingent payment to a disqualified individual is a parachute payment once the 3-times-base-amount test is met (section 280G(b)(2)(A))";
+    when disqualified_individual(p, corp);
+    when payment_contingent_on_change_in_control(p, corp, item, amount);
+    when three_times_base_amount_test_met(p, corp);
+    when not_known(payment_exempt_from_parachute_treatment(p, corp, item));
+    then parachute_payment(p, corp, item, amount);
+}
+
+pub relation base_amount_allocated_to_payment(p: Person, corp: Person, item: Integer, amount: Money) kind institutional {
+    label en official "the portion of the base amount allocated to the payment, by the ratio of its present value to the aggregate present value of all such payments (section 280G(b)(3)(B))";
+}
+@source(IRC_S280G_B, quote = "The portion of the base amount allocated to any parachute payment shall be an amount which bears the same ratio to the base amount as")
+rule BaseAmountAllocationComputation(p: Person, corp: Person, item: Integer, amount: Money, pv: Money, aggregate: Money, base: Money) defeasible {
+    label en official "the base amount allocated to a payment is the base amount times the ratio of that payment's present value to the aggregate present value of all contingent payments (section 280G(b)(3)(B))";
+    when parachute_payment(p, corp, item, amount);
+    when present_value_for_280g(p, corp, item, pv);
+    when aggregate_present_value_contingent_payments(p, corp, aggregate);
+    when base_amount(p, corp, base);
+    // One proportion, one rounding (TECH-GAPS G499, 26.09.2026).
+    then base_amount_allocated_to_payment(p, corp, item, div_round(base * (pv / 1.00 USD), aggregate / 1.00 USD, 2, "HALF_UP"));
+}
+
+pub relation excess_parachute_payment(p: Person, corp: Person, item: Integer, amount: Money) kind institutional {
+    label en official "the excess parachute payment: the excess of the parachute payment over the portion of the base amount allocated to it (section 280G(b)(1))";
+}
+@source(IRC_S280G_B, quote = "means an amount equal to the excess of any parachute payment over the portion of the base amount allocated to such payment")
+rule ExcessParachutePaymentComputation(p: Person, corp: Person, item: Integer, amount: Money, allocated: Money) defeasible {
+    label en official "the excess parachute payment equals the parachute payment minus its allocated base amount (section 280G(b)(1))";
+    when parachute_payment(p, corp, item, amount);
+    when base_amount_allocated_to_payment(p, corp, item, allocated);
+    then excess_parachute_payment(p, corp, item, amount - allocated);
+}
+// Stage 2b (280g-detail.law): (a)'s consequence is now wired (Section280GExcessParachutePayment);
+// `disqualified_individual` and `base_amount` became institutional (derived in 280g-detail.law from
+// (c) and (d)(1),(2) or asserted by a case); the classification, allocation and excess rules are
+// defeasible because they consume the exemption status of (b)(4)-(6).
+// (a)'s consequence ("no deduction shall be allowed... for any excess
+// parachute payment") is NOT wired into `deduction_allowed` this session —
+// TECH_GAP/scope decision (this module classifies and computes the amount
+// only; the corporation's own deduction-denial rule, and any interaction
+// with section 4999's excise tax on the recipient, are left to the
+// excise-entities/corporations packages that would consume this pub
+// relation).

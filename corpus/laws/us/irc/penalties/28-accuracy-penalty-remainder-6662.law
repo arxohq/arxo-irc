@@ -1,0 +1,489 @@
+language "law.core" version "0.2";
+package us.irc.penalties version "0.1.1";
+namespace "urn:us:irc:penalties:clir";
+
+use self::{
+    AccuracyGround,
+    FailureContext,
+    IRC_S6662_B,
+    IRC_S6662_F,
+    IRC_S6662_G,
+    IRC_S6662_H,
+    IRC_S6662_I,
+    IRC_S6662_J,
+    IRC_S6662_K,
+    IRC_S6662_L,
+    IRC_S6664_C,
+    Person,
+    Return,
+    TaxKind,
+    TaxableYear,
+    accuracy_or_fraud_penalty_applicable_to_return,
+    accuracy_related_penalty_on_ground,
+    gross_valuation_misstatement,
+    nondisclosed_noneconomic_substance_transaction,
+    reasonable_cause_defense_available,
+    substantial_valuation_misstatement,
+    underpayment_attributable_to_ground,
+};
+
+// 26 U.S.C. §6662(b)(4), (5), (8), (9), (10), (f), (g), (h)(2)(B)-(D), (i)(2)-(3), (j)(1)-(2),
+// (k), (l) (IRC-16 stage 2, DECISION-0379): the accuracy-related penalty grounds and
+// definitions that stage 1 left open. Module 07 gains five `AccuracyGround` members, two
+// guards on the base-rate rule (increased-rate grounds and gross pension / estate-gift
+// grounds are taxed by their own rules) and the statutory limits of (f)(2) and (g)(2).
+//
+// JUDGMENT CALLS AND GAPS:
+//  - As in module 07, the portion of an underpayment attributable to a ground is a
+//    case allocation (`underpayment_attributable_to_ground`); the substantial-overstatement
+//    and understatement tests are derived relations over claimed and correct amounts that
+//    classify the ground, and the gross tests choose the 40 percent rate.
+//  - §6662(e)(1)(B) and (e)(3) (transfer pricing / net section 482 adjustments) and the
+//    remaining (h)(2)(A)(ii), (iii) substitutions belong to that machinery: TECH-GAPS G3113.
+//  - §6662(d)(2)(C) (tax shelter carve-out): TECH-GAPS G3114 (needs the §6662(d)(2)(B)
+//    reduction to be re-derived for shelter items).
+//  - §6662(i)(2)-(3): `nondisclosed_noneconomic_substance_transaction` becomes a derived
+//    relation (kind institutional); scenarios that assert it directly still apply.
+//  - §6662(b) last paragraph (no penalty on a portion penalised under §6663 or §6662A) is
+//    the `unless`/coordination of modules 06 and 17; §6662A(e)(1), (2)(B) cross-effects
+//    are TECH-GAPS G3101.
+
+// --- helper relations of the base-rate guards --------------------------------------------------
+relation ground_taxed_at_increased_rate_6662(ground: AccuracyGround) kind institutional {
+    label en unofficial "the ground is taxed under its own increased-rate rule: section 6662(l) (50 percent) or section 6662(h)(2)(D) (40 percent)";
+}
+@source(IRC_S6662_L, relation = formalizes, coverage = exact, quote = "subsection (a) shall be applied with respect to such portion by substituting \"50 percent\" for \"20 percent\"")
+assert "ground-170p-increased-rate": ground_taxed_at_increased_rate_6662(CharitableDeduction170pOverstatement);
+@source(IRC_S6662_H, relation = formalizes, coverage = exact, quote = "any disallowance of a deduction described in subsection (b)(10)")
+assert "ground-170h7-increased-rate": ground_taxed_at_increased_rate_6662(Section170h7Disallowance);
+relation ground_portion_at_or_below_statutory_limit(p: Person, y: TaxableYear, kind: TaxKind, ground: AccuracyGround) kind institutional {
+    label en unofficial "the portion attributable to the ground does not exceed the limit of section 6662(f)(2) ($1,000) or (g)(2) ($5,000), so no penalty is imposed by reason of that ground";
+}
+@source(IRC_S6662_F, relation = formalizes, coverage = exact, quote = "No penalty shall be imposed by reason of subsection (b)(4) unless the portion of the underpayment for the taxable year attributable to substantial overstatements of pension liabilities exceeds $1,000")
+rule S6662f2PensionLimit strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for a: Money;
+    when underpayment_attributable_to_ground(p, y, kind, PensionLiabilityOverstatement, a)
+        and a <= round(PensionOverstatementUnderpaymentFloor, 2, "HALF_UP");
+    then ground_portion_at_or_below_statutory_limit(p, y, kind, PensionLiabilityOverstatement);
+}
+@source(IRC_S6662_G, relation = formalizes, coverage = exact, quote = "No penalty shall be imposed by reason of subsection (b)(5) unless the portion of the underpayment attributable to substantial estate or gift tax valuation understatements for the taxable period (or, in the case of the tax imposed by chapter 11, with respect to the estate of the decedent) exceeds $5,000")
+rule S6662g2EstateGiftLimit strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for a: Money;
+    when underpayment_attributable_to_ground(p, y, kind, EstateGiftValuationUnderstatement, a)
+        and a <= round(EstateGiftUnderstatementUnderpaymentFloor, 2, "HALF_UP");
+    then ground_portion_at_or_below_statutory_limit(p, y, kind, EstateGiftValuationUnderstatement);
+}
+
+// --- (f), (h)(2)(B): substantial overstatement of pension liabilities ------------------------------
+relation actuarial_liabilities_claimed_for_deduction_404a(p: Person, y: TaxableYear, kind: TaxKind, amount: Money) kind empirical {
+    label en official "the actuarial determination of the liabilities taken into account for computing the deduction under paragraph (1) or (2) of section 404(a) (case fact)";
+}
+relation correct_amount_of_pension_liabilities(p: Person, y: TaxableYear, kind: TaxKind, amount: Money) kind empirical {
+    label en official "the amount determined to be the correct amount of such liabilities (case fact)";
+}
+pub relation substantial_overstatement_of_pension_liabilities(p: Person, y: TaxableYear, kind: TaxKind) kind institutional {
+    label en official "there is a substantial overstatement of pension liabilities: the claimed liabilities are 200 percent or more of the correct amount";
+}
+@source(IRC_S6662_F, relation = formalizes, coverage = exact, quote = "is 200 percent or more of the amount determined to be the correct amount of such liabilities")
+rule S6662f1PensionOverstatement strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for c: Money;
+    for r: Money;
+    when actuarial_liabilities_claimed_for_deduction_404a(p, y, kind, c)
+        and correct_amount_of_pension_liabilities(p, y, kind, r)
+        and c >= round(r * PensionOverstatementRatio, 2, "HALF_UP");
+    then substantial_overstatement_of_pension_liabilities(p, y, kind);
+}
+pub relation gross_overstatement_of_pension_liabilities(p: Person, y: TaxableYear, kind: TaxKind) kind institutional {
+    label en unofficial "a gross pension overstatement: the claimed liabilities are 400 percent or more of the correct amount (section 6662(h)(2)(B))";
+}
+@source(IRC_S6662_H, relation = formalizes, coverage = exact, quote = "any substantial overstatement of pension liabilities as determined under subsection (f) by substituting \"400 percent\" for \"200 percent\"")
+rule S6662h2BGrossPensionOverstatement strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for c: Money;
+    for r: Money;
+    when actuarial_liabilities_claimed_for_deduction_404a(p, y, kind, c)
+        and correct_amount_of_pension_liabilities(p, y, kind, r)
+        and c >= round(r * GrossPensionOverstatementRatio, 2, "HALF_UP");
+    then gross_overstatement_of_pension_liabilities(p, y, kind);
+}
+
+// --- (g), (h)(2)(C): substantial estate or gift tax valuation understatement ---------------------------
+relation value_claimed_on_subtitle_b_return(p: Person, y: TaxableYear, kind: TaxKind, amount: Money) kind empirical {
+    label en official "the value of any property claimed on any return of tax imposed by subtitle B (case fact)";
+}
+relation correct_valuation_for_subtitle_b(p: Person, y: TaxableYear, kind: TaxKind, amount: Money) kind empirical {
+    label en official "the amount determined to be the correct amount of such valuation (case fact)";
+}
+pub relation substantial_estate_or_gift_valuation_understatement(p: Person, y: TaxableYear, kind: TaxKind) kind institutional {
+    label en official "the value claimed is 65 percent or less of the correct valuation";
+}
+@source(IRC_S6662_G, relation = formalizes, coverage = exact, quote = "is 65 percent or less of the amount determined to be the correct amount of such valuation")
+rule S6662g1EstateGiftUnderstatement strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for c: Money;
+    for r: Money;
+    when value_claimed_on_subtitle_b_return(p, y, kind, c)
+        and correct_valuation_for_subtitle_b(p, y, kind, r)
+        and c <= round(r * EstateGiftUnderstatementRatio, 2, "HALF_UP");
+    then substantial_estate_or_gift_valuation_understatement(p, y, kind);
+}
+pub relation gross_estate_or_gift_valuation_understatement(p: Person, y: TaxableYear, kind: TaxKind) kind institutional {
+    label en unofficial "a gross estate or gift understatement: the value claimed is 40 percent or less of the correct valuation (section 6662(h)(2)(C))";
+}
+@source(IRC_S6662_H, relation = formalizes, coverage = exact, quote = "any substantial estate or gift tax valuation understatement as determined under subsection (g) by substituting \"40 percent\" for \"65 percent\"")
+rule S6662h2CGrossEstateGiftUnderstatement strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for c: Money;
+    for r: Money;
+    when value_claimed_on_subtitle_b_return(p, y, kind, c)
+        and correct_valuation_for_subtitle_b(p, y, kind, r)
+        and c <= round(r * GrossEstateGiftUnderstatementRatio, 2, "HALF_UP");
+    then gross_estate_or_gift_valuation_understatement(p, y, kind);
+}
+relation gross_pension_or_estate_gift_ground(p: Person, y: TaxableYear, kind: TaxKind, ground: AccuracyGround) kind institutional {
+    label en unofficial "the ground is a gross pension overstatement or a gross estate or gift understatement and is taxed at 40 percent";
+}
+@source(IRC_S6662_H, relation = formalizes, coverage = exact, quote = "any substantial overstatement of pension liabilities as determined under subsection (f) by substituting \"400 percent\" for \"200 percent\"")
+rule S6662hGrossPensionGround strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    when gross_overstatement_of_pension_liabilities(p, y, kind);
+    then gross_pension_or_estate_gift_ground(p, y, kind, PensionLiabilityOverstatement);
+}
+@source(IRC_S6662_H, relation = formalizes, coverage = exact, quote = "any substantial estate or gift tax valuation understatement as determined under subsection (g) by substituting \"40 percent\" for \"65 percent\"")
+rule S6662hGrossEstateGiftGround strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    when gross_estate_or_gift_valuation_understatement(p, y, kind);
+    then gross_pension_or_estate_gift_ground(p, y, kind, EstateGiftValuationUnderstatement);
+}
+
+// --- increased-rate rules: (h)(1) for the (B)-(D) gross grounds, (l) for section 170(p) ----------------------
+@source(IRC_S6662_H, relation = formalizes, coverage = exact, quote = "subsection (a) shall be applied with respect to such portion by substituting \"40 percent\" for \"20 percent\"")
+rule S6662hBGrossPensionPenalty defeasible {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for portion: Money;
+    for r: Return;
+    for fc: FailureContext;
+    when underpayment_attributable_to_ground(p, y, kind, PensionLiabilityOverstatement, portion)
+        and gross_overstatement_of_pension_liabilities(p, y, kind)
+        and us.irc.core::return_of(r, p, y, kind)
+        and accuracy_or_fraud_penalty_applicable_to_return(r);
+    then accuracy_related_penalty_on_ground(p, y, kind, PensionLiabilityOverstatement, round(portion * GrossValuationMisstatementRate, 2, "HALF_UP"));
+    unless reasonable_cause_defense_available(p, y, kind, fc)
+        and underpayment_attributable_to_ground(p, y, kind, PensionLiabilityOverstatement, portion)
+        and gross_overstatement_of_pension_liabilities(p, y, kind)
+        and us.irc.core::return_of(r, p, y, kind)
+        and accuracy_or_fraud_penalty_applicable_to_return(r);
+    unless ground_portion_at_or_below_statutory_limit(p, y, kind, PensionLiabilityOverstatement)
+        and underpayment_attributable_to_ground(p, y, kind, PensionLiabilityOverstatement, portion)
+        and gross_overstatement_of_pension_liabilities(p, y, kind)
+        and us.irc.core::return_of(r, p, y, kind)
+        and accuracy_or_fraud_penalty_applicable_to_return(r);
+}
+@source(IRC_S6662_H, relation = formalizes, coverage = exact, quote = "subsection (a) shall be applied with respect to such portion by substituting \"40 percent\" for \"20 percent\"")
+rule S6662hCGrossEstateGiftPenalty defeasible {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for portion: Money;
+    for r: Return;
+    for fc: FailureContext;
+    when underpayment_attributable_to_ground(p, y, kind, EstateGiftValuationUnderstatement, portion)
+        and gross_estate_or_gift_valuation_understatement(p, y, kind)
+        and us.irc.core::return_of(r, p, y, kind)
+        and accuracy_or_fraud_penalty_applicable_to_return(r);
+    then accuracy_related_penalty_on_ground(p, y, kind, EstateGiftValuationUnderstatement, round(portion * GrossValuationMisstatementRate, 2, "HALF_UP"));
+    unless reasonable_cause_defense_available(p, y, kind, fc)
+        and underpayment_attributable_to_ground(p, y, kind, EstateGiftValuationUnderstatement, portion)
+        and gross_estate_or_gift_valuation_understatement(p, y, kind)
+        and us.irc.core::return_of(r, p, y, kind)
+        and accuracy_or_fraud_penalty_applicable_to_return(r);
+    unless ground_portion_at_or_below_statutory_limit(p, y, kind, EstateGiftValuationUnderstatement)
+        and underpayment_attributable_to_ground(p, y, kind, EstateGiftValuationUnderstatement, portion)
+        and gross_estate_or_gift_valuation_understatement(p, y, kind)
+        and us.irc.core::return_of(r, p, y, kind)
+        and accuracy_or_fraud_penalty_applicable_to_return(r);
+}
+@source(IRC_S6662_H, relation = formalizes, coverage = exact, quote = "any disallowance of a deduction described in subsection (b)(10)")
+rule S6662hDSection170h7Penalty defeasible {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for portion: Money;
+    for r: Return;
+    for fc: FailureContext;
+    when underpayment_attributable_to_ground(p, y, kind, Section170h7Disallowance, portion)
+        and us.irc.core::return_of(r, p, y, kind)
+        and accuracy_or_fraud_penalty_applicable_to_return(r);
+    then accuracy_related_penalty_on_ground(p, y, kind, Section170h7Disallowance, round(portion * GrossValuationMisstatementRate, 2, "HALF_UP"));
+    unless reasonable_cause_defense_available(p, y, kind, fc)
+        and underpayment_attributable_to_ground(p, y, kind, Section170h7Disallowance, portion)
+        and us.irc.core::return_of(r, p, y, kind)
+        and accuracy_or_fraud_penalty_applicable_to_return(r);
+    unless ground_portion_at_or_below_statutory_limit(p, y, kind, Section170h7Disallowance)
+        and underpayment_attributable_to_ground(p, y, kind, Section170h7Disallowance, portion)
+        and us.irc.core::return_of(r, p, y, kind)
+        and accuracy_or_fraud_penalty_applicable_to_return(r);
+}
+@source(IRC_S6662_L, relation = formalizes, coverage = exact, quote = "subsection (a) shall be applied with respect to such portion by substituting \"50 percent\" for \"20 percent\"")
+rule S6662lCharitableOverstatementPenalty defeasible {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for portion: Money;
+    for r: Return;
+    for fc: FailureContext;
+    when underpayment_attributable_to_ground(p, y, kind, CharitableDeduction170pOverstatement, portion)
+        and us.irc.core::return_of(r, p, y, kind)
+        and accuracy_or_fraud_penalty_applicable_to_return(r);
+    then accuracy_related_penalty_on_ground(p, y, kind, CharitableDeduction170pOverstatement, round(portion * CharitableDeduction170pPenaltyRate, 2, "HALF_UP"));
+    unless reasonable_cause_defense_available(p, y, kind, fc)
+        and underpayment_attributable_to_ground(p, y, kind, CharitableDeduction170pOverstatement, portion)
+        and us.irc.core::return_of(r, p, y, kind)
+        and accuracy_or_fraud_penalty_applicable_to_return(r);
+    unless ground_portion_at_or_below_statutory_limit(p, y, kind, CharitableDeduction170pOverstatement)
+        and underpayment_attributable_to_ground(p, y, kind, CharitableDeduction170pOverstatement, portion)
+        and us.irc.core::return_of(r, p, y, kind)
+        and accuracy_or_fraud_penalty_applicable_to_return(r);
+}
+
+// --- (k): inconsistent estate basis ----------------------------------------------------------------------
+relation underpayment_attributable_to_failure_to_comply_with_1014f(p: Person, y: TaxableYear, kind: TaxKind, amount: Money) kind empirical {
+    label en official "the portion of an underpayment attributable to the failure to comply with section 1014(f) (case fact)";
+}
+pub relation inconsistent_estate_basis_portion(p: Person, y: TaxableYear, kind: TaxKind, amount: Money) kind institutional {
+    label en official "the term \"inconsistent estate basis\" means any portion of an underpayment attributable to the failure to comply with section 1014(f)";
+}
+@source(IRC_S6662_K, relation = formalizes, coverage = exact, quote = "the term \"inconsistent estate basis\" means any portion of an underpayment attributable to the failure to comply with section 1014(f)")
+rule S6662kInconsistentEstateBasis strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for a: Money;
+    when underpayment_attributable_to_failure_to_comply_with_1014f(p, y, kind, a);
+    then inconsistent_estate_basis_portion(p, y, kind, a);
+}
+@source(IRC_S6662_B, relation = formalizes, coverage = exact, quote = "Any inconsistent estate basis")
+rule S6662b8InconsistentEstateBasisPenalty defeasible {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for a: Money;
+    for r: Return;
+    for fc: FailureContext;
+    when inconsistent_estate_basis_portion(p, y, kind, a)
+        and us.irc.core::return_of(r, p, y, kind)
+        and accuracy_or_fraud_penalty_applicable_to_return(r);
+    then accuracy_related_penalty_on_ground(p, y, kind, InconsistentEstateBasis, round(a * AccuracyPenaltyRate, 2, "HALF_UP"));
+    unless reasonable_cause_defense_available(p, y, kind, fc)
+        and inconsistent_estate_basis_portion(p, y, kind, a)
+        and us.irc.core::return_of(r, p, y, kind)
+        and accuracy_or_fraud_penalty_applicable_to_return(r);
+}
+
+// --- (j)(1), (j)(2): undisclosed foreign financial asset -------------------------------------------------
+relation foreign_asset_of_taxpayer(asset: ForeignFinancialAsset, p: Person, y: TaxableYear) kind empirical {
+    label en unofficial "the asset belongs to the taxpayer for the taxable year";
+}
+pub entity ForeignFinancialAsset {
+    label en unofficial "an asset with respect to which information may be required under section 6038, 6038B, 6038D, 6046A, or 6048";
+}
+relation information_required_for_asset_under_6038_6038B_6038D_6046A_or_6048(asset: ForeignFinancialAsset) kind empirical {
+    label en official "information was required to be provided with respect to the asset under section 6038, 6038B, 6038D, 6046A, or 6048 for the taxable year";
+}
+relation information_provided_as_required_for_asset(asset: ForeignFinancialAsset) kind empirical {
+    label en official "the information was provided by the taxpayer as required under the provisions of those sections";
+}
+pub relation undisclosed_foreign_financial_asset(asset: ForeignFinancialAsset) kind institutional {
+    label en unofficial "an asset with respect to which information was required to be provided but was not provided by the taxpayer as required";
+}
+@source(IRC_S6662_J, relation = formalizes, coverage = exact, quote = "any asset with respect to which information was required to be provided under section 6038, 6038B, 6038D, 6046A, or 6048 for such taxable year but was not provided by the taxpayer as required under the provisions of those sections")
+rule S6662j2UndisclosedAsset strict {
+    for asset: ForeignFinancialAsset;
+    when information_required_for_asset_under_6038_6038B_6038D_6046A_or_6048(asset)
+        and not_known(information_provided_as_required_for_asset(asset));
+    then undisclosed_foreign_financial_asset(asset);
+}
+relation understatement_portion_attributable_to_transaction_involving_asset(asset: ForeignFinancialAsset, p: Person, y: TaxableYear, kind: TaxKind, amount: Money) kind empirical {
+    label en official "the portion of the understatement for the taxable year attributable to a transaction involving the asset (case fact)";
+}
+pub relation undisclosed_foreign_financial_asset_understatement(p: Person, y: TaxableYear, kind: TaxKind, amount: Money) kind institutional {
+    label en unofficial "the portion of the understatement attributable to any transaction involving an undisclosed foreign financial asset";
+}
+@source(IRC_S6662_J, relation = formalizes, coverage = exact, quote = "the term \"undisclosed foreign financial asset understatement\" means, for any taxable year, the portion of the understatement for such taxable year which is attributable to any transaction involving an undisclosed foreign financial asset")
+rule S6662j1AssetUnderstatement strict {
+    for asset: ForeignFinancialAsset;
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for a: Money;
+    when undisclosed_foreign_financial_asset(asset)
+        and understatement_portion_attributable_to_transaction_involving_asset(asset, p, y, kind, a);
+    then undisclosed_foreign_financial_asset_understatement(p, y, kind, a);
+}
+
+// --- (i)(2), (i)(3): nondisclosed noneconomic substance transactions --------------------------------------
+relation economic_substance_transaction_portion_exists(p: Person, y: TaxableYear, kind: TaxKind) kind empirical {
+    label en official "a portion of a transaction described in subsection (b)(6) (lacking economic substance)";
+}
+relation facts_disclosed_in_return_or_attached_statement(p: Person, y: TaxableYear, kind: TaxKind) kind empirical {
+    label en official "the relevant facts affecting the tax treatment are adequately disclosed in the return or in a statement attached to the return";
+}
+relation facts_disclosed_by_amendment_or_supplement(p: Person, y: TaxableYear, kind: TaxKind) kind empirical {
+    label en official "the relevant facts are disclosed only by an amendment or supplement to the return";
+}
+relation amendment_filed_on_6662i3(p: Person, y: TaxableYear, kind: TaxKind, d: Date) kind empirical {
+    label en unofficial "the date the amendment or supplement was filed";
+}
+relation first_contact_by_secretary_on_6662i3(p: Person, y: TaxableYear, kind: TaxKind, d: Date) kind empirical {
+    label en official "the date the taxpayer is first contacted by the Secretary regarding the examination of the return";
+}
+relation secretary_specified_date_6662i3(p: Person, y: TaxableYear, kind: TaxKind, d: Date) kind empirical {
+    label en official "such other date as is specified by the Secretary";
+}
+relation amendment_disregarded_6662i3(p: Person, y: TaxableYear, kind: TaxKind) kind institutional {
+    label en unofficial "the amendment or supplement is disregarded for purposes of subsection (i): it was filed after the earlier of first contact or the Secretary's date";
+}
+@source(IRC_S6662_I, relation = formalizes, coverage = exact, quote = "In no event shall any amendment or supplement to a return of tax be taken into account for purposes of this subsection if the amendment or supplement is filed after the earlier of the date the taxpayer is first contacted by the Secretary regarding the examination of the return or such other date as is specified by the Secretary")
+rule S6662i3AfterContact strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for a: Date;
+    for c: Date;
+    when amendment_filed_on_6662i3(p, y, kind, a)
+        and first_contact_by_secretary_on_6662i3(p, y, kind, c)
+        and a > c;
+    then amendment_disregarded_6662i3(p, y, kind);
+}
+@source(IRC_S6662_I, relation = formalizes, coverage = exact, quote = "or such other date as is specified by the Secretary")
+rule S6662i3AfterSpecifiedDate strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for a: Date;
+    for c: Date;
+    when amendment_filed_on_6662i3(p, y, kind, a)
+        and secretary_specified_date_6662i3(p, y, kind, c)
+        and a > c;
+    then amendment_disregarded_6662i3(p, y, kind);
+}
+relation facts_adequately_disclosed_6662i2(p: Person, y: TaxableYear, kind: TaxKind) kind institutional {
+    label en unofficial "the relevant facts are adequately disclosed in the return, in an attached statement, or in a timely amendment";
+}
+@source(IRC_S6662_I, relation = formalizes, coverage = exact, quote = "with respect to which the relevant facts affecting the tax treatment are not adequately disclosed in the return nor in a statement attached to the return")
+rule S6662i2DisclosedInReturn strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    when facts_disclosed_in_return_or_attached_statement(p, y, kind);
+    then facts_adequately_disclosed_6662i2(p, y, kind);
+}
+@source(IRC_S6662_I, relation = formalizes, coverage = exact, quote = "nor in a statement attached to the return")
+rule S6662i2DisclosedByTimelyAmendment strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    when facts_disclosed_by_amendment_or_supplement(p, y, kind)
+        and not_known(amendment_disregarded_6662i3(p, y, kind));
+    then facts_adequately_disclosed_6662i2(p, y, kind);
+}
+@source(IRC_S6662_I, relation = formalizes, coverage = exact, quote = "the term \"nondisclosed noneconomic substance transaction\" means any portion of a transaction described in subsection (b)(6) with respect to which the relevant facts affecting the tax treatment are not adequately disclosed in the return nor in a statement attached to the return")
+rule S6662i2Nondisclosed strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    when economic_substance_transaction_portion_exists(p, y, kind)
+        and not_known(facts_adequately_disclosed_6662i2(p, y, kind));
+    then nondisclosed_noneconomic_substance_transaction(p, y, kind);
+}
+
+// --- §6664(c)(3), (4): valuation overstatements of charitable deduction property (defense barred) ---------
+pub entity ContributedProperty {
+    label en unofficial "property contributed by the taxpayer in a contribution for which a deduction was claimed under section 170";
+}
+relation property_contributed_with_170_deduction_claimed(prop: ContributedProperty) kind empirical {
+    label en official "the property was contributed by the taxpayer in a contribution for which a deduction was claimed under section 170";
+}
+relation securities_with_market_quotations_readily_available(prop: ContributedProperty) kind empirical {
+    label en official "the property is securities for which (as of the date of the contribution) market quotations are readily available on an established securities market";
+}
+pub relation charitable_deduction_property_for_6664c3(prop: ContributedProperty) kind institutional {
+    label en official "charitable deduction property for paragraph (3): contributed property with a section 170 deduction claimed, other than readily quoted securities";
+}
+@source(IRC_S6664_C, relation = formalizes, coverage = exact, quote = "The term \"charitable deduction property\" means any property contributed by the taxpayer in a contribution for which a deduction was claimed under section 170")
+rule S6664c4ACharitableDeductionProperty strict {
+    for prop: ContributedProperty;
+    when property_contributed_with_170_deduction_claimed(prop)
+        and not_known(securities_with_market_quotations_readily_available(prop));
+    then charitable_deduction_property_for_6664c3(prop);
+}
+relation valuation_overstatement_relates_to_property(p: Person, y: TaxableYear, kind: TaxKind, prop: ContributedProperty) kind empirical {
+    label en official "the valuation overstatement under chapter 1 relates to the contributed property";
+}
+relation claimed_value_based_on_qualified_appraisal_by_qualified_appraiser(p: Person, y: TaxableYear, kind: TaxKind) kind empirical {
+    label en official "the claimed value of the property was based on a qualified appraisal made by a qualified appraiser (sections 170(f)(11)(E)(i), (ii) are consumed as case facts)";
+}
+relation taxpayer_made_good_faith_investigation_of_value_in_addition_to_appraisal(p: Person, y: TaxableYear, kind: TaxKind) kind empirical {
+    label en official "in addition to obtaining such appraisal, the taxpayer made a good faith investigation of the value of the contributed property";
+}
+relation charitable_valuation_defense_barred_6664c3(p: Person, y: TaxableYear, kind: TaxKind) kind institutional {
+    label en unofficial "paragraph (1) does not apply to an underpayment attributable to a substantial or gross valuation overstatement with respect to charitable deduction property, except for a substantial overstatement backed by a qualified appraisal and a good faith investigation";
+}
+@source(IRC_S6664_C, relation = formalizes, coverage = exact, quote = "In the case of any underpayment attributable to a substantial or gross valuation overstatement under chapter 1 with respect to charitable deduction property, paragraph (1) shall not apply")
+rule S6664c3GrossBarsDefense strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for prop: ContributedProperty;
+    when valuation_overstatement_relates_to_property(p, y, kind, prop)
+        and charitable_deduction_property_for_6664c3(prop)
+        and gross_valuation_misstatement(p, y, kind);
+    then charitable_valuation_defense_barred_6664c3(p, y, kind);
+}
+@source(IRC_S6664_C, relation = formalizes, coverage = exact, quote = "The preceding sentence shall not apply to a substantial valuation overstatement under chapter 1 if—")
+rule S6664c3SubstantialWithoutAppraisalBarsDefense strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for prop: ContributedProperty;
+    when valuation_overstatement_relates_to_property(p, y, kind, prop)
+        and charitable_deduction_property_for_6664c3(prop)
+        and substantial_valuation_misstatement(p, y, kind)
+        and not_known(gross_valuation_misstatement(p, y, kind))
+        and not_known(claimed_value_based_on_qualified_appraisal_by_qualified_appraiser(p, y, kind));
+    then charitable_valuation_defense_barred_6664c3(p, y, kind);
+}
+@source(IRC_S6664_C, relation = formalizes, coverage = exact, quote = "in addition to obtaining such appraisal, the taxpayer made a good faith investigation of the value of the contributed property")
+rule S6664c3SubstantialWithoutInvestigationBarsDefense strict {
+    for p: Person;
+    for y: TaxableYear;
+    for kind: TaxKind;
+    for prop: ContributedProperty;
+    when valuation_overstatement_relates_to_property(p, y, kind, prop)
+        and charitable_deduction_property_for_6664c3(prop)
+        and substantial_valuation_misstatement(p, y, kind)
+        and not_known(gross_valuation_misstatement(p, y, kind))
+        and not_known(taxpayer_made_good_faith_investigation_of_value_in_addition_to_appraisal(p, y, kind));
+    then charitable_valuation_defense_barred_6664c3(p, y, kind);
+}

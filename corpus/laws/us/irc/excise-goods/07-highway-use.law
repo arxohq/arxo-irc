@@ -1,0 +1,127 @@
+// Chapter 36, subchapter D: section 4481(a)-(c), highway motor vehicle use
+// tax. Priority list, IRC-13 stage 1. The table of section 4481(a) is
+// implemented directly as two strict rules (the $100-plus-$22-per-1,000-
+// pounds-or-fraction band and the $550 flat band above 75,000 pounds)
+// rather than a `.lawtable.json`, because the first band's OUTPUT is itself
+// a formula (not a literal), which this package's decision-table sidecars
+// (see `gas-guzzler-tax-by-mpg.lawtable.json` for the literal-output form)
+// do not carry — JUDGMENT CALL, reported.
+
+use self::{
+    ExciseEvent,
+    IRC_S4481_A,
+    IRC_S4481_B,
+    IRC_S4481_C,
+    IRC_S4482_D,
+    IRC_S4483_E,
+    Person,
+    excise_tax_due,
+    liable_for_excise,
+};
+
+pub entity HighwayVehicleUseEvent : ExciseEvent;
+
+pub relation highway_vehicle_use(
+    e: HighwayVehicleUseEvent,
+    taxable_gross_weight_pounds: Decimal,
+    registered_owner: Person,
+) kind empirical {
+    label en unofficial "section 4481(a): the use, in a taxable period, of a highway motor vehicle (together with customarily used semitrailers/trailers) with the given taxable gross weight";
+}
+
+// Stage 2: the section 4481(a) table amount is computed first (`highway_table_amount`), then
+// reduced by 75 percent for the last taxable period ending September 30, 2029 (section 4482(d)),
+// then by 25 percent for logging trucks (section 4483(e)); the result is the full-year amount
+// that the section 4481(c) proration scales.
+pub relation highway_table_amount(e: HighwayVehicleUseEvent, amount: Money) kind institutional {
+    label en official "section 4481(a): the tax amount of the table for this taxable gross weight, before the reductions of sections 4482(d) and 4483(e)";
+}
+pub relation highway_use_in_final_taxable_period_ending_2029_09_30(e: HighwayVehicleUseEvent) kind empirical {
+    label en official "section 4482(c)(4), (d): the use is in the taxable period that begins on July 1, 2029 and ends on September 30, 2029";
+}
+pub relation highway_use_logging_reduction(e: HighwayVehicleUseEvent) kind empirical {
+    label en official "section 4483(e): the exclusive use of the vehicle during the taxable period is the transportation of products harvested from a forested site to and from a point on it, and it is registered as a vehicle used in the transportation of harvested forest products";
+}
+pub relation highway_full_year_amount_after_period_reduction(e: HighwayVehicleUseEvent, amount: Money) kind institutional {
+    label en official "section 4482(d): the table amount after the 75 percent reduction in the taxable period ending September 30, 2029";
+}
+@source(IRC_S4482_D, relation = formalizes, coverage = exact, quote = "the amount of the tax imposed by section 4481 with respect to any highway motor vehicle shall be determined by reducing each dollar amount in the table contained in section 4481(a) by 75 percent.")
+rule HighwayUseFinalPeriodReducedBy75Percent(e: HighwayVehicleUseEvent, amount: Money) strict {
+    when highway_table_amount(e, amount) and highway_use_in_final_taxable_period_ending_2029_09_30(e);
+    then highway_full_year_amount_after_period_reduction(e, round(amount * 0.25, 2, "HALF_UP"));
+}
+@source(IRC_S4481_A, relation = formalizes, coverage = exact, quote = "A tax is hereby imposed on the use of any highway motor vehicle which")
+rule HighwayUseRegularPeriodTableAmount(e: HighwayVehicleUseEvent, amount: Money) strict {
+    when highway_table_amount(e, amount) and not_known(highway_use_in_final_taxable_period_ending_2029_09_30(e));
+    then highway_full_year_amount_after_period_reduction(e, amount);
+}
+@source(IRC_S4483_E, relation = formalizes, coverage = exact, quote = "The tax imposed by section 4481 shall be reduced by 25 percent with respect to any highway motor vehicle if")
+rule HighwayUseLoggingReducedBy25Percent(e: HighwayVehicleUseEvent, amount: Money) strict {
+    when highway_full_year_amount_after_period_reduction(e, amount) and highway_use_logging_reduction(e);
+    then excise_tax_due_full_year(e, round(amount * 0.75, 2, "HALF_UP"));
+}
+@source(IRC_S4481_A, relation = formalizes, coverage = exact, quote = "A tax is hereby imposed on the use of any highway motor vehicle which")
+rule HighwayUseNoLoggingReduction(e: HighwayVehicleUseEvent, amount: Money) strict {
+    when highway_full_year_amount_after_period_reduction(e, amount) and not_known(highway_use_logging_reduction(e));
+    then excise_tax_due_full_year(e, amount);
+}
+
+pub relation excise_tax_due_full_year(e: HighwayVehicleUseEvent, amount: Money) kind institutional {
+    label en official "section 4481(a): the un-prorated table amount for the full taxable period, kept apart from `excise_tax_due` so the section 4481(c) proration rule can scale it without a predicate consuming and producing itself";
+}
+
+@source(IRC_S4481_A, relation = formalizes, coverage = exact, quote = "A tax is hereby imposed on the use of any highway motor vehicle which (together with the semitrailers and trailers customarily used in connection with highway motor vehicles of the same type as such highway motor vehicle) has a taxable gross weight of at least 55,000 pounds at the rate specified in the following table")
+rule HighwayUseTaxMiddleBand(e: HighwayVehicleUseEvent, weight: Decimal) strict {
+    when highway_vehicle_use(e, weight, _) and weight >= 55000.0 and weight <= 75000.0;
+    then highway_table_amount(e, 100 USD + round(22 USD * div_round(weight - 55000.0, 1000.0, 0, "CEILING"), 2, "HALF_UP"));
+}
+@source(IRC_S4481_A, relation = formalizes, coverage = exact, quote = "A tax is hereby imposed on the use of any highway motor vehicle which (together with the semitrailers and trailers customarily used in connection with highway motor vehicles of the same type as such highway motor vehicle) has a taxable gross weight of at least 55,000 pounds at the rate specified in the following table")
+rule HighwayUseTaxTopBand(e: HighwayVehicleUseEvent, weight: Decimal) strict {
+    when highway_vehicle_use(e, weight, _) and weight > 75000.0;
+    then highway_table_amount(e, 550 USD);
+}
+
+@source(IRC_S4481_B, relation = formalizes, coverage = exact, quote = "The tax imposed by this section shall be paid by the person in whose name the highway motor vehicle is, or is required to be, registered under the law of the State or contiguous foreign country in which such vehicle is, or is required to be, registered, or, in case the highway motor vehicle is owned by the United States, by the agency or instrumentality of the United States operating such vehicle.")
+rule HighwayUseLiability(e: HighwayVehicleUseEvent, owner: Person, amount: Money) defeasible {
+    when highway_vehicle_use(e, _, owner) and excise_tax_due(e, amount);
+    then liable_for_excise(owner, e, amount);
+}
+
+// --- section 4481(c): proration --------------------------------------------
+//
+// TECH_GAP (report this): the number of MONTHS a taxable period is prorated
+// over (§4481(c)(1): from the first-use month through the taxable period's
+// end; §4481(c)(2): from the first-use month through the month of sale,
+// destruction, or theft) is a calendar-month COUNT between two dates. No
+// standard-library term in this package's `law.core` 0.2 surface computes a
+// month-count from two `Date` values (only `add_calendar_period`, which
+// moves a date FORWARD by a literal period, was found — see AGENT-BRIEF's
+// compiler-traps list and `docs/foundations/us-irc/TECH-GAPS.md` row G12x
+// added by this package). The case therefore asserts the month count
+// directly (`highway_use_months_in_period`); this package computes the
+// PRORATED TAX from that count (the arithmetic §4481(c) actually prescribes)
+// but does not derive the count itself from the two boundary dates.
+
+pub relation highway_use_months_in_period(e: HighwayVehicleUseEvent, months: Decimal) kind empirical {
+    label en unofficial "the number of months (section 4481(c)(1) or (c)(2)) the tax is reckoned proportionately over; TECH_GAP above explains why this is case-asserted rather than computed from two dates";
+}
+
+pub relation highway_use_prorated(e: HighwayVehicleUseEvent) kind institutional {
+    label en official "some section 4481(c) proration count was supplied for this event";
+}
+rule HighwayUseProratedMarker(e: HighwayVehicleUseEvent, months: Decimal) strict {
+    when highway_use_months_in_period(e, months);
+    then highway_use_prorated(e);
+}
+
+@source(IRC_S4481_C, relation = formalizes, coverage = exact, quote = "the tax shall be reckoned proportionately from the first day of the month in which such use occurs to and including the last day in such taxable period")
+rule ProratedTaxAmount(e: HighwayVehicleUseEvent, fullYearTax: Money, months: Decimal) strict {
+    when excise_tax_due_full_year(e, fullYearTax) and highway_use_months_in_period(e, months);
+    then excise_tax_due(e, div_round(fullYearTax * months, 12.0, 2, "HALF_UP"));
+}
+
+@source(IRC_S4481_A, relation = formalizes, coverage = exact, quote = "A tax is hereby imposed on the use of any highway motor vehicle which (together with the semitrailers and trailers customarily used in connection with highway motor vehicles of the same type as such highway motor vehicle) has a taxable gross weight of at least 55,000 pounds at the rate specified in the following table")
+rule UnproratedTax(e: HighwayVehicleUseEvent, amount: Money) strict {
+    when excise_tax_due_full_year(e, amount) and not_known(highway_use_prorated(e));
+    then excise_tax_due(e, amount);
+}

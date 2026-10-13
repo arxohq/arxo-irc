@@ -1,0 +1,709 @@
+// 26 U.S.C. §641(c)(2)(A), (E)(ii), §646(b)(2), §667(a)(1)-(2), §667(b)(1)(B)-(D), §667(d)(1), §668(a)(2)-(3)
+// (stage 4, DECISION-0379 with deontics, 26.09.2026: the TECH_GAP rows that need a tax RECOMPUTED at a
+// hypothetical taxable income or an aggregate over a selection of years).
+//
+// TECHNIQUE (a parallel rule set with bounded years). The tax of section 1 of `us.irc.income_individual` is
+// keyed by a (person, year) pair whose taxable income the case asserts, so it cannot be asked at another income.
+// The ten rate tables it reads are decision tables that answer for ANY income (they are `pub` there since
+// this stage), so this module repeats only the arithmetic the table wording gives ("base tax + rate x excess over
+// the lower bound", the rule `TaxUnderTable*` of `rates.law`) over a REQUESTED income:
+//  - `hypothetical_income_request(p, y, income)` is derived by the rules below (it carries the queried income so
+//    that no head variable is unbound, the same device as `amount_to_index` of the cost-of-living module);
+//  - `hypothetical_section_1_tax(p, y, income, tax)` answers it under the table of the year (the year begins
+//    before 2018: the 1993 base table; from 2018: the TCJA table), read from `us.irc.core::begins`.
+//  The years of a computation are BOUNDED: exactly the five years of §667(b)(1)(B) (slots 1..5, 1 = earliest),
+//  the three that remain, and at most ten whole years for the period of §668(a)(2).
+//
+// JUDGMENT CALLS AND LIMITS (also in the coverage rows and TECH-GAPS G6700-G6799):
+//  - The tables are the ones pinned in `income-individual` (the 2018 unindexed TCJA amounts; the indexation of
+//    the brackets is TECH-GAPS G5500): the recomputed tax is exactly the tax `tax_under_section_1` would give at
+//    that income, no more exact.
+//  - §667(b)(1)(B): the highest and the lowest of the five years are taken by taxable income (loss years floored
+//    at zero, §667(b)(2), plus the amounts previously deemed distributed, §667(b)(4)); a tie is broken by the
+//    order of the years (the highest is the EARLIEST of equal years, the lowest the LATEST), so that exactly two
+//    distinct years are removed; the statute is silent on ties.
+//  - §667(b)(1)(C): the addition is `amount / N` in cents HALF_UP (JUDGMENT CALL: the text names no rounding);
+//    N is the number of preceding trust years counted under §667(b)(1)(A) and (b)(3).
+//  - §667(b)(1)(D): the average of the three increases is the sum over three cents-rounded increases divided by 3
+//    (cents HALF_UP). The excess subtracts the taxes deemed distributed under §666(b)-(c) OTHER than the §665(d)(2)
+//    foreign taxes (`foreign_taxes_deemed_distributed_665d2` names that part).
+//  - §667(d)(1): the credit limitation of subpart A of part III of subchapter N is the owner `international`, which
+//    this package does not import: the limit per computation year is an input (`foreign_tax_credit_limit_667d1`).
+//  - §646(b)(2): "the rate of tax which would apply to such gain if the taxpayer were subject to a tax on its other
+//    taxable income at only the lowest rate specified in section 1(c)" is read literally: the counterfactual only
+//    fixes the rate of the ORDINARY layer, which drops out of the gain's own tax; the gain is layered over the
+//    other taxable income by the amounts of §1(j)(5) (0, 15 and 20 percent), and the tax on the gain is the sum of
+//    the layers. The net capital gain is treated as adjusted net capital gain (no 28-percent or unrecaptured
+//    section 1250 layers).
+//  - §668(a)(3): the product of (B) uses the undistributed net income asserted for the year (before the
+//    distribution); the year numbers are the calendar year numbers of the taxable years; the rounding of the
+//    quotient is "under procedures prescribed by the Secretary" (EXTERNAL_DEPENDENCY): the whole-year value the
+//    case supplies feeds the period of (a)(2). The interest of (a)(1) is the owner `payment-refunds-interest`.
+
+language "law.core" version "0.2";
+package us.irc.trusts_estates version "0.1.1";
+namespace "urn:us:irc:trusts_estates:clir";
+
+use self::{
+    IRC_S641_C,
+    IRC_S646_B,
+    IRC_S667_A,
+    IRC_S667_B,
+    IRC_S667_D,
+    IRC_S668_A,
+    Person,
+    Secretary,
+    TaxableYear,
+    Trust,
+    accumulation_distribution_paid_credited_or_required_to_beneficiary,
+    additional_taxes_deemed_distributed_666,
+    beneficiary_inclusion_667a,
+    beneficiary_prior_year_income_for_partial_tax_667b4,
+    beneficiary_tax_for_year_667a,
+    beneficiary_taxable_income_deemed_for_667b,
+    beneficiary_taxable_income_for_year,
+    electing_settlement_trust,
+    esbt_separate_trust_taxable_income,
+    interest_charge_668_for_beneficiary,
+    preceding_year_counted_for_667b1A,
+    prior_year_previously_deemed_distributed_income,
+    settlement_trust_taxable_income,
+    trust_year_has_undistributed_net_income,
+    undistributed_income_year_668,
+};
+
+// ============================================================================
+// The tax of section 1 at a requested income (parallel rule set over the rate tables)
+// ============================================================================
+
+pub relation hypothetical_income_request(p: Person, y: TaxableYear, income: Money) kind institutional {
+    label en unofficial "the taxable income at which the section 1 tax of the person is recomputed for the year (produced by the recomputation rules of this module)";
+}
+pub relation hypothetical_section_1_tax(p: Person, y: TaxableYear, income: Money, tax: Money) kind institutional {
+    label en unofficial "the tax of section 1(a)-(e) at the requested income under the rate table of the year and the filing status of the person (base tax plus the rate times the excess over the lower bound)";
+}
+rule HypTax1993Joint(p: Person, y: TaxableYear, income: Money, d: Date, lower: Money, base: Money, rate: Decimal) defeasible {
+    label en unofficial "1993 base table, joint return";
+    when hypothetical_income_request(p, y, income);
+    when us.irc.income_individual::filing_status(p, y, us.irc.income_individual::Joint);
+    when us.irc.core::begins(y, d);
+    when d >= @1993-01-01;
+    when d < @2018-01-01;
+    when us.irc.income_individual::bracket_1986_joint(income, lower, base, rate);
+    then hypothetical_section_1_tax(p, y, income, base + rate * (income - lower));
+}
+rule HypTax1993Hoh(p: Person, y: TaxableYear, income: Money, d: Date, lower: Money, base: Money, rate: Decimal) defeasible {
+    label en unofficial "1993 base table, head of household";
+    when hypothetical_income_request(p, y, income);
+    when us.irc.income_individual::filing_status(p, y, us.irc.income_individual::HeadOfHousehold);
+    when us.irc.core::begins(y, d);
+    when d >= @1993-01-01;
+    when d < @2018-01-01;
+    when us.irc.income_individual::bracket_1986_hoh(income, lower, base, rate);
+    then hypothetical_section_1_tax(p, y, income, base + rate * (income - lower));
+}
+rule HypTax1993Unmarried(p: Person, y: TaxableYear, income: Money, d: Date, lower: Money, base: Money, rate: Decimal) defeasible {
+    label en unofficial "1993 base table, unmarried individual";
+    when hypothetical_income_request(p, y, income);
+    when us.irc.income_individual::filing_status(p, y, us.irc.income_individual::Unmarried);
+    when us.irc.core::begins(y, d);
+    when d >= @1993-01-01;
+    when d < @2018-01-01;
+    when us.irc.income_individual::bracket_1986_unmarried(income, lower, base, rate);
+    then hypothetical_section_1_tax(p, y, income, base + rate * (income - lower));
+}
+rule HypTax1993MarriedSeparate(p: Person, y: TaxableYear, income: Money, d: Date, lower: Money, base: Money, rate: Decimal) defeasible {
+    label en unofficial "1993 base table, married individual filing separately";
+    when hypothetical_income_request(p, y, income);
+    when us.irc.income_individual::filing_status(p, y, us.irc.income_individual::MarriedSeparate);
+    when us.irc.core::begins(y, d);
+    when d >= @1993-01-01;
+    when d < @2018-01-01;
+    when us.irc.income_individual::bracket_1986_married_separate(income, lower, base, rate);
+    then hypothetical_section_1_tax(p, y, income, base + rate * (income - lower));
+}
+rule HypTaxTcjaJoint(p: Person, y: TaxableYear, income: Money, d: Date, lower: Money, base: Money, rate: Decimal) defeasible {
+    label en unofficial "TCJA table, joint return";
+    when hypothetical_income_request(p, y, income);
+    when us.irc.income_individual::filing_status(p, y, us.irc.income_individual::Joint);
+    when us.irc.core::begins(y, d);
+    when d >= @2018-01-01;
+    when us.irc.income_individual::bracket_tcja_joint(income, lower, base, rate);
+    then hypothetical_section_1_tax(p, y, income, base + rate * (income - lower));
+}
+rule HypTaxTcjaHoh(p: Person, y: TaxableYear, income: Money, d: Date, lower: Money, base: Money, rate: Decimal) defeasible {
+    label en unofficial "TCJA table, head of household";
+    when hypothetical_income_request(p, y, income);
+    when us.irc.income_individual::filing_status(p, y, us.irc.income_individual::HeadOfHousehold);
+    when us.irc.core::begins(y, d);
+    when d >= @2018-01-01;
+    when us.irc.income_individual::bracket_tcja_hoh(income, lower, base, rate);
+    then hypothetical_section_1_tax(p, y, income, base + rate * (income - lower));
+}
+rule HypTaxTcjaUnmarried(p: Person, y: TaxableYear, income: Money, d: Date, lower: Money, base: Money, rate: Decimal) defeasible {
+    label en unofficial "TCJA table, unmarried individual";
+    when hypothetical_income_request(p, y, income);
+    when us.irc.income_individual::filing_status(p, y, us.irc.income_individual::Unmarried);
+    when us.irc.core::begins(y, d);
+    when d >= @2018-01-01;
+    when us.irc.income_individual::bracket_tcja_unmarried(income, lower, base, rate);
+    then hypothetical_section_1_tax(p, y, income, base + rate * (income - lower));
+}
+rule HypTaxTcjaMarriedSeparate(p: Person, y: TaxableYear, income: Money, d: Date, lower: Money, base: Money, rate: Decimal) defeasible {
+    label en unofficial "TCJA table, married individual filing separately";
+    when hypothetical_income_request(p, y, income);
+    when us.irc.income_individual::filing_status(p, y, us.irc.income_individual::MarriedSeparate);
+    when us.irc.core::begins(y, d);
+    when d >= @2018-01-01;
+    when us.irc.income_individual::bracket_tcja_married_separate(income, lower, base, rate);
+    then hypothetical_section_1_tax(p, y, income, base + rate * (income - lower));
+}
+
+// ============================================================================
+// §641(c)(2)(A): the highest rate of section 1(e) for the separate trust of an ESBT
+// ============================================================================
+
+pub relation highest_section_1e_rate(y: TaxableYear, rate: Decimal) kind institutional {
+    label en official "the highest rate of tax set forth in section 1(e) for the taxable year: the rate of the last bracket of the table of section 1(e) (read from the table at an income above every bracket)";
+}
+@source(IRC_S641_C, relation = formalizes, coverage = exact, quote = "the amount of the tax imposed by section 1(e) shall be determined by using the highest rate of tax set forth in section 1(e).")
+rule S641c2AHighestRate1993(y: TaxableYear, d: Date, lower: Money, base: Money, rate: Decimal) defeasible {
+    label en official "section 641(c)(2)(A): the last bracket of the 1993 base table of section 1(e)";
+    when us.irc.core::begins(y, d);
+    when d >= @1993-01-01;
+    when d < @2018-01-01;
+    when us.irc.income_individual::bracket_1986_estate_trust(1000000000000.00 USD, lower, base, rate);
+    then highest_section_1e_rate(y, rate);
+}
+@source(IRC_S641_C, relation = formalizes, coverage = exact, quote = "the amount of the tax imposed by section 1(e) shall be determined by using the highest rate of tax set forth in section 1(e).")
+rule S641c2AHighestRateTcja(y: TaxableYear, d: Date, lower: Money, base: Money, rate: Decimal) defeasible {
+    label en official "section 641(c)(2)(A): the last bracket of the TCJA table of section 1(e)";
+    when us.irc.core::begins(y, d);
+    when d >= @2018-01-01;
+    when us.irc.income_individual::bracket_tcja_estate_trust(1000000000000.00 USD, lower, base, rate);
+    then highest_section_1e_rate(y, rate);
+}
+pub relation esbt_has_net_capital_gain(t: Trust, y: TaxableYear) kind institutional {
+    label en unofficial "the separate trust has a net capital gain, to which section 1(h) applies (section 641(c)(2)(A), exception)";
+}
+rule EsbtHasNetCapitalGain(t: Trust, y: TaxableYear, ncg: Money) defeasible {
+    when us.irc.income_individual::net_capital_gain(t, y, ncg);
+    when ncg > 0 USD;
+    then esbt_has_net_capital_gain(t, y);
+}
+pub relation esbt_separate_trust_ordinary_tax_at_highest_rate(t: Trust, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the tax of section 1(e) on the separate-trust taxable income other than net capital gain, at the highest rate of section 1(e) (section 641(c)(2)(A)); the tax on the net capital gain is section 1(h)";
+}
+@source(IRC_S641_C, relation = formalizes, coverage = exact, quote = "Except as provided in section 1(h), the amount of the tax imposed by section 1(e) shall be determined by using the highest rate of tax set forth in section 1(e).")
+rule S641c2ATaxAtHighestRateNoGain(t: Trust, y: TaxableYear, ti: Money, rate: Decimal) defeasible {
+    label en official "section 641(c)(2)(A): the whole separate-trust taxable income at the highest rate (no net capital gain; cents HALF_UP is a JUDGMENT CALL)";
+    when esbt_separate_trust_taxable_income(t, y, ti);
+    when highest_section_1e_rate(y, rate);
+    when not_known(esbt_has_net_capital_gain(t, y));
+    then esbt_separate_trust_ordinary_tax_at_highest_rate(t, y, round(max(0 USD, ti) * rate, 2, "HALF_UP"));
+}
+@source(IRC_S641_C, relation = formalizes, coverage = exact, quote = "Except as provided in section 1(h), the amount of the tax imposed by section 1(e) shall be determined by using the highest rate of tax set forth in section 1(e).")
+rule S641c2ATaxAtHighestRateOrdinaryPart(t: Trust, y: TaxableYear, ti: Money, ncg: Money, rate: Decimal) defeasible {
+    label en official "section 641(c)(2)(A): the part other than net capital gain at the highest rate; the gain part is left to section 1(h)";
+    when esbt_separate_trust_taxable_income(t, y, ti);
+    when us.irc.income_individual::net_capital_gain(t, y, ncg);
+    when ncg > 0 USD;
+    when highest_section_1e_rate(y, rate);
+    then esbt_separate_trust_ordinary_tax_at_highest_rate(t, y, round(max(0 USD, ti - ncg) * rate, 2, "HALF_UP"));
+}
+
+// ============================================================================
+// §641(c)(2)(E)(ii): adjusted gross income of an ESBT for section 170(b)(1)(G)
+// ============================================================================
+
+pub relation esbt_agi_deductions_as_individual(t: Trust, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the deductions an individual would take in arriving at adjusted gross income for the trust's items, other than the administration costs of the next relation (case-asserted total; section 62)";
+}
+pub relation esbt_administration_costs_not_incurred_if_not_held_in_trust(t: Trust, y: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the costs paid or incurred in connection with the administration of the trust that would not have been incurred if the property were not held in such trust (section 641(c)(2)(E)(ii))";
+}
+pub relation esbt_agi_for_170b1G(t: Trust, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the adjusted gross income of the electing small business trust for section 170(b)(1)(G): computed as for an individual (gross income less the deductions in arriving at adjusted gross income), with the administration costs that the trust alone incurs allowed in arriving at it (section 641(c)(2)(E)(ii))";
+}
+@source(IRC_S641_C, relation = formalizes, coverage = exact, quote = "(ii) For purposes of section 170(b)(1)(G), adjusted gross income shall be computed in the same manner as in the case of an individual, except that the deductions for costs which are paid or incurred in connection with the administration of the trust and which would not have been incurred if the property were not held in such trust shall be treated as allowable in arriving at adjusted gross income.")
+rule S641c2EiiAgi(t: Trust, y: TaxableYear, gross: Money, deductions: Money, costs: Money) defeasible {
+    label en official "section 641(c)(2)(E)(ii): gross income of section 61 less the individual above-the-line deductions less the trust-only administration costs (JUDGMENT CALL: the individual deductions are one asserted total; the gross income is the section 61 aggregate of us.irc.gross_income for the trust)";
+    when us.irc.gross_income::gross_income(t, y, gross);
+    when esbt_agi_deductions_as_individual(t, y, deductions);
+    when esbt_administration_costs_not_incurred_if_not_held_in_trust(t, y, costs);
+    then esbt_agi_for_170b1G(t, y, gross - deductions - costs);
+}
+
+// ============================================================================
+// §646(b)(2): the tax on the net capital gain of an electing Settlement Trust
+// ============================================================================
+
+pub relation settlement_trust_gain_layer_amounts(t: Trust, y: TaxableYear, zero_layer: Money, fifteen_layer: Money, twenty_layer: Money) kind institutional {
+    label en official "the net capital gain of the electing Settlement Trust split into the layers taxed at 0, 15 and 20 percent over its other taxable income by the amounts of section 1(j)(5) (section 646(b)(2), read through section 1(h))";
+}
+@source(IRC_S646_B, relation = formalizes, coverage = exact, quote = "In the case of an electing Settlement Trust with a net capital gain for the taxable year, a tax is hereby imposed on such gain at the rate of tax which would apply to such gain")
+rule S646b2Layers(t: Trust, y: TaxableYear, ti: Money, ncg: Money, z0: Money, z15: Money) defeasible {
+    label en official "section 646(b)(2) with 1(h)(1)(B)-(D) and 1(j)(5): the gain stacked on the other taxable income; the 0-percent layer up to the maximum zero rate amount, the 15-percent layer up to the maximum 15-percent rate amount, the rest at 20 percent";
+    when electing_settlement_trust(t, y);
+    when settlement_trust_taxable_income(t, y, ti);
+    when us.irc.income_individual::net_capital_gain(t, y, ncg);
+    when ncg > 0 USD;
+    when us.irc.income_individual::max_zero_rate_amount(t, y, z0);
+    when us.irc.income_individual::max_15_percent_rate_amount(t, y, z15);
+    then settlement_trust_gain_layer_amounts(t, y,
+        min(ncg, max(0 USD, z0 - max(0 USD, ti - ncg))),
+        min(ncg - min(ncg, max(0 USD, z0 - max(0 USD, ti - ncg))), max(0 USD, z15 - max(0 USD, ti - ncg) - min(ncg, max(0 USD, z0 - max(0 USD, ti - ncg))))),
+        ncg - min(ncg, max(0 USD, z0 - max(0 USD, ti - ncg))) - min(ncg - min(ncg, max(0 USD, z0 - max(0 USD, ti - ncg))), max(0 USD, z15 - max(0 USD, ti - ncg) - min(ncg, max(0 USD, z0 - max(0 USD, ti - ncg))))));
+}
+pub relation section_646b2_tax_computed(t: Trust, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the tax on the net capital gain of the electing Settlement Trust computed over the layers: 15 percent of the second layer plus 20 percent of the third (section 646(b)(2))";
+}
+@source(IRC_S646_B, relation = formalizes, coverage = exact, quote = "a tax is hereby imposed on such gain at the rate of tax which would apply to such gain")
+rule S646b2TaxOverLayers(t: Trust, y: TaxableYear, l0: Money, l15: Money, l20: Money) defeasible {
+    label en official "section 646(b)(2): the sum of the layers (cents HALF_UP is a JUDGMENT CALL)";
+    when settlement_trust_gain_layer_amounts(t, y, l0, l15, l20);
+    then section_646b2_tax_computed(t, y, round(l15 * 0.15 + l20 * 0.20, 2, "HALF_UP"));
+}
+pub relation lowest_section_1c_rate_from_table(y: TaxableYear, rate: Decimal) kind institutional {
+    label en official "the lowest rate specified in section 1(c) for the taxable year: the rate of the first bracket of the table of section 1(c) (read from the table at the smallest positive income)";
+}
+rule LowestSection1cRate1993(y: TaxableYear, d: Date, lower: Money, base: Money, rate: Decimal) defeasible {
+    label en official "section 1(c), first bracket of the 1993 base table";
+    when us.irc.core::begins(y, d);
+    when d >= @1993-01-01;
+    when d < @2018-01-01;
+    when us.irc.income_individual::bracket_1986_unmarried(0.01 USD, lower, base, rate);
+    then lowest_section_1c_rate_from_table(y, rate);
+}
+rule LowestSection1cRateTcja(y: TaxableYear, d: Date, lower: Money, base: Money, rate: Decimal) defeasible {
+    label en official "section 1(c), first bracket of the TCJA table";
+    when us.irc.core::begins(y, d);
+    when d >= @2018-01-01;
+    when us.irc.income_individual::bracket_tcja_unmarried(0.01 USD, lower, base, rate);
+    then lowest_section_1c_rate_from_table(y, rate);
+}
+
+// ============================================================================
+// §667(b)(1): the five preceding years of the beneficiary, the selection, the three computation years
+// ============================================================================
+
+pub relation beneficiary_preceding_year_667b1B(b: Person, y: TaxableYear, slot: Integer, cy: TaxableYear) kind empirical {
+    label en unofficial "the slot-th (1 = earliest, 5 = latest) of the 5 taxable years of the beneficiary immediately preceding the year y of the accumulation distribution (case-asserted; section 667(b)(1)(B))";
+}
+pub relation slot_income_667b1(b: Person, y: TaxableYear, slot: Integer, income: Money) kind institutional {
+    label en unofficial "the taxable income of the slot-th preceding year used for the selection and the recomputation: not less than zero (section 667(b)(2)) plus the amounts previously deemed distributed in that year (section 667(b)(4))";
+}
+rule SlotIncomeWithPriorDeemed(b: Person, y: TaxableYear, slot: Integer, cy: TaxableYear, income: Money) defeasible {
+    label en official "section 667(b)(4): the year's income includes the amounts previously deemed distributed in it";
+    when beneficiary_preceding_year_667b1B(b, y, slot, cy);
+    when beneficiary_prior_year_income_for_partial_tax_667b4(b, cy, income);
+    then slot_income_667b1(b, y, slot, income);
+}
+pub relation has_prior_deemed_distribution_667b4(b: Person, cy: TaxableYear) kind institutional {
+    label en unofficial "amounts previously deemed distributed to the beneficiary in the year are asserted";
+}
+rule HasPriorDeemedDistribution(b: Person, cy: TaxableYear, deemed: Money) defeasible {
+    when prior_year_previously_deemed_distributed_income(b, cy, deemed);
+    then has_prior_deemed_distribution_667b4(b, cy);
+}
+rule SlotIncomeWithoutPriorDeemed(b: Person, y: TaxableYear, slot: Integer, cy: TaxableYear, income: Money) defeasible {
+    label en official "section 667(b)(2): the year's taxable income, not less than zero";
+    when beneficiary_preceding_year_667b1B(b, y, slot, cy);
+    when beneficiary_taxable_income_deemed_for_667b(b, cy, income);
+    when not_known(has_prior_deemed_distribution_667b4(b, cy));
+    then slot_income_667b1(b, y, slot, income);
+}
+relation slot_is_not_highest_667b1B(b: Person, y: TaxableYear, slot: Integer) kind institutional {
+    label en unofficial "another slot has a higher income, or an equal income and an earlier slot";
+}
+rule SlotNotHighestByIncome(b: Person, y: TaxableYear, slot: Integer, other: Integer, ti: Money, ti_other: Money) defeasible {
+    when slot_income_667b1(b, y, slot, ti);
+    when slot_income_667b1(b, y, other, ti_other);
+    when ti_other > ti;
+    then slot_is_not_highest_667b1B(b, y, slot);
+}
+rule SlotNotHighestByTie(b: Person, y: TaxableYear, slot: Integer, other: Integer, ti: Money, ti_other: Money) defeasible {
+    when slot_income_667b1(b, y, slot, ti);
+    when slot_income_667b1(b, y, other, ti_other);
+    when ti_other == ti;
+    when other < slot;
+    then slot_is_not_highest_667b1B(b, y, slot);
+}
+relation slot_is_not_lowest_667b1B(b: Person, y: TaxableYear, slot: Integer) kind institutional {
+    label en unofficial "another slot has a lower income, or an equal income and a later slot";
+}
+rule SlotNotLowestByIncome(b: Person, y: TaxableYear, slot: Integer, other: Integer, ti: Money, ti_other: Money) defeasible {
+    when slot_income_667b1(b, y, slot, ti);
+    when slot_income_667b1(b, y, other, ti_other);
+    when ti_other < ti;
+    then slot_is_not_lowest_667b1B(b, y, slot);
+}
+rule SlotNotLowestByTie(b: Person, y: TaxableYear, slot: Integer, other: Integer, ti: Money, ti_other: Money) defeasible {
+    when slot_income_667b1(b, y, slot, ti);
+    when slot_income_667b1(b, y, other, ti_other);
+    when ti_other == ti;
+    when other > slot;
+    then slot_is_not_lowest_667b1B(b, y, slot);
+}
+pub relation computation_slot_667d1D(b: Person, y: TaxableYear, slot: Integer) kind institutional {
+    label en official "the slot is one of the three taxable years remaining after the highest and the lowest of the five are taken out (section 667(b)(1)(B); the computation year of section 667(d)(1)(D))";
+}
+@source(IRC_S667_B, relation = formalizes, coverage = exact, quote = "by taking from the 5 taxable years immediately preceding the year of the accumulation distribution the 1 taxable year for which the beneficiary's taxable income was the highest and the 1 taxable year for which his taxable income was the lowest,")
+rule ComputationSlotIsNeitherHighestNorLowest(b: Person, y: TaxableYear, slot: Integer, ti: Money) defeasible {
+    label en official "section 667(b)(1)(B): the years other than the highest and the lowest";
+    when slot_income_667b1(b, y, slot, ti);
+    when slot_is_not_highest_667b1B(b, y, slot);
+    when slot_is_not_lowest_667b1B(b, y, slot);
+    then computation_slot_667d1D(b, y, slot);
+}
+@source(IRC_S667_D, relation = formalizes, coverage = exact, quote = "For purposes of this paragraph, the term \"computation year\" means any of the three taxable years remaining after application of subsection (b)(1)(B).")
+pub relation computation_year_667d1D(b: Person, y: TaxableYear, cy: TaxableYear) kind institutional {
+    label en official "a computation year: one of the three taxable years remaining after application of section 667(b)(1)(B) (section 667(d)(1)(D))";
+}
+rule ComputationYearDefined(b: Person, y: TaxableYear, slot: Integer, cy: TaxableYear) defeasible {
+    label en official "section 667(d)(1)(D)";
+    when computation_slot_667d1D(b, y, slot);
+    when beneficiary_preceding_year_667b1B(b, y, slot, cy);
+    then computation_year_667d1D(b, y, cy);
+}
+
+// --- N: the number of preceding trust years counted under (b)(1)(A) and (b)(3) ---
+
+pub relation number_of_counted_preceding_years_667b1A(t: Trust, ad: TaxableYear, n: Integer) kind institutional {
+    label en official "the number of preceding taxable years of the trust on the last day of which an amount is deemed distributed under section 666(a), without the years below 25 percent of the average (section 667(b)(1)(A), (b)(3))";
+}
+rule NumberOfCountedPrecedingYears(t: Trust, ad: TaxableYear, idx0: Integer) defeasible {
+    when preceding_year_counted_for_667b1A(t, ad, idx0);
+    then number_of_counted_preceding_years_667b1A(t, ad, count(collect j: Integer where preceding_year_counted_for_667b1A(t, ad, j)));
+}
+
+// --- (C): the addition to the taxable income of each computation year ---
+
+relation slot_income_with_addition_667b1C(b: Person, t: Trust, ad: TaxableYear, y: TaxableYear, slot: Integer, income: Money) kind institutional {
+    label en unofficial "the taxable income of the computation year plus the amount deemed distributed and included, divided by N (section 667(b)(1)(C))";
+}
+@source(IRC_S667_B, relation = formalizes, coverage = exact, quote = "by adding to the beneficiary's taxable income for each of the 3 taxable years remaining after the application of subparagraph (B) an amount determined by dividing the amount deemed distributed under section 666 and required to be included in income under subsection (a) by the number of preceding taxable years determined under subparagraph (A), and")
+rule SlotIncomeWithAddition(b: Person, t: Trust, ad: TaxableYear, y: TaxableYear, slot: Integer, ti: Money, amount: Money, n: Integer) defeasible {
+    label en official "section 667(b)(1)(C): income + amount / N (cents HALF_UP is a JUDGMENT CALL)";
+    when accumulation_distribution_paid_credited_or_required_to_beneficiary(b, t, ad, y);
+    when beneficiary_inclusion_667a(b, t, y, amount);
+    when number_of_counted_preceding_years_667b1A(t, ad, n);
+    when n > 0;
+    when computation_slot_667d1D(b, y, slot);
+    when slot_income_667b1(b, y, slot, ti);
+    when not_known(deduction_in_lieu_of_credit_667d1B(b, y, slot));
+    then slot_income_with_addition_667b1C(b, t, ad, y, slot, ti + div_round(amount, n * 1.0, 2, "HALF_UP"));
+}
+// §667(d)(1)(B): the beneficiary who did not choose the benefits of subpart A of part III of subchapter N for the
+// computation year MAY treat the foreign taxes as a deduction in computing the taxable income of (b)(1)(C) in lieu of
+// the credit: a liberty over the beneficiary's own treatment (no relation changes), read from the asserted action.
+relation beneficiary_chose_foreign_tax_credit_benefits_667d1B(b: Person, cy: TaxableYear) kind empirical {
+    label en unofficial "the beneficiary chose the benefits of subpart A of part III of subchapter N for the computation year (case-asserted)";
+}
+pub relation beneficiary_treats_taxes_as_deduction_667d1B(b: Person, y: TaxableYear, slot: Integer) kind empirical {
+    label en unofficial "the beneficiary treats the foreign taxes added for the slot-th preceding year as a deduction in lieu of a credit (case-asserted action of the liberty of section 667(d)(1)(B))";
+}
+relation deduction_in_lieu_of_credit_667d1B(b: Person, y: TaxableYear, slot: Integer) kind institutional {
+    label en unofficial "the deduction in lieu of the credit is taken for the computation year and is available (the beneficiary did not choose the credit benefits)";
+}
+rule DeductionInLieuOfCredit(b: Person, y: TaxableYear, slot: Integer, cy: TaxableYear) defeasible {
+    label en official "section 667(d)(1)(B): elected and available";
+    when beneficiary_treats_taxes_as_deduction_667d1B(b, y, slot);
+    when beneficiary_preceding_year_667b1B(b, y, slot, cy);
+    when not_known(beneficiary_chose_foreign_tax_credit_benefits_667d1B(b, cy));
+    then deduction_in_lieu_of_credit_667d1B(b, y, slot);
+}
+@source(IRC_S667_D, relation = formalizes, coverage = exact, quote = "the beneficiary may in lieu of treating the amounts described in subparagraph (A) (without regard to subparagraph (C)) as a credit may treat such amounts as a deduction in computing the beneficiary's taxable income under subsection (b)(1)(C) for the computation year.")
+rule S667d1BLiberty(b: Person, y: TaxableYear, slot: Integer, cy: TaxableYear) defeasible {
+    label en official "section 667(d)(1)(B): the beneficiary who did not choose the credit benefits may treat the foreign taxes as a deduction";
+    when computation_slot_667d1D(b, y, slot);
+    when beneficiary_preceding_year_667b1B(b, y, slot, cy);
+    when not_known(beneficiary_chose_foreign_tax_credit_benefits_667d1B(b, cy));
+    then liberty S667d1BDeductionInLieuOfCredit {
+        holder b;
+        against Secretary;
+        action beneficiary_treats_taxes_as_deduction_667d1B(b, y, slot);
+        window [-infinity, infinity];
+    };
+}
+@source(IRC_S667_D, relation = formalizes, coverage = exact, quote = "may treat such amounts as a deduction in computing the beneficiary's taxable income under subsection (b)(1)(C) for the computation year.")
+rule SlotIncomeWithAdditionLessForeignTaxDeduction(b: Person, t: Trust, ad: TaxableYear, y: TaxableYear, slot: Integer, ti: Money, amount: Money, n: Integer, foreign: Money) defeasible {
+    label en official "section 667(d)(1)(B): the addition of (b)(1)(C) less the foreign taxes added for the year (1/N of the taxes deemed distributed), not below the income itself";
+    when accumulation_distribution_paid_credited_or_required_to_beneficiary(b, t, ad, y);
+    when beneficiary_inclusion_667a(b, t, y, amount);
+    when number_of_counted_preceding_years_667b1A(t, ad, n);
+    when n > 0;
+    when computation_slot_667d1D(b, y, slot);
+    when slot_income_667b1(b, y, slot, ti);
+    when deduction_in_lieu_of_credit_667d1B(b, y, slot);
+    when foreign_taxes_deemed_distributed_665d2(t, ad, foreign);
+    then slot_income_with_addition_667b1C(b, t, ad, y, slot, ti + max(0 USD, div_round(amount, n * 1.0, 2, "HALF_UP") - div_round(foreign, n * 1.0, 2, "HALF_UP")));
+}
+@source(IRC_S667_B, relation = formalizes, coverage = exact, quote = "by adding to the beneficiary's taxable income for each of the 3 taxable years remaining after the application of subparagraph (B) an amount determined by dividing the amount deemed distributed under section 666 and required to be included in income under subsection (a) by the number of preceding taxable years determined under subparagraph (A), and")
+rule RequestIncomeBeforeAddition(b: Person, y: TaxableYear, slot: Integer, cy: TaxableYear, ti: Money) defeasible {
+    label en official "the tax at the income of the computation year before the addition is requested";
+    when computation_slot_667d1D(b, y, slot);
+    when beneficiary_preceding_year_667b1B(b, y, slot, cy);
+    when slot_income_667b1(b, y, slot, ti);
+    then hypothetical_income_request(b, cy, ti);
+}
+rule RequestIncomeAfterAddition(b: Person, t: Trust, ad: TaxableYear, y: TaxableYear, slot: Integer, cy: TaxableYear, ti2: Money) defeasible {
+    label en official "the tax at the income of the computation year after the addition is requested";
+    when slot_income_with_addition_667b1C(b, t, ad, y, slot, ti2);
+    when beneficiary_preceding_year_667b1B(b, y, slot, cy);
+    then hypothetical_income_request(b, cy, ti2);
+}
+
+// --- (D): the increase in tax of each computation year, the credit of (d)(1), the average ---
+
+pub relation foreign_tax_credit_limit_667d1(b: Person, y: TaxableYear, slot: Integer, limit: Money) kind empirical {
+    label en unofficial "the limitation of subpart A of part III of subchapter N applied separately to the amounts added under section 667(b)(1)(C) for the computation year: the largest credit allowed (case-asserted; the owner is `international`; section 667(d)(1)(C)(i))";
+}
+pub relation foreign_taxes_deemed_distributed_665d2(t: Trust, ad: TaxableYear, amount: Money) kind empirical {
+    label en unofficial "the part of the taxes deemed distributed under section 666(b) and (c) that is described in section 665(d)(2) (foreign taxes), summed over the preceding years (case-asserted)";
+}
+relation section_667b1_increase_before_credit(b: Person, t: Trust, ad: TaxableYear, y: TaxableYear, slot: Integer, increase: Money) kind institutional {
+    label en unofficial "the increase in the tax of the computation year resulting from the addition, before any credit of section 667(d)(1)";
+}
+@source(IRC_S667_B, relation = formalizes, coverage = exact, quote = "by determining the average increase in tax for the 3 taxable years referred to in subparagraph (C) resulting from the application of such subparagraph.")
+rule IncreaseInTaxOfComputationYear(b: Person, t: Trust, ad: TaxableYear, y: TaxableYear, slot: Integer, cy: TaxableYear, ti: Money, ti2: Money, tax0: Money, tax1: Money) defeasible {
+    label en official "section 667(b)(1)(D): the tax after the addition less the tax before it, for one computation year";
+    when slot_income_with_addition_667b1C(b, t, ad, y, slot, ti2);
+    when beneficiary_preceding_year_667b1B(b, y, slot, cy);
+    when slot_income_667b1(b, y, slot, ti);
+    when hypothetical_section_1_tax(b, cy, ti, tax0);
+    when hypothetical_section_1_tax(b, cy, ti2, tax1);
+    then section_667b1_increase_before_credit(b, t, ad, y, slot, tax1 - tax0);
+}
+pub relation section_667b1_increase(b: Person, t: Trust, ad: TaxableYear, y: TaxableYear, slot: Integer, increase: Money) kind institutional {
+    label en official "the increase in tax for the computation year under section 667(b)(1)(D), after the credit of section 667(d)(1)(A) where the taxes of section 665(d)(2) are treated as a credit against it";
+}
+@source(IRC_S667_D, relation = formalizes, coverage = exact, quote = "shall, except as provided in subparagraphs (B) and (C), be treated as a credit against the increase in tax for such computation year under subsection (b)(1)(D).")
+rule IncreaseWithoutForeignCredit(b: Person, t: Trust, ad: TaxableYear, y: TaxableYear, slot: Integer, increase: Money) defeasible {
+    label en official "section 667(b)(1)(D) for a domestic trust (no foreign taxes deemed distributed): the increase itself";
+    when section_667b1_increase_before_credit(b, t, ad, y, slot, increase);
+    when not_known(has_foreign_taxes_deemed_distributed_667d1(t, ad));
+    then section_667b1_increase(b, t, ad, y, slot, increase);
+}
+pub relation has_foreign_taxes_deemed_distributed_667d1(t: Trust, ad: TaxableYear) kind institutional {
+    label en unofficial "foreign taxes described in section 665(d)(2) are deemed distributed under section 666(b)-(c)";
+}
+rule HasForeignTaxesDeemedDistributed(t: Trust, ad: TaxableYear, amount: Money) defeasible {
+    when foreign_taxes_deemed_distributed_665d2(t, ad, amount);
+    then has_foreign_taxes_deemed_distributed_667d1(t, ad);
+}
+@source(IRC_S667_D, relation = formalizes, coverage = exact, quote = "shall, except as provided in subparagraphs (B) and (C), be treated as a credit against the increase in tax for such computation year under subsection (b)(1)(D).")
+rule IncreaseAfterForeignCredit(b: Person, t: Trust, ad: TaxableYear, y: TaxableYear, slot: Integer, increase: Money, foreign: Money, n: Integer, limit: Money) defeasible {
+    label en official "section 667(d)(1)(A): the foreign taxes added for the computation year (1/N of the taxes deemed distributed) are a credit against the increase, up to the limit of (C)(i)";
+    when section_667b1_increase_before_credit(b, t, ad, y, slot, increase);
+    when foreign_taxes_deemed_distributed_665d2(t, ad, foreign);
+    when number_of_counted_preceding_years_667b1A(t, ad, n);
+    when n > 0;
+    when foreign_tax_credit_limit_667d1(b, y, slot, limit);
+    when not_known(deduction_in_lieu_of_credit_667d1B(b, y, slot));
+    then section_667b1_increase(b, t, ad, y, slot, max(0 USD, increase - min(limit, div_round(foreign, n * 1.0, 2, "HALF_UP"))));
+}
+@source(IRC_S667_D, relation = formalizes, coverage = exact, quote = "may treat such amounts as a deduction in computing the beneficiary's taxable income under subsection (b)(1)(C) for the computation year.")
+rule IncreaseWithDeductionInLieuOfCredit(b: Person, t: Trust, ad: TaxableYear, y: TaxableYear, slot: Integer, increase: Money) defeasible {
+    label en official "section 667(d)(1)(B): with the deduction taken, the increase is not reduced by a credit";
+    when section_667b1_increase_before_credit(b, t, ad, y, slot, increase);
+    when deduction_in_lieu_of_credit_667d1B(b, y, slot);
+    then section_667b1_increase(b, t, ad, y, slot, increase);
+}
+pub relation average_increase_in_tax_667b1D(b: Person, t: Trust, ad: TaxableYear, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the average of the increases in tax for the 3 computation years (section 667(b)(1)(D))";
+}
+@source(IRC_S667_B, relation = formalizes, coverage = exact, quote = "by determining the average increase in tax for the 3 taxable years referred to in subparagraph (C) resulting from the application of such subparagraph.")
+rule AverageIncreaseOverThreeYears(b: Person, t: Trust, ad: TaxableYear, y: TaxableYear, slot0: Integer, inc0: Money) defeasible {
+    label en official "section 667(b)(1)(D): the sum of the three increases divided by 3 (cents HALF_UP is a JUDGMENT CALL)";
+    when section_667b1_increase(b, t, ad, y, slot0, inc0);
+    when count(collect s: Integer where section_667b1_increase(b, t, ad, y, s, _)) == 3;
+    then average_increase_in_tax_667b1D(b, t, ad, y,
+        div_round(sum(collect all a: Money, s: Integer where section_667b1_increase(b, t, ad, y, s, a), empty: 0.00 USD), 3.0, 2, "HALF_UP"));
+}
+pub relation partial_tax_667b1_computed(b: Person, t: Trust, ad: TaxableYear, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the partial tax imposed by section 667(a)(2): the excess, if any, of the average increase multiplied by N over the taxes (other than those of section 665(d)(2)) deemed distributed under section 666(b) and (c) (section 667(b)(1), closing paragraph)";
+}
+@source(IRC_S667_B, relation = formalizes, coverage = exact, quote = "The partial tax imposed by subsection (a)(2) shall be the excess (if any) of the average increase in tax determined under subparagraph (D), multiplied by the number of preceding taxable years determined under subparagraph (A), over the amount of taxes (other than the amount of taxes described in section 665(d)(2)) deemed distributed to the beneficiary under sections 666(b) and (c).")
+rule PartialTax667b1(b: Person, t: Trust, ad: TaxableYear, y: TaxableYear, avg: Money, n: Integer, foreign: Money) defeasible {
+    label en official "section 667(b)(1): excess of avg x N over the taxes deemed distributed other than the foreign taxes";
+    when average_increase_in_tax_667b1D(b, t, ad, y, avg);
+    when number_of_counted_preceding_years_667b1A(t, ad, n);
+    when foreign_taxes_deemed_distributed_665d2(t, ad, foreign);
+    then partial_tax_667b1_computed(b, t, ad, y, max(0 USD, avg * n - (sum(collect all a: Money, idx: Integer where additional_taxes_deemed_distributed_666(t, ad, idx, a), empty: 0.00 USD) - foreign)));
+}
+@source(IRC_S667_B, relation = formalizes, coverage = exact, quote = "The partial tax imposed by subsection (a)(2) shall be the excess (if any) of the average increase in tax determined under subparagraph (D), multiplied by the number of preceding taxable years determined under subparagraph (A), over the amount of taxes (other than the amount of taxes described in section 665(d)(2)) deemed distributed to the beneficiary under sections 666(b) and (c).")
+rule PartialTax667b1NoForeignTaxes(b: Person, t: Trust, ad: TaxableYear, y: TaxableYear, avg: Money, n: Integer) defeasible {
+    label en official "section 667(b)(1) for a trust with no foreign taxes deemed distributed";
+    when average_increase_in_tax_667b1D(b, t, ad, y, avg);
+    when number_of_counted_preceding_years_667b1A(t, ad, n);
+    when not_known(has_foreign_taxes_deemed_distributed_667d1(t, ad));
+    then partial_tax_667b1_computed(b, t, ad, y, max(0 USD, avg * n - sum(collect all a: Money, idx: Integer where additional_taxes_deemed_distributed_666(t, ad, idx, a), empty: 0.00 USD)));
+}
+
+// ============================================================================
+// §667(a)(1): the partial tax on the taxable income reduced by the amounts of the first sentence
+// ============================================================================
+
+pub relation total_inclusion_667a(b: Person, y: TaxableYear, total: Money) kind institutional {
+    label en unofficial "the total of the amounts included in the income of the beneficiary for the year under section 667(a), first sentence, over the trusts";
+}
+rule TotalInclusion667a(b: Person, y: TaxableYear, t0: Trust, a0: Money) defeasible {
+    when beneficiary_inclusion_667a(b, t0, y, a0);
+    then total_inclusion_667a(b, y, sum(collect all a: Money, t: Trust where beneficiary_inclusion_667a(b, t, y, a), empty: 0.00 USD));
+}
+relation taxable_income_reduced_by_667a_amounts(b: Person, y: TaxableYear, income: Money) kind institutional {
+    label en unofficial "the taxable income of the beneficiary for the year reduced by the total of the section 667(a) amounts, not below zero";
+}
+rule TaxableIncomeReducedBy667aAmounts(b: Person, y: TaxableYear, ti: Money, total: Money) defeasible {
+    when beneficiary_taxable_income_for_year(b, y, ti);
+    when total_inclusion_667a(b, y, total);
+    then taxable_income_reduced_by_667a_amounts(b, y, max(0 USD, ti - total));
+}
+@source(IRC_S667_A, relation = formalizes, coverage = exact, quote = "(1) a partial tax computed on the taxable income reduced by an amount equal to the total of such amounts, at the rate and in the manner as if this section had not been enacted,")
+rule RequestReducedIncome667a1(b: Person, y: TaxableYear, income: Money) defeasible {
+    label en official "the tax at the reduced income is requested";
+    when taxable_income_reduced_by_667a_amounts(b, y, income);
+    then hypothetical_income_request(b, y, income);
+}
+pub relation partial_tax_on_reduced_income_667a1_computed(b: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the partial tax computed on the taxable income reduced by the total of the section 667(a) amounts, at the rates and in the manner as if section 667 had not been enacted (section 667(a)(1))";
+}
+@source(IRC_S667_A, relation = formalizes, coverage = exact, quote = "(1) a partial tax computed on the taxable income reduced by an amount equal to the total of such amounts, at the rate and in the manner as if this section had not been enacted,")
+rule PartialTaxOnReducedIncome667a1(b: Person, y: TaxableYear, income: Money, tax: Money) defeasible {
+    label en official "section 667(a)(1): the section 1 tax at the reduced income";
+    when taxable_income_reduced_by_667a_amounts(b, y, income);
+    when hypothetical_section_1_tax(b, y, income, tax);
+    then partial_tax_on_reduced_income_667a1_computed(b, y, tax);
+}
+pub relation has_computed_partial_taxes_667(b: Person, t: Trust, y: TaxableYear) kind institutional {
+    label en unofficial "both partial taxes of section 667(a) are computed by this module for the beneficiary and the year of the distribution";
+}
+rule HasComputedPartialTaxes667(b: Person, t: Trust, ad: TaxableYear, y: TaxableYear, p1: Money, p2: Money) defeasible {
+    when accumulation_distribution_paid_credited_or_required_to_beneficiary(b, t, ad, y);
+    when partial_tax_on_reduced_income_667a1_computed(b, y, p1);
+    when partial_tax_667b1_computed(b, t, ad, y, p2);
+    then has_computed_partial_taxes_667(b, t, y);
+}
+@source(IRC_S667_A, relation = formalizes, coverage = exact, quote = "(2) a partial tax determined as provided in subsection (b) of this section, and")
+rule S667aTaxDomesticTrustComputed(b: Person, t: Trust, ad: TaxableYear, y: TaxableYear, p1: Money, p2: Money) defeasible {
+    label en official "section 667(a): the tax on a domestic trust distribution from the two computed partial taxes";
+    when accumulation_distribution_paid_credited_or_required_to_beneficiary(b, t, ad, y);
+    when beneficiary_inclusion_667a(b, t, y, _);
+    when partial_tax_on_reduced_income_667a1_computed(b, y, p1);
+    when partial_tax_667b1_computed(b, t, ad, y, p2);
+    unless us.irc.definitions::foreign_trust(t) and accumulation_distribution_paid_credited_or_required_to_beneficiary(b, t, ad, y) and partial_tax_on_reduced_income_667a1_computed(b, y, p1) and partial_tax_667b1_computed(b, t, ad, y, p2);
+    then beneficiary_tax_for_year_667a(b, t, y, p1 + p2);
+}
+
+@source(IRC_S667_A, relation = formalizes, coverage = exact, quote = "in the case of a foreign trust, the interest charge determined as provided in section 668")
+rule S667aTaxForeignTrustComputed(b: Person, t: Trust, ad: TaxableYear, y: TaxableYear, p1: Money, p2: Money, interest: Money) defeasible {
+    label en official "section 667(a): the tax on a foreign trust distribution from the two computed partial taxes and the interest charge of section 668 (an input: section 6621 is another owner)";
+    when us.irc.definitions::foreign_trust(t);
+    when accumulation_distribution_paid_credited_or_required_to_beneficiary(b, t, ad, y);
+    when beneficiary_inclusion_667a(b, t, y, _);
+    when partial_tax_on_reduced_income_667a1_computed(b, y, p1);
+    when partial_tax_667b1_computed(b, t, ad, y, p2);
+    when interest_charge_668_for_beneficiary(b, y, interest);
+    then beneficiary_tax_for_year_667a(b, t, y, p1 + p2 + interest);
+}
+
+// ============================================================================
+// §668(a)(3): the applicable number of years; §668(a)(2): the period
+// ============================================================================
+
+relation weighted_undistributed_net_income_668a3B(t: Trust, b: Person, dy: TaxableYear, uy: TaxableYear, product: Money) kind institutional {
+    label en unofficial "the product of section 668(a)(3)(B) for one undistributed income year: the undistributed net income times the number of taxable years between the year and the year of the distribution, counting the undistributed income year and not the year of the distribution";
+}
+@source(IRC_S668_A, relation = formalizes, coverage = exact, quote = "the product of—")
+rule WeightedUndistributedNetIncome(t: Trust, b: Person, dy: TaxableYear, uy: TaxableYear, uni: Money, nd: Integer, nu: Integer) defeasible {
+    label en official "section 668(a)(3)(B): UNI x (calendar year of the distribution - calendar year of the undistributed income year)";
+    when undistributed_income_year_668(t, b, uy);
+    when trust_year_has_undistributed_net_income(t, uy, uni);
+    when accumulation_distribution_paid_credited_or_required_to_beneficiary(b, t, dy, _);
+    when us.irc.core::calendar_year_of(dy, nd);
+    when us.irc.core::calendar_year_of(uy, nu);
+    when nd > nu;
+    then weighted_undistributed_net_income_668a3B(t, b, dy, uy, uni * (nd - nu));
+}
+pub relation applicable_number_of_years_unrounded_668a3A(t: Trust, b: Person, dy: TaxableYear, years: Decimal) kind institutional {
+    label en official "the sum of the products described in subparagraph (B) divided by the aggregate undistributed net income (section 668(a)(3)(A)), before the rounding under procedures prescribed by the Secretary";
+}
+@source(IRC_S668_A, relation = formalizes, coverage = exact, quote = "The applicable number of years with respect to a distribution is the number determined by dividing—")
+rule ApplicableNumberOfYearsUnrounded(t: Trust, b: Person, dy: TaxableYear, uy0: TaxableYear, p0: Money) defeasible {
+    label en official "section 668(a)(3)(A): the quotient, exact to six decimals (JUDGMENT CALL: the rounding of the Secretary is external)";
+    when weighted_undistributed_net_income_668a3B(t, b, dy, uy0, p0);
+    then applicable_number_of_years_unrounded_668a3A(t, b, dy,
+        div_round(sum(collect all a: Money, u: TaxableYear where weighted_undistributed_net_income_668a3B(t, b, dy, u, a), empty: 0.00 USD) / 1.00 USD,
+                  sum(collect all a2: Money, u2: TaxableYear where trust_year_has_undistributed_net_income(t, u2, a2) and undistributed_income_year_668(t, b, u2), empty: 0.00 USD) / 1.00 USD,
+                  6, "HALF_UP"));
+}
+pub relation applicable_number_of_years_whole_668a3(t: Trust, b: Person, dy: TaxableYear, years: Integer) kind empirical {
+    label en unofficial "the applicable number of years rounded under procedures prescribed by the Secretary, as a whole number of years between 1 and 10 (case-asserted; the procedures are not pinned, section 668(a)(3)(A), last sentence)";
+}
+pub relation distribution_date_668(t: Trust, b: Person, dy: TaxableYear, on: Date) kind empirical {
+    label en unofficial "the date of the accumulation distribution to the beneficiary (case-asserted)";
+}
+pub relation interest_period_start_668a2(t: Trust, b: Person, dy: TaxableYear, start: Date) kind institutional {
+    label en official "the date on which the period of section 668(a)(2) begins: the applicable number of years before the date of the distribution (bounded to whole years from 1 to 10)";
+}
+rule InterestPeriodStart1(t: Trust, b: Person, dy: TaxableYear, on: Date, calendar_before_1: Date) defeasible {
+    when applicable_number_of_years_whole_668a3(t, b, dy, 1);
+    when distribution_date_668(t, b, dy, on)
+        and us.irc.core::civil_calendar_boundary_before(on, 1, us.irc.core::CalendarYear, calendar_before_1);
+    then interest_period_start_668a2(t, b, dy, calendar_before_1);
+}
+rule InterestPeriodStart2(t: Trust, b: Person, dy: TaxableYear, on: Date, calendar_before_1: Date) defeasible {
+    when applicable_number_of_years_whole_668a3(t, b, dy, 2);
+    when distribution_date_668(t, b, dy, on)
+        and us.irc.core::civil_calendar_boundary_before(on, 2, us.irc.core::CalendarYear, calendar_before_1);
+    then interest_period_start_668a2(t, b, dy, calendar_before_1);
+}
+rule InterestPeriodStart3(t: Trust, b: Person, dy: TaxableYear, on: Date, calendar_before_1: Date) defeasible {
+    when applicable_number_of_years_whole_668a3(t, b, dy, 3);
+    when distribution_date_668(t, b, dy, on)
+        and us.irc.core::civil_calendar_boundary_before(on, 3, us.irc.core::CalendarYear, calendar_before_1);
+    then interest_period_start_668a2(t, b, dy, calendar_before_1);
+}
+rule InterestPeriodStart4(t: Trust, b: Person, dy: TaxableYear, on: Date, calendar_before_1: Date) defeasible {
+    when applicable_number_of_years_whole_668a3(t, b, dy, 4);
+    when distribution_date_668(t, b, dy, on)
+        and us.irc.core::civil_calendar_boundary_before(on, 4, us.irc.core::CalendarYear, calendar_before_1);
+    then interest_period_start_668a2(t, b, dy, calendar_before_1);
+}
+rule InterestPeriodStart5(t: Trust, b: Person, dy: TaxableYear, on: Date, calendar_before_1: Date) defeasible {
+    when applicable_number_of_years_whole_668a3(t, b, dy, 5);
+    when distribution_date_668(t, b, dy, on)
+        and us.irc.core::civil_calendar_boundary_before(on, 5, us.irc.core::CalendarYear, calendar_before_1);
+    then interest_period_start_668a2(t, b, dy, calendar_before_1);
+}
+rule InterestPeriodStart6(t: Trust, b: Person, dy: TaxableYear, on: Date, calendar_before_1: Date) defeasible {
+    when applicable_number_of_years_whole_668a3(t, b, dy, 6);
+    when distribution_date_668(t, b, dy, on)
+        and us.irc.core::civil_calendar_boundary_before(on, 6, us.irc.core::CalendarYear, calendar_before_1);
+    then interest_period_start_668a2(t, b, dy, calendar_before_1);
+}
+rule InterestPeriodStart7(t: Trust, b: Person, dy: TaxableYear, on: Date, calendar_before_1: Date) defeasible {
+    when applicable_number_of_years_whole_668a3(t, b, dy, 7);
+    when distribution_date_668(t, b, dy, on)
+        and us.irc.core::civil_calendar_boundary_before(on, 7, us.irc.core::CalendarYear, calendar_before_1);
+    then interest_period_start_668a2(t, b, dy, calendar_before_1);
+}
+rule InterestPeriodStart8(t: Trust, b: Person, dy: TaxableYear, on: Date, calendar_before_1: Date) defeasible {
+    when applicable_number_of_years_whole_668a3(t, b, dy, 8);
+    when distribution_date_668(t, b, dy, on)
+        and us.irc.core::civil_calendar_boundary_before(on, 8, us.irc.core::CalendarYear, calendar_before_1);
+    then interest_period_start_668a2(t, b, dy, calendar_before_1);
+}
+rule InterestPeriodStart9(t: Trust, b: Person, dy: TaxableYear, on: Date, calendar_before_1: Date) defeasible {
+    when applicable_number_of_years_whole_668a3(t, b, dy, 9);
+    when distribution_date_668(t, b, dy, on)
+        and us.irc.core::civil_calendar_boundary_before(on, 9, us.irc.core::CalendarYear, calendar_before_1);
+    then interest_period_start_668a2(t, b, dy, calendar_before_1);
+}
+rule InterestPeriodStart10(t: Trust, b: Person, dy: TaxableYear, on: Date, calendar_before_1: Date) defeasible {
+    when applicable_number_of_years_whole_668a3(t, b, dy, 10);
+    when distribution_date_668(t, b, dy, on)
+        and us.irc.core::civil_calendar_boundary_before(on, 10, us.irc.core::CalendarYear, calendar_before_1);
+    then interest_period_start_668a2(t, b, dy, calendar_before_1);
+}

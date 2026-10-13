@@ -1,0 +1,624 @@
+language "law.core" version "0.2";
+package us.irc.penalties version "0.1.1";
+namespace "urn:us:irc:penalties:clir";
+
+use self::{
+    CorporateEstimatedInstallment,
+    EstimatedTaxInstallment,
+    IRC_S6654_B,
+    IRC_S6654_D,
+    IRC_S6654_F,
+    IRC_S6654_I,
+    IRC_S6654_J,
+    IRC_S6654_K,
+    IRC_S6654_L,
+    IRC_S6654_TABLE_1,
+    IRC_S6654_TABLE_2,
+    IRC_S6654_TABLE_3,
+    Person,
+    TaxableYear,
+    current_year_tax,
+    estate_or_trust_taxpayer,
+    estimated_tax_january31_exception,
+    installment_paid_amount,
+    preceding_year_return_filed,
+    preceding_year_tax_shown,
+    preceding_year_was_12_months,
+    required_annual_payment,
+    required_installment_amount,
+    required_installment_due_date,
+    underpayment_portion_paid_on,
+};
+
+// 26 U.S.C. §6654(b)(3), (c)(2), (d)(2), (f), (i), (j), (k), (l)(4), (m) — IRC-16 stage 3 (TECH_GAP
+// reduction, 26.09.2026, DECISION-0379 with deontics). The stage-2 gap register named these G3117-G3123.
+//
+// WHAT CHANGED IN THE OLDER MODULES (both are this package's): module 08 — `CurrentYearTax` now reads the
+// section 6654(f) "tax" (chapter 1 less the section 143(m) increase, plus chapter 2, 2A and the Medicare
+// tax of (m), less the part IV credits other than section 31; every optional component is a sum with an
+// explicit empty policy, so a case without them gets the old figure); `RequiredInstallmentAmount` and
+// the January 31 rule are gated off for the farmer, and `RequiredInstallmentAmount` also for the
+// nonresident alien (their installments are derived below); the two underpayment rules read
+// `required_installment_applicable` (annualized or regular).
+//
+// DUE DATES ARE DERIVED FROM THE BEGINNING OF THE TAXABLE YEAR. Table T1 gives "April 15, June 15,
+// September 15, January 15 of the following taxable year"; the fiscal-year rule of (k)(1) substitutes
+// "the months which correspond thereto". Both are the same arithmetic on the beginning date of the year:
+// the 4th, 6th and 9th month and the 1st month of the following year, on the 15th day (year start + 3, 5, 8
+// and 12 calendar months, + 14 calendar days), so a calendar-year and a fiscal-year taxpayer are one rule
+// (`us.irc.core::begins`). A case that asserts `required_installment_due_date` directly still works.
+//
+// ANNUALIZATION (d)(2). The tax "computed by placing on an annualized basis the taxable income,
+// alternative minimum taxable income and adjusted self-employment income" is applied by regulations that
+// re-run the section 1, 55 and 1401 computations on a hypothetical income: the per-installment annualized
+// tax is a case leaf (`annualized_tax_for_installment_ind`, the same class as G1501), exactly as the
+// corporate module 14 treats it. The applicable percentage (T2), the excess over the prior required
+// installments and the RECAPTURE are executed. The recapture chain is closed without recursion: the
+// cumulative required installments through the k-th installment are max over j<=k of min(cumulative
+// annualized amount_j, cumulative regular installments_j) (each stage reads only the previous stage).
+// JUDGMENT CALL: the annualized installment is compared with the (d)(1) amount INCREASED by the recaptured
+// reduction (the reading of Form 2210 Schedule AI), which is what the recapture sentence produces.
+//
+// CREDITING ORDER (b)(3). Payments are facts by date (`estimated_tax_payment_on`); the amount of an
+// installment paid on or before its due date is the cumulative payments through that date less the
+// installments required before it, within the installment: the earliest unpaid installment absorbs a
+// payment first. `installment_paid_amount` (module 08) is therefore DERIVED when payments are asserted
+// by date; a case that asserts it directly (stage-1 scenarios) still works. The date of the cure of an
+// underpayment stays a case fact (`underpayment_portion_paid_on`, module 30).
+//
+// SOURCE OBSERVATION. The pinned table T4 of subsection (j)(3)(B) (the applicable percentage of a
+// nonresident alien) reads "1st 22.5, 2nd 45, 3rd 67.5, 4th 90": four rows for a schedule of three
+// installments, identical to table T2. It is not trusted and no nonresident percentage is derived.
+
+relation installment_ordinal(i: EstimatedTaxInstallment, n: Integer) kind institutional {
+    label en unofficial "the position of the installment in the order in which the installments are required to be paid";
+}
+rule InstallmentOrdinalFirst strict { then installment_ordinal(First, 1); }
+rule InstallmentOrdinalSecond strict { then installment_ordinal(Second, 2); }
+rule InstallmentOrdinalThird strict { then installment_ordinal(Third, 3); }
+rule InstallmentOrdinalFourth strict { then installment_ordinal(Fourth, 4); }
+
+// --- person-level facts ---------------------------------------------------------------------------
+pub relation nonresident_alien_described_in_6072c(p: Person, y: TaxableYear) kind empirical {
+    label en official "a nonresident alien described in section 6072(c)";
+}
+relation farming_or_fishing_gross_income(p: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the individual's gross income from farming or fishing (including oyster farming) for the taxable year";
+}
+relation total_gross_income_from_all_sources(p: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the total gross income from all sources for the taxable year";
+}
+relation preceding_farming_or_fishing_gross_income_shown(p: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the gross income from farming or fishing shown on the return of the individual for the preceding taxable year";
+}
+relation preceding_total_gross_income_shown(p: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the total gross income from all sources shown on the return for the preceding taxable year";
+}
+relation return_filed_by_march_1_following(p: Person, y: TaxableYear) kind empirical {
+    label en official "on or before March 1 of the following taxable year, the farmer or fisherman files a return for the taxable year";
+}
+relation full_amount_paid_with_march_1_return(p: Person, y: TaxableYear) kind empirical {
+    label en official "pays in full the amount computed on the return as payable";
+}
+
+// --- (c)(2), (k)(1): due dates from the beginning of the taxable year -----------------------------------
+@source(IRC_S6654_TABLE_1, relation = formalizes, coverage = exact, quote = "1st / April 15")
+rule RequiredInstallmentDueDateFirst strict {
+    for p: Person;
+    for y: TaxableYear;
+    for start: Date;
+    when us.irc.core::year_of(p, y) and us.irc.core::begins(y, start)
+        and not_known(nonresident_alien_described_in_6072c(p, y));
+    then required_installment_due_date(y, First, add_calendar_period(add_calendar_period(start, 3 calendar_month), 14 calendar_day));
+}
+@source(IRC_S6654_TABLE_1, relation = formalizes, coverage = exact, quote = "2nd / June 15")
+rule RequiredInstallmentDueDateSecond strict {
+    for p: Person;
+    for y: TaxableYear;
+    for start: Date;
+    when us.irc.core::year_of(p, y) and us.irc.core::begins(y, start)
+        and not_known(nonresident_alien_described_in_6072c(p, y));
+    then required_installment_due_date(y, Second, add_calendar_period(add_calendar_period(start, 5 calendar_month), 14 calendar_day));
+}
+@source(IRC_S6654_TABLE_1, relation = formalizes, coverage = exact, quote = "3rd / September 15")
+rule RequiredInstallmentDueDateThird strict {
+    for p: Person;
+    for y: TaxableYear;
+    for start: Date;
+    when us.irc.core::year_of(p, y) and us.irc.core::begins(y, start)
+        and not_known(nonresident_alien_described_in_6072c(p, y));
+    then required_installment_due_date(y, Third, add_calendar_period(add_calendar_period(start, 8 calendar_month), 14 calendar_day));
+}
+@source(IRC_S6654_TABLE_1, relation = formalizes, coverage = exact, quote = "4th / January 15 of the following taxable year")
+rule RequiredInstallmentDueDateFourth strict {
+    for p: Person;
+    for y: TaxableYear;
+    for start: Date;
+    when us.irc.core::year_of(p, y) and us.irc.core::begins(y, start)
+        and not_known(nonresident_alien_described_in_6072c(p, y));
+    then required_installment_due_date(y, Fourth, add_calendar_period(add_calendar_period(start, 12 calendar_month), 14 calendar_day));
+}
+@source(IRC_S6654_K, relation = formalizes, coverage = exact, quote = "In applying this section to a taxable year beginning on any date other than January 1, there shall be substituted, for the months specified in this section, the months which correspond thereto.")
+rule FiscalYearMonthsCorrespond strict {
+    for p: Person;
+    for y: TaxableYear;
+    for start: Date;
+    when us.irc.core::year_of(p, y) and us.irc.core::begins(y, start) and us.irc.core::fiscal_year(y);
+    then fiscal_year_due_dates_by_corresponding_months(y);
+}
+pub relation fiscal_year_due_dates_by_corresponding_months(y: TaxableYear) kind institutional {
+    label en official "for a taxable year not beginning on January 1 the due dates are those of the corresponding months of the year (counted from the beginning of the year)";
+}
+
+// --- (j): nonresident aliens ---------------------------------------------------------------------------
+@source(IRC_S6654_J, relation = formalizes, coverage = exact, quote = "In the case of a nonresident alien described in section 6072(c):")
+rule NonresidentAlienInstallmentsApply strict {
+    for p: Person;
+    for y: TaxableYear;
+    when nonresident_alien_described_in_6072c(p, y);
+    then nonresident_installment_schedule_applies(p, y);
+}
+pub relation nonresident_installment_schedule_applies(p: Person, y: TaxableYear) kind institutional {
+    label en official "section 6654(j) applies: 3 required installments";
+}
+@source(IRC_S6654_TABLE_3, relation = formalizes, coverage = exact, quote = "1st / June 15")
+rule NonresidentInstallmentDueDateFirst strict {
+    for p: Person;
+    for y: TaxableYear;
+    for start: Date;
+    when us.irc.core::year_of(p, y) and us.irc.core::begins(y, start) and nonresident_alien_described_in_6072c(p, y);
+    then required_installment_due_date(y, First, add_calendar_period(add_calendar_period(start, 5 calendar_month), 14 calendar_day));
+}
+@source(IRC_S6654_TABLE_3, relation = formalizes, coverage = exact, quote = "2nd / September 15")
+rule NonresidentInstallmentDueDateSecond strict {
+    for p: Person;
+    for y: TaxableYear;
+    for start: Date;
+    when us.irc.core::year_of(p, y) and us.irc.core::begins(y, start) and nonresident_alien_described_in_6072c(p, y);
+    then required_installment_due_date(y, Second, add_calendar_period(add_calendar_period(start, 8 calendar_month), 14 calendar_day));
+}
+@source(IRC_S6654_TABLE_3, relation = formalizes, coverage = exact, quote = "3rd / January 15 of the following taxable year")
+rule NonresidentInstallmentDueDateThird strict {
+    for p: Person;
+    for y: TaxableYear;
+    for start: Date;
+    when us.irc.core::year_of(p, y) and us.irc.core::begins(y, start) and nonresident_alien_described_in_6072c(p, y);
+    then required_installment_due_date(y, Third, add_calendar_period(add_calendar_period(start, 12 calendar_month), 14 calendar_day));
+}
+@source(IRC_S6654_J, relation = formalizes, coverage = exact, quote = "In the case of the first required installment, subsection (d) shall be applied by substituting \"50 percent\" for \"25 percent\" in subsection (d)(1)(A).")
+rule NonresidentFirstInstallmentAmount strict {
+    for p: Person;
+    for y: TaxableYear;
+    for annual: Money;
+    when nonresident_alien_described_in_6072c(p, y) and required_annual_payment(p, y, annual);
+    then required_installment_amount(p, y, First, round(annual * NonresidentFirstInstallmentPercent, 2, "HALF_UP"));
+}
+@source(IRC_S6654_D, relation = formalizes, coverage = partial, quote = "the amount of any required installment shall be 25 percent of the required annual payment")
+rule NonresidentLaterInstallmentAmountSecond strict {
+    for p: Person;
+    for y: TaxableYear;
+    for annual: Money;
+    when nonresident_alien_described_in_6072c(p, y) and required_annual_payment(p, y, annual);
+    then required_installment_amount(p, y, Second, round(annual * RequiredInstallmentPercent, 2, "HALF_UP"));
+}
+@source(IRC_S6654_D, relation = formalizes, coverage = partial, quote = "the amount of any required installment shall be 25 percent of the required annual payment")
+rule NonresidentLaterInstallmentAmountThird strict {
+    for p: Person;
+    for y: TaxableYear;
+    for annual: Money;
+    when nonresident_alien_described_in_6072c(p, y) and required_annual_payment(p, y, annual);
+    then required_installment_amount(p, y, Third, round(annual * RequiredInstallmentPercent, 2, "HALF_UP"));
+}
+
+// --- (i): farmers and fishermen ------------------------------------------------------------------------
+pub relation farmer_or_fisherman(p: Person, y: TaxableYear) kind institutional {
+    label en official "an individual is a farmer or fisherman for the taxable year";
+}
+@source(IRC_S6654_I, relation = formalizes, coverage = exact, quote = "the individual's gross income from farming or fishing (including oyster farming) for the taxable year is at least 662/3 percent of the total gross income from all sources for the taxable year, or")
+rule FarmerOrFishermanCurrentYear strict {
+    for p: Person;
+    for y: TaxableYear;
+    for farm: Money;
+    for total: Money;
+    when farming_or_fishing_gross_income(p, y, farm) and total_gross_income_from_all_sources(p, y, total)
+        and farm * 3 >= total * 2;
+    then farmer_or_fisherman(p, y);
+}
+@source(IRC_S6654_I, relation = formalizes, coverage = exact, quote = "such individual's gross income from farming or fishing (including oyster farming) shown on the return of the individual for the preceding taxable year is at least 662/3 percent of the total gross income from all sources shown on such return.")
+rule FarmerOrFishermanPrecedingYear strict {
+    for p: Person;
+    for y: TaxableYear;
+    for farm: Money;
+    for total: Money;
+    when preceding_farming_or_fishing_gross_income_shown(p, y, farm) and preceding_total_gross_income_shown(p, y, total)
+        and farm * 3 >= total * 2;
+    then farmer_or_fisherman(p, y);
+}
+pub relation farmer_required_annual_payment(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the required annual payment of a farmer or fisherman: subsection (d)(1)(B) with 662/3 percent for 90 percent and without subparagraph (C) of (d)(1)";
+}
+@source(IRC_S6654_I, relation = formalizes, coverage = exact, quote = "the amount of such installment shall be equal to the required annual payment determined under subsection (d)(1)(B) by substituting \"662/3 percent\" for \"90 percent\" and without regard to subparagraph (C) of subsection (d)(1)")
+rule FarmerRequiredAnnualPaymentWithPriorYear strict {
+    for p: Person;
+    for y: TaxableYear;
+    for current: Money;
+    for preceding: Money;
+    when farmer_or_fisherman(p, y) and current_year_tax(p, y, current)
+        and preceding_year_return_filed(p, y) and not preceding_year_was_12_months(p, y)
+        and preceding_year_tax_shown(p, y, preceding);
+    then farmer_required_annual_payment(p, y, min(div_round(current * 2, 3.0, 2, "HALF_UP"), round(preceding * PrecedingYearStandardPercent, 2, "HALF_UP")));
+}
+@source(IRC_S6654_I, relation = formalizes, coverage = exact, quote = "the amount of such installment shall be equal to the required annual payment determined under subsection (d)(1)(B) by substituting \"662/3 percent\" for \"90 percent\" and without regard to subparagraph (C) of subsection (d)(1)")
+rule FarmerRequiredAnnualPaymentNoPriorYear strict {
+    for p: Person;
+    for y: TaxableYear;
+    for current: Money;
+    when farmer_or_fisherman(p, y) and current_year_tax(p, y, current) and preceding_year_was_12_months(p, y);
+    then farmer_required_annual_payment(p, y, div_round(current * 2, 3.0, 2, "HALF_UP"));
+}
+@source(IRC_S6654_I, relation = formalizes, coverage = exact, quote = "the amount of such installment shall be equal to the required annual payment determined under subsection (d)(1)(B) by substituting \"662/3 percent\" for \"90 percent\" and without regard to subparagraph (C) of subsection (d)(1)")
+rule FarmerRequiredAnnualPaymentNoPriorReturn strict {
+    for p: Person;
+    for y: TaxableYear;
+    for current: Money;
+    when farmer_or_fisherman(p, y) and current_year_tax(p, y, current)
+        and not preceding_year_return_filed(p, y) and not preceding_year_was_12_months(p, y);
+    then farmer_required_annual_payment(p, y, div_round(current * 2, 3.0, 2, "HALF_UP"));
+}
+@source(IRC_S6654_I, relation = formalizes, coverage = exact, quote = "there shall be only 1 required installment for the taxable year,")
+rule FarmerOnlyOneInstallment strict {
+    for p: Person;
+    for y: TaxableYear;
+    for annual: Money;
+    when farmer_or_fisherman(p, y) and farmer_required_annual_payment(p, y, annual);
+    then required_installment_amount(p, y, Fourth, annual);
+}
+@source(IRC_S6654_I, relation = formalizes, coverage = exact, quote = "by treating the required installment described in subparagraph (A) of this paragraph as the 4th required installment.")
+rule FarmerMarch1Exception strict {
+    for p: Person;
+    for y: TaxableYear;
+    when farmer_or_fisherman(p, y) and return_filed_by_march_1_following(p, y) and full_amount_paid_with_march_1_return(p, y);
+    then estimated_tax_january31_exception(p, y);
+}
+
+// --- (f), (m): the "tax" ------------------------------------------------------------------------------
+pub relation chapter_1_tax_increase_by_143m(p: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "any increase in the chapter 1 tax by reason of section 143(m)";
+}
+pub relation part_iv_credits_other_than_section_31(p: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the credits against tax provided by part IV of subchapter A of chapter 1, other than the credit provided by section 31";
+}
+pub relation medicare_tax_3101b2_not_withheld(p: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the tax imposed under section 3101(b)(2), to the extent not withheld (treated as a tax imposed under chapter 2)";
+}
+pub relation tax_for_6654(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en official "the term tax for section 6654: chapter 1 (less the section 143(m) increase), plus chapter 2, plus chapter 2A, minus the part IV credits other than section 31; the Medicare tax not withheld is a chapter 2 tax";
+}
+@source(IRC_S6654_F, relation = formalizes, coverage = exact, quote = "the tax imposed by chapter 1 (other than any increase in such tax by reason of section 143(m)), plus")
+rule TaxFor6654Rule(p: Person, y: TaxableYear, ch1: Money) strict {
+    label en official "section 6654(f), (m): the tax is the sum of the components, each optional component read with an explicit empty policy";
+    when us.irc.core::liability(p, y, us.irc.core::IncomeCh1, ch1);
+    then tax_for_6654(p, y, ch1
+        - sum(collect all a: Money where chapter_1_tax_increase_by_143m(p, y, a), empty: 0.00 USD)
+        + sum(collect all b: Money where us.irc.core::liability(p, y, us.irc.core::SelfEmploymentCh2, b), empty: 0.00 USD)
+        + sum(collect all c: Money where medicare_tax_3101b2_not_withheld(p, y, c), empty: 0.00 USD)
+        + sum(collect all d: Money where us.irc.core::liability(p, y, us.irc.core::NiitCh2A, d), empty: 0.00 USD)
+        - sum(collect all e: Money where part_iv_credits_other_than_section_31(p, y, e), empty: 0.00 USD));
+}
+
+// --- (d)(2): the annualized income installment --------------------------------------------------------
+pub relation individual_establishes_annualized_installments(p: Person, y: TaxableYear) kind empirical {
+    label en official "the individual establishes that the annualized income installments are less than the amounts determined under paragraph (1) (the election to use the annualized method)";
+}
+pub relation annualized_tax_for_installment_ind(p: Person, y: TaxableYear, installment: EstimatedTaxInstallment, amount: Money) kind empirical {
+    label en official "the tax for the taxable year computed by placing on an annualized basis the taxable income, alternative minimum taxable income and adjusted self-employment income for the months ending before the due date of the installment (EXTERNAL_DEPENDENCY: regulations and the section 1, 55, 1401 computations on a hypothetical income)";
+}
+pub relation individual_annualized_applicable_percentage(installment: EstimatedTaxInstallment, pct: Decimal) kind institutional {
+    label en official "table T2: the applicable percentage is 22.5 (1st), 45 (2nd), 67.5 (3rd), 90 (4th)";
+}
+@source(IRC_S6654_TABLE_2, relation = formalizes, coverage = exact, quote = "1st / 22.5")
+rule IndividualApplicablePercentageFirst strict { then individual_annualized_applicable_percentage(First, 0.225); }
+@source(IRC_S6654_TABLE_2, relation = formalizes, coverage = exact, quote = "2nd / 45")
+rule IndividualApplicablePercentageSecond strict { then individual_annualized_applicable_percentage(Second, 0.45); }
+@source(IRC_S6654_TABLE_2, relation = formalizes, coverage = exact, quote = "3rd / 67.5")
+rule IndividualApplicablePercentageThird strict { then individual_annualized_applicable_percentage(Third, 0.675); }
+@source(IRC_S6654_TABLE_2, relation = formalizes, coverage = exact, quote = "4th / 90")
+rule IndividualApplicablePercentageFourth strict { then individual_annualized_applicable_percentage(Fourth, 0.90); }
+
+relation annualized_cumulative_amount_ind(p: Person, y: TaxableYear, installment: EstimatedTaxInstallment, amount: Money) kind institutional {
+    label en unofficial "the applicable percentage of the annualized tax for the installment (the amount before the prior required installments are deducted)";
+}
+@source(IRC_S6654_D, relation = formalizes, coverage = exact, quote = "an amount equal to the applicable percentage of the tax for the taxable year computed by placing on an annualized basis the taxable income, alternative minimum taxable income, and adjusted self-employment income for months in the taxable year ending before the due date for the installment")
+rule AnnualizedCumulativeAmountRule(p: Person, y: TaxableYear, inst: EstimatedTaxInstallment, tax: Money, pct: Decimal) strict {
+    when annualized_tax_for_installment_ind(p, y, inst, tax) and individual_annualized_applicable_percentage(inst, pct);
+    then annualized_cumulative_amount_ind(p, y, inst, max(0.00 USD, round(tax * pct, 2, "HALF_UP")));
+}
+relation regular_cumulative_installments(p: Person, y: TaxableYear, installment: EstimatedTaxInstallment, amount: Money) kind institutional {
+    label en unofficial "the sum of the paragraph (1) installments through the installment";
+}
+rule RegularCumulativeInstallmentsRule(p: Person, y: TaxableYear, inst: EstimatedTaxInstallment, k: Integer) strict {
+    when required_installment_amount(p, y, inst, _) and installment_ordinal(inst, k);
+    then regular_cumulative_installments(p, y, inst, sum(collect all a: Money, j: EstimatedTaxInstallment, n: Integer where required_installment_amount(p, y, j, a) and installment_ordinal(j, n) and n <= k, empty: 0.00 USD));
+}
+// The cumulative required installments through each installment: S_k = max(S_(k-1), min(A_k, G_k)).
+relation cumulative_required_ind_1(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "the required installments through the first installment on the annualized method";
+}
+relation cumulative_required_ind_2(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "the required installments through the second installment on the annualized method";
+}
+relation cumulative_required_ind_3(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "the required installments through the third installment on the annualized method";
+}
+relation cumulative_required_ind_4(p: Person, y: TaxableYear, amount: Money) kind institutional {
+    label en unofficial "the required installments through the fourth installment on the annualized method";
+}
+@source(IRC_S6654_D, relation = formalizes, coverage = exact, quote = "the amount of such required installment shall be the annualized income installment, and")
+rule CumulativeRequiredInd1(p: Person, y: TaxableYear, a: Money, g: Money) strict {
+    when individual_establishes_annualized_installments(p, y) and annualized_cumulative_amount_ind(p, y, First, a) and regular_cumulative_installments(p, y, First, g);
+    then cumulative_required_ind_1(p, y, min(a, g));
+}
+@source(IRC_S6654_D, relation = formalizes, coverage = exact, quote = "any reduction in a required installment resulting from the application of this subparagraph shall be recaptured by increasing the amount of the next required installment determined under paragraph (1) by the amount of such reduction")
+rule CumulativeRequiredInd2(p: Person, y: TaxableYear, s1: Money, a: Money, g: Money) strict {
+    when individual_establishes_annualized_installments(p, y) and cumulative_required_ind_1(p, y, s1)
+        and annualized_cumulative_amount_ind(p, y, Second, a) and regular_cumulative_installments(p, y, Second, g);
+    then cumulative_required_ind_2(p, y, max(s1, min(a, g)));
+}
+@source(IRC_S6654_D, relation = formalizes, coverage = exact, quote = "(and by increasing subsequent required installments to the extent that the reduction has not previously been recaptured under this clause)")
+rule CumulativeRequiredInd3(p: Person, y: TaxableYear, s2: Money, a: Money, g: Money) strict {
+    when individual_establishes_annualized_installments(p, y) and cumulative_required_ind_2(p, y, s2)
+        and annualized_cumulative_amount_ind(p, y, Third, a) and regular_cumulative_installments(p, y, Third, g);
+    then cumulative_required_ind_3(p, y, max(s2, min(a, g)));
+}
+@source(IRC_S6654_D, relation = formalizes, coverage = exact, quote = "(and by increasing subsequent required installments to the extent that the reduction has not previously been recaptured under this clause)")
+rule CumulativeRequiredInd4(p: Person, y: TaxableYear, s3: Money, a: Money, g: Money) strict {
+    when individual_establishes_annualized_installments(p, y) and cumulative_required_ind_3(p, y, s3)
+        and annualized_cumulative_amount_ind(p, y, Fourth, a) and regular_cumulative_installments(p, y, Fourth, g);
+    then cumulative_required_ind_4(p, y, max(s3, min(a, g)));
+}
+pub relation annualized_income_installment_ind(p: Person, y: TaxableYear, installment: EstimatedTaxInstallment, amount: Money) kind institutional {
+    label en official "the annualized income installment: the excess (if any) of the applicable percentage of the annualized tax over the aggregate of the prior required installments";
+}
+@source(IRC_S6654_D, relation = formalizes, coverage = exact, quote = "the annualized income installment is the excess (if any) of—")
+rule AnnualizedIncomeInstallmentInd1(p: Person, y: TaxableYear, a: Money) strict {
+    when annualized_cumulative_amount_ind(p, y, First, a);
+    then annualized_income_installment_ind(p, y, First, a);
+}
+@source(IRC_S6654_D, relation = formalizes, coverage = exact, quote = "the aggregate amount of any prior required installments for the taxable year.")
+rule AnnualizedIncomeInstallmentInd2(p: Person, y: TaxableYear, a: Money, s1: Money) strict {
+    when annualized_cumulative_amount_ind(p, y, Second, a) and cumulative_required_ind_1(p, y, s1);
+    then annualized_income_installment_ind(p, y, Second, max(0.00 USD, a - s1));
+}
+@source(IRC_S6654_D, relation = formalizes, coverage = exact, quote = "the aggregate amount of any prior required installments for the taxable year.")
+rule AnnualizedIncomeInstallmentInd3(p: Person, y: TaxableYear, a: Money, s2: Money) strict {
+    when annualized_cumulative_amount_ind(p, y, Third, a) and cumulative_required_ind_2(p, y, s2);
+    then annualized_income_installment_ind(p, y, Third, max(0.00 USD, a - s2));
+}
+@source(IRC_S6654_D, relation = formalizes, coverage = exact, quote = "the aggregate amount of any prior required installments for the taxable year.")
+rule AnnualizedIncomeInstallmentInd4(p: Person, y: TaxableYear, a: Money, s3: Money) strict {
+    when annualized_cumulative_amount_ind(p, y, Fourth, a) and cumulative_required_ind_3(p, y, s3);
+    then annualized_income_installment_ind(p, y, Fourth, max(0.00 USD, a - s3));
+}
+pub relation annualized_required_installment_ind(p: Person, y: TaxableYear, installment: EstimatedTaxInstallment, amount: Money) kind institutional {
+    label en official "the required installment on the annualized method: the annualized income installment or, when smaller than the paragraph (1) amount, the recaptured regular amount";
+}
+@source(IRC_S6654_D, relation = formalizes, coverage = exact, quote = "the amount of such required installment shall be the annualized income installment, and")
+rule AnnualizedRequiredInstallmentInd1(p: Person, y: TaxableYear, s1: Money) strict {
+    when cumulative_required_ind_1(p, y, s1);
+    then annualized_required_installment_ind(p, y, First, s1);
+}
+@source(IRC_S6654_D, relation = formalizes, coverage = exact, quote = "recaptured by increasing the amount of the next required installment")
+rule AnnualizedRequiredInstallmentInd2(p: Person, y: TaxableYear, s1: Money, s2: Money) strict {
+    when cumulative_required_ind_1(p, y, s1) and cumulative_required_ind_2(p, y, s2);
+    then annualized_required_installment_ind(p, y, Second, s2 - s1);
+}
+@source(IRC_S6654_D, relation = formalizes, coverage = exact, quote = "recaptured by increasing the amount of the next required installment")
+rule AnnualizedRequiredInstallmentInd3(p: Person, y: TaxableYear, s2: Money, s3: Money) strict {
+    when cumulative_required_ind_2(p, y, s2) and cumulative_required_ind_3(p, y, s3);
+    then annualized_required_installment_ind(p, y, Third, s3 - s2);
+}
+@source(IRC_S6654_D, relation = formalizes, coverage = exact, quote = "recaptured by increasing the amount of the next required installment")
+rule AnnualizedRequiredInstallmentInd4(p: Person, y: TaxableYear, s3: Money, s4: Money) strict {
+    when cumulative_required_ind_3(p, y, s3) and cumulative_required_ind_4(p, y, s4);
+    then annualized_required_installment_ind(p, y, Fourth, s4 - s3);
+}
+
+pub relation required_installment_applicable(p: Person, y: TaxableYear, installment: EstimatedTaxInstallment, amount: Money) kind institutional {
+    label en official "the required installment that applies: the annualized installment when the individual establishes it, otherwise the amount determined under paragraph (1)";
+}
+@source(IRC_S6654_D, relation = formalizes, coverage = exact, quote = "the amount of any required installment shall be 25 percent of the required annual payment")
+rule RequiredInstallmentApplicableRegular strict {
+    for p: Person;
+    for y: TaxableYear;
+    for inst: EstimatedTaxInstallment;
+    for a: Money;
+    when required_installment_amount(p, y, inst, a) and not_known(individual_establishes_annualized_installments(p, y));
+    then required_installment_applicable(p, y, inst, a);
+}
+@source(IRC_S6654_D, relation = formalizes, coverage = exact, quote = "the amount of such required installment shall be the annualized income installment, and")
+rule RequiredInstallmentApplicableAnnualized strict {
+    for p: Person;
+    for y: TaxableYear;
+    for inst: EstimatedTaxInstallment;
+    for a: Money;
+    when individual_establishes_annualized_installments(p, y) and annualized_required_installment_ind(p, y, inst, a);
+    then required_installment_applicable(p, y, inst, a);
+}
+
+// --- (b)(3): payments are credited against the earliest unpaid installment ------------------------------
+pub relation estimated_tax_payment_on(p: Person, y: TaxableYear, d: Date, amount: Money) kind empirical {
+    label en official "a payment of estimated tax made on the date (one fact per date: the case totals the payments of a day)";
+}
+relation has_estimated_tax_payments(p: Person, y: TaxableYear) kind institutional {
+    label en unofficial "at least one dated payment of estimated tax is asserted";
+}
+rule HasEstimatedTaxPayments strict {
+    for p: Person;
+    for y: TaxableYear;
+    for d: Date;
+    for a: Money;
+    when estimated_tax_payment_on(p, y, d, a);
+    then has_estimated_tax_payments(p, y);
+}
+@source(IRC_S6654_B, relation = formalizes, coverage = exact, quote = "a payment of estimated tax shall be credited against unpaid required installments in the order in which such installments are required to be paid.")
+rule InstallmentPaidByCreditingOrder strict {
+    for p: Person;
+    for y: TaxableYear;
+    for inst: EstimatedTaxInstallment;
+    for required: Money;
+    for due: Date;
+    for k: Integer;
+    when has_estimated_tax_payments(p, y) and required_installment_applicable(p, y, inst, required)
+        and required_installment_due_date(y, inst, due) and installment_ordinal(inst, k);
+    then installment_paid_amount(p, y, inst, min(required, max(0.00 USD,
+        sum(collect all a: Money, t: Date where estimated_tax_payment_on(p, y, t, a) and t <= due, empty: 0.00 USD)
+        - sum(collect all r: Money, j: EstimatedTaxInstallment, n: Integer where required_installment_applicable(p, y, j, r) and installment_ordinal(j, n) and n < k, empty: 0.00 USD))));
+}
+
+// The part of each payment credited to each installment, and the date on which a portion of an
+// underpayment is thereby paid (section 6654(b)(2)(B) with (b)(3)).
+pub relation payment_credited_to_installment(p: Person, y: TaxableYear, installment: EstimatedTaxInstallment, t: Date, amount: Money) kind institutional {
+    label en official "the part of the payment made on the date that is credited against the installment, the earlier installments being credited first";
+}
+@source(IRC_S6654_B, relation = formalizes, coverage = exact, quote = "a payment of estimated tax shall be credited against unpaid required installments in the order in which such installments are required to be paid.")
+rule PaymentCreditedToInstallment strict {
+    for p: Person;
+    for y: TaxableYear;
+    for inst: EstimatedTaxInstallment;
+    for required: Money;
+    for k: Integer;
+    for t: Date;
+    for paid: Money;
+    when required_installment_applicable(p, y, inst, required) and installment_ordinal(inst, k)
+        and estimated_tax_payment_on(p, y, t, paid);
+    then payment_credited_to_installment(p, y, inst, t,
+        min(required, max(0.00 USD,
+            sum(collect all a: Money, u: Date where estimated_tax_payment_on(p, y, u, a) and u <= t, empty: 0.00 USD)
+            - sum(collect all r: Money, j: EstimatedTaxInstallment, n: Integer where required_installment_applicable(p, y, j, r) and installment_ordinal(j, n) and n < k, empty: 0.00 USD)))
+        - min(required, max(0.00 USD,
+            sum(collect all a2: Money, u2: Date where estimated_tax_payment_on(p, y, u2, a2) and u2 < t, empty: 0.00 USD)
+            - sum(collect all r2: Money, j2: EstimatedTaxInstallment, n2: Integer where required_installment_applicable(p, y, j2, r2) and installment_ordinal(j2, n2) and n2 < k, empty: 0.00 USD))));
+}
+@source(IRC_S6654_B, relation = formalizes, coverage = exact, quote = "with respect to any portion of the underpayment, the date on which such portion is paid")
+rule UnderpaymentPortionPaidOnDate strict {
+    for p: Person;
+    for y: TaxableYear;
+    for inst: EstimatedTaxInstallment;
+    for t: Date;
+    for due: Date;
+    for c: Money;
+    when payment_credited_to_installment(p, y, inst, t, c) and required_installment_due_date(y, inst, due)
+        and c > 0.00 USD and t > due;
+    then underpayment_portion_paid_on(p, y, inst, t);
+}
+
+// --- (d)(2)(D): subpart F income in the annualized installments ----------------------------------------------
+relation individual_subpart_f_inclusion_951a(p: Person, y: TaxableYear) kind empirical {
+    label en official "amounts are required to be included in the gross income of the individual under section 951(a) (and credits are properly allocable thereto)";
+}
+relation individual_elects_subpart_f_safe_harbor(p: Person, y: TaxableYear) kind empirical {
+    label en official "the taxpayer elects to have clause (ii) apply for the taxable year (the exercise)";
+}
+pub relation individual_subpart_f_safe_harbor_in_effect(p: Person, y: TaxableYear) kind institutional {
+    label en official "the prior year safe harbor election applies to the taxable year (the effect of the power)";
+}
+pub relation individual_subpart_f_safe_harbor_made(p: Person, y: TaxableYear) kind institutional {
+    label en official "a valid prior year safe harbor election is made (computational twin of the power's effect)";
+}
+@source(IRC_S6654_D, relation = formalizes, coverage = exact, quote = "If a taxpayer elects to have this clause apply to any taxable year—")
+rule IndividualMayElectSubpartFSafeHarbor defeasible {
+    label en official "section 6654(d)(2)(D)(ii): the taxpayer may elect the prior year safe harbor for subpart F income";
+    for p: Person;
+    for y: TaxableYear;
+    when individual_subpart_f_inclusion_951a(p, y);
+    then power ElectIndividualSubpartFSafeHarbor {
+        holder p; over p;
+        exercise individual_elects_subpart_f_safe_harbor(p, y);
+        valid_when individual_subpart_f_inclusion_951a(p, y);
+        effect create(individual_subpart_f_safe_harbor_in_effect(p, y));
+        window [-infinity, infinity];
+    };
+}
+@source(IRC_S6654_D, relation = formalizes, coverage = exact, quote = "If a taxpayer elects to have this clause apply to any taxable year—")
+rule IndividualSubpartFSafeHarborMade strict {
+    for p: Person;
+    for y: TaxableYear;
+    when individual_elects_subpart_f_safe_harbor(p, y) and individual_subpart_f_inclusion_951a(p, y);
+    then individual_subpart_f_safe_harbor_made(p, y);
+}
+pub relation individual_subpart_f_treated_like_partnership_inclusion(p: Person, y: TaxableYear) kind institutional {
+    label en official "the section 951(a) inclusions are taken into account in computing any annualized income installment in the manner of partnership income inclusions";
+}
+@source(IRC_S6654_D, relation = formalizes, coverage = exact, quote = "shall be taken into account in computing any annualized income installment under subparagraph (B) in a manner similar to the manner under which partnership income inclusions (and credits properly allocable thereto) are taken into account.")
+rule IndividualSubpartFTreatedLikePartnership strict {
+    for p: Person;
+    for y: TaxableYear;
+    when individual_subpart_f_inclusion_951a(p, y) and not_known(individual_subpart_f_safe_harbor_made(p, y));
+    then individual_subpart_f_treated_like_partnership_inclusion(p, y);
+}
+relation preceding_year_subpart_f_items_individual(p: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the items of income and credit described in clause (i) shown on the return of the taxpayer for the preceding taxable year";
+}
+relation second_preceding_year_subpart_f_items_individual(p: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the same items shown on the return for the second preceding taxable year";
+}
+pub relation individual_subpart_f_safe_harbor_amount(p: Person, y: TaxableYear, installment: EstimatedTaxInstallment, amount: Money) kind institutional {
+    label en official "the items the taxpayer is treated as having received ratably during the taxable year, in an amount equal to the items shown on the return for the preceding taxable year (the second preceding year for the first and second installments)";
+}
+@source(IRC_S6654_D, relation = formalizes, coverage = exact, quote = "(the second preceding taxable year in the case of the first and second required installments for such taxable year).")
+rule IndividualSafeHarborAmountFirst strict {
+    for p: Person;
+    for y: TaxableYear;
+    for items: Money;
+    when individual_subpart_f_safe_harbor_made(p, y) and second_preceding_year_subpart_f_items_individual(p, y, items);
+    then individual_subpart_f_safe_harbor_amount(p, y, First, items);
+}
+@source(IRC_S6654_D, relation = formalizes, coverage = exact, quote = "(the second preceding taxable year in the case of the first and second required installments for such taxable year).")
+rule IndividualSafeHarborAmountSecond strict {
+    for p: Person;
+    for y: TaxableYear;
+    for items: Money;
+    when individual_subpart_f_safe_harbor_made(p, y) and second_preceding_year_subpart_f_items_individual(p, y, items);
+    then individual_subpart_f_safe_harbor_amount(p, y, Second, items);
+}
+@source(IRC_S6654_D, relation = formalizes, coverage = exact, quote = "the taxpayer shall be treated as having received ratably during such taxable year items of income and credit described in clause (i) in an amount equal to the amount of such items shown on the return of the taxpayer for the preceding taxable year")
+rule IndividualSafeHarborAmountThird strict {
+    for p: Person;
+    for y: TaxableYear;
+    for items: Money;
+    when individual_subpart_f_safe_harbor_made(p, y) and preceding_year_subpart_f_items_individual(p, y, items);
+    then individual_subpart_f_safe_harbor_amount(p, y, Third, items);
+}
+@source(IRC_S6654_D, relation = formalizes, coverage = exact, quote = "the taxpayer shall be treated as having received ratably during such taxable year items of income and credit described in clause (i) in an amount equal to the amount of such items shown on the return of the taxpayer for the preceding taxable year")
+rule IndividualSafeHarborAmountFourth strict {
+    for p: Person;
+    for y: TaxableYear;
+    for items: Money;
+    when individual_subpart_f_safe_harbor_made(p, y) and preceding_year_subpart_f_items_individual(p, y, items);
+    then individual_subpart_f_safe_harbor_amount(p, y, Fourth, items);
+}
+
+// --- (l)(4): the annualization period of an estate or trust ends one month earlier ---------------------------
+pub relation annualization_cutoff_date_ind(p: Person, y: TaxableYear, installment: EstimatedTaxInstallment, d: Date) kind institutional {
+    label en official "the months of the taxable year whose income is annualized are those ending before this date: the due date of the installment (one month before it for an estate or trust)";
+}
+@source(IRC_S6654_D, relation = formalizes, coverage = exact, quote = "for months in the taxable year ending before the due date for the installment")
+rule AnnualizationCutoffOrdinary strict {
+    for p: Person;
+    for y: TaxableYear;
+    for inst: EstimatedTaxInstallment;
+    for due: Date;
+    when required_installment_due_date(y, inst, due) and us.irc.core::year_of(p, y) and not_known(estate_or_trust_taxpayer(p));
+    then annualization_cutoff_date_ind(p, y, inst, due);
+}
+@source(IRC_S6654_L, relation = formalizes, coverage = exact, quote = "subsection (d)(2)(B)(i) shall be applied by substituting \"ending before the date 1 month before the due date for the installment\" for \"ending before the due date for the installment\".")
+rule AnnualizationCutoffEstateOrTrust strict {
+    for p: Person;
+    for y: TaxableYear;
+    for inst: EstimatedTaxInstallment;
+    for due: Date;
+    for calendar_before_1: Date;
+    when required_installment_due_date(y, inst, due) and us.irc.core::year_of(p, y) and estate_or_trust_taxpayer(p)
+        and us.irc.core::civil_calendar_boundary_before(due, 1, us.irc.core::CalendarMonth, calendar_before_1);
+    then annualization_cutoff_date_ind(p, y, inst, calendar_before_1);
+}

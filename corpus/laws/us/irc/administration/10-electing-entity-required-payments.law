@@ -1,0 +1,628 @@
+// 26 U.S.C. §7519 — Required payments for entities electing not to have a
+// required taxable year (section 444 election). STAGE 3.
+//
+// JUDGMENT CALLS
+//  - Multi-year balances are case facts: the net required payment balance
+//    (§7519(e)(4)) needs the sum of required payments and refunds of all
+//    preceding applicable election years, i.e. derived predicates over a
+//    year ledger (TECH-GAPS G3004); each year's required payment is
+//    computed here, the cross-year aggregate enters as a fact.
+//  - "Applicable payments" are aggregated by `sum all` over an EMPIRICAL
+//    relation whose `kind` enum already excludes the (d)(3)(B) exceptions
+//    (sale/exchange gain, S corporation dividends, guaranteed payments); the
+//    classification of one payment is therefore the case's fact, not derived
+//    (aggregates over derived predicates are the §111 runtime limit).
+//  - April 15 of the calendar year following the year in which the
+//    applicable election year begins is built from a case-supplied
+//    December 31 (no calendar-year term of a date, TECH-GAPS G3005).
+//  - "Reasonable cause and not willful neglect" and "willfully fails" are
+//    external judgments (DECISION-0194).
+//  - The 1987 special rate (36 percent) and the 1987-1990 applicable
+//    percentage schedule are dated rules over the calendar year in which
+//    the applicable election year begins.
+//  - Money x Decimal results are rounded once, HALF_UP, at cents (the
+//    statute names no rounding).
+
+language "law.core" version "0.2";
+package us.irc.administration version "0.1.1";
+namespace "urn:us:irc:administration:clir";
+
+use self::{
+    IRC_S7519_A,
+    IRC_S7519_B,
+    IRC_S7519_C,
+    IRC_S7519_D,
+    IRC_S7519_E,
+    IRC_S7519_F,
+    IRC_S7519_G,
+    IRC_S7519_TABLE_1,
+    Organ,
+    Person,
+    Secretary,
+    TaxableYear,
+};
+
+// --- (a) applicability -----------------------------------------------------------
+
+relation election_444_in_effect(e: Person, y: TaxableYear) kind empirical {
+    label en unofficial "an election under section 444 is in effect for the taxable year of the partnership or S corporation (an applicable election year, §7519(e)(2)(B))";
+}
+relation entity_is_partnership_or_s_corporation(e: Person) kind empirical {
+    label en unofficial "the entity is a partnership or an S corporation";
+}
+relation required_payment_over_500_in_earlier_year(e: Person, y: TaxableYear) kind empirical {
+    label en unofficial "the required payment determined under subsection (b) for a taxable year preceding this one exceeded $500 (the year-by-year recursion is TECH-GAPS G3004)";
+}
+pub relation required_payment(e: Person, y: TaxableYear, amt: Money) kind institutional {
+    label en unofficial "the required payment under §7519(b) for the applicable election year";
+}
+pub relation section_7519_applies(e: Person, y: TaxableYear) kind institutional {
+    label en unofficial "section 7519 applies to the entity for the taxable year: a section 444 election is in effect and the required payment for the year (or a preceding year) exceeds $500";
+}
+@source(IRC_S7519_A, relation = formalizes, coverage = exact, quote = "the required payment determined under subsection (b) for such taxable year (or any preceding taxable year) exceeds $500")
+rule S7519AppliesCurrentYearOver500 strict {
+    for e: Person;
+    for y: TaxableYear;
+    for amt: Money;
+    when entity_is_partnership_or_s_corporation(e)
+        and election_444_in_effect(e, y)
+        and required_payment(e, y, amt)
+        and amt > 500.00 USD;
+    then section_7519_applies(e, y);
+}
+@source(IRC_S7519_A, relation = formalizes, coverage = exact, quote = "the required payment determined under subsection (b) for such taxable year (or any preceding taxable year) exceeds $500")
+rule S7519AppliesEarlierYearOver500 strict {
+    for e: Person;
+    for y: TaxableYear;
+    when entity_is_partnership_or_s_corporation(e)
+        and election_444_in_effect(e, y)
+        and required_payment_over_500_in_earlier_year(e, y);
+    then section_7519_applies(e, y);
+}
+
+// --- (d)(2)-(3) net income and applicable payments --------------------------------
+
+relation base_year_of(y: TaxableYear, base: TaxableYear) kind empirical {
+    label en unofficial "the base year: the taxable year preceding the applicable election year (§7519(e)(2)(A))";
+}
+relation entity_is_partnership(e: Person) kind empirical {
+    label en unofficial "the entity is a partnership (net income from section 702(a) items)";
+}
+relation entity_is_s_corporation(e: Person) kind empirical {
+    label en unofficial "the entity is an S corporation (net income from section 1366(a) items)";
+}
+relation section_702a_or_1366a_items_total(e: Person, base: TaxableYear, amt: Money) kind empirical {
+    label en unofficial "the aggregate amount of the section 702(a) items (partnership) or section 1366(a) items (S corporation) for the base year, other than credits and tax-exempt income, with limitations on the partner's or shareholder's use of any item disregarded ((d)(2)(C))";
+}
+relation guaranteed_payments_deducted_in_items(e: Person, base: TaxableYear, amt: Money) kind empirical {
+    label en unofficial "guaranteed payments (section 707(c)) by a partnership that reduced the items above";
+}
+relation s_corporation_was_c_corporation_in_base_year(e: Person, base: TaxableYear) kind empirical {
+    label en unofficial "the S corporation was a C corporation for the base year";
+}
+relation c_corporation_taxable_income_for_base_year(e: Person, base: TaxableYear, amt: Money) kind empirical {
+    label en unofficial "the taxable income of the entity as a C corporation for the base year";
+}
+pub relation net_income_for_base_year(e: Person, base: TaxableYear, amt: Money) kind institutional {
+    label en unofficial "net income of the entity for the base year under §7519(d)(2): not below zero";
+}
+@source(IRC_S7519_D, relation = formalizes, coverage = exact, quote = "In the case of a partnership, net income shall be the amount (not below zero) determined by taking into account the aggregate amount of the partnership's items described in section 702(a) (other than credits and tax-exempt income).")
+rule S7519NetIncomePartnership strict {
+    for e: Person;
+    for base: TaxableYear;
+    for items: Money;
+    for gp: Money;
+    when entity_is_partnership(e)
+        and section_702a_or_1366a_items_total(e, base, items)
+        and guaranteed_payments_deducted_in_items(e, base, gp);
+    then net_income_for_base_year(e, base, max(0.00 USD, items + gp));
+}
+@source(IRC_S7519_D, relation = formalizes, coverage = exact, quote = "In the case of an S corporation, net income shall be the amount (not below zero) determined by taking into account the aggregate amount of the S corporation's items described in section 1366(a) (other than credits and tax-exempt income).")
+rule S7519NetIncomeSCorporation strict {
+    for e: Person;
+    for base: TaxableYear;
+    for items: Money;
+    when entity_is_s_corporation(e)
+        and section_702a_or_1366a_items_total(e, base, items)
+        and not_known(s_corporation_was_c_corporation_in_base_year(e, base));
+    then net_income_for_base_year(e, base, max(0.00 USD, items));
+}
+@source(IRC_S7519_D, relation = formalizes, coverage = exact, quote = "If the S corporation was a C corporation for the base year, its taxable income for such year shall be treated as its net income for such year")
+rule S7519NetIncomeFormerCCorporation strict {
+    for e: Person;
+    for base: TaxableYear;
+    for ti: Money;
+    when entity_is_s_corporation(e)
+        and s_corporation_was_c_corporation_in_base_year(e, base)
+        and c_corporation_taxable_income_for_base_year(e, base, ti);
+    then net_income_for_base_year(e, base, ti);
+}
+
+enum OwnerPaymentKind {
+    IncludibleInOwnerGrossIncome;
+    SaleOrExchangeGainBetweenOwnerAndEntity;
+    SCorporationDividend;
+    GuaranteedPayment;
+    NotIncludibleInGrossIncome;
+}
+enum PaymentTiming {
+    DuringDeferralPeriod;
+    OutsideDeferralPeriod;
+}
+entity OwnerPayment {
+    label en unofficial "an amount paid by a partnership or S corporation to a partner or shareholder";
+}
+relation owner_payment(pay: OwnerPayment, e: Person, base: TaxableYear, kind: OwnerPaymentKind, timing: PaymentTiming, amt: Money) kind empirical {
+    label en unofficial "a payment of the base year, of the named kind (the (d)(3)(B) and (d)(5) exclusions are separate kinds) and timing";
+}
+pub relation applicable_payments_base_year(e: Person, base: TaxableYear, amt: Money) kind institutional {
+    label en unofficial "the aggregate applicable payments made by the entity during the base year (§7519(d)(3)(A))";
+}
+pub relation applicable_payments_in_deferral_period(e: Person, base: TaxableYear, amt: Money) kind institutional {
+    label en unofficial "the aggregate applicable payments made during the deferral period of the base year";
+}
+@source(IRC_S7519_D, relation = formalizes, coverage = exact, quote = "The term \"applicable payment\" means amounts paid by a partnership or S corporation which are includible in gross income of a partner or shareholder.")
+rule S7519AggregateApplicablePayments strict {
+    for e: Person;
+    for base: TaxableYear;
+    when entity_is_partnership_or_s_corporation(e)
+        and base_year_of_some_election_year(e, base);
+    then applicable_payments_base_year(e, base, sum all amt: Money for pay: OwnerPayment where owner_payment(pay, e, base, IncludibleInOwnerGrossIncome, DuringDeferralPeriod, amt) or owner_payment(pay, e, base, IncludibleInOwnerGrossIncome, OutsideDeferralPeriod, amt));
+}
+relation base_year_of_some_election_year(e: Person, base: TaxableYear) kind empirical {
+    label en unofficial "the taxable year is the base year of an applicable election year of the entity";
+}
+@source(IRC_S7519_D, relation = formalizes, coverage = exact, quote = "the aggregate amount of such applicable payments made during the deferral period of the base year")
+rule S7519AggregateDeferralPeriodPayments strict {
+    for e: Person;
+    for base: TaxableYear;
+    when entity_is_partnership_or_s_corporation(e)
+        and base_year_of_some_election_year(e, base);
+    then applicable_payments_in_deferral_period(e, base, sum all amt: Money for pay: OwnerPayment where owner_payment(pay, e, base, IncludibleInOwnerGrossIncome, DuringDeferralPeriod, amt));
+}
+
+// --- (d)(1) net base year income -------------------------------------------------
+
+relation deferral_period_months(e: Person, y: TaxableYear, months: Integer) kind empirical {
+    label en unofficial "the number of months in the deferral period of the base year (section 444(b)(4), owner: accounting)";
+}
+relation taxable_year_months(e: Person, base: TaxableYear, months: Integer) kind empirical {
+    label en unofficial "the number of months in the partnership's or S corporation's taxable year (base year)";
+}
+pub relation net_base_year_income(e: Person, y: TaxableYear, amt: Money) kind institutional {
+    label en unofficial "net base year income: deferral ratio x net income, plus the excess of deferral ratio x base-year applicable payments over applicable payments made in the deferral period (§7519(d)(1))";
+}
+@source(IRC_S7519_D, relation = formalizes, coverage = exact, quote = "An entity's net base year income shall be equal to the sum of—")
+rule S7519NetBaseYearIncome strict {
+    for e: Person;
+    for y: TaxableYear;
+    for base: TaxableYear;
+    for ni: Money;
+    for ap: Money;
+    for apd: Money;
+    for dm: Integer;
+    for tm: Integer;
+    when base_year_of(y, base)
+        and net_income_for_base_year(e, base, ni)
+        and applicable_payments_base_year(e, base, ap)
+        and applicable_payments_in_deferral_period(e, base, apd)
+        and deferral_period_months(e, y, dm)
+        and taxable_year_months(e, base, tm);
+    then net_base_year_income(e, y, div_round(ni * dm, tm * 1.0, 2, "HALF_UP") + max(0.00 USD, div_round(ap * dm, tm * 1.0, 2, "HALF_UP") - apd));
+}
+
+// --- (d)(4) applicable percentage ----------------------------------------------
+
+relation election_year_begins_in_calendar_year(y: TaxableYear, n: Integer) kind empirical {
+    label en unofficial "the applicable election year begins in this calendar year";
+}
+relation more_than_half_net_income_to_806e2c_holders(e: Person, y: TaxableYear) kind empirical {
+    label en unofficial "more than 50 percent of the entity's net income for the short taxable year that would have resulted had it not elected would have been allocated to partners or shareholders entitled to the benefits of section 806(e)(2)(C) of the Tax Reform Act of 1986";
+}
+relation table_percentage(y: TaxableYear, pct: Decimal) kind derived {
+    label en unofficial "the schedule percentage by the calendar year in which the applicable election year begins: 25 (1987), 50 (1988), 75 (1989), 100 (1990 or thereafter)";
+}
+pub relation applicable_percentage(e: Person, y: TaxableYear, pct: Decimal) kind institutional {
+    label en unofficial "the applicable percentage of §7519(d)(4)";
+}
+@source(IRC_S7519_TABLE_1, relation = formalizes, coverage = exact, quote = "1987")
+rule S7519Percentage1987 strict {
+    for y: TaxableYear;
+    when election_year_begins_in_calendar_year(y, 1987);
+    then table_percentage(y, 0.25);
+}
+@source(IRC_S7519_TABLE_1, relation = formalizes, coverage = exact, quote = "1988")
+rule S7519Percentage1988 strict {
+    for y: TaxableYear;
+    when election_year_begins_in_calendar_year(y, 1988);
+    then table_percentage(y, 0.50);
+}
+@source(IRC_S7519_TABLE_1, relation = formalizes, coverage = exact, quote = "1989")
+rule S7519Percentage1989 strict {
+    for y: TaxableYear;
+    when election_year_begins_in_calendar_year(y, 1989);
+    then table_percentage(y, 0.75);
+}
+@source(IRC_S7519_TABLE_1, relation = formalizes, coverage = exact, quote = "1990 or thereafter")
+rule S7519Percentage1990OrLater strict {
+    for y: TaxableYear;
+    for n: Integer;
+    when election_year_begins_in_calendar_year(y, n)
+        and n >= 1990;
+    then table_percentage(y, 1.00);
+}
+@source(IRC_S7519_D, relation = formalizes, coverage = exact, quote = "the applicable percentage for any partnership or S corporation shall be 100 percent unless more than 50 percent of such entity's net income for the short taxable year")
+rule S7519PercentageScheduleWhen806Holders strict {
+    for e: Person;
+    for y: TaxableYear;
+    for pct: Decimal;
+    when table_percentage(y, pct)
+        and more_than_half_net_income_to_806e2c_holders(e, y);
+    then applicable_percentage(e, y, pct);
+}
+@source(IRC_S7519_D, relation = formalizes, coverage = exact, quote = "the applicable percentage for any partnership or S corporation shall be 100 percent unless more than 50 percent of such entity's net income for the short taxable year")
+rule S7519PercentageHundredOtherwise strict {
+    for e: Person;
+    for y: TaxableYear;
+    when election_444_in_effect(e, y)
+        and not_known(more_than_half_net_income_to_806e2c_holders(e, y));
+    then applicable_percentage(e, y, 1.00);
+}
+
+// --- (b) required payment ---------------------------------------------------------
+
+relation highest_section_1_rate_at_end_of_base_year(y: TaxableYear, rate: Decimal) kind empirical {
+    label en unofficial "the highest rate of tax in effect under section 1 as of the end of the base year (owner: income-individual)";
+}
+pub relation adjusted_highest_section_1_rate(y: TaxableYear, rate: Decimal) kind institutional {
+    label en unofficial "the highest section 1 rate at the end of the base year plus 1 percentage point, or 36 percent for applicable election years beginning in 1987";
+}
+@source(IRC_S7519_B, relation = formalizes, coverage = exact, quote = "the highest rate of tax in effect under section 1 as of the end of the base year plus 1 percentage point")
+rule S7519AdjustedRateGeneral strict {
+    for y: TaxableYear;
+    for rate: Decimal;
+    when highest_section_1_rate_at_end_of_base_year(y, rate)
+        and not_known(election_year_begins_in_calendar_year(y, 1987));
+    then adjusted_highest_section_1_rate(y, rate + 0.01);
+}
+@source(IRC_S7519_B, relation = formalizes, coverage = exact, quote = "or, in the case of applicable election years beginning in 1987, 36 percent")
+rule S7519AdjustedRate1987 strict {
+    for y: TaxableYear;
+    when election_year_begins_in_calendar_year(y, 1987);
+    then adjusted_highest_section_1_rate(y, 0.36);
+}
+relation aggregate_required_payments_preceding_years(e: Person, y: TaxableYear, amt: Money) kind empirical {
+    label en unofficial "the aggregate of the required payments under this section for all preceding applicable election years (§7519(e)(4)(A); cross-year ledger, TECH-GAPS G3004)";
+}
+relation aggregate_refunds_preceding_years(e: Person, y: TaxableYear, amt: Money) kind empirical {
+    label en unofficial "the aggregate amount allowable as a refund to the entity under subsection (c) for all preceding applicable election years (§7519(e)(4)(B))";
+}
+pub relation net_required_payment_balance(e: Person, y: TaxableYear, amt: Money) kind institutional {
+    label en unofficial "the excess (if any) of aggregate preceding required payments over aggregate preceding refunds (§7519(e)(4))";
+}
+@source(IRC_S7519_E, relation = formalizes, coverage = exact, quote = "The term \"net required payment balance\" means the excess (if any) of—")
+rule S7519NetRequiredPaymentBalance strict {
+    for e: Person;
+    for y: TaxableYear;
+    for paid: Money;
+    for refunded: Money;
+    when aggregate_required_payments_preceding_years(e, y, paid)
+        and aggregate_refunds_preceding_years(e, y, refunded);
+    then net_required_payment_balance(e, y, max(0.00 USD, paid - refunded));
+}
+pub relation required_payment_product(e: Person, y: TaxableYear, amt: Money) kind institutional {
+    label en unofficial "(b)(1): the applicable percentage of the adjusted highest section 1 rate, multiplied by the net base year income";
+}
+@source(IRC_S7519_B, relation = formalizes, coverage = exact, quote = "the excess of the product of—")
+rule S7519ProductTerm strict {
+    for e: Person;
+    for y: TaxableYear;
+    for pct: Decimal;
+    for rate: Decimal;
+    for nbyi: Money;
+    when applicable_percentage(e, y, pct)
+        and adjusted_highest_section_1_rate(y, rate)
+        and net_base_year_income(e, y, nbyi);
+    then required_payment_product(e, y, round(nbyi * (pct * rate), 2, "HALF_UP"));
+}
+@source(IRC_S7519_B, relation = formalizes, coverage = exact, quote = "an amount equal to—")
+rule S7519RequiredPayment strict {
+    for e: Person;
+    for y: TaxableYear;
+    for prod: Money;
+    for bal: Money;
+    when required_payment_product(e, y, prod)
+        and net_required_payment_balance(e, y, bal);
+    then required_payment(e, y, max(0.00 USD, prod - bal));
+}
+
+// --- (c) refunds ----------------------------------------------------------------------
+
+pub relation refund_due_for_overpaid_balance(e: Person, y: TaxableYear, amt: Money) kind institutional {
+    label en unofficial "(c)(1): the net required payment balance exceeds the product: the entity is entitled to a refund of the excess";
+}
+@source(IRC_S7519_C, relation = formalizes, coverage = exact, quote = "the amount determined under subsection (b)(2) exceeds the amount determined under subsection (b)(1), the entity shall be entitled to a refund of such excess for such year")
+rule S7519RefundOfExcessBalance strict {
+    for e: Person;
+    for y: TaxableYear;
+    for prod: Money;
+    for bal: Money;
+    when required_payment_product(e, y, prod)
+        and net_required_payment_balance(e, y, bal)
+        and bal > prod;
+    then refund_due_for_overpaid_balance(e, y, bal - prod);
+}
+relation election_444_terminated_effective(e: Person, y: TaxableYear) kind empirical {
+    label en unofficial "an election under section 444 is terminated effective with respect to the year";
+}
+relation entity_liquidated_during_year(e: Person, y: TaxableYear) kind empirical {
+    label en unofficial "the entity is liquidated during the year";
+}
+pub relation refund_due_on_termination_or_liquidation(e: Person, y: TaxableYear, amt: Money) kind institutional {
+    label en unofficial "(c)(2): the entity is entitled to a refund of the net required payment balance";
+}
+@source(IRC_S7519_C, relation = formalizes, coverage = exact, quote = "an election under section 444 is terminated effective with respect to any year")
+rule S7519RefundOnTermination strict {
+    for e: Person;
+    for y: TaxableYear;
+    for bal: Money;
+    when election_444_terminated_effective(e, y)
+        and net_required_payment_balance(e, y, bal);
+    then refund_due_on_termination_or_liquidation(e, y, bal);
+}
+@source(IRC_S7519_C, relation = formalizes, coverage = exact, quote = "the entity is liquidated during any year")
+rule S7519RefundOnLiquidation strict {
+    for e: Person;
+    for y: TaxableYear;
+    for bal: Money;
+    when entity_liquidated_during_year(e, y)
+        and net_required_payment_balance(e, y, bal);
+    then refund_due_on_termination_or_liquidation(e, y, bal);
+}
+relation calendar_year_end_of_year_begun(y: TaxableYear, d: Date) kind empirical {
+    label en unofficial "December 31 of the calendar year in which the applicable election year begins (case-supplied: no date-of-calendar-year term, TECH-GAPS G3005)";
+}
+relation calendar_year_end_of_year_ended(y: TaxableYear, d: Date) kind empirical {
+    label en unofficial "December 31 of the calendar year in which the year ends";
+}
+relation refund_claim_filed_on(e: Person, y: TaxableYear, d: Date) kind empirical {
+    label en unofficial "the entity filed a claim for the refund with the Secretary on this date";
+}
+pub relation refund_payable_on_or_after(e: Person, y: TaxableYear, d: Date) kind institutional {
+    label en unofficial "the refund is payable on the later of April 15 following the calendar year (in which the year begins for (c)(1); in which it ends for (c)(2)) and the 90th day after the claim is filed (§7519(c)(3))";
+}
+relation april_15_following_year_begun(y: TaxableYear, d: Date) kind derived {
+    label en unofficial "April 15 of the calendar year following the calendar year in which the year begins";
+}
+relation april_15_following_year_ended(y: TaxableYear, d: Date) kind derived {
+    label en unofficial "April 15 of the calendar year following the calendar year in which the year ends";
+}
+@source(IRC_S7519_C, relation = formalizes, coverage = exact, quote = "April 15 of the calendar year following—")
+rule S7519April15AfterBegin strict {
+    for y: TaxableYear;
+    for dec31: Date;
+    when calendar_year_end_of_year_begun(y, dec31);
+    then april_15_following_year_begun(y, add_calendar_period(add_calendar_period(add_calendar_period(dec31, 1 calendar_day), 3 calendar_month), 14 calendar_day));
+}
+@source(IRC_S7519_C, relation = formalizes, coverage = exact, quote = "in the case of the year referred to in paragraph (2), the calendar year in which it ends")
+rule S7519April15AfterEnd strict {
+    for y: TaxableYear;
+    for dec31: Date;
+    when calendar_year_end_of_year_ended(y, dec31);
+    then april_15_following_year_ended(y, add_calendar_period(add_calendar_period(add_calendar_period(dec31, 1 calendar_day), 3 calendar_month), 14 calendar_day));
+}
+@source(IRC_S7519_C, relation = formalizes, coverage = exact, quote = "the day 90 days after the day on which claim therefor is filed with the Secretary")
+rule S7519RefundDateExcessLaterIsApril15 strict {
+    for e: Person;
+    for y: TaxableYear;
+    for apr: Date;
+    for filed: Date;
+    when refund_due_for_overpaid_balance_flag(e, y)
+        and april_15_following_year_begun(y, apr)
+        and refund_claim_filed_on(e, y, filed)
+        and apr >= add_calendar_period(filed, 90 calendar_day);
+    then refund_payable_on_or_after(e, y, apr);
+}
+@source(IRC_S7519_C, relation = formalizes, coverage = exact, quote = "the day 90 days after the day on which claim therefor is filed with the Secretary")
+rule S7519RefundDateExcessLaterIsClaim strict {
+    for e: Person;
+    for y: TaxableYear;
+    for apr: Date;
+    for filed: Date;
+    when refund_due_for_overpaid_balance_flag(e, y)
+        and april_15_following_year_begun(y, apr)
+        and refund_claim_filed_on(e, y, filed)
+        and apr < add_calendar_period(filed, 90 calendar_day);
+    then refund_payable_on_or_after(e, y, add_calendar_period(filed, 90 calendar_day));
+}
+relation refund_due_for_overpaid_balance_flag(e: Person, y: TaxableYear) kind derived {
+    label en unofficial "a (c)(1) refund is due for the year";
+}
+@source(IRC_S7519_C, relation = formalizes, coverage = exact, quote = "the entity shall be entitled to a refund of such excess for such year")
+rule S7519RefundFlag strict {
+    for e: Person;
+    for y: TaxableYear;
+    for amt: Money;
+    when refund_due_for_overpaid_balance(e, y, amt);
+    then refund_due_for_overpaid_balance_flag(e, y);
+}
+relation refund_due_on_termination_flag(e: Person, y: TaxableYear) kind derived {
+    label en unofficial "a (c)(2) refund is due for the year";
+}
+@source(IRC_S7519_C, relation = formalizes, coverage = exact, quote = "the entity shall be entitled to a refund of the net required payment balance")
+rule S7519TerminationRefundFlag strict {
+    for e: Person;
+    for y: TaxableYear;
+    for amt: Money;
+    when refund_due_on_termination_or_liquidation(e, y, amt);
+    then refund_due_on_termination_flag(e, y);
+}
+@source(IRC_S7519_C, relation = formalizes, coverage = exact, quote = "the day 90 days after the day on which claim therefor is filed with the Secretary")
+rule S7519RefundDateTerminationLaterIsApril15 strict {
+    for e: Person;
+    for y: TaxableYear;
+    for apr: Date;
+    for filed: Date;
+    when refund_due_on_termination_flag(e, y)
+        and april_15_following_year_ended(y, apr)
+        and refund_claim_filed_on(e, y, filed)
+        and apr >= add_calendar_period(filed, 90 calendar_day);
+    then refund_payable_on_or_after(e, y, apr);
+}
+@source(IRC_S7519_C, relation = formalizes, coverage = exact, quote = "the day 90 days after the day on which claim therefor is filed with the Secretary")
+rule S7519RefundDateTerminationLaterIsClaim strict {
+    for e: Person;
+    for y: TaxableYear;
+    for apr: Date;
+    for filed: Date;
+    when refund_due_on_termination_flag(e, y)
+        and april_15_following_year_ended(y, apr)
+        and refund_claim_filed_on(e, y, filed)
+        and apr < add_calendar_period(filed, 90 calendar_day);
+    then refund_payable_on_or_after(e, y, add_calendar_period(filed, 90 calendar_day));
+}
+
+// --- (e)(3) reporting and (f) administrative provisions --------------------------------
+
+relation entity_includes_information_prescribed_by_secretary(e: Person, y: TaxableYear) kind empirical {
+    label en unofficial "the entity includes on its required return or statement the information the Secretary prescribes to carry out §7519";
+}
+@source(IRC_S7519_E, relation = formalizes, coverage = exact, quote = "Each partnership or S corporation which makes an election under section 444 shall include on any required return or statement such information as the Secretary shall prescribe as is necessary to carry out the provisions of this section.")
+rule S7519ReportingDuty defeasible {
+    for e: Person;
+    for y: TaxableYear;
+    when entity_is_partnership_or_s_corporation(e)
+        and election_444_in_effect(e, y);
+    then duty S7519IncludePrescribedInformation {
+        bearer e;
+        beneficiary Secretary;
+        goal maintenance {
+            condition entity_includes_information_prescribed_by_secretary(e, y);
+            window [-infinity, infinity];
+        }
+    };
+}
+pub relation section_7519_payment_treated_as_subtitle_c_tax(e: Person, y: TaxableYear) kind institutional {
+    label en unofficial "a payment required by §7519 is assessed and collected as if it were a tax imposed by subtitle C, and treated as a tax for interest and for part II of subchapter A of chapter 68 (§7519(f)(1), (3), (4)(B))";
+}
+@source(IRC_S7519_F, relation = formalizes, coverage = exact, quote = "any payment required by this section shall be assessed and collected in the same manner as if it were a tax imposed by subtitle C")
+rule S7519TreatedAsTax strict {
+    for e: Person;
+    for y: TaxableYear;
+    for amt: Money;
+    when required_payment(e, y, amt)
+        and amt > 0.00 USD;
+    then section_7519_payment_treated_as_subtitle_c_tax(e, y);
+}
+pub relation section_7519_payment_due_date(e: Person, y: TaxableYear, d: Date) kind institutional {
+    label en unofficial "the payment required by §7519 is due on or before April 15 of the calendar year following the calendar year in which the applicable election year begins (or a later date the Secretary prescribes)";
+}
+@source(IRC_S7519_F, relation = formalizes, coverage = exact, quote = "on or before April 15 of the calendar year following the calendar year in which the applicable election year begins")
+rule S7519PaymentDueDate defeasible {
+    for e: Person;
+    for y: TaxableYear;
+    for apr: Date;
+    when election_444_in_effect(e, y)
+        and april_15_following_year_begun(y, apr);
+    then section_7519_payment_due_date(e, y, apr);
+}
+relation entity_pays_required_payment_by_due_date(e: Person, y: TaxableYear) kind empirical {
+    label en unofficial "the entity pays the required payment on or before its due date";
+}
+@source(IRC_S7519_F, relation = formalizes, coverage = exact, quote = "The amount of any payment required by this section shall be paid on or before April 15 of the calendar year following the calendar year in which the applicable election year begins")
+rule S7519PaymentDuty defeasible {
+    for e: Person;
+    for y: TaxableYear;
+    for amt: Money;
+    for due: Date;
+    when required_payment(e, y, amt)
+        and amt > 0.00 USD
+        and section_7519_payment_due_date(e, y, due);
+    then duty S7519PayRequiredPayment {
+        bearer e;
+        beneficiary Secretary;
+        goal achievement {
+            condition entity_pays_required_payment_by_due_date(e, y);
+            window [-infinity, due];
+        }
+    };
+}
+external judgment relation section_7519_failure_due_to_reasonable_cause(e: Person, y: TaxableYear) {
+    authority Secretary;
+    label en unofficial "the failure to pay is shown to be due to reasonable cause and not willful neglect (§7519(f)(4)(A))";
+}
+relation amount_paid_by_due_date(e: Person, y: TaxableYear, amt: Money) kind empirical {
+    label en unofficial "the amount of the §7519 payment paid on or before the date prescribed therefor";
+}
+pub relation section_7519_underpayment(e: Person, y: TaxableYear, amt: Money) kind institutional {
+    label en unofficial "the excess of the amount of the payment required over the amount, if any, paid on or before the date prescribed";
+}
+pub relation section_7519_penalty(e: Person, y: TaxableYear, amt: Money) kind institutional {
+    label en unofficial "the 10 percent penalty on the underpayment (§7519(f)(4)(A))";
+}
+@source(IRC_S7519_F, relation = formalizes, coverage = exact, quote = "the term \"underpayment\" means the excess of the amount of the payment required under this section over the amount (if any) of such payment paid on or before the date prescribed therefor")
+rule S7519Underpayment strict {
+    for e: Person;
+    for y: TaxableYear;
+    for req: Money;
+    for paid: Money;
+    when required_payment(e, y, req)
+        and amount_paid_by_due_date(e, y, paid)
+        and req > paid;
+    then section_7519_underpayment(e, y, req - paid);
+}
+@source(IRC_S7519_F, relation = formalizes, coverage = exact, quote = "there shall be imposed on such person a penalty of 10 percent of the underpayment")
+rule S7519PenaltyTenPercent defeasible {
+    for e: Person;
+    for y: TaxableYear;
+    for under: Money;
+    when section_7519_underpayment(e, y, under);
+    then section_7519_penalty(e, y, round(under * 0.10, 2, "HALF_UP"));
+    unless section_7519_failure_due_to_reasonable_cause(e, y) and section_7519_underpayment(e, y, under);
+}
+external judgment relation section_7519_willful_failure_to_comply(e: Person) {
+    authority TaxCourt;
+    label en unofficial "the partnership or S corporation willfully fails to comply with the requirements of the section (§7519(f)(4)(C))";
+}
+pub relation section_444_ceases_to_apply(e: Person) kind institutional {
+    label en unofficial "section 444 ceases to apply to the entity";
+}
+@source(IRC_S7519_F, relation = formalizes, coverage = exact, quote = "If any partnership or S corporation willfully fails to comply with the requirements of this section, section 444 shall cease to apply with respect to such partnership or S corporation.")
+rule S7519WillfulFailureEndsSection444 strict {
+    for e: Person;
+    when entity_is_partnership_or_s_corporation(e)
+        and section_7519_willful_failure_to_comply(e);
+    then section_444_ceases_to_apply(e);
+}
+
+pub relation no_interest_on_refund_of_7519_payment(e: Person, y: TaxableYear) kind institutional {
+    label en unofficial "no interest is allowed with respect to any refund of a payment made under §7519 (§7519(f)(3))";
+}
+@source(IRC_S7519_F, relation = formalizes, coverage = exact, quote = "no interest shall be allowed with respect to any refund of a payment made under this section")
+rule S7519NoInterestOnRefundExcess strict {
+    for e: Person;
+    for y: TaxableYear;
+    when refund_due_for_overpaid_balance_flag(e, y);
+    then no_interest_on_refund_of_7519_payment(e, y);
+}
+@source(IRC_S7519_F, relation = formalizes, coverage = exact, quote = "no interest shall be allowed with respect to any refund of a payment made under this section")
+rule S7519NoInterestOnRefundTermination strict {
+    for e: Person;
+    for y: TaxableYear;
+    when refund_due_on_termination_flag(e, y);
+    then no_interest_on_refund_of_7519_payment(e, y);
+}
+relation secretary_prescribes_7519_regulations(o: Organ) kind empirical {
+    label en unofficial "the Secretary has prescribed the regulations necessary or appropriate to carry out §7519 and section 280H, including adjustments where two or more applicable election years begin in the same calendar year or the base year is shorter than 12 months";
+}
+@source(IRC_S7519_G, relation = formalizes, coverage = exact, quote = "The Secretary shall prescribe such regulations as may be necessary or appropriate to carry out the provisions of this section and section 280H")
+rule S7519RegulationsDuty strict {
+    when true;
+    then duty S7519PrescribeRegulations {
+        bearer Secretary;
+        goal maintenance {
+            condition secretary_prescribes_7519_regulations(Secretary);
+            window [-infinity, infinity];
+        }
+    };
+}

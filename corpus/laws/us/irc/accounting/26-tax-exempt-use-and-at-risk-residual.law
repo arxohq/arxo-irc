@@ -1,0 +1,650 @@
+// Section 470 (tax-exempt use property losses) and section 465 residual
+// (stage 2c, IRC-07).
+//
+// Section 470: (a)-(b) disallowance and one-year carryover, (c)(1) tax-exempt
+// use loss, (c)(2)(B) partnership exception, (d) the four-part lease exception
+// with its numeric thresholds, (e)(1) former tax-exempt use property, (e)(2)
+// dispositions, (e)(4)(B) adjusted basis after like-kind/involuntary exchange,
+// (f) related parties and lease terms. Whether property is "tax-exempt use
+// property" under section 168(h) (modified by (c)(2)(A)) is a case fact: the
+// section 168 owner is not part of this package (EXTERNAL_DEPENDENCY).
+//
+// Section 465: (a)(1) persons, (b)(2)-(4),(6) borrowed amounts at risk, (b)(5)
+// reduction for allowed losses, (c) activities to which the section applies
+// and the (c)(4)-(5),(7) exclusions, (d) loss definition. The (b)(2) aggregate
+// over several loans is an aggregate over a derived predicate (§111) and is
+// NOT built (TECH-GAPS G2137); the per-loan amounts are.
+//
+// Not modelled (TECH-GAPS G2117-G2118, G2126-G2127, G2140, coverage/accounting.json): the (a)(3)
+// section 544 attribution modifications, (c)(2)(B) aggregation of section 1245
+// leases, (c)(3)(B)-(D) aggregation and regulations, (c)(6)(C), (c)(7)(D)-(G)
+// special rules, (d)(1)(B)/(C)(ii) regulations, (d)(3)(B) regulations,
+// (e)(4)(A) the lease-date test for sections 1031/1033.
+
+// ===================== Section 470 =====================
+
+use self::{
+    Asset,
+    IRC_S465_B,
+    IRC_S465_C,
+    IRC_S465_D,
+    IRC_S470_A,
+    IRC_S470_B,
+    IRC_S470_C,
+    IRC_S470_D,
+    IRC_S470_E,
+    Person,
+    TaxableYear,
+    activity_subject_to_465,
+    amount_at_risk_at_close,
+    at_risk_loss_allowed,
+    derived_qualified_leasing_member_465,
+    is_c_corporation_described_in_465a1B,
+    loss_from_activity_465,
+    related_party_acquirer_470e2,
+};
+
+pub relation is_tax_exempt_use_property_470(prop: Asset) kind empirical {
+    label en official "the property is tax-exempt use property: section 168(h) applied without regard to (1)(C) and (3), and as if section 197 intangibles and section 167(f)(1)(B)/(2) property were tangible (section 470(c)(2)(A)) — an EXTERNAL_DEPENDENCY on the section 168 owner";
+}
+pub relation tax_exempt_use_solely_by_reason_of_168h6(prop: Asset) kind empirical {
+    label en official "the property would be tax-exempt use property solely by reason of section 168(h)(6) (partnership with a tax-exempt partner) (section 470(c)(2)(B))";
+}
+pub relation is_tax_exempt_use_property_for_470(prop: Asset) kind institutional {
+    label en official "tax-exempt use property for section 470, after the (c)(2)(B) partnership exception";
+}
+@source(IRC_S470_C, quote = "Such term shall not include any property which would (but for this subparagraph) be tax-exempt use property solely by reason of section 168(h)(6).")
+rule TaxExemptUsePropertyAfterPartnershipException(prop: Asset) defeasible {
+    label en official "property that is tax-exempt use property only through section 168(h)(6) is excluded (section 470(c)(2)(B))";
+    when is_tax_exempt_use_property_470(prop);
+    when not_known(tax_exempt_use_solely_by_reason_of_168h6(prop));
+    then is_tax_exempt_use_property_for_470(prop);
+}
+pub relation deductions_other_than_interest_allocable_470(p: Person, y: TaxableYear, prop: Asset, amount: Money) kind empirical {
+    label en official "the aggregate deductions (other than interest) directly allocable to the tax-exempt use property (section 470(c)(1)(A)(i))";
+}
+pub relation interest_deductions_allocable_470(p: Person, y: TaxableYear, prop: Asset, amount: Money) kind empirical {
+    label en official "the aggregate deductions for interest properly allocable to the property (section 470(c)(1)(A)(ii))";
+}
+pub relation income_from_tax_exempt_use_property_470(p: Person, y: TaxableYear, prop: Asset, amount: Money) kind empirical {
+    label en official "the aggregate income from the property (section 470(c)(1)(B))";
+}
+pub relation tax_exempt_use_loss(p: Person, y: TaxableYear, prop: Asset, amount: Money) kind institutional {
+    label en official "the tax-exempt use loss: allocable deductions (including interest) in excess of income from the property (section 470(c)(1))";
+}
+@source(IRC_S470_C, quote = "The term \"tax-exempt use loss\" means, with respect to any taxable year, the amount (if any) by which—")
+rule TaxExemptUseLossComputation(p: Person, y: TaxableYear, prop: Asset, d1: Money, d2: Money, income: Money) defeasible {
+    label en official "tax-exempt use loss = (non-interest deductions + interest deductions) - income, when positive (section 470(c)(1))";
+    when is_tax_exempt_use_property_for_470(prop);
+    when deductions_other_than_interest_allocable_470(p, y, prop, d1);
+    when interest_deductions_allocable_470(p, y, prop, d2);
+    when income_from_tax_exempt_use_property_470(p, y, prop, income);
+    when round(d1 + d2, 2, "HALF_UP") > income;
+    then tax_exempt_use_loss(p, y, prop, round(d1 + d2 - income, 2, "HALF_UP"));
+}
+// (d): the lease exception.
+pub relation lease_of_property(lease: Integer, prop: Asset) kind empirical {
+    label en official "the lease is a lease of the property";
+}
+pub relation lessor_adjusted_basis_at_lease_start(lease: Integer, amount: Money) kind empirical {
+    label en official "the lessor's adjusted basis in the property at the time the lease is entered into (section 470(d)(1)(C)(i)); after a section 1031/1033 acquisition, the (e)(4)(B) figure";
+}
+pub relation lease_term_years(lease: Integer, years: Integer) kind institutional {
+    label en official "the lease term in years within section 168(i)(3) (section 470(f)(2)) — whole-year simplification for the 5-year short-lease tests; the section 168(i)(3) term computation is an EXTERNAL_DEPENDENCY";
+}
+pub relation funds_set_aside_or_under_arrangement(lease: Integer, amount: Money) kind empirical {
+    label en official "the maximum amount of funds at any time during the lease term subject to a (d)(1)(B) arrangement or set aside (or reasonably expected to be) for the lessor, a lender, or the lessee's obligations (section 470(d)(1)(A))";
+}
+pub relation lessee_purchase_option_price(lease: Integer, amount: Money) kind empirical {
+    label en official "the fixed (or other-than-fair-market-value) price at which the lessee may purchase the property (section 470(d)(1)(C)(iii))";
+}
+pub relation lease_has_purchase_option_470(lease: Integer) kind institutional {
+    label en official "the lessee has an option to purchase the property (bridge for absence tests without a wildcard)";
+}
+rule LeaseHasPurchaseOptionBridge(lease: Integer) defeasible {
+    label en official "a stated option price means the lease has a purchase option";
+    when lessee_purchase_option_price(lease, _);
+    then lease_has_purchase_option_470(lease);
+}
+pub relation arrangement_forces_zero_allowable_amount(lease: Integer) kind empirical {
+    label en official "the lease involves a lessee loan to the lessor or a lender, a lender-side deposit, letter of credit, or payment undertaking, or junior lessor credit support with a lender (section 470(d)(1)(C)(iv))";
+}
+pub relation allowable_amount_470d1C(lease: Integer, amount: Money) kind institutional {
+    label en official "the allowable amount of funds: 20 percent of the lessor's adjusted basis; at most 50 percent of the option price where a purchase option exists; zero for the (iv) arrangements (higher percentages by regulations are an EXTERNAL_DEPENDENCY)";
+}
+@source(IRC_S470_D, quote = "the term \"allowable amount\" means an amount equal to 20 percent of the lessor's adjusted basis in the property at the time the lease is entered into.")
+rule AllowableAmountTwentyPercentOfBasis(lease: Integer, basis: Money) defeasible {
+    label en official "the general allowable amount is 20 percent of the lessor's adjusted basis (section 470(d)(1)(C)(i))";
+    when lessor_adjusted_basis_at_lease_start(lease, basis);
+    when not_known(arrangement_forces_zero_allowable_amount(lease));
+    when not_known(lease_has_purchase_option_470(lease));
+    then allowable_amount_470d1C(lease, round(basis * 0.2, 2, "HALF_UP"));
+}
+@source(IRC_S470_D, quote = "the allowable amount at the time such option may be exercised may not exceed 50 percent of the price at which such option may be exercised.")
+rule AllowableAmountCappedByPurchaseOption(lease: Integer, basis: Money, price: Money) defeasible {
+    label en official "with a purchase option the allowable amount is the lesser of 20 percent of basis and 50 percent of the option price (section 470(d)(1)(C)(i), (iii))";
+    when lessor_adjusted_basis_at_lease_start(lease, basis);
+    when lessee_purchase_option_price(lease, price);
+    when not_known(arrangement_forces_zero_allowable_amount(lease));
+    then allowable_amount_470d1C(lease, min(round(basis * 0.2, 2, "HALF_UP"), round(price * 0.5, 2, "HALF_UP")));
+}
+@source(IRC_S470_D, quote = "The allowable amount shall be zero with respect to any arrangement which involves—")
+rule AllowableAmountZeroForCertainArrangements(lease: Integer) defeasible {
+    label en official "the allowable amount is zero for the (iv) arrangements (section 470(d)(1)(C)(iv))";
+    when arrangement_forces_zero_allowable_amount(lease);
+    then allowable_amount_470d1C(lease, 0.00 USD);
+}
+pub relation lease_meets_availability_of_funds_470d1(lease: Integer) kind institutional {
+    label en official "the lease meets (d)(1): at all times not more than the allowable amount of funds is subject to the arrangements or set aside";
+}
+@source(IRC_S470_D, quote = "A lease of property meets the requirements of this paragraph if (at all times during the lease term) not more than an allowable amount of funds are—")
+rule LeaseMeetsAvailabilityOfFunds(lease: Integer, funds: Money, allowable: Money) defeasible {
+    label en official "funds within the allowable amount satisfy (d)(1)";
+    when funds_set_aside_or_under_arrangement(lease, funds);
+    when allowable_amount_470d1C(lease, allowable);
+    when funds <= allowable;
+    then lease_meets_availability_of_funds_470d1(lease);
+}
+pub relation lessor_unconditional_at_risk_equity(lease: Integer, amount: Money) kind empirical {
+    label en official "the lessor's unconditional at-risk equity investment in the property at the time the lease is entered into (section 470(d)(2)(A)(i)(I)); the Secretary determines what is unconditional at-risk equity (EXTERNAL_DEPENDENCY)";
+}
+pub relation lessor_maintains_equity_through_term(lease: Integer) kind empirical {
+    label en official "the lessor maintains the investment throughout the term (section 470(d)(2)(A)(i)(II))";
+}
+pub relation expected_fair_market_value_at_lease_end(lease: Integer, amount: Money) kind empirical {
+    label en official "the fair market value of the property at the end of the lease term as reasonably expected, before the (2)(B) reduction (section 470(d)(2)(A)(ii))";
+}
+pub relation value_risk_borne_by_person_other_than_lessor(lease: Integer, amount: Money) kind empirical {
+    label en official "the part of the end-of-term value risk borne by a person other than the lessor (section 470(d)(2)(B))";
+}
+pub relation lease_meets_lessor_equity_470d2(lease: Integer) kind institutional {
+    label en official "the lease meets (d)(2): lessor equity of at least 20 percent of basis, maintained, and expected end-of-term value (net of others' risk) of at least 20 percent; not applicable to leases of 5 years or less";
+}
+@source(IRC_S470_D, quote = "This paragraph shall not apply to any lease with a lease term of 5 years or less.")
+rule LeaseMeetsLessorEquityShortLeaseExempt(lease: Integer, years: Integer) defeasible {
+    label en official "(d)(2) does not apply to a lease of 5 years or less, so it is treated as met (section 470(d)(2)(C))";
+    when lease_term_years(lease, years);
+    when years <= 5;
+    then lease_meets_lessor_equity_470d2(lease);
+}
+@source(IRC_S470_D, quote = "has at the time the lease is entered into an unconditional at-risk equity investment (as determined by the Secretary) in the property of at least 20 percent of the lessor's adjusted basis in the property as of that time, and")
+rule LeaseMeetsLessorEquityTests(lease: Integer, years: Integer, basis: Money, equity: Money, value: Money, others: Money) defeasible {
+    label en official "lessor equity >= 20% of basis, maintained, and end-of-term value less others' risk >= 20% of basis (section 470(d)(2)(A)-(B))";
+    when lease_term_years(lease, years);
+    when years > 5;
+    when lessor_adjusted_basis_at_lease_start(lease, basis);
+    when lessor_unconditional_at_risk_equity(lease, equity);
+    when lessor_maintains_equity_through_term(lease);
+    when expected_fair_market_value_at_lease_end(lease, value);
+    when value_risk_borne_by_person_other_than_lessor(lease, others);
+    when equity >= round(basis * 0.2, 2, "HALF_UP");
+    when round(value - others, 2, "HALF_UP") >= round(basis * 0.2, 2, "HALF_UP");
+    then lease_meets_lessor_equity_470d2(lease);
+}
+pub relation lessee_loss_if_value_25_percent_lower(lease: Integer, amount: Money) kind empirical {
+    label en official "the part of the loss that would occur if the property's value at termination were 25 percent below its reasonably expected value that the lessee bears under any arrangement (section 470(d)(3)(A)(i))";
+}
+pub relation lessee_share_of_loss_if_value_zero_percent(lease: Integer, pct: Decimal) kind empirical {
+    label en official "the percentage of the loss that would occur if the property's value at termination were zero that the lessee bears (section 470(d)(3)(A)(ii))";
+}
+pub relation lease_meets_lessee_minimal_risk_470d3(lease: Integer) kind institutional {
+    label en official "the lease meets (d)(3): the lessee bears no part of the 25-percent-decline loss and not more than 50 percent of the zero-value loss; not applicable to leases of 5 years or less (the (B) regulations are an EXTERNAL_DEPENDENCY)";
+}
+rule LeaseMeetsLesseeMinimalRiskShortLeaseExempt(lease: Integer, years: Integer) defeasible {
+    label en official "(d)(3) does not apply to a lease of 5 years or less (section 470(d)(3)(C))";
+    when lease_term_years(lease, years);
+    when years <= 5;
+    then lease_meets_lessee_minimal_risk_470d3(lease);
+}
+@source(IRC_S470_D, quote = "A lease of property meets the requirements of this paragraph if there is no arrangement under which the lessee bears—")
+rule LeaseMeetsLesseeMinimalRiskTests(lease: Integer, years: Integer, loss25: Money, pct: Decimal) defeasible {
+    label en official "the lessee bears none of the 25-percent-decline loss and at most 50 percent of the zero-value loss (section 470(d)(3)(A))";
+    when lease_term_years(lease, years);
+    when years > 5;
+    when lessee_loss_if_value_25_percent_lower(lease, loss25);
+    when lessee_share_of_loss_if_value_zero_percent(lease, pct);
+    when loss25 <= 0.00 USD;
+    when pct <= 50.0;
+    then lease_meets_lessee_minimal_risk_470d3(lease);
+}
+pub relation class_life_years_470(lease: Integer, years: Integer) kind empirical {
+    label en official "the class life of the leased property under section 168(i)(1) (section 470(d)(4)(A))";
+}
+pub relation property_is_fixed_wing_aircraft_or_vessel(lease: Integer) kind empirical {
+    label en official "the leased property is a fixed-wing aircraft or vessel (section 470(d)(4)(A))";
+}
+pub relation option_price_equals_fair_market_value_at_exercise(lease: Integer) kind empirical {
+    label en official "the purchase price under the lessee's option equals the fair market value of the property at exercise (section 470(d)(4))";
+}
+pub relation lease_meets_long_life_option_470d4(lease: Integer) kind institutional {
+    label en official "the lease meets (d)(4): a lease of property with a class life over 7 years (other than fixed-wing aircraft and vessels) with a lessee purchase option must have an option price equal to fair market value; leases outside that shape meet (d)(4) trivially";
+}
+@source(IRC_S470_D, quote = "the lease meets the requirements of this paragraph only if the purchase price under the option equals the fair market value of the property (determined at the time of exercise).")
+rule LongLifeOptionLeaseRequiresFairMarketValuePrice(lease: Integer, life: Integer) defeasible {
+    label en official "long-life property with a purchase option needs a fair-market-value option price (section 470(d)(4))";
+    when class_life_years_470(lease, life);
+    when life > 7;
+    when not_known(property_is_fixed_wing_aircraft_or_vessel(lease));
+    when lessee_purchase_option_price(lease, _);
+    when option_price_equals_fair_market_value_at_exercise(lease);
+    then lease_meets_long_life_option_470d4(lease);
+}
+rule LongLifeParagraphNotEngagedWithoutOption(lease: Integer, life: Integer) defeasible {
+    label en official "a lease without a purchase option is outside the (d)(4) shape and meets it (section 470(d)(4)(B))";
+    when class_life_years_470(lease, life);
+    when not_known(lease_has_purchase_option_470(lease));
+    then lease_meets_long_life_option_470d4(lease);
+}
+pub relation lease_excepted_from_section_470(lease: Integer) kind institutional {
+    label en official "the lease meets all of paragraphs (d)(1)-(4), so section 470 does not apply to it";
+}
+@source(IRC_S470_D, quote = "This section shall not apply to any lease of property which meets the requirements of all of the following paragraphs:")
+rule LeaseExceptionAllFourParagraphs(lease: Integer) defeasible {
+    label en official "a lease meeting (d)(1), (d)(2), (d)(3), and (d)(4) is outside section 470 (section 470(d))";
+    when lease_meets_availability_of_funds_470d1(lease);
+    when lease_meets_lessor_equity_470d2(lease);
+    when lease_meets_lessee_minimal_risk_470d3(lease);
+    when lease_meets_long_life_option_470d4(lease);
+    then lease_excepted_from_section_470(lease);
+}
+pub relation tax_exempt_use_property_subject_to_lease(prop: Asset, lease: Integer) kind empirical {
+    label en official "the tax-exempt use property is subject to the lease";
+}
+pub relation section_470_applies_to_property(p: Person, y: TaxableYear, prop: Asset) kind institutional {
+    label en official "section 470 applies to the property for the taxable year: it is tax-exempt use property not covered by an excepted lease";
+}
+@source(IRC_S470_A, quote = "Except as otherwise provided in this section, a tax-exempt use loss for any taxable year shall not be allowed.")
+rule Section470AppliesUnlessLeaseException(p: Person, y: TaxableYear, prop: Asset, lease: Integer) defeasible {
+    label en official "a tax-exempt use property whose lease does not meet (d) is under section 470 (section 470(a), (d))";
+    when is_tax_exempt_use_property_for_470(prop);
+    when tax_exempt_use_property_subject_to_lease(prop, lease);
+    when us.irc.core::year_of(p, y);
+    when not_known(lease_excepted_from_section_470(lease));
+    then section_470_applies_to_property(p, y, prop);
+}
+pub relation tax_exempt_use_loss_disallowed(p: Person, y: TaxableYear, prop: Asset, amount: Money) kind institutional {
+    label en official "the tax-exempt use loss is not allowed for the taxable year (section 470(a))";
+}
+rule TaxExemptUseLossDisallowed(p: Person, y: TaxableYear, prop: Asset, amount: Money) defeasible {
+    label en official "a tax-exempt use loss on property under section 470 is disallowed (section 470(a))";
+    when section_470_applies_to_property(p, y, prop);
+    when tax_exempt_use_loss(p, y, prop, amount);
+    then tax_exempt_use_loss_disallowed(p, y, prop, amount);
+}
+pub relation tax_exempt_use_loss_carried_as_deduction_next_year(p: Person, y: TaxableYear, prop: Asset, amount: Money) kind institutional {
+    label en official "the disallowed loss is treated as a deduction with respect to the property in the next taxable year (section 470(b))";
+}
+@source(IRC_S470_B, quote = "shall be treated as a deduction with respect to such property in the next taxable year.")
+rule TaxExemptUseLossCarryover(p: Person, y: TaxableYear, prop: Asset, amount: Money) defeasible {
+    label en official "a disallowed tax-exempt use loss carries to the next year as a deduction on the same property (section 470(b))";
+    when tax_exempt_use_loss_disallowed(p, y, prop, amount);
+    then tax_exempt_use_loss_carried_as_deduction_next_year(p, y, prop, amount);
+}
+// (e)(1): former tax-exempt use property.
+pub relation was_tax_exempt_use_property_in_prior_year(prop: Asset, y: TaxableYear) kind empirical {
+    label en official "the property was tax-exempt use property for a taxable year preceding y (section 470(e)(1)(B)(ii)) — case-asserted link to the prior year";
+}
+pub relation is_former_tax_exempt_use_property(prop: Asset, y: TaxableYear) kind institutional {
+    label en official "former tax-exempt use property: not tax-exempt use property for the year but was for a prior year (section 470(e)(1)(B))";
+}
+@source(IRC_S470_E, quote = "means any property which—")
+rule FormerTaxExemptUsePropertyDefinition(prop: Asset, y: TaxableYear) defeasible {
+    label en official "property that was tax-exempt use in a prior year and is not now is former tax-exempt use property (section 470(e)(1)(B))";
+    when was_tax_exempt_use_property_in_prior_year(prop, y);
+    when not_known(is_tax_exempt_use_property_for_470(prop));
+    then is_former_tax_exempt_use_property(prop, y);
+}
+pub relation unused_470b_deduction_on_property(p: Person, y: TaxableYear, prop: Asset, amount: Money) kind empirical {
+    label en official "the deduction allowable under subsection (b) with respect to the property for the year (section 470(e)(1)(A)(i))";
+}
+pub relation net_income_from_property_without_470b_deduction(p: Person, y: TaxableYear, prop: Asset, amount: Money) kind empirical {
+    label en official "the net income from the property for the year without regard to the (b) deduction (section 470(e)(1)(A)(i))";
+}
+pub relation former_use_470b_deduction_allowed(p: Person, y: TaxableYear, prop: Asset, amount: Money) kind institutional {
+    label en official "the (b) deduction on former tax-exempt use property is allowed only to the extent of net income from the property for the year (section 470(e)(1)(A)(i))";
+}
+@source(IRC_S470_E, quote = "shall be allowed only to the extent of any net income (without regard to such deduction) from such property for such taxable year, and")
+rule FormerUseDeductionLimitedToNetIncome(p: Person, y: TaxableYear, prop: Asset, ded: Money, income: Money) defeasible {
+    label en official "allowed = min(deduction, max(0, net income)) (section 470(e)(1)(A)(i))";
+    when is_former_tax_exempt_use_property(prop, y);
+    when unused_470b_deduction_on_property(p, y, prop, ded);
+    when net_income_from_property_without_470b_deduction(p, y, prop, income);
+    then former_use_470b_deduction_allowed(p, y, prop, min(ded, max(0.00 USD, income)));
+}
+pub relation former_use_470b_deduction_carried_forward(p: Person, y: TaxableYear, prop: Asset, amount: Money) kind institutional {
+    label en official "the unused portion is treated as a (b) deduction with respect to the property in the next taxable year (section 470(e)(1)(A)(ii))";
+}
+@source(IRC_S470_E, quote = "any portion of such unused deduction remaining after application of clause (i) shall be treated as a deduction allowable under subsection (b) with respect to such property in the next taxable year.")
+rule FormerUseUnusedDeductionCarriedForward(p: Person, y: TaxableYear, prop: Asset, ded: Money, allowed: Money) defeasible {
+    label en official "deduction not absorbed by net income carries forward (section 470(e)(1)(A)(ii))";
+    when unused_470b_deduction_on_property(p, y, prop, ded);
+    when former_use_470b_deduction_allowed(p, y, prop, allowed);
+    when ded > allowed;
+    then former_use_470b_deduction_carried_forward(p, y, prop, round(ded - allowed, 2, "HALF_UP"));
+}
+pub relation disposes_entire_interest_in_tax_exempt_use_property(p: Person, y: TaxableYear, prop: Asset) kind empirical {
+    label en official "the taxpayer disposes of the entire interest in tax-exempt use property (or former tax-exempt use property) (section 470(e)(2)); the results follow rules similar to section 469(g) — a fully taxable disposition frees the loss";
+}
+pub relation all_gain_or_loss_recognized_470(p: Person, y: TaxableYear, prop: Asset) kind empirical {
+    label en official "all gain or loss on the disposition is recognized (section 469(g)(1)(A) applied by section 470(e)(2))";
+}
+pub relation tax_exempt_use_loss_freed_on_disposition(p: Person, y: TaxableYear, prop: Asset, amount: Money) kind institutional {
+    label en official "on a fully taxable disposition of the entire interest, the suspended tax-exempt use loss is allowed (section 470(e)(2) by analogy to section 469(g)(1)(A)); the related-party, death, and installment branches of section 469(g) are written in module 56 (stage 4)";
+}
+rule DispositionFreesSuspendedTaxExemptUseLoss(p: Person, y: TaxableYear, y_prior: TaxableYear, prop: Asset, amount: Money) defeasible {
+    label en official "a fully taxable disposition of the entire interest in year y frees the loss suspended from the immediately preceding year (section 470(e)(2)); older suspended years need the multi-year ledger (TECH-GAPS G2126)";
+    when disposes_entire_interest_in_tax_exempt_use_property(p, y, prop);
+    when all_gain_or_loss_recognized_470(p, y, prop);
+    when not_known(related_party_acquirer_470e2(p, y, prop));
+    when preceding_taxable_year_465(y_prior, y);
+    when tax_exempt_use_loss_carried_as_deduction_next_year(p, y_prior, prop, amount);
+    then tax_exempt_use_loss_freed_on_disposition(p, y, prop, amount);
+}
+pub relation fmv_at_beginning_of_lease_term(lease: Integer, amount: Money) kind empirical {
+    label en official "the fair market value of the property at the beginning of the lease term (section 470(e)(4)(B)(i))";
+}
+pub relation adjusted_basis_without_1031_1033(lease: Integer, amount: Money) kind empirical {
+    label en official "the lessor's adjusted basis if sections 1031 and 1033 did not apply to the acquisition (section 470(e)(4)(B)(ii))";
+}
+pub relation adjusted_basis_for_470_after_exchange(lease: Integer, amount: Money) kind institutional {
+    label en official "the lessor's adjusted basis for section 470 for property acquired in a section 1031/1033 transaction: the lesser of fair market value at the start of the lease term and the basis without those sections (section 470(e)(4)(B))";
+}
+@source(IRC_S470_E, quote = "the adjusted basis of such property for purposes of this section shall be equal to the lesser of—")
+rule AdjustedBasisAfterLikeKindOrInvoluntaryExchange(lease: Integer, fmv: Money, basis: Money) defeasible {
+    label en official "min(fair market value at lease start, basis without sections 1031/1033) (section 470(e)(4)(B))";
+    when fmv_at_beginning_of_lease_term(lease, fmv);
+    when adjusted_basis_without_1031_1033(lease, basis);
+    then adjusted_basis_for_470_after_exchange(lease, min(fmv, basis));
+}
+pub relation related_party_of_lessor_lessee_lender_197f9C(person: Person, party: Person) kind empirical {
+    label en official "party is a related party of person within section 197(f)(9)(C)(i) (section 470(f)(1)) — an EXTERNAL_DEPENDENCY on the section 197 owner";
+}
+pub relation is_lender_470f3(person: Person, lease: Integer) kind empirical {
+    label en official "the person makes a loan to the lessor secured (or economically similar to secured) by the lease or leased property (section 470(f)(3)); 'loan' includes similar arrangements ((f)(4))";
+}
+
+// ===================== Section 465 residual =====================
+
+pub relation is_individual_taxpayer_465(p: Person) kind empirical {
+    label en official "the taxpayer is an individual (section 465(a)(1)(A))";
+}
+pub relation person_subject_to_465a1(p: Person) kind institutional {
+    label en official "the taxpayer is an individual, or a C corporation with respect to which the section 542(a)(2) stock ownership requirement is met (section 465(a)(1)(A)-(B)); the (a)(3) section 544 modifications are an EXTERNAL_DEPENDENCY";
+}
+rule Person465aIndividual(p: Person) strict {
+    label en official "an individual is subject to section 465 (section 465(a)(1)(A))";
+    when is_individual_taxpayer_465(p);
+    then person_subject_to_465a1(p);
+}
+rule Person465aClosedCCorporation(p: Person) strict {
+    label en official "a C corporation meeting the section 542(a)(2) stock requirement (the fact `is_c_corporation_described_in_465a1B`) is subject to section 465 (section 465(a)(1)(B))";
+    when is_c_corporation_described_in_465a1B(p);
+    then person_subject_to_465a1(p);
+}
+pub relation engaged_in_activity_for_465(p: Person, activity: Integer) kind empirical {
+    label en official "the taxpayer is engaged in the activity as a trade or business or for the production of income (section 465(c)(1), (c)(3)(A)(i))";
+}
+pub enum Section465ActivityType {
+    MotionPictureOrVideoTape;
+    Farming;
+    Section1245PropertyLeasing;
+    OilAndGas;
+    Geothermal;
+    OtherTradeOrBusinessOrIncomeActivity;
+    label en official "the activities of section 465(c)(1)(A)-(E), and the (c)(3) extension to other activities";
+}
+pub relation activity_type_465(activity: Integer, t: Section465ActivityType) kind empirical {
+    label en official "the type of the activity for section 465(c)";
+}
+pub relation equipment_leasing_receipts_465(p: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "gross receipts of the corporation (or, with the controlled-group rule, of the group) attributable to equipment leasing (section 465(c)(4)(B), (c)(6)(A)); master sound recording leasing is excluded ((c)(6)(B))";
+}
+pub relation total_gross_receipts_465(p: Person, y: TaxableYear, amount: Money) kind empirical {
+    label en official "the corporation's (or group's) gross receipts for the taxable year (section 465(c)(4)(B))";
+}
+pub relation member_of_qualified_leasing_group_465c5(p: Person, y: TaxableYear) kind empirical {
+    label en official "the corporation is a qualified leasing member of a qualified leasing group: for the year and each of the 2 preceding years it met the (c)(5)(B) tests (3 employees, 5 transactions, $1,000,000 receipts) — case-asserted per year set";
+}
+pub relation group_leasing_year_tests(g: Integer, y: TaxableYear, employees: Integer, transactions: Integer, receipts: Money) kind empirical {
+    label en official "the controlled group's leasing facts for a taxable year: full-time employees directly related to leasing, separate equipment leasing transactions, and equipment leasing gross receipts (section 465(c)(5)(B)(i)-(iii))";
+}
+pub relation group_year_meets_leasing_tests_465c5B(g: Integer, y: TaxableYear) kind institutional {
+    label en official "in the year the group had at least 3 full-time employees directly related to leasing, at least 5 separate leasing transactions, and at least $1,000,000 leasing receipts";
+}
+@source(IRC_S465_C, quote = "During the year, the qualified leasing members in the aggregate entered into at least 5 separate equipment leasing transactions.")
+rule GroupYearMeetsLeasingTests(g: Integer, y: TaxableYear, e: Integer, t: Integer, r: Money) defeasible {
+    label en official "at least 3 employees, 5 transactions, and $1,000,000 in leasing receipts (section 465(c)(5)(B)(i)-(iii))";
+    when group_leasing_year_tests(g, y, e, t, r);
+    when e >= 3;
+    when t >= 5;
+    when r >= 1000000.00 USD;
+    then group_year_meets_leasing_tests_465c5B(g, y);
+}
+pub relation preceding_taxable_year_465(y_prior: TaxableYear, y: TaxableYear) kind empirical {
+    label en official "y_prior is the taxable year immediately preceding y (case-asserted link; no successor term in the language)";
+}
+pub relation is_qualified_leasing_group_465c5B(g: Integer, y: TaxableYear) kind institutional {
+    label en official "a qualified leasing group: the controlled group met the (c)(5)(B) tests for the taxable year and each of the 2 immediately preceding taxable years";
+}
+@source(IRC_S465_C, quote = "For purposes of this paragraph, the term \"qualified leasing group\" means a controlled group of corporations which, for the taxable year and each of the 2 immediately preceding taxable years, satisfied each of the following 3 requirements:")
+rule QualifiedLeasingGroupThreeYears(g: Integer, y: TaxableYear, y1: TaxableYear, y2: TaxableYear) defeasible {
+    label en official "the group qualifies when the tests are met in the year and in each of the two preceding years (section 465(c)(5)(B))";
+    when group_year_meets_leasing_tests_465c5B(g, y);
+    when preceding_taxable_year_465(y1, y);
+    when preceding_taxable_year_465(y2, y1);
+    when group_year_meets_leasing_tests_465c5B(g, y1);
+    when group_year_meets_leasing_tests_465c5B(g, y2);
+    then is_qualified_leasing_group_465c5B(g, y);
+}
+pub relation actively_engaged_in_equipment_leasing_465c4(p: Person, y: TaxableYear) kind institutional {
+    label en official "a closely held C corporation is actively engaged in equipment leasing when equipment leasing receipts are at least 50 percent of gross receipts (80 percent for a qualified leasing member) (section 465(c)(4)(B), (c)(5)(A)(i))";
+}
+@source(IRC_S465_C, quote = "a corporation shall not be considered to be actively engaged in equipment leasing unless 50 percent or more of the gross receipts of the corporation for the taxable year is attributable, under regulations prescribed by the Secretary, to equipment leasing.")
+rule ActivelyEngagedInEquipmentLeasingFiftyPercent(p: Person, y: TaxableYear, lease: Money, total: Money) defeasible {
+    label en official "50 percent or more of gross receipts from equipment leasing (section 465(c)(4)(B))";
+    when is_c_corporation_described_in_465a1B(p);
+    when equipment_leasing_receipts_465(p, y, lease);
+    when total_gross_receipts_465(p, y, total);
+    when not_known(member_of_qualified_leasing_group_465c5(p, y));
+    when not_known(derived_qualified_leasing_member_465(p, y));
+    when lease * 2.0 >= total;
+    then actively_engaged_in_equipment_leasing_465c4(p, y);
+}
+@source(IRC_S465_C, quote = "by substituting \"80 percent\" for \"50 percent\" in subparagraph (B) thereof, and")
+rule ActivelyEngagedInEquipmentLeasingEightyPercentForQualifiedGroup(p: Person, y: TaxableYear, lease: Money, total: Money) defeasible {
+    label en official "a qualified leasing member needs 80 percent (section 465(c)(5)(A)(i))";
+    when is_c_corporation_described_in_465a1B(p);
+    when equipment_leasing_receipts_465(p, y, lease);
+    when total_gross_receipts_465(p, y, total);
+    when member_of_qualified_leasing_group_465c5(p, y);
+    when lease * 5.0 >= total * 4.0;
+    then actively_engaged_in_equipment_leasing_465c4(p, y);
+}
+pub relation loss_exempt_from_465a_by_c4_or_c7(p: Person, y: TaxableYear, activity: Integer) kind institutional {
+    label en official "section 465(a) does not apply to the losses of the activity: equipment leasing of a closely held C corporation ((c)(4)(A)(ii)) or a qualifying business of a qualified C corporation ((c)(7)(A)(ii))";
+}
+pub relation activity_is_equipment_leasing_465c6A(activity: Integer) kind empirical {
+    label en official "the activity is equipment leasing: leasing of section 1245 equipment and its purchase, servicing, and sale, other than master sound recording arrangements (section 465(c)(6)(A)-(B))";
+}
+@source(IRC_S465_C, quote = "(ii) subsection (a) shall not apply to losses from such activity.")
+rule EquipmentLeasingByClosedCorporationExempt(p: Person, y: TaxableYear, activity: Integer) defeasible {
+    label en official "an actively engaged closely held corporation's equipment leasing is a separate activity outside section 465(a) (section 465(c)(4)(A))";
+    when engaged_in_activity_for_465(p, activity);
+    when activity_is_equipment_leasing_465c6A(activity);
+    when actively_engaged_in_equipment_leasing_465c4(p, y);
+    then loss_exempt_from_465a_by_c4_or_c7(p, y, activity);
+}
+// (c)(7): qualified C corporations.
+pub relation is_personal_holding_company_542a(p: Person) kind empirical {
+    label en official "the corporation is a personal holding company (section 542(a)) — an EXTERNAL_DEPENDENCY on the section 542 owner";
+}
+pub relation is_personal_service_corporation_269A_five_percent(p: Person) kind empirical {
+    label en official "the corporation is a personal service corporation within section 269A(b) with '5 percent' substituted for '10 percent' in 269A(b)(2) (section 465(c)(7)(B)(ii))";
+}
+pub relation is_qualified_c_corporation_465c7B(p: Person) kind institutional {
+    label en official "a qualified C corporation: a corporation described in (a)(1)(B) that is neither a personal holding company nor a personal service corporation (5 percent)";
+}
+@source(IRC_S465_C, quote = "the term \"qualified C corporation\" means any corporation described in subparagraph (B) of subsection (a)(1) which is not—")
+rule QualifiedCCorporationDefinition(p: Person) defeasible {
+    label en official "a closely held C corporation that is not a PHC or a 5-percent PSC (section 465(c)(7)(B))";
+    when is_c_corporation_described_in_465a1B(p);
+    when not_known(is_personal_holding_company_542a(p));
+    when not_known(is_personal_service_corporation_269A_five_percent(p));
+    then is_qualified_c_corporation_465c7B(p);
+}
+pub relation business_full_time_management_employees_12_months(p: Person, business: Integer, employees: Integer) kind empirical {
+    label en official "full-time employees during the entire 12-month period ending on the last day of the year, substantially all of whose services were in the active management of the business (section 465(c)(7)(C)(i))";
+}
+pub relation business_full_time_nonowner_employees_12_months(p: Person, business: Integer, employees: Integer) kind empirical {
+    label en official "full-time nonowner employees during the entire 12-month period, substantially all of whose services relate directly to the business (section 465(c)(7)(C)(ii))";
+}
+pub relation business_deductions_162_404(p: Person, business: Integer, y: TaxableYear, amount: Money) kind empirical {
+    label en official "deductions attributable to the business allowable solely by reason of sections 162 and 404 for the year (section 465(c)(7)(C)(iii)), after the (D)(iii) exclusion of owner-employee compensation";
+}
+pub relation business_gross_income_465(p: Person, business: Integer, y: TaxableYear, amount: Money) kind empirical {
+    label en official "gross income from the business for the year (section 465(c)(7)(C)(iii))";
+}
+pub relation business_is_excluded_business_465c7E(business: Integer) kind empirical {
+    label en official "the business is an excluded business: equipment leasing, or use/exploitation/sale/lease of master sound recordings, films, video tapes, or literary, artistic, or musical property (section 465(c)(7)(E)(ii)), unless the (iii) exceptions apply";
+}
+pub relation is_qualifying_business_465c7C(p: Person, business: Integer, y: TaxableYear) kind institutional {
+    label en official "a qualifying business: at least 1 management employee, 3 nonowner employees, section 162/404 deductions exceeding 15 percent of gross income, and not an excluded business";
+}
+@source(IRC_S465_C, quote = "the term \"qualifying business\" means any active business if—")
+rule QualifyingBusinessTests(p: Person, business: Integer, y: TaxableYear, mgr: Integer, nonowner: Integer, ded: Money, income: Money) defeasible {
+    label en official "the four (C) conditions; 15 percent test as deductions > 15% of gross income (section 465(c)(7)(C))";
+    when business_full_time_management_employees_12_months(p, business, mgr);
+    when business_full_time_nonowner_employees_12_months(p, business, nonowner);
+    when business_deductions_162_404(p, business, y, ded);
+    when business_gross_income_465(p, business, y, income);
+    when mgr >= 1;
+    when nonowner >= 3;
+    when ded > round(income * 0.15, 2, "HALF_UP");
+    when not_known(business_is_excluded_business_465c7E(business));
+    then is_qualifying_business_465c7C(p, business, y);
+}
+@source(IRC_S465_C, quote = "(ii) subsection (a) shall not apply to losses from such business.")
+rule QualifyingBusinessOfQualifiedCorporationExempt(p: Person, y: TaxableYear, business: Integer) defeasible {
+    label en official "each qualifying business of a qualified C corporation is a separate activity outside section 465(a) (section 465(c)(7)(A))";
+    when is_qualified_c_corporation_465c7B(p);
+    when engaged_in_activity_for_465(p, business);
+    when is_qualifying_business_465c7C(p, business, y);
+    then loss_exempt_from_465a_by_c4_or_c7(p, y, business);
+}
+pub relation section_465_applies_to_activity(p: Person, activity: Integer) kind institutional {
+    label en official "section 465 applies to the taxpayer's activity: an activity of section 465(c)(1) or (c)(3) engaged in by an individual or closely held C corporation, or the stage 1b case-asserted `activity_subject_to_465`";
+}
+rule Section465AppliesLegacyCaseFact(p: Person, activity: Integer) strict {
+    label en official "the stage 1b case-asserted applicability still applies (compatibility path)";
+    when activity_subject_to_465(p, activity);
+    then section_465_applies_to_activity(p, activity);
+}
+@source(IRC_S465_C, quote = "This section also applies to each activity—")
+rule Section465AppliesToTradeOrBusinessOrIncomeActivity(p: Person, activity: Integer) strict {
+    label en official "for a person described in (a)(1), every activity engaged in as a trade or business or for the production of income is covered — (c)(1) types by name, all others by (c)(3)(A) (section 465(c)(1), (c)(3)(A))";
+    when person_subject_to_465a1(p);
+    when engaged_in_activity_for_465(p, activity);
+    then section_465_applies_to_activity(p, activity);
+}
+// (d): the definition of loss; wired to the stage 1b loss relation.
+pub relation deductions_allocable_to_activity_465d(p: Person, y: TaxableYear, activity: Integer, amount: Money) kind empirical {
+    label en official "the deductions allowable under chapter 1 for the year, determined without regard to the first sentence of (a), allocable to the activity (section 465(d))";
+}
+pub relation income_from_activity_465d(p: Person, y: TaxableYear, activity: Integer, amount: Money) kind empirical {
+    label en official "the income received or accrued from the activity during the year, determined without regard to (e)(1)(A) (section 465(d))";
+}
+pub relation loss_for_465(p: Person, y: TaxableYear, activity: Integer, amount: Money) kind institutional {
+    label en official "the section 465 loss of the activity for the year: the excess of allocable deductions over income (section 465(d)), or the stage 1b case-asserted loss";
+}
+@source(IRC_S465_D, quote = "the term \"loss\" means the excess of the deductions allowable under this chapter for the taxable year")
+rule LossDefinitionExcessOfDeductionsOverIncome(p: Person, y: TaxableYear, activity: Integer, ded: Money, income: Money) defeasible {
+    label en official "loss = allocable deductions minus income from the activity, when positive (section 465(d))";
+    when deductions_allocable_to_activity_465d(p, y, activity, ded);
+    when income_from_activity_465d(p, y, activity, income);
+    when ded > income;
+    then loss_for_465(p, y, activity, round(ded - income, 2, "HALF_UP"));
+}
+rule LossLegacyCaseFact(p: Person, y: TaxableYear, activity: Integer, amount: Money) defeasible {
+    label en official "the stage 1b case-asserted loss still stands as the section 465 loss (compatibility path)";
+    when loss_from_activity_465(p, y, activity, amount);
+    then loss_for_465(p, y, activity, amount);
+}
+// (b)(2)-(4), (6): amounts borrowed and at risk, per loan.
+pub relation loan_for_activity(loan: Integer, activity: Integer, amount: Money) kind empirical {
+    label en official "an amount borrowed for use in the activity (section 465(b)(2))";
+}
+pub relation taxpayer_personally_liable_for_loan(p: Person, loan: Integer) kind empirical {
+    label en official "the taxpayer is personally liable for repayment (section 465(b)(2)(A))";
+}
+pub relation pledged_other_property_net_fmv(p: Person, loan: Integer, amount: Money) kind empirical {
+    label en official "the net fair market value of the taxpayer's interest in property, other than property used in the activity, pledged as security for the loan, excluding property financed by debt secured by activity property (section 465(b)(2)(B), flush sentence)";
+}
+pub relation lender_has_interest_in_activity(loan: Integer) kind empirical {
+    label en official "the amounts are borrowed from a person who has an interest in the activity, or from a related person of such a person (section 465(b)(3)(A)); related person: (b)(3)(C) with 10 percent substituted for 50 percent";
+}
+pub relation lender_interest_only_as_creditor_or_shareholder_lending_to_corporation(loan: Integer) kind empirical {
+    label en official "the lender's only interest is as a creditor in the activity, or as a shareholder lending to the corporation (section 465(b)(3)(B)(i)-(ii))";
+}
+pub relation loan_protected_against_loss(loan: Integer) kind empirical {
+    label en official "the borrowed amount is protected against loss through nonrecourse financing, guarantees, stop loss agreements, or similar arrangements (section 465(b)(4))";
+}
+pub relation is_qualified_nonrecourse_financing_465b6(loan: Integer) kind empirical {
+    label en official "qualified nonrecourse financing secured by real property used in the activity of holding real property: borrowed from a qualified person or a government (or guaranteed by one), no person personally liable, not convertible debt (section 465(b)(6)(A)-(B)); 'qualified person' by section 49(a)(1)(D)(iv) is an EXTERNAL_DEPENDENCY";
+}
+pub relation taxpayers_share_of_qualified_nonrecourse_financing(p: Person, loan: Integer, amount: Money) kind empirical {
+    label en official "the taxpayer's share of the qualified nonrecourse financing (for a partnership, by the partner's share of section 752 liabilities) (section 465(b)(6)(C))";
+}
+pub relation loan_excluded_from_at_risk_465b3(loan: Integer) kind institutional {
+    label en official "the loan is not at risk: borrowed from an interested person or related person (b)(3), unless the creditor/shareholder exceptions apply, or protected against loss (b)(4)";
+}
+@source(IRC_S465_B, quote = "amounts borrowed shall not be considered to be at risk with respect to an activity if such amounts are borrowed from any person who has an interest in such activity")
+rule LoanFromInterestedPersonExcluded(loan: Integer) defeasible {
+    label en official "a loan from a person with an interest in the activity is not at risk, except for a creditor's interest or a shareholder's loan to the corporation (section 465(b)(3))";
+    when lender_has_interest_in_activity(loan);
+    when not_known(lender_interest_only_as_creditor_or_shareholder_lending_to_corporation(loan));
+    then loan_excluded_from_at_risk_465b3(loan);
+}
+@source(IRC_S465_B, quote = "a taxpayer shall not be considered at risk with respect to amounts protected against loss through nonrecourse financing, guarantees, stop loss agreements, or other similar arrangements.")
+rule ProtectedLoanExcluded(loan: Integer) defeasible {
+    label en official "amounts protected against loss are not at risk (section 465(b)(4))";
+    when loan_protected_against_loss(loan);
+    then loan_excluded_from_at_risk_465b3(loan);
+}
+pub relation loan_amount_at_risk_465b(p: Person, loan: Integer, amount: Money) kind institutional {
+    label en official "the amount of the loan for which the taxpayer is at risk: the full amount when personally liable, the net fair market value of pledged property (not above the loan) otherwise, nothing when excluded by (b)(3)-(4); qualified nonrecourse financing adds the taxpayer's share ((b)(6))";
+}
+@source(IRC_S465_B, quote = "is personally liable for the repayment of such amounts, or")
+rule LoanAtRiskWhenPersonallyLiable(p: Person, loan: Integer, activity: Integer, amount: Money) defeasible {
+    label en official "a loan the taxpayer is personally liable for is at risk in full (section 465(b)(2)(A)), unless excluded by (b)(3)-(4)";
+    when loan_for_activity(loan, activity, amount);
+    when taxpayer_personally_liable_for_loan(p, loan);
+    when not_known(loan_excluded_from_at_risk_465b3(loan));
+    then loan_amount_at_risk_465b(p, loan, amount);
+}
+@source(IRC_S465_B, quote = "has pledged property, other than property used in such activity, as security for such borrowed amount (to the extent of the net fair market value of the taxpayer's interest in such property).")
+rule LoanAtRiskToExtentOfPledgedProperty(p: Person, loan: Integer, activity: Integer, amount: Money, fmv: Money) defeasible {
+    label en official "pledged non-activity property makes a loan at risk to the extent of its net fair market value (section 465(b)(2)(B))";
+    when loan_for_activity(loan, activity, amount);
+    when pledged_other_property_net_fmv(p, loan, fmv);
+    when not_known(taxpayer_personally_liable_for_loan(p, loan));
+    when not_known(loan_excluded_from_at_risk_465b3(loan));
+    then loan_amount_at_risk_465b(p, loan, min(amount, fmv));
+}
+@source(IRC_S465_B, quote = "a taxpayer shall be considered at risk with respect to the taxpayer's share of any qualified nonrecourse financing which is secured by real property used in such activity.")
+rule QualifiedNonrecourseFinancingAtRisk(p: Person, loan: Integer, share: Money) defeasible {
+    label en official "in the activity of holding real property, the taxpayer's share of qualified nonrecourse financing is at risk notwithstanding (b)(3)-(4) (section 465(b)(6)(A))";
+    when is_qualified_nonrecourse_financing_465b6(loan);
+    when taxpayers_share_of_qualified_nonrecourse_financing(p, loan, share);
+    then loan_amount_at_risk_465b(p, loan, share);
+}
+// (b)(5): the amount at risk in the next year is reduced by the allowed loss.
+pub relation amount_at_risk_beginning_next_year(p: Person, y: TaxableYear, activity: Integer, amount: Money) kind institutional {
+    label en official "the amount at risk carried into the next taxable year, reduced by the portion of the loss allowed as a deduction after (a) (section 465(b)(5)); the running multi-year ledger is not built (TECH-GAPS G1 family)";
+}
+@source(IRC_S465_B, quote = "shall be reduced by that portion of the loss which (after the application of subsection (a)) is allowable as a deduction.")
+rule AmountAtRiskReducedByAllowedLoss(p: Person, y: TaxableYear, activity: Integer, at_risk: Money, allowed: Money) defeasible {
+    label en official "next year's starting amount at risk = year-end amount at risk - loss allowed (section 465(b)(5))";
+    when amount_at_risk_at_close(p, y, activity, at_risk);
+    when at_risk_loss_allowed(p, y, activity, allowed);
+    then amount_at_risk_beginning_next_year(p, y, activity, round(at_risk - allowed, 2, "HALF_UP"));
+}

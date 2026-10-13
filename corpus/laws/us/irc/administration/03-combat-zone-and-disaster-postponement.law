@@ -1,0 +1,310 @@
+// 26 U.S.C. §7508 — Time for performing certain acts postponed by reason of
+// service in a combat zone or a contingency operation; §7508A — Secretary's
+// authority to postpone deadlines for a federally declared disaster,
+// significant fire, or terroristic or military action.
+//
+// COMPUTABILITY DESIGN (see §7503 module for the same wall). Adding a fixed
+// COUNT of days to a date (the "next 180 days", "up to 1 year", "60 days
+// after") is NOT purely computable in this corpus's closed surface without a
+// §85 business-day snapshot, even with a `calendar_day` unit (errata
+// E-0029/E-0109). MEASURING the days between two dates (`days_between`, §84.4)
+// needs no snapshot at all. So both postponement predicates below are framed
+// as a VALIDATION: the caller supplies a candidate postponed/extended date
+// and the rule confirms it falls within the statutorily disregarded window,
+// computed purely by `days_between` and integer comparison — rather than the
+// package computing the postponed date outright. This is the honest
+// TECH_GAP: the package cannot itself PRODUCE the postponed date from the
+// original date and a day count; it can only certify a candidate.
+//
+// JUDGMENT CALLS (see report):
+//  - §7508(a)'s list of eleven acts ((A)-(K)) is modelled as one enum
+//    `CombatZoneActKind` rather than eleven separate relations, because the
+//    disregarded-period computation and the exceptions in (b)/(e) apply
+//    uniformly across the list; the enum values are the STATUTORY act
+//    descriptions, not this package's invention.
+//  - §7508(a)(2) ("the amount of any credit or refund") and (a)(3)
+//    (§7345 certification) are not deadlines at all — they are OTHER
+//    determinations as to which the disregarded period matters (e.g. an
+//    amount computed as of a date). They are out of this stage's timing-rule
+//    scope; flagged INTERPRETATION in coverage (the disregarded-period fact
+//    itself, `combat_zone_disregarded_days`, is available for a future
+//    owner package to apply to its own credit/refund/certification rule).
+//  - §7508(b) (interest on overpayments unaffected) and §7508(e) (jeopardy/
+//    bankruptcy/receivership actions proceed; action-before-ascertainment)
+//    are modelled as exceptions on the `deadline_postponed` validation
+//    itself, per PLAN's "priority/exception" convention (§116), not as
+//    separate un-postponement facts.
+//  - §7508A(d)'s mandatory 60-day extension is a SEPARATE, narrower
+//    postponement (disaster area only, (A)-(F) acts of §7508(a)(1) only, no
+//    Secretary determination needed) from (a)'s Secretary-specified "up to 1
+//    year" period; modelled as its own predicate rather than folded into (a)
+//    because (a) requires an EXERCISE of the Secretary's power (a `power`
+//    below) while (d) is self-executing once the qualified-taxpayer/
+//    disaster-area facts are shown.
+//  - §7508A(e) ("significant fire") and the pension-plan rule (b)/(d)(4) are
+//    modelled as the same disregarded-period mechanism, addressed to a
+//    `Person` standing in for the plan/sponsor/participant role named in
+//    (b); a dedicated `EmployeeBenefitPlan` entity was judged unnecessary at
+//    this stage (no other stage-1 section needs one).
+
+language "law.core" version "0.2";
+package us.irc.administration version "0.1.1";
+namespace "urn:us:irc:administration:clir";
+
+use self::{
+    IRC_S7508A_A,
+    IRC_S7508A_D,
+    IRC_S7508_A,
+    IRC_S7508_C,
+    Person,
+    Secretary,
+    declared_after_pl_119_29,
+};
+
+// --- §7508(a): the disregarded period for combat zone / contingency service --
+
+pub enum CombatZoneActKind {
+    FilingReturn;
+    PaymentOfTax;
+    TaxCourtPetitionOrAppeal;
+    AllowanceOfCreditOrRefund;
+    ClaimForCreditOrRefund;
+    SuitUponClaimForCreditOrRefund;
+    AssessmentOfTax;
+    NoticeOrDemandForPayment;
+    CollectionByLevyOrOtherwise;
+    SuitByUnitedStates;
+    OtherActSpecifiedBySecretary;
+}
+
+relation combat_zone_or_contingency_service(p: Person, begin: Date, end: Date) kind empirical {
+    label en unofficial "the individual served in the Armed Forces (or in support of them) in a designated combat zone, or was deployed away from their permanent duty station in a designated contingency operation, during the given period";
+}
+relation qualified_hospitalization_period(p: Person, begin: Date, end: Date) kind empirical {
+    label en unofficial "the individual was hospitalized (§7508(g)) during the given period as a result of an injury received while serving as described above";
+}
+
+relation combat_zone_disregarded_days(p: Person, count: Integer) kind institutional {
+    label en unofficial "the number of days disregarded under §7508(a): the period of service, plus continuous qualified hospitalization attributable to the injury, plus the next 180 days";
+}
+
+@source(IRC_S7508_A, relation = formalizes, coverage = partial, quote = "the period of service in such area or operation, plus the period of continuous qualified hospitalization attributable to such injury, and the next 180 days thereafter, shall be disregarded")
+rule S7508DisregardedDaysNoHospitalization(p: Person, sbegin: Date, send: Date) defeasible {
+    when combat_zone_or_contingency_service(p, sbegin, send)
+        and not_known(qualified_hospitalization_period(p, sbegin, send));
+    then combat_zone_disregarded_days(p, days_between(sbegin, send) + 180);
+}
+
+@source(IRC_S7508_A, relation = formalizes, coverage = partial, quote = "the period of service in such area or operation, plus the period of continuous qualified hospitalization attributable to such injury, and the next 180 days thereafter, shall be disregarded")
+rule S7508DisregardedDaysWithHospitalization(p: Person, sbegin: Date, send: Date, hbegin: Date, hend: Date) defeasible {
+    when combat_zone_or_contingency_service(p, sbegin, send)
+        and qualified_hospitalization_period(p, hbegin, hend);
+    then combat_zone_disregarded_days(p, days_between(sbegin, hend) + 180);
+}
+
+// --- §7508(c): spouse -----------------------------------------------------------
+
+relation spouse_of_entitled_individual(spouse: Person, individual: Person) kind empirical {
+    label en unofficial "the person is the spouse of an individual entitled to the benefits of §7508(a)";
+}
+relation vietnam_combat_zone_case(p: Person) kind empirical {
+    label en unofficial "the combat zone at issue is the zone designated for purposes of the Vietnam conflict (§7508(c)'s own exception to its own 2-year spousal cutoff)";
+}
+relation spousal_cutoff_exceeded(spouse: Person) kind empirical {
+    label en unofficial "the spouse's taxable year begins more than 2 years after the date designated under §112 as the date of termination of combatant activities in the combat zone (§7508(c) spousal cutoff gate)";
+}
+
+pub relation combat_zone_benefits_extend_to_spouse(spouse: Person, individual: Person) kind institutional {
+    label en unofficial "§7508's benefits, running from the individual's service, extend to the individual's spouse";
+}
+@source(IRC_S7508_C, relation = formalizes, coverage = exact, quote = "The provisions of this section shall apply to the spouse of any individual entitled to the benefits of subsection (a).")
+rule S7508ExtendsToSpouse(spouse: Person, individual: Person) defeasible {
+    when spouse_of_entitled_individual(spouse, individual);
+    then combat_zone_benefits_extend_to_spouse(spouse, individual);
+    unless spousal_cutoff_exceeded(spouse) and spouse_of_entitled_individual(spouse, individual) and not_known(vietnam_combat_zone_case(individual));
+}
+
+// --- §7508(e): exceptions ---------------------------------------------------------
+
+relation jeopardy_or_title11_or_transferred_assets_action(p: Person) kind empirical {
+    label en unofficial "the action or proceeding is one authorized by §6851, chapter 70, or chapter 71 (jeopardy assessment, title 11 cases and receiverships, or transferred assets) — §7508(e)(1) carve-out";
+}
+relation ascertained_entitled_to_benefits_before_action(p: Person) kind empirical {
+    label en unofficial "before the assessment, collection, action, or proceeding, it was ascertained that the person is entitled to the benefits of §7508(a) (§7508(e)(2) gate — the exception applies only while entitlement is NOT yet ascertained)";
+}
+
+// --- §7508: the postponement itself (validated, not computed — see header) --
+
+relation act_originally_due(p: Person, act_kind: CombatZoneActKind, original: Date) kind institutional {
+    label en unofficial "the date the named act was originally prescribed to be performed, before applying §7508";
+}
+relation performed_on(p: Person, act_kind: CombatZoneActKind, candidate: Date) kind empirical {
+    label en unofficial "the date the named act was actually performed";
+}
+
+pub relation deadline_postponed(p: Person, act_kind: CombatZoneActKind, original: Date, postponed: Date) kind institutional {
+    label en unofficial "the act's deadline is postponed, under §7508(a), from `original` to `postponed`, within the individual's disregarded-days allowance";
+}
+
+@source(IRC_S7508_A, relation = formalizes, coverage = exact, quote = "Whether any of the following acts was performed within the time prescribed therefor")
+rule S7508DeadlinePostponedWithinAllowance(p: Person, act_kind: CombatZoneActKind, original: Date, candidate: Date, n: Integer) defeasible {
+    when act_originally_due(p, act_kind, original)
+        and performed_on(p, act_kind, candidate)
+        and combat_zone_disregarded_days(p, n)
+        and candidate > original
+        and days_between(original, candidate) <= n;
+    then deadline_postponed(p, act_kind, original, candidate);
+    unless jeopardy_or_title11_or_transferred_assets_action(p)
+        and act_originally_due(p, act_kind, original)
+        and performed_on(p, act_kind, candidate);
+    unless ascertained_entitled_to_benefits_before_action(p)
+        and act_originally_due(p, act_kind, original)
+        and performed_on(p, act_kind, candidate);
+}
+
+// --- §7508A(a): Secretary's disaster/fire/terroristic-action postponement --------
+//
+// A `power`: the Secretary MAY specify a period of up to 1 year. `valid_when`
+// is the single derived atom `taxpayer_determined_affected_by_covered_event`
+// (LDC-E1305 lesson: `valid_when` takes one atom).
+
+enum CoveredEventKind { FederallyDeclaredDisaster; SignificantFire; TerroristicOrMilitaryAction; }
+
+relation taxpayer_determined_affected_by_covered_event(p: Person, kind: CoveredEventKind) kind empirical {
+    label en unofficial "the Secretary has determined the taxpayer to be affected by a federally declared disaster, a significant fire, or a terroristic or military action (§7508A(a) gate)";
+}
+relation secretary_specifies_postponement_period(p: Person, kind: CoveredEventKind, days: Integer) kind empirical {
+    label en unofficial "the Secretary specifies a period (of up to 1 year, i.e. at most 366 days) to be disregarded for this taxpayer under §7508A(a)";
+}
+pub relation postponement_period_specified(p: Person, kind: CoveredEventKind, days: Integer) kind institutional {
+    label en unofficial "the Secretary has validly specified the §7508A(a) disregarded-period length for this taxpayer";
+}
+@source(IRC_S7508A_A, relation = formalizes, coverage = exact, quote = "the Secretary may specify a period of up to 1 year that may be disregarded in determining, under the internal revenue laws, in respect of any tax liability of such taxpayer")
+rule S7508ASpecifyPostponementPeriod(p: Person, kind: CoveredEventKind, days: Integer) strict {
+    when secretary_specifies_postponement_period(p, kind, days)
+        and days <= 366;
+    then power S7508ASpecifyPostponementPeriodPower {
+        holder Secretary;
+        over p;
+        exercise secretary_specifies_postponement_period(p, kind, days);
+        valid_when taxpayer_determined_affected_by_covered_event(p, kind);
+        effect create(postponement_period_specified(p, kind, days));
+    };
+}
+
+pub relation deadline_postponed_by_secretary(p: Person, act_kind: CombatZoneActKind, kind: CoveredEventKind, original: Date, postponed: Date) kind institutional {
+    label en unofficial "the act's deadline is postponed under §7508A(a), from `original` to `postponed`, within the Secretary-specified period";
+}
+@source(IRC_S7508A_A, relation = formalizes, coverage = exact, quote = "whether any of the acts described in paragraph (1) of section 7508(a) were performed within the time prescribed therefor")
+rule S7508ADeadlinePostponed(p: Person, act_kind: CombatZoneActKind, kind: CoveredEventKind, original: Date, candidate: Date, days: Integer) defeasible {
+    when act_originally_due(p, act_kind, original)
+        and performed_on(p, act_kind, candidate)
+        and postponement_period_specified(p, kind, days)
+        and candidate > original
+        and days_between(original, candidate) <= days;
+    then deadline_postponed_by_secretary(p, act_kind, kind, original, candidate);
+}
+
+// --- §7508A(d): mandatory 60-day extension for a qualified taxpayer -------------
+//
+// Self-executing (no exercise of the Secretary's (a) power needed): the
+// period from the earliest incident date to 60 days after the later of that
+// date or the declaration date is disregarded for the six acts of
+// §7508(a)(1)(A)-(F), for a "qualified taxpayer" in a declared disaster area.
+
+relation qualified_taxpayer_principal_residence_in_disaster_area(p: Person) kind empirical {
+    label en unofficial "the individual's principal residence (§1033(h)(4)) is located in a disaster area (§7508A(d)(2)(A))";
+}
+relation qualified_taxpayer_principal_place_of_business_in_disaster_area(p: Person) kind empirical {
+    label en unofficial "the taxpayer's principal place of business (other than as an employee) is located in a disaster area (§7508A(d)(2)(B))";
+}
+relation qualified_taxpayer_relief_worker(p: Person) kind empirical {
+    label en unofficial "the individual is a relief worker affiliated with a recognized government or philanthropic organization assisting in a disaster area (§7508A(d)(2)(C))";
+}
+relation qualified_taxpayer_records_in_disaster_area(p: Person) kind empirical {
+    label en unofficial "the taxpayer's records necessary to meet the deadline are maintained in a disaster area (§7508A(d)(2)(D))";
+}
+relation qualified_taxpayer_visitor_killed_or_injured(p: Person) kind empirical {
+    label en unofficial "the individual, visiting a disaster area, was killed or injured as a result of the disaster (§7508A(d)(2)(E))";
+}
+relation qualified_taxpayer_joint_return_spouse(p: Person, other: Person) kind empirical {
+    label en unofficial "solely with respect to a joint return, the person is the spouse of an individual otherwise described in §7508A(d)(2)(A)-(E)";
+}
+
+// Two layers to avoid a self-referential cycle through the spouse rule
+// (§7508A(d)(2)(F) reads another person's OWN qualification): the five
+// direct grounds (A)-(E) derive `qualified_taxpayer_primary`, and
+// `qualified_taxpayer` is primary-OR-spouse-of-primary.
+relation qualified_taxpayer_primary(p: Person) kind derived {
+    label en unofficial "the person satisfies one of §7508A(d)(2)(A)-(E) directly (not solely as a joint-return spouse)";
+}
+relation qualified_taxpayer(p: Person) kind derived {
+    label en unofficial "the person is a §7508A(d)(2) qualified taxpayer";
+}
+@source(IRC_S7508A_D, relation = formalizes, coverage = partial, quote = "any individual whose principal residence (for purposes of section 1033(h)(4)) is located in a disaster area")
+rule S7508AQualifiedTaxpayerResidence(p: Person) strict { when qualified_taxpayer_principal_residence_in_disaster_area(p); then qualified_taxpayer_primary(p); }
+@source(IRC_S7508A_D, relation = formalizes, coverage = partial, quote = "any taxpayer if the taxpayer's principal place of business (other than the business of performing services as an employee) is located in a disaster area")
+rule S7508AQualifiedTaxpayerBusiness(p: Person) strict { when qualified_taxpayer_principal_place_of_business_in_disaster_area(p); then qualified_taxpayer_primary(p); }
+@source(IRC_S7508A_D, relation = formalizes, coverage = partial, quote = "any individual who is a relief worker affiliated with a recognized government or philanthropic organization")
+rule S7508AQualifiedTaxpayerReliefWorker(p: Person) strict { when qualified_taxpayer_relief_worker(p); then qualified_taxpayer_primary(p); }
+@source(IRC_S7508A_D, relation = formalizes, coverage = partial, quote = "any taxpayer whose records necessary to meet a deadline for an act described in section 7508(a)(1) are maintained in a disaster area")
+rule S7508AQualifiedTaxpayerRecords(p: Person) strict { when qualified_taxpayer_records_in_disaster_area(p); then qualified_taxpayer_primary(p); }
+@source(IRC_S7508A_D, relation = formalizes, coverage = partial, quote = "any individual visiting a disaster area who was killed or injured as a result of the disaster")
+rule S7508AQualifiedTaxpayerVisitor(p: Person) strict { when qualified_taxpayer_visitor_killed_or_injured(p); then qualified_taxpayer_primary(p); }
+@source(IRC_S7508A_D, relation = formalizes, coverage = partial, quote = "any individual whose principal residence (for purposes of section 1033(h)(4)) is located in a disaster area")
+rule S7508AQualifiedTaxpayerFromPrimary(p: Person) strict { when qualified_taxpayer_primary(p); then qualified_taxpayer(p); }
+@source(IRC_S7508A_D, relation = formalizes, coverage = partial, quote = "solely with respect to a joint return, any spouse of an individual described in any preceding subparagraph")
+rule S7508AQualifiedTaxpayerSpouse(p: Person, other: Person) strict {
+    when qualified_taxpayer_joint_return_spouse(p, other) and qualified_taxpayer_primary(other);
+    then qualified_taxpayer(p);
+}
+
+relation disaster_declaration_incident_date(disaster_area: Person, incident: Date) kind empirical {
+    label en unofficial "the earliest incident date specified in the disaster declaration (§7508A(d)(1)(A)); `disaster_area` stands for the declared disaster the taxpayer's qualification is tied to";
+}
+relation disaster_declaration_issued_on(disaster_area: Person, issued: Date) kind empirical {
+    label en unofficial "the date the disaster declaration was issued (§7508A(d)(1)(B))";
+}
+
+relation candidate_60_day_extension_end(disaster_area: Person, end: Date) kind empirical {
+    label en unofficial "a candidate end date for the §7508A(d)(1) mandatory disregarded period, supplied by the caller and validated by the rules below (day-level date arithmetic needs a §85 snapshot this package does not register — see module header)";
+}
+pub relation mandatory_60_day_extension_end(disaster_area: Person, end: Date) kind institutional {
+    label en unofficial "the last day of the §7508A(d)(1) mandatory disregarded period: 60 days after the later of the earliest incident date or the declaration date";
+}
+@source(IRC_S7508A_D, relation = formalizes, coverage = exact, quote = "ending on the date which is 60 days after the later of such earliest incident date described in subparagraph (A) or the date such declaration was issued")
+rule S7508AMandatory60DayExtensionFromIncident(disaster_area: Person, incident: Date, issued: Date, end: Date) defeasible {
+    when disaster_declaration_incident_date(disaster_area, incident)
+        and disaster_declaration_issued_on(disaster_area, issued)
+        and incident >= issued
+        and candidate_60_day_extension_end(disaster_area, end)
+        and end > incident
+        and days_between(incident, end) == 60
+        and not_known(declared_after_pl_119_29(disaster_area));
+    then mandatory_60_day_extension_end(disaster_area, end);
+}
+@source(IRC_S7508A_D, relation = formalizes, coverage = exact, quote = "ending on the date which is 60 days after the later of such earliest incident date described in subparagraph (A) or the date such declaration was issued")
+rule S7508AMandatory60DayExtensionFromDeclaration(disaster_area: Person, incident: Date, issued: Date, end: Date) defeasible {
+    when disaster_declaration_incident_date(disaster_area, incident)
+        and disaster_declaration_issued_on(disaster_area, issued)
+        and issued > incident
+        and candidate_60_day_extension_end(disaster_area, end)
+        and end > issued
+        and days_between(issued, end) == 60
+        and not_known(declared_after_pl_119_29(disaster_area));
+    then mandatory_60_day_extension_end(disaster_area, end);
+}
+
+pub relation mandatory_deadline_postponed(p: Person, act_kind: CombatZoneActKind, disaster_area: Person, original: Date, postponed: Date) kind institutional {
+    label en unofficial "the qualified taxpayer's deadline for one of the six acts named in §7508(a)(1)(A)-(F) is postponed to `postponed`, mandatorily, under §7508A(d)(1)";
+}
+@source(IRC_S7508A_D, relation = formalizes, coverage = exact, quote = "shall be disregarded in determining, under the internal revenue laws, in respect of any tax liability of such qualified taxpayer, whether any of the acts described in subparagraphs (A) through (F) of section 7508(a)(1) were performed within the time prescribed therefor")
+rule S7508AMandatoryDeadlinePostponed(p: Person, act_kind: CombatZoneActKind, disaster_area: Person, original: Date, candidate: Date, end: Date) defeasible {
+    when qualified_taxpayer(p)
+        and act_originally_due(p, act_kind, original)
+        and performed_on(p, act_kind, candidate)
+        and mandatory_60_day_extension_end(disaster_area, end)
+        and candidate <= end
+        and candidate > original;
+    then mandatory_deadline_postponed(p, act_kind, disaster_area, original, candidate);
+}
